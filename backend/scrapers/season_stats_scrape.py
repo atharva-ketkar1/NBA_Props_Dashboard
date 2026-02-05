@@ -151,6 +151,7 @@ if __name__ == "__main__":
     
     if not final_stats.empty:
         print(f"Total Players Processed: {len(final_stats)}")
+        #print(list(final_stats.columns))
         final_stats.to_csv("stats.csv", index=False)
     else:
         print("Failed to retrieve data.")

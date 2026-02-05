@@ -1,5 +1,6 @@
 .venv
-/player_headshots
-/team_logos
-exploration.ipynb
-stats.csv
+backend/assets/player_headshots
+backend/assets/team_logos
+backend/data
+backend/exploration
+backend/maintainence
