@@ -61,9 +61,9 @@ def main():
     # Note: gamelogs is fast now, so we can include it in the thread pool!
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [
-            # executor.submit(run_dk),   # Uncomment to run
-            # executor.submit(run_fd),   # Uncomment to run
-            # executor.submit(run_stats), # Uncomment to run
+            executor.submit(run_dk),   # Uncomment to run
+            executor.submit(run_fd),   # Uncomment to run
+            executor.submit(run_stats), # Uncomment to run
             executor.submit(run_logs)     # Running this to link it up
         ]
         

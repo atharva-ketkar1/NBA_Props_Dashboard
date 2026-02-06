@@ -1,39 +1,51 @@
-import { useState } from 'react'
-import PlayerCard from './components/PlayerCard'
-
-// --- DUMMY DATA FOR TESTING (Matches your JSON structure) ---
-const TEST_PLAYER = {
-  "id": 2544,
-  "name": "LeBron James",
-  "team": "LAL",
-  "game_log": [
-    // 3 Fake games to test the chart
-    { "DATE_STR": "02/05", "MATCHUP": "LAL vs GSW", "PTS": 28, "REB": 10, "AST": 8 },
-    { "DATE_STR": "02/03", "MATCHUP": "LAL @ NYK", "PTS": 15, "REB": 5, "AST": 5 },
-    { "DATE_STR": "02/01", "MATCHUP": "LAL vs BOS", "PTS": 32, "REB": 8, "AST": 12 }
-  ],
-  "props": {
-    "PTS": {
-      "dk": { "line": 24.5, "over": "-110", "under": "-110" },
-      "fd": { "line": 23.5, "over": "-115", "under": "-105" }
-    }
-  }
-}
+import React from 'react';
+import Sidebar from './components/Sidebar';
+import PlayerCard from './components/PlayerCard';
+import { ShootingZones, ShotTypeAnalysis, PlayTypeAnalysis, SimilarPlayers } from './components/Widgets';
 
 function App() {
   return (
-    <div className="min-h-screen bg-slate-950 p-8">
-      <div className="max-w-4xl mx-auto">
-        <h1 className="text-3xl font-bold text-white mb-8 text-center">
-          NBA Prop Dashboard
-        </h1>
+    <div className="flex min-h-screen bg-[#000000] font-sans overflow-hidden">
 
-        {/* Render the Component */}
-        <PlayerCard player={TEST_PLAYER} />
+      {/* 1. FIXED SIDEBAR */}
+      <div className="w-80 flex-shrink-0">
+        <Sidebar />
+      </div>
 
+      {/* 2. SCROLLABLE DASHBOARD AREA */}
+      <div className="flex-1 h-screen overflow-y-auto p-6 scrollbar-hide">
+        <div className="max-w-[1400px] mx-auto space-y-4">
+
+          {/* ROW A: Player Card (Full Width) */}
+          <section>
+            <PlayerCard />
+          </section>
+
+          {/* ROW B: Split 50/50 - Zones & Shot Types */}
+          <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-[320px]">
+            <div className="h-full">
+              <ShootingZones />
+            </div>
+            <div className="h-full">
+              <ShotTypeAnalysis />
+            </div>
+          </section>
+
+          {/* ROW C: Split 40/60 - Play Types & Similar Players */}
+          <section className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+            <div className="lg:col-span-2">
+              <PlayTypeAnalysis />
+            </div>
+            <div className="lg:col-span-3">
+              <SimilarPlayers />
+            </div>
+          </section>
+
+          <div className="h-10"></div> {/* Spacer */}
+        </div>
       </div>
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
