@@ -1,50 +1,37 @@
-# File: backend/utils/aggregator.py
 import pandas as pd
 import difflib
 import json
 import os
 import numpy as np
 
-# 1. MAPPING FOR BETTING (Odds -> Stats)
-# This matches a DraftKings "points" prop to your "PTS" column.
+# ==========================================
+# 1. CONFIGURATION MAPPINGS
+# ==========================================
+# Maps betting props to internal column names
 PROP_MAP = {
     'points': 'PTS', 'rebounds': 'REB', 'assists': 'AST',
     'threes': 'FG3M', 'blocks': 'BLK', 'steals': 'STL',
     'pra': 'PTS+REB+AST', 'pr': 'PTS+REB', 'pa': 'PTS+AST', 'ra': 'REB+AST', 'stocks': 'STL+BLK'
 }
 
-# 2. STATS TO DISPLAY (The full list for your Frontend)
+# The explicit list of stats to send to the Frontend
 DISPLAY_STATS = [
-    # --- 1. ID & Team Info ---
-    'PLAYER_ID', 'TEAM_ID', 'TEAM_ABBREVIATION', 'AGE', 'GP', 'MIN',
-
-    # --- 2. Scoring & Shooting ---
-    'PTS', 'FGM', 'FGA', 'FG_PCT', 
-    'FG3M', 'FG3A', 'FG3_PCT', 
-    'FTM', 'FTA', 'FT_PCT', 
-    'PLUS_MINUS',
-
-    # --- 3. Traditional Box Score ---
-    'REB', 'OREB', 'DREB', 
-    'AST', 'TOV', 
-    'STL', 'BLK', 'PF', 'PFD',
-    'DD2', 'TD3', # Double-Doubles, Triple-Doubles
-
-    # --- 4. Advanced Tracking (The Good Stuff) ---
-    'POTENTIAL_AST', 'PASSES_MADE', 
-    'DRIVES', 'DRIVE_PTS', 
-    'REB_CHANCES', 'REB_CONTEST_PCT',
-
-    # --- 5. Custom "Edge" Metrics (Calculated by you) ---
-    'AST_CONVERSION_PCT', 
-    'REB_HUSTLE_PCT', 
-    'AGGRESSION_SCORE',
-
-    # --- 6. Combos (Calculated by Aggregator) ---
+    # Basic
+    'PLAYER_ID', 'TEAM_ABBREVIATION', 'MIN', 'GP',
+    # Scoring
+    'PTS', 'FGM', 'FGA', 'FG_PCT', 'FG3M', 'FG3A', 'FG3_PCT', 'FTM', 'FTA', 'FT_PCT', 'PLUS_MINUS',
+    # Traditional
+    'REB', 'OREB', 'DREB', 'AST', 'TOV', 'STL', 'BLK', 'PF',
+    # Advanced / Calculated
+    'POTENTIAL_AST', 'DRIVES', 'DRIVE_PTS', 'REB_CHANCES', 
     'PTS+REB+AST', 'PTS+REB', 'PTS+AST', 'REB+AST', 'STL+BLK'
 ]
 
+# ==========================================
+# 2. HELPER FUNCTIONS
+# ==========================================
 def normalize_name(name):
+    """Standardizes names for fuzzy matching."""
     if not isinstance(name, str): return ""
     name = name.lower().strip().replace('.', '').replace("'", "")
     for suffix in [' jr', ' sr', ' ii', ' iii', ' iv', ' v']:
@@ -52,84 +39,137 @@ def normalize_name(name):
     return name
 
 def get_best_match_id(name, name_to_id_map):
+    """Finds the PLAYER_ID for a messy betting name."""
     norm = normalize_name(name)
     if norm in name_to_id_map: return name_to_id_map[norm]
+    # Fuzzy match
     matches = difflib.get_close_matches(norm, list(name_to_id_map.keys()), n=1, cutoff=0.85)
     return name_to_id_map[matches[0]] if matches else None
 
-def run_aggregation(stats_path, dk_path, fd_path, output_path):
-    print(f"   🔨 Aggregating: {stats_path} + {dk_path} + {fd_path}")
-    
-    # 1. Load Stats
+def safe_float(x):
+    """Converts to float safely, handling errors."""
     try:
-        df_stats = pd.read_csv(stats_path)
-        
-        # --- CALCULATE COMBOS ---
-        # Ensure base columns exist (default to 0 if missing)
-        base_cols = ['PTS', 'REB', 'AST', 'STL', 'BLK', 'FG3M']
-        for c in base_cols: 
-            if c not in df_stats.columns: df_stats[c] = 0
-            
-        df_stats['PTS+REB+AST'] = df_stats['PTS'] + df_stats['REB'] + df_stats['AST']
-        df_stats['PTS+REB'] = df_stats['PTS'] + df_stats['REB']
-        df_stats['PTS+AST'] = df_stats['PTS'] + df_stats['AST']
-        df_stats['REB+AST'] = df_stats['REB'] + df_stats['AST']
-        df_stats['STL+BLK'] = df_stats['STL'] + df_stats['BLK']
+        return float(x)
+    except:
+        return 0.0
 
-        # Map for fuzzy matching
-        df_stats['norm_name'] = df_stats['PLAYER_NAME'].apply(normalize_name)
-        name_to_id_map = dict(zip(df_stats['norm_name'], df_stats['PLAYER_ID']))
-    except Exception as e:
-        print(f"❌ Failed to load stats: {e}")
+def load_csv(path):
+    """Loads a CSV if it exists, else empty DF."""
+    if os.path.exists(path):
+        try:
+            return pd.read_csv(path)
+        except:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+# ==========================================
+# 3. MAIN AGGREGATION LOGIC
+# ==========================================
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, output_path):
+    print(f"   🔨 Aggregating Data...")
+
+    # A. Load All Data
+    df_stats = load_csv(stats_path)
+    df_dk = load_csv(dk_path)
+    df_fd = load_csv(fd_path)
+    df_logs = load_csv(logs_path)
+
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)})")
+
+    if df_stats.empty:
+        print("   ❌ No stats found. Aborting.")
         return
 
-    # 2. Setup Master Dict
+    # B. Prepare Stats Data (Calculate Combos)
+    df_stats = df_stats.fillna(0)
+    df_stats['PTS+REB+AST'] = df_stats['PTS'] + df_stats['REB'] + df_stats['AST']
+    df_stats['PTS+REB'] = df_stats['PTS'] + df_stats['REB']
+    df_stats['PTS+AST'] = df_stats['PTS'] + df_stats['AST']
+    df_stats['REB+AST'] = df_stats['REB'] + df_stats['AST']
+    df_stats['STL+BLK'] = df_stats['STL'] + df_stats['BLK']
+
+    # Create Name Map for Odds matching
+    df_stats['norm_name'] = df_stats['PLAYER_NAME'].apply(normalize_name)
+    name_to_id_map = dict(zip(df_stats['norm_name'], df_stats['PLAYER_ID']))
+
+    # C. Prepare Game Logs (Group by Player)
+    logs_map = {}
+    if not df_logs.empty and 'PLAYER_ID' in df_logs.columns:
+        df_logs = df_logs.fillna(0)
+        # Group by ID and convert to list of dicts
+        for pid, group in df_logs.groupby('PLAYER_ID'):
+            logs_map[int(pid)] = group.to_dict(orient='records')
+
+    # D. Build Master Dictionary
     master_data = {}
+
     for _, row in df_stats.iterrows():
         pid = int(row['PLAYER_ID'])
         
-        # --- DYNAMIC STATS EXTRACTION ---
-        # We grab everything in DISPLAY_STATS. If a column is missing in CSV, default to 0.
-        stats_payload = {}
+        # 1. Extract Season Stats (Using DISPLAY_STATS list)
+        season_stats = {}
         for k in DISPLAY_STATS:
-            if k in row:
-                val = row[k]
-                # Clean up ugly floats (e.g. 23.40000001 -> 23.4)
-                if isinstance(val, float):
-                    stats_payload[k] = round(val, 2)
-                else:
-                    stats_payload[k] = val
-            else:
-                stats_payload[k] = 0
+            season_stats[k] = safe_float(row.get(k, 0))
 
         master_data[pid] = {
+            "id": pid,
             "name": row['PLAYER_NAME'],
             "team": row['TEAM_ABBREVIATION'],
-            "season_stats": stats_payload,  # <--- Now includes MIN, POTENTIAL_AST, etc.
+            "stats": season_stats,
+            "game_log": logs_map.get(pid, []), # <--- NEW: Injects the 30-game history
             "props": {}
         }
 
-    # 3. Merge Odds (Same logic as before)
-    for book_name, path in [("DraftKings", dk_path), ("FanDuel", fd_path)]:
-        if not os.path.exists(path): continue
-        
-        df_odds = pd.read_csv(path)
-        for _, row in df_odds.iterrows():
-            pid = get_best_match_id(row['player'], name_to_id_map)
-            if not pid: continue
+    # E. Merge Betting Odds
+    # Helper to process odds files
+    def process_odds(df, book_name):
+        if df.empty: return
+        for _, row in df.iterrows():
+            # Find Player ID
+            pid = get_best_match_id(row.get('player', ''), name_to_id_map)
+            if not pid or pid not in master_data: continue
+
+            # Map prop type (e.g. 'points' -> 'PTS')
+            raw_prop = row.get('prop_type', '')
+            clean_key = PROP_MAP.get(raw_prop, raw_prop).upper()
             
-            clean_key = PROP_MAP.get(row['prop_type'], row['prop_type']).upper()
+            # Initialize dict structure
             if clean_key not in master_data[pid]['props']:
                 master_data[pid]['props'][clean_key] = {}
             
+            # Add the line
             master_data[pid]['props'][clean_key][book_name] = {
-                "line": row['line'],
-                "over": row['over_odds'],
-                "under": row['under_odds']
+                "line": row.get('line'),
+                "over": row.get('over_odds'),
+                "under": row.get('under_odds'),
+                "implied": row.get('implied_prob', 0)
             }
 
-    # 4. Save
-    active_players = {k: v for k, v in master_data.items() if v['props']}
-    with open(output_path, "w") as f:
-        json.dump(active_players, f, indent=2)
-    print(f"   💾 Saved Master Feed ({len(active_players)} players) to {output_path}")
+    process_odds(df_dk, "dk")
+    process_odds(df_fd, "fd")
+
+    # F. Filter & Save
+    # Only save players who have EITHER stats OR odds (removes G-League noise)
+    final_output = []
+    for pid, data in master_data.items():
+        if data['props'] or data['stats']['GP'] > 0:
+            final_output.append(data)
+
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(final_output, f, indent=4)
+        print(f"   ✅ Saved Master Feed ({len(final_output)} players) to {output_path}")
+    except Exception as e:
+        print(f"   ❌ Error saving JSON: {e}")
+
+if __name__ == "__main__":
+    # Test Run
+    base = "backend/data/current"
+    run_aggregation(
+        f"{base}/stats.csv",
+        f"{base}/draftkings.csv",
+        f"{base}/fanduel.csv",
+        f"{base}/gamelogs.csv",
+        f"{base}/master_feed.json"
+    )
