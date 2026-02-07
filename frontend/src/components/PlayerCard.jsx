@@ -1,6 +1,18 @@
 import React, { useState, useMemo } from 'react';
 import { SlidersHorizontal } from 'lucide-react';
 
+const TEAM_ID_MAP = {
+    ATL: 1610612737, BOS: 1610612738, BKN: 1610612751, CHA: 1610612766,
+    CHI: 1610612741, CLE: 1610612739, DAL: 1610612742, DEN: 1610612743,
+    DET: 1610612765, GSW: 1610612744, HOU: 1610612745, IND: 1610612754,
+    LAC: 1610612746, LAL: 1610612747, MEM: 1610612763, MIA: 1610612748,
+    MIL: 1610612749, MIN: 1610612750, NOP: 1610612740, NYK: 1610612752,
+    OKC: 1610612760, ORL: 1610612753, PHI: 1610612755, PHX: 1610612756,
+    POR: 1610612757, SAC: 1610612758, SAS: 1610612759, TOR: 1610612761,
+    UTA: 1610612762, WAS: 1610612764
+};
+
+
 const PlayerCard = ({ player }) => {
     const [activeTab, setActiveTab] = useState('PTS');
     const [activeSportsbook, setActiveSportsbook] = useState('dk'); // 'dk' or 'fd'
@@ -42,6 +54,23 @@ const PlayerCard = ({ player }) => {
     const overOdds = propData.over || -110;
     const underOdds = propData.under || -110;
 
+    const getOpponentAbbrev = (matchup) => {
+        if (!matchup) return null;
+
+        if (matchup.includes('@')) {
+            // "UTA @ ATL" → "ATL"
+            return matchup.split('@')[1].trim();
+        }
+
+        if (matchup.toLowerCase().includes('vs')) {
+            // "BOS vs. MIA" → "MIA"
+            return matchup.split('vs')[1].replace('.', '').trim();
+        }
+
+        return null;
+    };
+
+
     // Calculate combo stat values for game log
     const calculateComboStat = (game, statKey) => {
         if (game[statKey] !== undefined) return game[statKey];
@@ -63,20 +92,24 @@ const PlayerCard = ({ player }) => {
 
         return player.game_log.slice(0, 32).reverse().map((game, i) => {
             const val = calculateComboStat(game, activeTab);
-            const date = new Date(game.GAME_DATE);
-            const monthShort = date.toLocaleDateString('en-US', { month: 'short' });
-            const day = date.getDate();
+            const [year, month, day] = game.GAME_DATE.split('-').map(Number);
+            const date = new Date(year, month - 1, day); // local time, no TZ shift
+
+
+            const opponentAbbrev = getOpponentAbbrev(game.MATCHUP);
+            const opponentTeamId = TEAM_ID_MAP[opponentAbbrev];
 
             return {
                 ...game,
                 val,
                 isHit: val >= line,
                 id: i,
-                dateLabel: `${monthShort} ${day}`,
-                // Extract opponent from MATCHUP (e.g., "UTA @ ATL" -> "ATL")
-                opponent: game.MATCHUP.includes('@')
-                    ? game.MATCHUP.split('@')[1].trim()
-                    : game.MATCHUP.split('vs.')[1]?.trim() || game.MATCHUP.split('vs')[1]?.trim() || 'OPP'
+                dateLabel: date.toLocaleDateString('en-US', {
+                    month: 'short',
+                    day: 'numeric'
+                }),
+                opponentAbbrev,
+                opponentTeamId
             };
         });
     }, [player, activeTab, line]);
@@ -118,9 +151,12 @@ const PlayerCard = ({ player }) => {
         <div className="w-full bg-[#0a0a0a] text-white font-sans rounded-2xl overflow-hidden shadow-2xl flex flex-col ring-1 ring-white/10 relative">
 
             {/* Hide scrollbar */}
-            <style>{`
+            <style type="text/css">{`
                 .scrollbar-hide::-webkit-scrollbar { display: none; }
-                .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+                .scrollbar-hide {
+                    -ms-overflow-style: none;
+                    scrollbar-width: none;
+                }
             `}</style>
 
             {/* A. TABS - SCROLLABLE CONTAINER */}
@@ -202,8 +238,8 @@ const PlayerCard = ({ player }) => {
                                             key={book}
                                             onClick={() => setActiveSportsbook(book)}
                                             className={`px-2.5 h-full flex items-center justify-center transition-all ${activeSportsbook === book
-                                                    ? 'bg-blue-600 text-white'
-                                                    : 'text-gray-600 hover:text-gray-400'
+                                                ? 'bg-blue-600 text-white'
+                                                : 'text-gray-600 hover:text-gray-400'
                                                 }`}
                                         >
                                             <span className="text-[10px] font-black uppercase">{book}</span>
@@ -260,10 +296,10 @@ const PlayerCard = ({ player }) => {
                                         </span>
                                         {/* Diff Indicator (Pill style) */}
                                         <span className={`text-[9px] font-bold px-1 rounded ${diffData.diff.includes('+')
-                                                ? 'text-emerald-500 bg-emerald-500/10'
-                                                : diffData.diff.includes('-')
-                                                    ? 'text-red-500 bg-red-500/10'
-                                                    : 'text-gray-500'
+                                            ? 'text-emerald-500 bg-emerald-500/10'
+                                            : diffData.diff.includes('-')
+                                                ? 'text-red-500 bg-red-500/10'
+                                                : 'text-gray-500'
                                             }`}>
                                             {diffData.diff}
                                         </span>
@@ -285,14 +321,17 @@ const PlayerCard = ({ player }) => {
                     </div>
 
                     {/* Prop Line - Yellow */}
-                    <div
-                        className="absolute left-8 right-0 border-t-2 border-yellow-400 z-20 pointer-events-none"
-                        style={{ bottom: `${((line / maxVal) * 100) + 8}%` }}
-                    >
-                        <div className="absolute left-0 -top-6 bg-yellow-400 text-black text-[9px] font-black px-2 py-0.5 rounded">
-                            LINE
+                    <div className="absolute left-8 right-0 bottom-2 top-0 z-20 pointer-events-none">
+                        <div
+                            className="absolute left-0 right-0 border-t-2 border-yellow-400"
+                            style={{ bottom: `${(line / maxVal) * 100}%` }}
+                        >
+                            <div className="absolute left-0 -bottom-6 bg-yellow-400 text-black text-[9px] font-black px-2 py-0.5 rounded">
+                                LINE
+                            </div>
                         </div>
                     </div>
+
 
                     {/* Chart Bars */}
                     <div className="absolute inset-0 left-8 bottom-8 flex items-end justify-between gap-[2px] pb-2">
@@ -330,8 +369,21 @@ const PlayerCard = ({ player }) => {
                                     {/* Date & Team Labels below bar */}
                                     <div className="mt-1 flex flex-col items-center gap-0.5 min-h-[40px]">
                                         {/* Opponent Team Logo */}
-                                        <div className="w-5 h-5 rounded-full bg-gray-800 border border-white/10 flex items-center justify-center text-[7px] font-bold text-gray-300">
-                                            {game.opponent.substring(0, 3)}
+                                        <div className="w-5 h-5 rounded-full bg-[#18181b] border border-white/10 flex items-center justify-center overflow-hidden">
+                                            {game.opponentTeamId ? (
+                                                <img
+                                                    src={`http://localhost:5000/assets/team_logos/${game.opponentTeamId}.svg`}
+                                                    alt={game.opponentAbbrev}
+                                                    className="w-4 h-4 object-contain opacity-90"
+                                                    onError={(e) => {
+                                                        e.target.style.display = 'none';
+                                                    }}
+                                                />
+                                            ) : (
+                                                <span className="text-[7px] font-bold text-gray-400">
+                                                    {game.opponentAbbrev}
+                                                </span>
+                                            )}
                                         </div>
                                         {/* Date */}
                                         <div className="text-[7px] text-gray-600 font-medium whitespace-nowrap hidden lg:block">
