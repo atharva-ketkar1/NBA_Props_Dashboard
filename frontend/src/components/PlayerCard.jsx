@@ -72,18 +72,44 @@ const PlayerCard = ({ player }) => {
 
 
     // Calculate combo stat values for game log
+    // Update calculateComboStat to handle all stat types:
     const calculateComboStat = (game, statKey) => {
-        if (game[statKey] !== undefined) return game[statKey];
+        // First, check if the stat exists directly in the game object
+        if (game[statKey] !== undefined && game[statKey] !== null) {
+            return game[statKey];
+        }
 
-        // Calculate combined stats if not present
-        const statMap = {
+        // Handle combined stats
+        const comboStats = {
             'PTS+AST': (game.PTS || 0) + (game.AST || 0),
             'PTS+REB': (game.PTS || 0) + (game.REB || 0),
             'REB+AST': (game.REB || 0) + (game.AST || 0),
             'PTS+REB+AST': (game.PTS || 0) + (game.REB || 0) + (game.AST || 0),
+            // Add other combo stats if needed
         };
 
-        return statMap[statKey] || game.PTS || 0;
+        if (comboStats[statKey] !== undefined) {
+            return comboStats[statKey];
+        }
+
+        // For quarter/half stats, try to find them with different naming conventions
+        if (statKey.includes('_1Q')) {
+            const baseStat = statKey.replace('_1Q', '');
+            return game[`${baseStat}_1Q`] || game[`1Q_${baseStat}`] || game[baseStat] || 0;
+        }
+
+        if (statKey.includes('_1H')) {
+            const baseStat = statKey.replace('_1H', '');
+            return game[`${baseStat}_1H`] || game[`1H_${baseStat}`] || game[baseStat] || 0;
+        }
+
+        // For double-double/triple-double, these should be boolean (0 or 1)
+        if (statKey === 'DD2' || statKey === 'TD3') {
+            return game[statKey] || 0;
+        }
+
+        // Default fallback
+        return game.PTS || 0;
     };
 
     // Process game log data for chart
@@ -94,7 +120,6 @@ const PlayerCard = ({ player }) => {
             const val = calculateComboStat(game, activeTab);
             const [year, month, day] = game.GAME_DATE.split('-').map(Number);
             const date = new Date(year, month - 1, day); // local time, no TZ shift
-
 
             const opponentAbbrev = getOpponentAbbrev(game.MATCHUP);
             const opponentTeamId = TEAM_ID_MAP[opponentAbbrev];
@@ -114,12 +139,27 @@ const PlayerCard = ({ player }) => {
         });
     }, [player, activeTab, line]);
 
-    // Calculate hit rate
+    // Calculate maxVal FIRST (depends on graphData and line)
+    const maxVal = useMemo(() => {
+        if (!graphData.length) return line * 1.25;
+
+        const dataMax = Math.max(...graphData.map(g => g.val));
+        const actualMax = Math.max(dataMax, line);
+
+        // Add 25% padding, but ensure minimum padding for visualization
+        const padding = Math.max(actualMax * 0.25, line * 0.1);
+
+        return actualMax + padding;
+    }, [graphData, line]);
+
+    // Then calculate chartReady (depends on graphData, maxVal, and line)
+    const chartReady = useMemo(() => {
+        return graphData.length > 0 && maxVal > 0 && line > 0;
+    }, [graphData, maxVal, line]);
+
+    // Then other calculations
     const hitCount = graphData.filter(g => g.isHit).length;
     const hitRate = graphData.length ? ((hitCount / graphData.length) * 100).toFixed(1) : 0;
-
-    // Calculate max value for chart scaling
-    const maxVal = Math.max(...graphData.map(g => g.val), line) * 1.25;
 
     // Calculate stat differences (last 5 games vs season average)
     const calculateDiff = (statKey) => {
@@ -163,16 +203,22 @@ const PlayerCard = ({ player }) => {
             <div className="w-full border-b border-[#27272a] bg-[#09090b]">
                 <div className="flex items-center gap-0 overflow-x-auto scrollbar-hide">
                     {TABS.map((tab) => {
+                        const hasProps = player?.props?.[tab.key] && Object.keys(player.props[tab.key]).length > 0;
                         const isActive = activeTab === tab.key;
+
                         return (
                             <button
                                 key={tab.key}
-                                onClick={() => setActiveTab(tab.key)}
+                                onClick={() => hasProps && setActiveTab(tab.key)}
+                                disabled={!hasProps}
                                 className={`
                                     relative h-10 px-4 flex items-center justify-center text-[10px] font-bold uppercase tracking-wider whitespace-nowrap transition-all
-                                    ${isActive
-                                        ? 'text-white bg-[#18181b]'
-                                        : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'}
+                                    ${!hasProps
+                                        ? 'text-gray-600 opacity-40 cursor-not-allowed'
+                                        : isActive
+                                            ? 'text-white bg-[#18181b] cursor-pointer'
+                                            : 'text-gray-500 hover:text-gray-300 hover:bg-white/5 cursor-pointer'
+                                    }
                                 `}
                             >
                                 {tab.label}
@@ -314,29 +360,38 @@ const PlayerCard = ({ player }) => {
                 <div className="relative w-full flex-1 min-h-[280px] select-none mt-4">
 
                     {/* Y-Axis Labels */}
-                    <div className="absolute left-0 top-0 bottom-8 flex flex-col justify-between text-[9px] text-gray-600 font-mono pointer-events-none z-10 pr-2">
+                    <div className="absolute left-0 top-0 bottom-12 flex flex-col justify-between text-[9px] text-gray-600 font-mono pointer-events-none z-10 pr-2">
                         <span>{Math.round(maxVal)}</span>
                         <span>{Math.round(maxVal * 0.5)}</span>
                         <span>0</span>
                     </div>
 
-                    {/* Prop Line - Yellow */}
-                    <div className="absolute left-8 right-0 bottom-2 top-0 z-20 pointer-events-none">
+                    {/* Prop Line - Yellow with Value on Left */}
+                    <div className="absolute left-8 right-0 bottom-12 top-0 z-20 pointer-events-none">
                         <div
-                            className="absolute left-0 right-0 border-t-2 border-yellow-400"
-                            style={{ bottom: `${(line / maxVal) * 100}%` }}
+                            className="absolute left-0 right-0 border-t-2 border-yellow-400 border-dashed"
+                            style={{
+                                bottom: `${(line / maxVal) * 100}%`,
+                                opacity: line > 0 ? 1 : 0 // Hide if line is 0
+                            }}
                         >
-                            <div className="absolute left-0 -bottom-6 bg-yellow-400 text-black text-[9px] font-black px-2 py-0.5 rounded">
+                            {/* Line Value on Left */}
+                            <div className="absolute -left-10 -translate-y-1/2 bg-yellow-400 text-black text-xs font-black px-2 py-0.5 rounded-sm shadow-sm">
+                                {line.toFixed(1)}
+                            </div>
+
+                            {/* "LINE" Text on Right */}
+                            <div className="absolute right-0 -translate-y-1/2 bg-yellow-400 text-black text-[9px] font-black px-2 py-0.5 rounded-sm shadow-sm">
                                 LINE
                             </div>
                         </div>
                     </div>
 
-
                     {/* Chart Bars */}
-                    <div className="absolute inset-0 left-8 bottom-8 flex items-end justify-between gap-[2px] pb-2">
+                    <div className="absolute inset-0 left-8 bottom-12 flex items-end justify-between gap-[2px]">
                         {graphData.map((game, i) => {
                             const heightPct = Math.min((game.val / maxVal) * 100, 100);
+                            const isHit = game.val >= line;
 
                             return (
                                 <div
@@ -346,7 +401,14 @@ const PlayerCard = ({ player }) => {
                                     {/* Tooltip on Hover */}
                                     <div className="absolute -top-16 left-1/2 -translate-x-1/2 bg-[#18181b] border border-white/20 text-white text-[10px] p-2 rounded shadow-2xl opacity-0 group-hover:opacity-100 z-50 pointer-events-none whitespace-nowrap transition-opacity">
                                         <div className="font-bold text-xs mb-1">
-                                            {game.val} {activeTab}
+                                            {game.val.toFixed(1)} {activeTab}
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                            <span className={isHit ? 'text-emerald-400' : 'text-red-400'}>
+                                                {isHit ? '✓ OVER' : '✗ UNDER'}
+                                            </span>
+                                            <span className="text-gray-400">|</span>
+                                            <span className="text-yellow-400">Line: {line.toFixed(1)}</span>
                                         </div>
                                         <div className="text-gray-400 text-[9px]">{game.MATCHUP}</div>
                                         <div className="text-gray-400 text-[9px]">{game.dateLabel}</div>
@@ -354,20 +416,20 @@ const PlayerCard = ({ player }) => {
 
                                     {/* Bar */}
                                     <div
-                                        className={`w-full rounded-t transition-all duration-300 ${game.isHit
+                                        className={`w-full rounded-t transition-all duration-300 ${isHit
                                             ? 'bg-emerald-500 hover:bg-emerald-400'
                                             : 'bg-red-500 hover:bg-red-400'
                                             } shadow-sm relative`}
                                         style={{ height: `${heightPct}%` }}
                                     >
-                                        {/* Value inside bar (hidden on mobile) */}
+                                        {/* Value inside bar */}
                                         <div className="absolute top-2 w-full text-center text-white text-[9px] font-bold leading-none opacity-80 hidden md:block">
-                                            {game.val}
+                                            {game.val.toFixed(game.val % 1 === 0 ? 0 : 1)}
                                         </div>
                                     </div>
 
                                     {/* Date & Team Labels below bar */}
-                                    <div className="mt-1 flex flex-col items-center gap-0.5 min-h-[40px]">
+                                    <div className="absolute top-full left-0 w-full pt-2 flex flex-col items-center gap-0.5">
                                         {/* Opponent Team Logo */}
                                         <div className="w-5 h-5 rounded-full bg-[#18181b] border border-white/10 flex items-center justify-center overflow-hidden">
                                             {game.opponentTeamId ? (
