@@ -4,6 +4,8 @@ backend/assets/team_logos
 backend/data
 backend/exploration
 backend/maintainence
+utils/player_matcher.py
+utils/test_matcher.py
 
 .DS_Store
 Thumbs.db
