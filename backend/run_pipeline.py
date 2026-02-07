@@ -11,7 +11,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
 from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
 from scrapers import season_stats_scrape as nba_stats
-from scrapers import gamelogs as gamelogs # <--- IMPORT NEW SCRAPER
+from scrapers import gamelogs as gamelogs
+from scrapers import fetch_todays_games as schedule # <--- NEW IMPORT
 from utils import aggregator
 
 # CONFIGURATION
@@ -23,8 +24,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 STATS_PATH = os.path.join(DATA_DIR, "stats.csv")
 DK_PATH = os.path.join(DATA_DIR, "draftkings.csv")
 FD_PATH = os.path.join(DATA_DIR, "fanduel.csv")
-LOGS_PATH = os.path.join(DATA_DIR, "gamelogs.csv") # <--- NEW PATH
+LOGS_PATH = os.path.join(DATA_DIR, "gamelogs.csv")
 MASTER_PATH = os.path.join(DATA_DIR, "master_feed.json")
+GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json") # <--- NEW PATH
 
 def run_dk():
     print("   🔵 Starting DraftKings...")
@@ -53,18 +55,28 @@ def run_logs():
     gamelogs.run_scrape(LOGS_PATH)
     return "Game Logs Updated"
 
+def run_schedule():
+    print("   📅 Starting Game Schedule...")
+    # This scraper saves its own file, so we just run it
+    df, _ = schedule.get_dashboard_data()
+    # Ensure it saves to the right place via the imported module if needed, 
+    # but based on previous edit it saves to ../data/current/nba_dashboard_games.json relative to itself.
+    # To be safe, we can rely on its internal saving or explicit save here if it returned raw data.
+    # The previous edit to fetch_todays_games.py handles the saving.
+    return f"Schedule: {len(df)} games"
+
 def main():
     start_time = time.time()
     print("🚀 PIPELINE STARTED")
 
     # STEP 1: Run Scrapers (Parallel)
-    # Note: gamelogs is fast now, so we can include it in the thread pool!
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [
-            executor.submit(run_dk),   # Uncomment to run
-            executor.submit(run_fd),   # Uncomment to run
-            executor.submit(run_stats), # Uncomment to run
-            executor.submit(run_logs)     # Running this to link it up
+            executor.submit(run_dk),
+            executor.submit(run_fd),
+            executor.submit(run_stats),
+            executor.submit(run_logs),
+            executor.submit(run_schedule) # <--- ADDED
         ]
         
         for future in concurrent.futures.as_completed(futures):

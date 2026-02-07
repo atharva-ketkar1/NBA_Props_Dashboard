@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { SlidersHorizontal } from 'lucide-react';
+import { SlidersHorizontal, ChevronDown } from 'lucide-react';
 
 const TEAM_ID_MAP = {
     ATL: 1610612737, BOS: 1610612738, BKN: 1610612751, CHA: 1610612766,
@@ -15,7 +15,26 @@ const TEAM_ID_MAP = {
 
 const PlayerCard = ({ player }) => {
     const [activeTab, setActiveTab] = useState('PTS');
-    const [activeSportsbook, setActiveSportsbook] = useState('dk'); // 'dk' or 'fd'
+    const [activeSportsbook, setActiveSportsbook] = useState('dk');
+
+    // --- NEW: Auto-switch sportsbook if current one has no line ---
+    React.useEffect(() => {
+        const currentProps = player?.props?.[activeTab]?.[activeSportsbook];
+        const hasLine = currentProps && currentProps.line > 0;
+
+        if (!hasLine) {
+            // Find the first book that HAS a line
+            const books = ['dk', 'fd'];
+            const validBook = books.find(book => {
+                const p = player?.props?.[activeTab]?.[book];
+                return p && p.line > 0;
+            });
+
+            if (validBook) {
+                setActiveSportsbook(validBook);
+            }
+        }
+    }, [activeTab, player]);
 
     // Tab configuration matching PropsMadness
     // EXPANDED TAB LIST (Matching the original's density)
@@ -203,18 +222,20 @@ const PlayerCard = ({ player }) => {
             <div className="w-full border-b border-[#27272a] bg-[#09090b]">
                 <div className="flex items-center gap-0 overflow-x-auto scrollbar-hide">
                     {TABS.map((tab) => {
-                        const hasProps = player?.props?.[tab.key] && Object.keys(player.props[tab.key]).length > 0;
+                        // FIX: Strict check - only show tab if at least one book has a line > 0
+                        const propsObj = player?.props?.[tab.key];
+                        const hasValidLine = propsObj && Object.values(propsObj).some(book => book.line > 0);
                         const isActive = activeTab === tab.key;
 
                         return (
                             <button
                                 key={tab.key}
-                                onClick={() => hasProps && setActiveTab(tab.key)}
-                                disabled={!hasProps}
+                                onClick={() => hasValidLine && setActiveTab(tab.key)}
+                                disabled={!hasValidLine}
                                 className={`
                                     relative h-10 px-4 flex items-center justify-center text-[10px] font-bold uppercase tracking-wider whitespace-nowrap transition-all
-                                    ${!hasProps
-                                        ? 'text-gray-600 opacity-40 cursor-not-allowed'
+                                    ${!hasValidLine
+                                        ? 'hidden' // Hide completely if no lines exist
                                         : isActive
                                             ? 'text-white bg-[#18181b] cursor-pointer'
                                             : 'text-gray-500 hover:text-gray-300 hover:bg-white/5 cursor-pointer'
@@ -222,7 +243,6 @@ const PlayerCard = ({ player }) => {
                                 `}
                             >
                                 {tab.label}
-                                {/* Active Indicator Line at Bottom */}
                                 {isActive && (
                                     <div className="absolute bottom-0 left-0 w-full h-[2px] bg-blue-500"></div>
                                 )}
@@ -236,7 +256,7 @@ const PlayerCard = ({ player }) => {
             <div className="p-6 flex-1 flex flex-col bg-black">
 
                 {/* 1. HERO HEADER - REFACTORED FOR PHASE 2 */}
-                <div className="flex flex-col xl:flex-row justify-between items-start gap-6 mb-2">
+                <div className="flex flex-col xl:flex-row justify-between items-start gap-6 mb-2 relative z-40">
 
                     {/* LEFT: Player Identity & Betting Lines */}
                     <div className="flex flex-col gap-3 min-w-[300px]">
@@ -276,37 +296,103 @@ const PlayerCard = ({ player }) => {
 
                         {/* Bottom Row: The Betting Badge (Compact) */}
                         <div className="flex items-center gap-2 mt-1">
-                            <div className="flex items-center bg-[#18181b] rounded-md border border-[#27272a] h-8 overflow-hidden">
-                                {/* Book Toggle */}
-                                <div className="flex h-full border-r border-[#27272a]">
-                                    {['fd', 'dk'].map((book) => (
-                                        <button
-                                            key={book}
-                                            onClick={() => setActiveSportsbook(book)}
-                                            className={`px-2.5 h-full flex items-center justify-center transition-all ${activeSportsbook === book
-                                                ? 'bg-blue-600 text-white'
-                                                : 'text-gray-600 hover:text-gray-400'
-                                                }`}
-                                        >
-                                            <span className="text-[10px] font-black uppercase">{book}</span>
-                                        </button>
-                                    ))}
+                            <div className="flex items-center bg-[#18181b] rounded-md border border-[#27272a] h-8 overflow-visible relative">
+
+                                {/* Book Dropdown */}
+                                <div className="relative h-full border-r border-[#27272a] group z-50">
+                                    <button
+                                        className={`
+                                            h-full px-3 flex items-center justify-center gap-2 transition-all min-w-[110px] cursor-pointer
+                                            ${activeSportsbook === 'fd' ? 'bg-[#0090FF]/10 text-[#0090FF]' : 'bg-[#53d337]/10 text-[#53d337]'}
+                                        `}
+                                    >
+                                        {/* Active Logo/Text */}
+                                        <div className="flex items-center gap-2">
+                                            {activeSportsbook === 'fd' ? (
+                                                <>
+                                                    <div className="bg-[#0090FF] text-white font-black text-[10px] w-5 h-5 flex items-center justify-center rounded-sm">FD</div>
+                                                    <span className="text-[11px] font-bold text-white">FanDuel</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <div className="bg-[#53d337] text-black font-black text-[10px] w-5 h-5 flex items-center justify-center rounded-sm">DK</div>
+                                                    <span className="text-[11px] font-bold text-white">DraftKings</span>
+                                                </>
+                                            )}
+                                        </div>
+                                        <ChevronDown size={14} className="text-gray-400 group-hover:text-white transition-colors" />
+                                    </button>
+
+                                    {/* Dropdown Menu Wrapper - The "Invisible Bridge" Fix */}
+                                    {/* 1. top-full: touches the button bottom directly (no gap) */}
+                                    {/* 2. pt-2: pushes the visible content down, but the invisible padding keeps the hover active */}
+                                    <div className="absolute top-full left-0 w-[140px] pt-2 hidden group-hover:block">
+
+                                        {/* Actual Visual Dropdown Box */}
+                                        <div className="bg-[#18181b] border border-[#27272a] rounded-md shadow-2xl overflow-hidden">
+                                            {[
+                                                { id: 'dk', label: 'DraftKings', color: '#53d337', bg: 'bg-[#53d337]', text: 'text-black' },
+                                                { id: 'fd', label: 'FanDuel', color: '#0090FF', bg: 'bg-[#0090FF]', text: 'text-white' }
+                                            ].map((book) => {
+                                                const propData = player?.props?.[activeTab]?.[book.id];
+                                                const isAvailable = propData && propData.line > 0;
+
+                                                return (
+                                                    <button
+                                                        key={book.id}
+                                                        onClick={() => isAvailable && setActiveSportsbook(book.id)}
+                                                        disabled={!isAvailable}
+                                                        className={`
+                                                            w-full px-3 py-2.5 flex items-center gap-2 border-b border-[#27272a] last:border-0 text-left transition-colors
+                                                            ${activeSportsbook === book.id ? 'bg-white/5' : 'hover:bg-white/5'}
+                                                            ${!isAvailable ? 'opacity-40 cursor-not-allowed grayscale' : 'cursor-pointer'}
+                                                        `}
+                                                    >
+                                                        {/* Logo */}
+                                                        <div className={`${book.bg} ${book.text} font-black text-[9px] w-5 h-5 flex items-center justify-center rounded-sm flex-shrink-0`}>
+                                                            {book.id.toUpperCase()}
+                                                        </div>
+
+                                                        {/* Label */}
+                                                        <span className={`text-[10px] font-bold ${activeSportsbook === book.id ? 'text-white' : 'text-gray-400'}`}>
+                                                            {book.label}
+                                                        </span>
+
+                                                        {/* No Symbol */}
+                                                        {!isAvailable && (
+                                                            <div className="ml-auto w-4 h-4 flex items-center justify-center">
+                                                                <div className="w-3 h-3 rounded-full border border-red-500/50 flex items-center justify-center">
+                                                                    <div className="w-2 h-[1px] bg-red-500/50 rotate-45"></div>
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Active Checkmark */}
+                                                        {isAvailable && activeSportsbook === book.id && (
+                                                            <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]"></div>
+                                                        )}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
                                 </div>
-                                {/* The Line */}
+
+                                {/* The Line Display (Right side of badge) */}
                                 <div className="px-3 flex items-center gap-3">
                                     <div className="flex items-baseline gap-1">
-                                        <span className="text-base font-black text-white">{line}</span>
+                                        <span className="text-base font-black text-white">{line > 0 ? line : '-'}</span>
                                         <span className="text-[9px] font-bold text-gray-500 uppercase">{activeTab}</span>
                                     </div>
-                                    <div className="w-px h-3 bg-[#27272a]"></div>
-                                    <div className="flex gap-2">
-                                        <span className="text-[10px] font-bold text-gray-400">
-                                            o{overOdds}
-                                        </span>
-                                        <span className="text-[10px] font-bold text-gray-400">
-                                            u{underOdds}
-                                        </span>
-                                    </div>
+                                    {line > 0 && (
+                                        <>
+                                            <div className="w-px h-3 bg-[#27272a]"></div>
+                                            <div className="flex gap-2">
+                                                <span className="text-[10px] font-bold text-gray-400">o{overOdds}</span>
+                                                <span className="text-[10px] font-bold text-gray-400">u{underOdds}</span>
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         </div>

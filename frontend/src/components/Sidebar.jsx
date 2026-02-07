@@ -1,37 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Search, ChevronDown, Lock, LockOpen, Plus } from 'lucide-react';
-
-const TEAM_ID_MAP = {
-    ATL: 1610612737, BOS: 1610612738, BKN: 1610612751, CHA: 1610612766,
-    CHI: 1610612741, CLE: 1610612739, DAL: 1610612742, DEN: 1610612743,
-    DET: 1610612765, GSW: 1610612744, HOU: 1610612745, IND: 1610612754,
-    LAC: 1610612746, LAL: 1610612747, MEM: 1610612763, MIA: 1610612748,
-    MIL: 1610612749, MIN: 1610612750, NOP: 1610612740, NYK: 1610612752,
-    OKC: 1610612760, ORL: 1610612753, PHI: 1610612755, PHX: 1610612756,
-    POR: 1610612757, SAC: 1610612758, SAS: 1610612759, TOR: 1610612761,
-    UTA: 1610612762, WAS: 1610612764
-};
-
-// Map full team names from CSV to abbreviations
-const TEAM_NAME_TO_ABBREV = {
-    "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN", "Charlotte Hornets": "CHA",
-    "Chicago Bulls": "CHI", "Cleveland Cavaliers": "CLE", "Dallas Mavericks": "DAL", "Denver Nuggets": "DEN",
-    "Detroit Pistons": "DET", "Golden State Warriors": "GSW", "Houston Rockets": "HOU", "Indiana Pacers": "IND",
-    "LA Clippers": "LAC", "Los Angeles Lakers": "LAL", "Memphis Grizzlies": "MEM", "Miami Heat": "MIA",
-    "Milwaukee Bucks": "MIL", "Minnesota Timberwolves": "MIN", "New Orleans Pelicans": "NOP", "New York Knicks": "NYK",
-    "Oklahoma City Thunder": "OKC", "Orlando Magic": "ORL", "Philadelphia 76ers": "PHI", "Phoenix Suns": "PHX",
-    "Portland Trail Blazers": "POR", "Sacramento Kings": "SAC", "San Antonio Spurs": "SAS", "Toronto Raptors": "TOR",
-    "Utah Jazz": "UTA", "Washington Wizards": "WAS",
-    // CSV variations
-    "ATL Hawks": "ATL", "BOS Celtics": "BOS", "BKN Nets": "BKN", "CHA Hornets": "CHA",
-    "CHI Bulls": "CHI", "CLE Cavaliers": "CLE", "DAL Mavericks": "DAL", "DEN Nuggets": "DEN",
-    "DET Pistons": "DET", "GS Warriors": "GSW", "HOU Rockets": "HOU", "IND Pacers": "IND",
-    "MEM Grizzlies": "MEM", "MIA Heat": "MIA",
-    "MIL Bucks": "MIL", "MIN Timberwolves": "MIN", "NO Pelicans": "NOP", "NY Knicks": "NYK",
-    "OKC Thunder": "OKC", "ORL Magic": "ORL", "PHI 76ers": "PHI", "PHX Suns": "PHX",
-    "POR Trail Blazers": "POR", "SAC Kings": "SAC", "SA Spurs": "SAS", "TOR Raptors": "TOR",
-    "UTA Jazz": "UTA", "WAS Wizards": "WAS"
-};
+import { Search, ChevronDown, Lock, LockOpen } from 'lucide-react';
 
 const STAT_FILTERS = [
     { label: 'Points', key: 'PTS' },
@@ -48,44 +16,16 @@ const Sidebar = ({ players = [], activePlayerId, onSelectPlayer }) => {
     const [expandedGames, setExpandedGames] = useState({});
     const [searchTerm, setSearchTerm] = useState('');
 
-    // Fetch and parse CSV to get Schedule/Game data
+    // Fetch live game data
     useEffect(() => {
-        fetch('http://localhost:5000/data/current/draftkings.csv')
-            .then(res => res.text())
-            .then(csvText => {
-                const rows = csvText.split('\n').slice(1);
-                const gamesMap = {};
-
-                // Parse CSV to build Game Objects
-                rows.forEach(row => {
-                    if (!row.trim()) return;
-                    // CSV: player,team,prop_type,line,over_odds,under_odds,game,game_date,sportsbook
-                    const cols = row.split(',');
-                    const gameStr = cols[6]; // "NY Knicks @ DET Pistons"
-
-                    if (gameStr && !gamesMap[gameStr]) {
-                        const [awayName, homeName] = gameStr.split(' @ ');
-                        const awayAbbrev = TEAM_NAME_TO_ABBREV[awayName] || awayName.substring(0, 3).toUpperCase();
-                        const homeAbbrev = TEAM_NAME_TO_ABBREV[homeName] || homeName.substring(0, 3).toUpperCase();
-
-                        // Determinisitic fake time based on game string length
-                        const times = ['7:00 PM', '7:30 PM', '8:00 PM', '8:30 PM', '10:00 PM'];
-                        const timeIndex = (gameStr.length + awayAbbrev.charCodeAt(0)) % times.length;
-
-                        gamesMap[gameStr] = {
-                            id: gameStr,
-                            away: awayAbbrev,
-                            home: homeAbbrev,
-                            awayName: awayName,
-                            homeName: homeName,
-                            time: times[timeIndex],
-                            date: 'Fri', // Mocking assume today is Fri as per screenshot
-                            players: []
-                        };
-                    }
+        fetch('http://localhost:5000/data/current/nba_dashboard_games.json')
+            .then(res => res.json())
+            .then(data => {
+                // Sort games by time
+                const sortedGames = data.sort((a, b) => {
+                    return new Date(a.game_time_utc) - new Date(b.game_time_utc);
                 });
-
-                setScheduleData(Object.values(gamesMap));
+                setScheduleData(sortedGames);
             })
             .catch(err => console.error("Error loading schedule:", err));
     }, []);
@@ -94,28 +34,16 @@ const Sidebar = ({ players = [], activePlayerId, onSelectPlayer }) => {
     const processedGames = useMemo(() => {
         if (!scheduleData.length || !players.length) return [];
 
-        // 1. Create a map of players by normalized name
-        const playerMap = {};
-        players.forEach(p => {
-            playerMap[p.name.toLowerCase()] = p;
-        });
-
-        // 2. Clone schedule to avoid mutation
+        // Clone schedule to avoid mutation and add players array
         const games = scheduleData.map(g => ({ ...g, players: [] }));
-        const unassignedPlayers = [];
 
-        // 3. Assign players to games based on Team ID or Team Abbrev matching
+        // Assign players to games based on Team Tricode matching
         players.forEach(player => {
-            // Try to find the game where this player's team is either Home or Away
-            const game = games.find(g => g.away === player.team || g.home === player.team);
-
-            // Check if player has the prop for current filter
-            // Logic: Checks if 'props[statFilter]' exists OR if statFilter is 'Points' checks 'PTS', etc.
-            // Simplified: Just iterate all tabs logic from PlayerCard? 
-            // For now, check if player.props[statFilter] exists
-            // But wait, key in PlayerCard TABS map is different from labels.
-            // Map label -> key
-            // Points -> PTS
+            // Find game where player's team matches Home or Away Tricode
+            const game = games.find(g =>
+                g.home_team_tricode === player.team ||
+                g.away_team_tricode === player.team
+            );
 
             const hasProp = player.props && (
                 (statFilter === 'Points' && player.props.PTS) ||
@@ -129,12 +57,10 @@ const Sidebar = ({ players = [], activePlayerId, onSelectPlayer }) => {
 
             if (game && hasProp) {
                 game.players.push(player);
-            } else if (!game) {
-                unassignedPlayers.push(player); // Fallback if no game found (should cover untracked games)
             }
         });
 
-        return games.filter(g => g.players.length > 0 || g.away); // Return all games derived from CSV
+        return games;
     }, [scheduleData, players, statFilter]);
 
 
@@ -193,31 +119,40 @@ const Sidebar = ({ players = [], activePlayerId, onSelectPlayer }) => {
             <div className="flex-1 overflow-y-auto custom-scrollbar">
                 {processedGames.length === 0 && (
                     <div className="text-center py-8 text-gray-600 text-xs">
-                        Loading games...
+                        Loading games... (Check ./backend/data/current/nba_dashboard_games.json)
                     </div>
                 )}
 
                 {processedGames.map((game) => {
-                    const isExpanded = expandedGames[game.id];
+                    const isExpanded = expandedGames[game.game_id];
                     // Filter players inside the game by search term
                     const visiblePlayers = game.players.filter(p =>
                         p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                         p.team.toLowerCase().includes(searchTerm.toLowerCase())
                     );
 
-                    // If search logic requires hiding empty games, handle here. 
-                    // For now show game if it matches term OR has players matching
-                    if (searchTerm && visiblePlayers.length === 0 &&
-                        !game.away.includes(searchTerm.toUpperCase()) &&
-                        !game.home.includes(searchTerm.toUpperCase())) {
+                    // Search Logic: Show game if it matches term OR has players matching
+                    const gameMatches =
+                        game.away_team_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        game.home_team_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        game.away_team_tricode.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        game.home_team_tricode.toLowerCase().includes(searchTerm.toLowerCase());
+
+                    if (searchTerm && visiblePlayers.length === 0 && !gameMatches) {
                         return null;
                     }
 
+                    // Format Time/Status
+                    // game_status_text is like "3:00 pm ET" or "Final" or "Q1 10:00"
+                    // If live, use green status. If scheduled, use time.
+                    const statusColor = game.is_live ? 'text-green-500' : 'text-gray-500';
+                    const periodText = game.is_live ? `Q${game.period} ${game.game_clock}` : game.game_status_text;
+
                     return (
-                        <div key={game.id} className="border-b border-white/5">
+                        <div key={game.game_id} className="border-b border-white/5">
                             {/* Game Header / Accordion Trigger */}
                             <div
-                                onClick={() => toggleGame(game.id)}
+                                onClick={() => toggleGame(game.game_id)}
                                 className={`
                                     p-3 flex items-center justify-between cursor-pointer transition-colors group
                                     ${isExpanded ? 'bg-white/5' : 'hover:bg-white/5'}
@@ -228,29 +163,52 @@ const Sidebar = ({ players = [], activePlayerId, onSelectPlayer }) => {
                                     {/* Away */}
                                     <div className="flex flex-col items-center gap-1 w-14">
                                         <img
-                                            src={`http://localhost:5000/assets/team_logos/${TEAM_ID_MAP[game.away]}.svg`}
-                                            alt={game.away}
+                                            src={`http://localhost:5000/assets/team_logos/${game.away_team_id}.svg`}
+                                            alt={game.away_team_tricode}
                                             className="w-6 h-6 object-contain"
                                             onError={(e) => e.target.style.display = 'none'}
                                         />
-                                        <span className="text-[10px] font-bold text-gray-400 group-hover:text-white transition-colors">{game.awayName?.split(' ').pop()}</span>
+                                        <div className="flex flex-col items-center">
+                                            <span className="text-[10px] font-bold text-gray-400 group-hover:text-white transition-colors">
+                                                {game.away_team_tricode}
+                                            </span>
+                                            {/* Show score if live or final */}
+                                            {(game.is_live || game.is_final) && (
+                                                <span className="text-[10px] font-mono text-white">{game.away_score}</span>
+                                            )}
+                                        </div>
                                     </div>
 
-                                    {/* Time */}
+                                    {/* Time / Status center */}
                                     <div className="flex flex-col items-center gap-0.5">
-                                        <span className="text-[9px] font-bold text-gray-500 uppercase">{game.date}</span>
-                                        <span className="text-[11px] font-bold text-white">{game.time}</span>
+                                        {game.is_final ? (
+                                            <span className="text-[9px] font-bold text-gray-500">FINAL</span>
+                                        ) : (
+                                            <span className={`text-[9px] font-bold ${statusColor} uppercase`}>
+                                                {periodText}
+                                            </span>
+                                        )}
+                                        {!game.is_live && !game.is_final && (
+                                            <span className="text-[9px] font-bold text-gray-600 uppercase">{game.game_weekday?.substring(0, 3)}</span>
+                                        )}
                                     </div>
 
                                     {/* Home */}
                                     <div className="flex flex-col items-center gap-1 w-14">
                                         <img
-                                            src={`http://localhost:5000/assets/team_logos/${TEAM_ID_MAP[game.home]}.svg`}
-                                            alt={game.home}
+                                            src={`http://localhost:5000/assets/team_logos/${game.home_team_id}.svg`}
+                                            alt={game.home_team_tricode}
                                             className="w-6 h-6 object-contain"
                                             onError={(e) => e.target.style.display = 'none'}
                                         />
-                                        <span className="text-[10px] font-bold text-gray-400 group-hover:text-white transition-colors">{game.homeName?.split(' ').pop()}</span>
+                                        <div className="flex flex-col items-center">
+                                            <span className="text-[10px] font-bold text-gray-400 group-hover:text-white transition-colors">
+                                                {game.home_team_tricode}
+                                            </span>
+                                            {(game.is_live || game.is_final) && (
+                                                <span className="text-[10px] font-mono text-white">{game.home_score}</span>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -290,7 +248,6 @@ const Sidebar = ({ players = [], activePlayerId, onSelectPlayer }) => {
                                                                 {player.name}
                                                             </span>
                                                             <div className="flex items-center gap-1">
-                                                                {/* Example Prop Lock Status - Mocked as Unlock for now */}
                                                                 <span className="text-[9px] text-gray-500 font-medium">
                                                                     {player.props[statFilter] ? 'Available' : 'No Prop'}
                                                                 </span>
@@ -320,7 +277,7 @@ const Sidebar = ({ players = [], activePlayerId, onSelectPlayer }) => {
                                         })
                                     ) : (
                                         <div className="py-3 text-center text-[10px] text-gray-600">
-                                            No players found with this prop.
+                                            No players found.
                                         </div>
                                     )}
                                 </div>
