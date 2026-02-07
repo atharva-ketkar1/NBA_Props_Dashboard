@@ -6,6 +6,7 @@ const PlayerCard = ({ player }) => {
     const [activeSportsbook, setActiveSportsbook] = useState('dk'); // 'dk' or 'fd'
 
     // Tab configuration matching PropsMadness
+    // EXPANDED TAB LIST (Matching the original's density)
     const TABS = [
         { label: 'Points', key: 'PTS' },
         { label: 'Assists', key: 'AST' },
@@ -15,6 +16,15 @@ const PlayerCard = ({ player }) => {
         { label: 'Pts+Reb', key: 'PTS+REB' },
         { label: 'Reb+Ast', key: 'REB+AST' },
         { label: 'Pts+Reb+Ast', key: 'PTS+REB+AST' },
+        // New Advanced Tabs
+        { label: 'Double Double', key: 'DD2' },
+        { label: 'Triple Double', key: 'TD3' },
+        { label: '1Q Points', key: 'PTS_1Q' },
+        { label: '1Q Assists', key: 'AST_1Q' },
+        { label: '1Q Rebounds', key: 'REB_1Q' },
+        { label: '1H Points', key: 'PTS_1H' },
+        { label: '1H Assists', key: 'AST_1H' },
+        { label: '1H Rebounds', key: 'REB_1H' },
     ];
 
     // Header stats with calculated differences from season average
@@ -95,6 +105,15 @@ const PlayerCard = ({ player }) => {
 
     if (!player) return null;
 
+    // --- NEW: Dynamic Image URLs ---
+    // Extract Team ID from the most recent game log entry (reliable source)
+    const teamId = player.game_log?.[0]?.TEAM_ID;
+
+    // Construct URLs pointing to your local server
+    // Note: This assumes you are running 'npx serve' from the 'backend' folder
+    const headshotUrl = `http://localhost:5000/assets/player_headshots/${player.id}.png`;
+    const teamLogoUrl = `http://localhost:5000/assets/team_logos/${teamId}.svg`;
+
     return (
         <div className="w-full bg-[#0a0a0a] text-white font-sans rounded-2xl overflow-hidden shadow-2xl flex flex-col ring-1 ring-white/10 relative">
 
@@ -104,91 +123,106 @@ const PlayerCard = ({ player }) => {
                 .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
             `}</style>
 
-            {/* A. TABS - Uppercase, tight spacing */}
-            <div className="flex items-center gap-0 overflow-x-auto bg-[#09090b] scrollbar-hide border-b border-white/10 h-11 flex-shrink-0">
-                {TABS.map((tab) => {
-                    const isActive = activeTab === tab.key;
-                    return (
-                        <button
-                            key={tab.key}
-                            onClick={() => setActiveTab(tab.key)}
-                            className={`
-                                h-full px-6 text-[10px] font-bold uppercase tracking-widest whitespace-nowrap transition-all border-b-[3px]
-                                ${isActive
-                                    ? 'text-white border-white bg-black/30'
-                                    : 'text-gray-500 border-transparent hover:text-gray-300 hover:bg-white/5'}
-                            `}
-                        >
-                            {tab.label}
-                        </button>
-                    );
-                })}
+            {/* A. TABS - SCROLLABLE CONTAINER */}
+            <div className="w-full border-b border-[#27272a] bg-[#09090b]">
+                <div className="flex items-center gap-0 overflow-x-auto scrollbar-hide">
+                    {TABS.map((tab) => {
+                        const isActive = activeTab === tab.key;
+                        return (
+                            <button
+                                key={tab.key}
+                                onClick={() => setActiveTab(tab.key)}
+                                className={`
+                                    relative h-10 px-4 flex items-center justify-center text-[10px] font-bold uppercase tracking-wider whitespace-nowrap transition-all
+                                    ${isActive
+                                        ? 'text-white bg-[#18181b]'
+                                        : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'}
+                                `}
+                            >
+                                {tab.label}
+                                {/* Active Indicator Line at Bottom */}
+                                {isActive && (
+                                    <div className="absolute bottom-0 left-0 w-full h-[2px] bg-blue-500"></div>
+                                )}
+                            </button>
+                        );
+                    })}
+                </div>
             </div>
 
             {/* B. MAIN CONTENT */}
             <div className="p-6 flex-1 flex flex-col bg-black">
 
-                {/* 1. HERO HEADER */}
-                <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 mb-6">
+                {/* 1. HERO HEADER - REFACTORED FOR PHASE 2 */}
+                <div className="flex flex-col xl:flex-row justify-between items-start gap-6 mb-2">
 
-                    {/* Left: Player Identity */}
-                    <div className="flex gap-4 items-center">
-                        {/* Player Avatar */}
-                        <div className="relative">
-                            <div className="w-16 h-16 rounded-full border-2 border-orange-500/80 bg-gradient-to-br from-purple-900 to-purple-700 flex items-center justify-center font-black text-xl text-yellow-400 shadow-lg flex-shrink-0">
-                                {player.name.split(' ').map(n => n[0]).join('').slice(0, 3).toUpperCase()}
+                    {/* LEFT: Player Identity & Betting Lines */}
+                    <div className="flex flex-col gap-3 min-w-[300px]">
+
+                        {/* Top Row: Avatar + Name + Team */}
+                        <div className="flex items-center gap-4">
+                            {/* Avatar (Slightly smaller, cleaner border) */}
+                            <div className="relative w-14 h-14 rounded-full border-2 border-[#27272a] overflow-hidden bg-[#18181b]">
+                                <img
+                                    src={headshotUrl}
+                                    alt={player.name}
+                                    className="w-full h-full object-cover transform scale-125 pt-1.5"
+                                    onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                                />
+                                <div className="hidden w-full h-full items-center justify-center font-black text-sm text-gray-500 bg-[#18181b]">
+                                    {player.name.slice(0, 2)}
+                                </div>
                             </div>
-                            {/* Team logo placeholder - top right corner */}
-                            <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-orange-500 border-2 border-black flex items-center justify-center text-[8px] font-black text-white">
-                                {player.team}
+
+                            {/* Name & Team Info Stack */}
+                            <div className="flex flex-col justify-center">
+                                {/* Team Name + Position Row */}
+                                <div className="flex items-center gap-2 mb-0.5">
+                                    {teamId && (
+                                        <img src={teamLogoUrl} alt="Team" className="w-4 h-4 object-contain opacity-80" />
+                                    )}
+                                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                                        {player.team} • {player.position || 'F'}
+                                    </span>
+                                </div>
+                                {/* Player Name - Big & Bright */}
+                                <h1 className="text-2xl font-black text-white leading-none tracking-tight">
+                                    {player.name}
+                                </h1>
                             </div>
                         </div>
 
-                        <div>
-                            {/* Player Name & Position */}
-                            <div className="flex items-center gap-2 mb-1">
-                                <h1 className="text-xl font-bold text-white tracking-tight">{player.name}</h1>
-                                <span className="text-gray-400 font-bold text-[10px] bg-white/10 px-2 py-0.5 rounded uppercase">
-                                    {player.position || 'F'}
-                                </span>
-                            </div>
-
-                            {/* Betting Badge - Sportsbook tabs */}
-                            <div className="flex items-center gap-2">
-                                {/* Sportsbook Badge */}
-                                <div className="flex items-center bg-[#18181b] rounded-md border border-white/10 h-7 shadow-sm overflow-hidden">
-                                    {/* FD Tab */}
-                                    <button
-                                        onClick={() => setActiveSportsbook('fd')}
-                                        className={`h-full px-2 flex items-center justify-center transition-colors ${activeSportsbook === 'fd'
-                                                ? 'bg-[#3b82f6]'
-                                                : 'bg-[#1e293b] hover:bg-[#334155]'
-                                            }`}
-                                    >
-                                        <span className="text-[9px] font-black text-white">FD</span>
-                                    </button>
-
-                                    {/* DK Tab */}
-                                    <button
-                                        onClick={() => setActiveSportsbook('dk')}
-                                        className={`h-full px-2 flex items-center justify-center transition-colors ${activeSportsbook === 'dk'
-                                                ? 'bg-[#3b82f6]'
-                                                : 'bg-[#1e293b] hover:bg-[#334155]'
-                                            }`}
-                                    >
-                                        <span className="text-[9px] font-black text-white">DK</span>
-                                    </button>
-
-                                    {/* Line & Odds */}
-                                    <div className="px-3 flex items-center gap-2">
-                                        <span className="font-bold text-white text-xs">
-                                            {line} <span className="text-[9px] text-gray-400 uppercase">{activeTab.replace('FG3M', '3PM')}</span>
+                        {/* Bottom Row: The Betting Badge (Compact) */}
+                        <div className="flex items-center gap-2 mt-1">
+                            <div className="flex items-center bg-[#18181b] rounded-md border border-[#27272a] h-8 overflow-hidden">
+                                {/* Book Toggle */}
+                                <div className="flex h-full border-r border-[#27272a]">
+                                    {['fd', 'dk'].map((book) => (
+                                        <button
+                                            key={book}
+                                            onClick={() => setActiveSportsbook(book)}
+                                            className={`px-2.5 h-full flex items-center justify-center transition-all ${activeSportsbook === book
+                                                    ? 'bg-blue-600 text-white'
+                                                    : 'text-gray-600 hover:text-gray-400'
+                                                }`}
+                                        >
+                                            <span className="text-[10px] font-black uppercase">{book}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                                {/* The Line */}
+                                <div className="px-3 flex items-center gap-3">
+                                    <div className="flex items-baseline gap-1">
+                                        <span className="text-base font-black text-white">{line}</span>
+                                        <span className="text-[9px] font-bold text-gray-500 uppercase">{activeTab}</span>
+                                    </div>
+                                    <div className="w-px h-3 bg-[#27272a]"></div>
+                                    <div className="flex gap-2">
+                                        <span className="text-[10px] font-bold text-gray-400">
+                                            o{overOdds}
                                         </span>
-                                        <span className="text-[9px] text-emerald-400 font-bold font-mono">
-                                            O {overOdds > 0 ? '+' : ''}{overOdds}
-                                        </span>
-                                        <span className="text-[9px] text-red-400 font-bold font-mono">
-                                            U {underOdds > 0 ? '+' : ''}{underOdds}
+                                        <span className="text-[10px] font-bold text-gray-400">
+                                            u{underOdds}
                                         </span>
                                     </div>
                                 </div>
@@ -196,46 +230,47 @@ const PlayerCard = ({ player }) => {
                         </div>
                     </div>
 
-                    {/* Right: Stats Cluster */}
-                    <div className="flex flex-1 items-center justify-between xl:justify-end gap-6 w-full xl:w-auto">
+                    {/* RIGHT: Stats Grid (The "Dashboard" Look) */}
+                    <div className="flex items-center gap-2 w-full xl:w-auto overflow-x-auto pb-2 xl:pb-0">
 
-                        {/* Hit Rate - Prominent */}
-                        <div className="text-center flex flex-col items-center px-6 border-r border-white/10">
-                            <div className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Hit Rate</div>
-                            <div className={`text-3xl font-black leading-none ${Number(hitRate) >= 50 ? 'text-emerald-400' : 'text-red-400'
-                                }`}>
-                                {hitRate}%
-                            </div>
-                            <div className="text-[10px] text-gray-400 font-medium mt-0.5">
-                                ({hitCount}/{graphData.length})
+                        {/* 1. The HIT RATE Box (Key Feature) */}
+                        <div className="flex flex-col justify-center items-center h-16 w-28 bg-[#18181b] border border-[#27272a] rounded-lg mr-2 flex-shrink-0">
+                            <span className="text-[9px] text-gray-500 font-bold tracking-widest uppercase mb-0.5">Hit Rate</span>
+                            <div className="flex items-baseline gap-1.5">
+                                <span className={`text-2xl font-black ${Number(hitRate) >= 50 ? 'text-emerald-500' : 'text-red-500'}`}>
+                                    {hitRate}%
+                                </span>
+                                <span className="text-[9px] font-bold text-gray-600">
+                                    {hitCount}/{graphData.length}
+                                </span>
                             </div>
                         </div>
 
-                        {/* Season Stats */}
-                        <div className="flex gap-6 overflow-x-auto scrollbar-hide items-center">
-                            {HEADER_STATS.map(stat => {
+                        {/* 2. The Stats Columns */}
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                            {HEADER_STATS.map((stat, i) => {
                                 const diffData = calculateDiff(stat.key);
                                 return (
-                                    <div key={stat.key} className="flex flex-col items-center min-w-[40px]">
-                                        <div className="text-[9px] text-gray-500 font-bold mb-1 tracking-wider uppercase">
-                                            {stat.label}
-                                        </div>
-                                        <div className="text-xl font-bold text-white leading-none">
+                                    <div key={stat.key} className={`flex flex-col items-center justify-center w-14 h-16 ${i !== HEADER_STATS.length - 1 ? 'border-r border-[#27272a]' : ''}`}>
+                                        {/* Label */}
+                                        <span className="text-[9px] font-bold text-gray-600 uppercase mb-0.5">{stat.label}</span>
+                                        {/* Value */}
+                                        <span className="text-base font-bold text-white leading-none mb-0.5">
                                             {player.stats?.[stat.key]?.toFixed(1) || '-'}
-                                        </div>
-                                        <div className={`text-[9px] font-bold mt-1 ${diffData.color}`}>
+                                        </span>
+                                        {/* Diff Indicator (Pill style) */}
+                                        <span className={`text-[9px] font-bold px-1 rounded ${diffData.diff.includes('+')
+                                                ? 'text-emerald-500 bg-emerald-500/10'
+                                                : diffData.diff.includes('-')
+                                                    ? 'text-red-500 bg-red-500/10'
+                                                    : 'text-gray-500'
+                                            }`}>
                                             {diffData.diff}
-                                        </div>
+                                        </span>
                                     </div>
                                 );
                             })}
                         </div>
-
-                        {/* Filter Button */}
-                        <button className="hidden lg:flex items-center gap-2 px-4 py-2 rounded-md border border-white/10 bg-[#18181b] text-xs font-bold text-white hover:bg-[#27272a] transition">
-                            <SlidersHorizontal size={14} />
-                            <span>Filters</span>
-                        </button>
                     </div>
                 </div>
 
@@ -281,8 +316,8 @@ const PlayerCard = ({ player }) => {
                                     {/* Bar */}
                                     <div
                                         className={`w-full rounded-t transition-all duration-300 ${game.isHit
-                                                ? 'bg-emerald-500 hover:bg-emerald-400'
-                                                : 'bg-red-500 hover:bg-red-400'
+                                            ? 'bg-emerald-500 hover:bg-emerald-400'
+                                            : 'bg-red-500 hover:bg-red-400'
                                             } shadow-sm relative`}
                                         style={{ height: `${heightPct}%` }}
                                     >

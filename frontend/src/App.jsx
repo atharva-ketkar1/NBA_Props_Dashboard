@@ -11,7 +11,7 @@ function App() {
   // 1. Fetch data from your local "backend" server
   useEffect(() => {
     // In the future, you just change this URL to your Cloud API URL
-    fetch('http://localhost:5000/master_feed.json')
+    fetch('http://localhost:5000/data/current/master_feed.json')
       .then(res => res.json())
       .then(data => {
         setRawData(data);
