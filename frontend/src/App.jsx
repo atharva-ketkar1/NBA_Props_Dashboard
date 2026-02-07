@@ -52,9 +52,16 @@ function App() {
       </div>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar - You can eventually pass 'playersWithProps' here to create a navigation list */}
+        {/* Sidebar */}
         <div className="hidden md:block w-56 lg:w-64 flex-shrink-0 h-full">
-          <Sidebar />
+          <Sidebar
+            players={playersWithProps}
+            activePlayerId={currentPlayer?.id}
+            onSelectPlayer={(playerId) => {
+              const index = playersWithProps.findIndex(p => p.id === playerId);
+              if (index !== -1) setSelectedIndex(index);
+            }}
+          />
         </div>
 
         <div className="flex-1 h-full overflow-y-auto overflow-x-hidden">
