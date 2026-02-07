@@ -1,8 +1,8 @@
 import pandas as pd
-import difflib
 import json
 import os
 import numpy as np
+from utils.player_matcher import PlayerMatcher
 
 # ==========================================
 # 1. CONFIGURATION MAPPINGS
@@ -88,9 +88,9 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, output_path):
     df_stats['REB+AST'] = df_stats['REB'] + df_stats['AST']
     df_stats['STL+BLK'] = df_stats['STL'] + df_stats['BLK']
 
-    # Create Name Map for Odds matching
-    df_stats['norm_name'] = df_stats['PLAYER_NAME'].apply(normalize_name)
-    name_to_id_map = dict(zip(df_stats['norm_name'], df_stats['PLAYER_ID']))
+    # Create Matcher Instance (using PlayerMatcher)
+    stats_records = df_stats[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].to_dict('records')
+    matcher = PlayerMatcher(stats_records)
 
     # C. Prepare Game Logs (Group by Player)
     logs_map = {}
@@ -125,8 +125,22 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, output_path):
     def process_odds(df, book_name):
         if df.empty: return
         for _, row in df.iterrows():
-            # Find Player ID
-            pid = get_best_match_id(row.get('player', ''), name_to_id_map)
+            # Extract basic info
+            player_name = row.get('player', '')
+            team_context = row.get('team', 'UNK')
+            
+            # Extract team options if available (from DK scraper update)
+            team_opts = []
+            raw_opts = row.get('team_options')
+            if isinstance(raw_opts, str) and "[" in raw_opts:
+                try:
+                    import ast
+                    team_opts = ast.literal_eval(raw_opts)
+                except: pass
+
+            # Match Player using robust matcher
+            pid = matcher.match_player(player_name, team_context, team_opts)
+            
             if not pid or pid not in master_data: continue
 
             # Map prop type (e.g. 'points' -> 'PTS')

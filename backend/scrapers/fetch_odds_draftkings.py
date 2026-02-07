@@ -142,6 +142,13 @@ def parse_dk_data(data, prop_type_key):
         event = event_map.get(event_id, {})
         game_name = event.get('name', 'Unknown')
         
+        # Team Extraction
+        # DK typically has teamName1, teamName2, teamShortName1, teamShortName2
+        # We can't easily link the player directly to the team without more parsing,
+        # but we can return the matchup or both teams to help the matcher.
+        team1 = event.get('teamShortName1', 'UNK')
+        team2 = event.get('teamShortName2', 'UNK')
+        
         start_date = event.get('startEventDate')
         game_date = datetime.now().strftime('%Y-%m-%d')
         if start_date:
@@ -163,7 +170,8 @@ def parse_dk_data(data, prop_type_key):
 
         parsed.append({
             "player": normalize_player_name(player_name),
-            "team": "Unknown",
+            "team": "Unknown", # DK doesn't give us player-team link easily here, but we can use matchup
+            "team_options": [team1, team2], # NEW: Pass possible teams to matcher
             "prop_type": prop_type_key,
             "line": float(line),
             "over_odds": over_int,

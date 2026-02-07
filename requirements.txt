@@ -7,3 +7,4 @@ nba_api
 requests
 notebook
 jupyter
+rapidfuzz

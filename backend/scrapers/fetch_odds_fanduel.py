@@ -87,12 +87,41 @@ def normalize_prop_type(prop_name):
         if key in prop_name_lower: return val
     return prop_name_lower.replace(' ', '_')
 
+TEAM_MAP = {
+    'hawks': 'ATL', 'celtics': 'BOS', 'nets': 'BKN', 'hornets': 'CHA', 'bulls': 'CHI',
+    'cavaliers': 'CLE', 'mavericks': 'DAL', 'nuggets': 'DEN', 'pistons': 'DET', 'warriors': 'GSW',
+    'rockets': 'HOU', 'pacers': 'IND', 'clippers': 'LAC', 'lakers': 'LAL', 'grizzlies': 'MEM',
+    'heat': 'MIA', 'bucks': 'MIL', 'timberwolves': 'MIN', 'pelicans': 'NOP', 'knicks': 'NYK',
+    'thunder': 'OKC', 'magic': 'ORL', 'sixers': 'PHI', '76ers': 'PHI', 'suns': 'PHX',
+    'blazers': 'POR', 'trail_blazers': 'POR', 'kings': 'SAC', 'spurs': 'SAS', 'raptors': 'TOR',
+    'jazz': 'UTA', 'wizards': 'WAS'
+}
+
 def extract_team_name(logo_url):
-    if not logo_url: return "Unknown Team"
+    """
+    Extracts team abbreviation from logo URL or team name.
+    Returns 'UNK' if not found.
+    """
+    if not logo_url: return "UNK"
     try:
-        team_slug = logo_url.split('/')[-1].replace('.png', '').replace('_jersey', '')
-        return ' '.join(word.capitalize() for word in team_slug.split('_'))
-    except: return "Unknown Team"
+        # Example URL: .../teams/cleveland_cavaliers.png or .../teams/cavaliers.png
+        # We try to grab the last part
+        slug = logo_url.split('/')[-1].replace('.png', '').replace('_jersey', '').lower()
+        
+        # Check for direct map keys in the slug
+        for key, tricode in TEAM_MAP.items():
+            if key in slug:
+                return tricode
+                
+        # Parse slug parts (e.g., "cleveland_cavaliers" -> ["cleveland", "cavaliers"])
+        parts = slug.split('_')
+        for part in parts:
+            if part in TEAM_MAP:
+                return TEAM_MAP[part]
+                
+        return "UNK"
+    except: 
+        return "UNK"
 
 def fetch_odds():
     print("🚀 Starting FanDuel Odds Fetch...")
