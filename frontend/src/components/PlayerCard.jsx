@@ -1,30 +1,11 @@
 import React, { useState, useMemo } from 'react';
 import { SlidersHorizontal } from 'lucide-react';
 
-const MOCK_PLAYER = {
-    "id": 2544,
-    "name": "LeBron James",
-    "team": "LAL",
-    "position": "F",
-    "stats": {
-        "PTS": 22.5, "AST": 6.4, "REB": 5.8, "FG3M": 1.5, "MIN": 33.1, "USAGE": 27.6, "FGA": 16.4
-    },
-    "game_log": Array.from({ length: 32 }, (_, i) => ({
-        "GAME_DATE": "2026-02-05", "MATCHUP": "vs NYK", "WL": i % 3 === 0 ? "L" : "W",
-        "PTS": Math.floor(Math.random() * (36 - 15) + 15),
-        "AST": Math.floor(Math.random() * (12 - 4) + 4),
-        "REB": Math.floor(Math.random() * (10 - 2) + 2),
-        "FG3M": Math.floor(Math.random() * 5),
-    })),
-    "props": {
-        "PTS": { "dk": { "line": 20.5, "over": -120, "under": -130 } },
-        "AST": { "dk": { "line": 6.5, "over": -122, "under": -108 } }
-    }
-};
-
-const PlayerCard = ({ player = MOCK_PLAYER }) => {
+const PlayerCard = ({ player }) => {
     const [activeTab, setActiveTab] = useState('PTS');
+    const [activeSportsbook, setActiveSportsbook] = useState('dk'); // 'dk' or 'fd'
 
+    // Tab configuration matching PropsMadness
     const TABS = [
         { label: 'Points', key: 'PTS' },
         { label: 'Assists', key: 'AST' },
@@ -34,48 +15,97 @@ const PlayerCard = ({ player = MOCK_PLAYER }) => {
         { label: 'Pts+Reb', key: 'PTS+REB' },
         { label: 'Reb+Ast', key: 'REB+AST' },
         { label: 'Pts+Reb+Ast', key: 'PTS+REB+AST' },
-        { label: 'Double Double', key: 'DD2' },
-        { label: 'Triple Double', key: 'TD3' },
     ];
 
+    // Header stats with calculated differences from season average
     const HEADER_STATS = [
-        { label: 'PTS', key: 'PTS', diff: '+8.5', color: 'text-emerald-400' },
-        { label: 'AST', key: 'AST', diff: '-3.6', color: 'text-red-400' },
-        { label: 'REB', key: 'REB', diff: '+1.3', color: 'text-emerald-400' },
-        { label: '3PM', key: 'FG3M', diff: '+0.5', color: 'text-emerald-400' },
-        { label: 'MINS', key: 'MIN', diff: '+1.1', color: 'text-emerald-400' },
-        { label: 'USAGE', key: 'USAGE', diff: '+7.5%', color: 'text-emerald-400', isPercent: true },
-        { label: 'FGA', key: 'FGA', diff: '+3.9', color: 'text-emerald-400' },
+        { label: 'PTS', key: 'PTS' },
+        { label: 'AST', key: 'AST' },
+        { label: 'REB', key: 'REB' },
+        { label: '3PM', key: 'FG3M' },
+        { label: 'MINS', key: 'MIN' },
     ];
 
-    const propData = player.props?.[activeTab] || {};
-    const line = propData.dk?.line || 20.5;
-    const overOdds = propData.dk?.over || -110;
-    const underOdds = propData.dk?.under || -110;
+    // Get prop line and odds for active tab and sportsbook
+    const propData = player?.props?.[activeTab]?.[activeSportsbook] || {};
+    const line = propData.line || 0;
+    const overOdds = propData.over || -110;
+    const underOdds = propData.under || -110;
 
+    // Calculate combo stat values for game log
+    const calculateComboStat = (game, statKey) => {
+        if (game[statKey] !== undefined) return game[statKey];
+
+        // Calculate combined stats if not present
+        const statMap = {
+            'PTS+AST': (game.PTS || 0) + (game.AST || 0),
+            'PTS+REB': (game.PTS || 0) + (game.REB || 0),
+            'REB+AST': (game.REB || 0) + (game.AST || 0),
+            'PTS+REB+AST': (game.PTS || 0) + (game.REB || 0) + (game.AST || 0),
+        };
+
+        return statMap[statKey] || game.PTS || 0;
+    };
+
+    // Process game log data for chart
     const graphData = useMemo(() => {
-        const logs = player.game_log || [];
-        return logs.slice(0, 32).reverse().map((game, i) => {
-            const val = game[activeTab] || game.PTS;
-            return { ...game, val, isHit: val >= line, id: i };
+        if (!player?.game_log) return [];
+
+        return player.game_log.slice(0, 32).reverse().map((game, i) => {
+            const val = calculateComboStat(game, activeTab);
+            const date = new Date(game.GAME_DATE);
+            const monthShort = date.toLocaleDateString('en-US', { month: 'short' });
+            const day = date.getDate();
+
+            return {
+                ...game,
+                val,
+                isHit: val >= line,
+                id: i,
+                dateLabel: `${monthShort} ${day}`,
+                // Extract opponent from MATCHUP (e.g., "UTA @ ATL" -> "ATL")
+                opponent: game.MATCHUP.includes('@')
+                    ? game.MATCHUP.split('@')[1].trim()
+                    : game.MATCHUP.split('vs.')[1]?.trim() || game.MATCHUP.split('vs')[1]?.trim() || 'OPP'
+            };
         });
     }, [player, activeTab, line]);
 
+    // Calculate hit rate
     const hitCount = graphData.filter(g => g.isHit).length;
     const hitRate = graphData.length ? ((hitCount / graphData.length) * 100).toFixed(1) : 0;
-    const maxVal = Math.max(...graphData.map(g => g.val), line) * 1.3;
+
+    // Calculate max value for chart scaling
+    const maxVal = Math.max(...graphData.map(g => g.val), line) * 1.25;
+
+    // Calculate stat differences (last 5 games vs season average)
+    const calculateDiff = (statKey) => {
+        if (!player?.game_log || player.game_log.length < 5) return { diff: '+0.0', color: 'text-gray-400' };
+
+        const recent5 = player.game_log.slice(0, 5);
+        const recentAvg = recent5.reduce((sum, game) => sum + (game[statKey] || 0), 0) / 5;
+        const seasonAvg = player.stats?.[statKey] || 0;
+        const diff = recentAvg - seasonAvg;
+
+        return {
+            diff: `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}`,
+            color: diff >= 0 ? 'text-emerald-400' : 'text-red-400'
+        };
+    };
+
+    if (!player) return null;
 
     return (
-        <div className="w-full bg-[#121212] text-white font-sans rounded-2xl overflow-hidden shadow-lg flex flex-col ring-1 ring-white/5 relative">
+        <div className="w-full bg-[#0a0a0a] text-white font-sans rounded-2xl overflow-hidden shadow-2xl flex flex-col ring-1 ring-white/10 relative">
 
-            {/* Force Hide Scrollbar Style */}
+            {/* Hide scrollbar */}
             <style>{`
                 .scrollbar-hide::-webkit-scrollbar { display: none; }
                 .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
             `}</style>
 
-            {/* A. TABS - Compact & Clean */}
-            <div className="flex items-center gap-1 overflow-x-auto bg-[#0a0a0a] px-4 scrollbar-hide border-b border-white/5 h-12 flex-shrink-0">
+            {/* A. TABS - Uppercase, tight spacing */}
+            <div className="flex items-center gap-0 overflow-x-auto bg-[#09090b] scrollbar-hide border-b border-white/10 h-11 flex-shrink-0">
                 {TABS.map((tab) => {
                     const isActive = activeTab === tab.key;
                     return (
@@ -83,118 +113,197 @@ const PlayerCard = ({ player = MOCK_PLAYER }) => {
                             key={tab.key}
                             onClick={() => setActiveTab(tab.key)}
                             className={`
-                                h-full px-4 text-xs font-bold uppercase tracking-wide whitespace-nowrap transition-all border-b-2 flex items-center
+                                h-full px-6 text-[10px] font-bold uppercase tracking-widest whitespace-nowrap transition-all border-b-[3px]
                                 ${isActive
-                                    ? 'text-white border-white'
-                                    : 'text-gray-500 border-transparent hover:text-gray-300'}
+                                    ? 'text-white border-white bg-black/30'
+                                    : 'text-gray-500 border-transparent hover:text-gray-300 hover:bg-white/5'}
                             `}
                         >
                             {tab.label}
                         </button>
-                    )
+                    );
                 })}
             </div>
 
-            {/* B. MAIN CONTENT - Reduced Padding */}
-            <div className="p-5 flex-1 flex flex-col">
+            {/* B. MAIN CONTENT */}
+            <div className="p-6 flex-1 flex flex-col bg-black">
 
-                {/* 1. HERO HEADER - Single Row Layout */}
-                <div className="flex flex-col xl:flex-row justify-between items-center gap-6 mb-6">
+                {/* 1. HERO HEADER */}
+                <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 mb-6">
 
                     {/* Left: Player Identity */}
-                    <div className="flex gap-4 items-center self-start xl:self-center">
-                        <div className="w-14 h-14 rounded-full border-2 border-yellow-500 bg-gray-800 flex items-center justify-center font-bold text-xl bg-purple-900 text-yellow-400 shadow-lg flex-shrink-0">
-                            LBJ
+                    <div className="flex gap-4 items-center">
+                        {/* Player Avatar */}
+                        <div className="relative">
+                            <div className="w-16 h-16 rounded-full border-2 border-orange-500/80 bg-gradient-to-br from-purple-900 to-purple-700 flex items-center justify-center font-black text-xl text-yellow-400 shadow-lg flex-shrink-0">
+                                {player.name.split(' ').map(n => n[0]).join('').slice(0, 3).toUpperCase()}
+                            </div>
+                            {/* Team logo placeholder - top right corner */}
+                            <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-orange-500 border-2 border-black flex items-center justify-center text-[8px] font-black text-white">
+                                {player.team}
+                            </div>
                         </div>
+
                         <div>
-                            <div className="flex items-center gap-2">
+                            {/* Player Name & Position */}
+                            <div className="flex items-center gap-2 mb-1">
                                 <h1 className="text-xl font-bold text-white tracking-tight">{player.name}</h1>
-                                <span className="text-gray-500 font-bold text-xs bg-white/5 px-1.5 py-0.5 rounded">{player.position}</span>
+                                <span className="text-gray-400 font-bold text-[10px] bg-white/10 px-2 py-0.5 rounded uppercase">
+                                    {player.position || 'F'}
+                                </span>
                             </div>
 
-                            {/* Betting Badge */}
-                            <div className="mt-1.5 flex items-center bg-[#18181b] rounded-md border border-white/10 h-7 w-fit shadow-sm overflow-hidden">
-                                <div className="bg-[#3b82f6] h-full px-2 flex items-center justify-center">
-                                    <span className="text-[9px] font-black text-white">FD</span>
-                                </div>
-                                <div className="px-2.5 flex items-center gap-2">
-                                    <span className="font-bold text-white text-xs">{line} <span className="text-[9px] text-gray-400 uppercase">{activeTab.replace('FG3M', '3PM')}</span></span>
-                                    <span className="text-[9px] text-emerald-400 font-bold font-mono">O {overOdds}</span>
-                                    <span className="text-[9px] text-red-400 font-bold font-mono">U {underOdds}</span>
+                            {/* Betting Badge - Sportsbook tabs */}
+                            <div className="flex items-center gap-2">
+                                {/* Sportsbook Badge */}
+                                <div className="flex items-center bg-[#18181b] rounded-md border border-white/10 h-7 shadow-sm overflow-hidden">
+                                    {/* FD Tab */}
+                                    <button
+                                        onClick={() => setActiveSportsbook('fd')}
+                                        className={`h-full px-2 flex items-center justify-center transition-colors ${activeSportsbook === 'fd'
+                                                ? 'bg-[#3b82f6]'
+                                                : 'bg-[#1e293b] hover:bg-[#334155]'
+                                            }`}
+                                    >
+                                        <span className="text-[9px] font-black text-white">FD</span>
+                                    </button>
+
+                                    {/* DK Tab */}
+                                    <button
+                                        onClick={() => setActiveSportsbook('dk')}
+                                        className={`h-full px-2 flex items-center justify-center transition-colors ${activeSportsbook === 'dk'
+                                                ? 'bg-[#3b82f6]'
+                                                : 'bg-[#1e293b] hover:bg-[#334155]'
+                                            }`}
+                                    >
+                                        <span className="text-[9px] font-black text-white">DK</span>
+                                    </button>
+
+                                    {/* Line & Odds */}
+                                    <div className="px-3 flex items-center gap-2">
+                                        <span className="font-bold text-white text-xs">
+                                            {line} <span className="text-[9px] text-gray-400 uppercase">{activeTab.replace('FG3M', '3PM')}</span>
+                                        </span>
+                                        <span className="text-[9px] text-emerald-400 font-bold font-mono">
+                                            O {overOdds > 0 ? '+' : ''}{overOdds}
+                                        </span>
+                                        <span className="text-[9px] text-red-400 font-bold font-mono">
+                                            U {underOdds > 0 ? '+' : ''}{underOdds}
+                                        </span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    {/* Right: Stats Cluster - FORCED Single Row */}
-                    <div className="flex flex-1 items-center justify-between xl:justify-end gap-4 w-full xl:w-auto">
+                    {/* Right: Stats Cluster */}
+                    <div className="flex flex-1 items-center justify-between xl:justify-end gap-6 w-full xl:w-auto">
 
-                        {/* Hit Rate Group */}
-                        <div className="text-center flex flex-col items-center px-4 border-r border-white/10">
-                            <div className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-0.5">Hit Rate</div>
-                            <div className={`text-2xl font-black leading-none ${Number(hitRate) > 50 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {/* Hit Rate - Prominent */}
+                        <div className="text-center flex flex-col items-center px-6 border-r border-white/10">
+                            <div className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Hit Rate</div>
+                            <div className={`text-3xl font-black leading-none ${Number(hitRate) >= 50 ? 'text-emerald-400' : 'text-red-400'
+                                }`}>
                                 {hitRate}%
                             </div>
-                            <div className="text-[10px] text-gray-500 font-medium">({hitCount}/{graphData.length})</div>
+                            <div className="text-[10px] text-gray-400 font-medium mt-0.5">
+                                ({hitCount}/{graphData.length})
+                            </div>
                         </div>
 
-                        {/* Season Stats Group */}
-                        <div className="flex gap-4 sm:gap-6 overflow-x-auto scrollbar-hide items-center">
-                            {HEADER_STATS.map(stat => (
-                                <div key={stat.key} className="flex flex-col items-center min-w-[30px]">
-                                    <div className="text-[9px] text-gray-500 font-bold mb-0.5 tracking-wider">{stat.label}</div>
-                                    <div className="text-lg font-bold text-white leading-none">
-                                        {player.stats ? player.stats[stat.key] : '-'}{stat.isPercent ? '%' : ''}
+                        {/* Season Stats */}
+                        <div className="flex gap-6 overflow-x-auto scrollbar-hide items-center">
+                            {HEADER_STATS.map(stat => {
+                                const diffData = calculateDiff(stat.key);
+                                return (
+                                    <div key={stat.key} className="flex flex-col items-center min-w-[40px]">
+                                        <div className="text-[9px] text-gray-500 font-bold mb-1 tracking-wider uppercase">
+                                            {stat.label}
+                                        </div>
+                                        <div className="text-xl font-bold text-white leading-none">
+                                            {player.stats?.[stat.key]?.toFixed(1) || '-'}
+                                        </div>
+                                        <div className={`text-[9px] font-bold mt-1 ${diffData.color}`}>
+                                            {diffData.diff}
+                                        </div>
                                     </div>
-                                    <div className={`text-[9px] font-bold mt-0.5 ${stat.color}`}>{stat.diff}</div>
-                                </div>
-                            ))}
+                                );
+                            })}
                         </div>
 
-                        {/* Filter Button (Desktop Only) */}
-                        <button className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded border border-white/10 bg-[#18181b] text-xs font-bold text-white hover:bg-[#27272a] transition ml-2">
-                            <SlidersHorizontal size={12} /> <span className="hidden lg:inline">Filters</span>
+                        {/* Filter Button */}
+                        <button className="hidden lg:flex items-center gap-2 px-4 py-2 rounded-md border border-white/10 bg-[#18181b] text-xs font-bold text-white hover:bg-[#27272a] transition">
+                            <SlidersHorizontal size={14} />
+                            <span>Filters</span>
                         </button>
                     </div>
                 </div>
 
-                {/* 2. CHART - Optimized Height */}
-                <div className="relative w-full flex-1 min-h-[220px] select-none">
-                    {/* Y-Axis */}
-                    <div className="absolute left-0 top-0 bottom-6 flex flex-col justify-between text-[9px] text-gray-600 font-mono pointer-events-none z-10">
+                {/* 2. PERFORMANCE CHART */}
+                <div className="relative w-full flex-1 min-h-[280px] select-none mt-4">
+
+                    {/* Y-Axis Labels */}
+                    <div className="absolute left-0 top-0 bottom-8 flex flex-col justify-between text-[9px] text-gray-600 font-mono pointer-events-none z-10 pr-2">
                         <span>{Math.round(maxVal)}</span>
                         <span>{Math.round(maxVal * 0.5)}</span>
                         <span>0</span>
                     </div>
 
-                    {/* Yellow Line */}
-                    <div className="absolute left-6 right-0 border-t border-yellow-400 z-20 shadow-[0_0_8px_rgba(250,204,21,0.4)]" style={{ bottom: `${(line / maxVal) * 100}%` }}>
-                        <div className="absolute left-1/2 -translate-x-1/2 -bottom-5 bg-[#18181b] border border-yellow-500/30 text-yellow-400 text-[8px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1">LINE</div>
+                    {/* Prop Line - Yellow */}
+                    <div
+                        className="absolute left-8 right-0 border-t-2 border-yellow-400 z-20 pointer-events-none"
+                        style={{ bottom: `${((line / maxVal) * 100) + 8}%` }}
+                    >
+                        <div className="absolute left-0 -top-6 bg-yellow-400 text-black text-[9px] font-black px-2 py-0.5 rounded">
+                            LINE
+                        </div>
                     </div>
 
-                    {/* Bars */}
-                    <div className="absolute inset-0 left-6 flex items-end justify-between gap-1">
+                    {/* Chart Bars */}
+                    <div className="absolute inset-0 left-8 bottom-8 flex items-end justify-between gap-[2px] pb-2">
                         {graphData.map((game, i) => {
                             const heightPct = Math.min((game.val / maxVal) * 100, 100);
+
                             return (
-                                <div key={i} className="flex-1 flex flex-col justify-end h-full group relative min-w-[5px]">
-                                    {/* Tooltip */}
-                                    <div className="absolute -top-10 left-1/2 -translate-x-1/2 bg-[#18181b] border border-white/10 text-white text-[10px] p-2 rounded shadow-xl opacity-0 group-hover:opacity-100 z-50 pointer-events-none whitespace-nowrap transition-all">
-                                        <div className="font-bold">{game.val} {activeTab}</div>
-                                        <div className="text-gray-400">{game.MATCHUP}</div>
+                                <div
+                                    key={game.id}
+                                    className="flex-1 flex flex-col justify-end h-full group relative min-w-[8px] max-w-[30px]"
+                                >
+                                    {/* Tooltip on Hover */}
+                                    <div className="absolute -top-16 left-1/2 -translate-x-1/2 bg-[#18181b] border border-white/20 text-white text-[10px] p-2 rounded shadow-2xl opacity-0 group-hover:opacity-100 z-50 pointer-events-none whitespace-nowrap transition-opacity">
+                                        <div className="font-bold text-xs mb-1">
+                                            {game.val} {activeTab}
+                                        </div>
+                                        <div className="text-gray-400 text-[9px]">{game.MATCHUP}</div>
+                                        <div className="text-gray-400 text-[9px]">{game.dateLabel}</div>
                                     </div>
 
                                     {/* Bar */}
-                                    <div className={`w-full rounded-t-[2px] transition-all duration-300 ${game.isHit ? 'bg-[#22c55e]' : 'bg-[#ef4444]'} hover:brightness-110 shadow-sm`} style={{ height: `${heightPct}%` }}>
-                                        <div className="absolute bottom-1 w-full text-center text-white text-[8px] font-bold leading-none mix-blend-overlay hidden sm:block">
+                                    <div
+                                        className={`w-full rounded-t transition-all duration-300 ${game.isHit
+                                                ? 'bg-emerald-500 hover:bg-emerald-400'
+                                                : 'bg-red-500 hover:bg-red-400'
+                                            } shadow-sm relative`}
+                                        style={{ height: `${heightPct}%` }}
+                                    >
+                                        {/* Value inside bar (hidden on mobile) */}
+                                        <div className="absolute top-2 w-full text-center text-white text-[9px] font-bold leading-none opacity-80 hidden md:block">
                                             {game.val}
                                         </div>
                                     </div>
 
-                                    {/* Logos */}
-                                    <div className="mt-2 flex flex-col items-center gap-1 h-6 justify-start opacity-70 group-hover:opacity-100">
-                                        <div className="w-4 h-4 rounded-full bg-[#18181b] flex items-center justify-center text-[6px] text-white border border-white/10 overflow-hidden hidden sm:flex">
-                                            {game.MATCHUP.split(' ')[1].substring(0, 3)}
+                                    {/* Date & Team Labels below bar */}
+                                    <div className="mt-1 flex flex-col items-center gap-0.5 min-h-[40px]">
+                                        {/* Opponent Team Logo */}
+                                        <div className="w-5 h-5 rounded-full bg-gray-800 border border-white/10 flex items-center justify-center text-[7px] font-bold text-gray-300">
+                                            {game.opponent.substring(0, 3)}
+                                        </div>
+                                        {/* Date */}
+                                        <div className="text-[7px] text-gray-600 font-medium whitespace-nowrap hidden lg:block">
+                                            {game.dateLabel.split(' ')[0]}
+                                        </div>
+                                        <div className="text-[8px] text-gray-500 font-bold hidden lg:block">
+                                            {game.dateLabel.split(' ')[1]}
                                         </div>
                                     </div>
                                 </div>
