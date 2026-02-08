@@ -285,7 +285,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
     return (
         <>
             {/* Mobile Sidebar */}
-            <div className={`fixed inset-y-0 left-0 z-50 w-[320px] bg-sidebar border-r border-border transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-auto lg:h-screen lg:sticky lg:top-0 flex flex-col gap-3 p-4 pt-[88px] overflow-hidden ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+            <div className={`
+                // Mobile: Fixed z-index for slide-over
+                fixed inset-y-0 left-0 z-[60] w-[300px] transform transition-transform duration-300
+                ${isOpen ? 'translate-x-0' : '-translate-x-full'}
+
+                // Desktop: Static (flows naturally in the new Flex Row we just made)
+                lg:static lg:inset-auto lg:translate-x-0 lg:flex lg:flex-col lg:z-0
+                
+                // Borders/Colors
+                bg-[#050505] border-r border-[#27272a]
+            `}>
 
                 {/* Mobile Close Button */}
                 <button

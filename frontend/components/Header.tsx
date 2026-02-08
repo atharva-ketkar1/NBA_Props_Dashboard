@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Player, GameLog } from '../types';
+import { Player } from '../types';
 import { HelpCircle, SlidersHorizontal, ChevronRight, Ban } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 
@@ -53,21 +53,14 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
   const statKey = STAT_LABELS[activeTab] || 'PTS';
 
-  // Calculate data derived from player
   const { line, odds, hitRateInfo, statsData, hasLine } = useMemo(() => {
     if (!player) return { line: 0, odds: { over: 0, under: 0 }, hitRateInfo: null, statsData: [], hasLine: false };
 
-    // 1. Get Prop Line & Odds based on Active Sportsbook
     let prop = player.props?.[statKey]?.[activeSportsbook];
-
-    // Auto-switch logic (visual only for now, actual switch requires effect)
-    // We handle the "Show only the one that has a line" via the useEffect below.
-
     const hasLine = !!prop;
     const lineVal = prop?.line || 0;
     const oddsVal = { over: prop?.over || 0, under: prop?.under || 0 };
 
-    // 2. Calculate Hit Rate
     const logs = player.game_log || [];
     const gamesPlayed = logs.length;
     let hits = 0;
@@ -87,7 +80,6 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
     const rate = (hasLine && gamesPlayed > 0) ? ((hits / gamesPlayed) * 100).toFixed(1) : '0.0';
 
-    // 3. Stats for ticker
     const seasonStats = player.stats || {};
     const last5 = logs.slice(0, 5);
 
@@ -123,13 +115,10 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
     };
   }, [player, statKey, activeSportsbook]);
 
-  // Auto-switch effect: If active SB has no line, but another does, switch to it.
   React.useEffect(() => {
     if (!player || !player.props || !player.props[statKey]) return;
-
     const activeProp = player.props[statKey]?.[activeSportsbook];
     if (!activeProp) {
-      // Find first available
       const availableSb = SPORTSBOOKS.find(sb => player.props?.[statKey]?.[sb.id]);
       if (availableSb) {
         onSportsbookChange(availableSb.id as any);
@@ -137,40 +126,28 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
     }
   }, [player, statKey, activeSportsbook, onSportsbookChange]);
 
-
   const currentSbLogo = SPORTSBOOKS.find(sb => sb.id === activeSportsbook)?.logo;
-
 
   if (!player) return <div className="p-4 text-white">Select a player</div>;
 
   return (
-    <div className="bg-[#050505] pt-4 px-0 pb-0 w-full">
+    // CHANGE: bg-[#050505] -> bg-[#121214] (Card Background)
+    // Also added rounded-xl to match the "Card" look
+    <div className="bg-[#121214] pt-4 px-0 pb-0 w-full rounded-xl border border-[#27272a] overflow-hidden">
 
       {/* Top Nav Tabs */}
       <div className="relative w-full border-b border-[#27272a] mb-0 px-5">
         <div className="flex items-center gap-6 text-[13px] font-bold text-[#71717a] overflow-x-auto no-scrollbar pr-12 pb-3 mask-linear-fade">
           {TAB_ORDER.map((tab, i) => {
             const isActive = tab === activeTab;
-
-            // Check if line exists for this tab for the CURRENT sportsbook
             const tabKey = STAT_LABELS[tab];
             const tabProp = player.props?.[tabKey]?.[activeSportsbook];
-            // Check if line exists for ANY sportsbook (to disable completely or just fade?)
-            // User request: "If there is a line on fanduel and no line on draftkings... only show the one that has a line"
-            // This implies we stick to the active one for display, but user can switch.
-            // Disable tab only if NO sportsbook has a line? Or if current doesn't?
-            // "Handle 'No Prop' state (Fade tab)" -> typically implies current view.
             const hasTabLine = !!tabProp;
 
             return (
-              <div
-                key={tab}
-                className="relative group"
-              >
+              <div key={tab} className="relative group">
                 <span
                   onClick={() => {
-                    // Allow click even if no line, so user can see "No Line" state or switch SB?
-                    // Or block? "disable interaction" was requested.
                     if (hasTabLine) onTabChange(tab)
                   }}
                   className={`
@@ -187,18 +164,18 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           })}
         </div>
 
-        {/* Gradient Fade & Arrow */}
-        <div className="absolute right-0 top-0 bottom-[2px] w-20 bg-gradient-to-l from-[#050505] via-[#050505] to-transparent pointer-events-none flex items-center justify-end pr-5">
+        {/* CHANGE: Gradient fade matches new card BG (#121214) */}
+        <div className="absolute right-0 top-0 bottom-[2px] w-20 bg-gradient-to-l from-[#121214] via-[#121214] to-transparent pointer-events-none flex items-center justify-end pr-5">
           <div className="text-[#52525b]">
             <ChevronRight className="w-5 h-5" />
           </div>
         </div>
       </div>
 
-      {/* Main Stats Row */}
-      <div className="flex flex-col xl:flex-row items-center w-full bg-[#050505]">
+      {/* Main Stats Row - CHANGE: bg-[#121214] */}
+      <div className="flex flex-col xl:flex-row items-center w-full bg-[#121214]">
 
-        {/* Section 1: Player Info (Fixed Width) */}
+        {/* Section 1: Player Info */}
         <div className="flex items-center gap-4 px-6 py-4 xl:py-5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto shrink-0 justify-start">
           <div className="relative shrink-0 w-[52px] h-[52px]">
             <div className="w-full h-full rounded-full border border-[#552583] overflow-hidden bg-[#18181b]">
@@ -221,17 +198,9 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
               <h1 className="text-lg font-bold text-white tracking-tight whitespace-nowrap truncate">{player.name} <span className="text-[#71717a] font-semibold text-sm">{player.position || 'POS'}</span></h1>
             </div>
 
-            {/* Prop Display or Sportsbook Selector */}
             <div className="flex items-center">
-              {/* 
-                   We always render the block, but content depends on line.
-                   User said: "If there is a line on fanduel and no line on draftkings or vice versa, it should only show the one that has a line."
-                   This essentially implies the PRIMARY display should be the available one.
-                   The dropdown allows switching.
-                */}
               <div className={`bg-[#18181b] rounded-[4px] px-2 py-1 flex items-center gap-2 border ${hasLine ? 'border-[#27272a] hover:border-gray-600' : 'border-red-900/30'} relative group cursor-pointer transition-colors`}>
 
-                {/* Active Sportsbook Logo/Icon */}
                 <div className="w-4 h-4 rounded-[3px] flex items-center justify-center shrink-0 overflow-hidden bg-white">
                   {currentSbLogo ? (
                     <img src={currentSbLogo} alt={activeSportsbook} className="w-full h-full object-contain" />
@@ -253,7 +222,6 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                   </div>
                 )}
 
-                {/* Dropdown on Hover/Click */}
                 <div className="absolute top-full left-0 mt-2 bg-[#18181b] border border-[#27272a] rounded-md shadow-xl z-[9999] flex-col gap-1 p-1 hidden group-hover:flex min-w-[140px] before:absolute before:-top-4 before:left-0 before:w-full before:h-4 before:bg-transparent">
                   {SPORTSBOOKS.map(sb => {
                     const sbProp = player.props?.[statKey]?.[sb.id];
@@ -288,7 +256,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           </div>
         </div>
 
-        {/* Section 2: Hit Rate (Fixed Width) */}
+        {/* Section 2: Hit Rate */}
         <div className="flex flex-col items-center justify-center px-6 py-4 xl:py-5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto shrink-0">
           <span className="text-[10px] text-[#a1a1aa] font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE ({hitRateInfo?.total || 0} G)</span>
           {hasLine ? (
@@ -301,7 +269,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           <span className="text-[10px] text-[#71717a] font-medium whitespace-nowrap">Season</span>
         </div>
 
-        {/* Section 3: Stats Grid (Fluid) */}
+        {/* Section 3: Stats Grid */}
         <div className="flex-1 overflow-x-auto no-scrollbar py-4 xl:py-5 px-4 w-full xl:w-auto">
           <div className="flex items-center justify-between xl:justify-around min-w-max h-full gap-4">
             {statsData.map((stat, i) => (
@@ -313,8 +281,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           </div>
         </div>
 
-        {/* Section 4: Actions (Fixed) */}
-        <div className="flex items-center gap-4 px-6 py-4 xl:py-5 xl:border-l border-[#27272a] w-full xl:w-auto justify-end shrink-0 bg-[#050505]">
+        {/* Section 4: Actions - CHANGE: bg-[#121214] */}
+        <div className="flex items-center gap-4 px-6 py-4 xl:py-5 xl:border-l border-[#27272a] w-full xl:w-auto justify-end shrink-0 bg-[#121214]">
           <HelpCircle className="w-5 h-5 text-[#52525b] cursor-pointer hover:text-[#a1a1aa] transition-colors" />
           <button className="flex items-center gap-2 bg-transparent border border-[#27272a] hover:bg-[#18181b] text-white text-xs font-bold px-4 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
             <SlidersHorizontal className="w-3.5 h-3.5" />
