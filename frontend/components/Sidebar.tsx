@@ -20,59 +20,37 @@ interface SidebarProps {
     onSelectPlayer: (id: number) => void;
 }
 
-const TeamLogo = ({ team, large = false }: { team: string, large?: boolean }) => {
-    // We assume team ID is not available here easily without mapping, 
-    // but we can try to find it or just use the fallback circle.
-    // Actually, processedGames will have team IDs.
-    // For now, let's just use the team tricode as fallback or try to construct URL if we had ID.
-    // Since we don't have teamID easily for the header logic in some cases, we'll rely on the parent passing it or just use the circle.
-    // But wait, the Game object has team IDs.
+// Optimized TeamLogo that takes an ID
+const RealTeamLogo = ({ teamId, tricode, large = false }: { teamId: number, tricode: string, large?: boolean }) => {
+    // Determine background color based on team tricode (Mock logic)
+    // For now we use the dark default, or could enable the color map if desired.
+    // Keeping it simple with the Mock's visual style.
     return (
         <div className="flex flex-col items-center justify-center gap-1">
             <div className={`${large ? 'w-10 h-10' : 'w-8 h-8'} rounded-full flex items-center justify-center font-bold text-white border border-white/10 overflow-hidden bg-[#18181b]`}>
                 <ImageWithFallback
-                    src={`http://localhost:5000/assets/team_logos/${team}.svg`} // This effectively needs ID, but we only have tricode here often. 
-                    // Wait, the GameCard receives the Game object which HAS home_team_id. 
-                    // So we should pass the URL or ID to TeamLogo.
-                    // Let's change TeamLogo to accept src or ID.
-                    // For now, let's just render the tricode if we don't have the image, or try the tricode image if that's how it's stored (it's stored by ID).
-                    // we will fix this in GameCard usage.
-                    fallbackComponent={<span className="text-[9px]">{team}</span>}
-                    alt={team}
-                    className="w-full h-full object-contain p-1"
+                    src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`}
+                    fallbackComponent={<span className="text-[8px]">{tricode}</span>}
+                    alt={tricode}
+                    className="w-full h-full object-contain p-1.5"
                 />
             </div>
-            <span className={`${large ? 'text-[10px]' : 'text-[9px]'} text-gray-400 font-bold tracking-wide mt-0.5`}>{team}</span>
+            <span className={`${large ? 'text-[10px]' : 'text-[9px]'} text-gray-400 font-bold tracking-wide mt-0.5`}>{tricode}</span>
         </div>
     );
 };
-
-// Optimized TeamLogo that takes an ID
-const RealTeamLogo = ({ teamId, tricode, large = false }: { teamId: number, tricode: string, large?: boolean }) => (
-    <div className="flex flex-col items-center justify-center gap-1">
-        <div className={`${large ? 'w-10 h-10' : 'w-8 h-8'} rounded-full flex items-center justify-center font-bold text-white border border-white/10 overflow-hidden bg-[#18181b]`}>
-            <ImageWithFallback
-                src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`}
-                fallbackComponent={<span className="text-[8px]">{tricode}</span>}
-                alt={tricode}
-                className="w-full h-full object-contain p-1.5"
-            />
-        </div>
-        <span className={`${large ? 'text-[10px]' : 'text-[9px]'} text-gray-400 font-bold tracking-wide mt-0.5`}>{tricode}</span>
-    </div>
-);
-
 
 const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, statFilter: string, isActive: boolean, onClick: () => void }) => {
     const prop = player.props?.[statFilter]?.['dk'] || player.props?.[statFilter]?.['fd'];
     const hasProp = !!prop;
     const line = prop?.line;
-    const isPlusYellow = true; // Placeholder logic
+    // Basic placeholder logic for color, can be enhanced later
+    const isPlusYellow = true;
 
     return (
         <div
             onClick={onClick}
-            className={`flex items-center justify-between p-3 border-b border-[#27272a] hover:bg-[#121214] transition-colors group cursor-pointer ${isActive ? 'bg-[#18181b]' : 'bg-[#09090b]'}`}
+            className={`flex items-center justify-between p-3 border-b border-[#27272a] bg-[#09090b] hover:bg-[#121214] transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-[#18181b]' : ''}`}
         >
             <div className="flex items-center gap-3">
                 <div className="relative w-10 h-10 rounded-full border border-[#27272a] overflow-hidden bg-[#18181b]">
@@ -83,7 +61,7 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
                     />
                 </div>
                 <div className="flex flex-col gap-1">
-                    <span className={`text-[13px] font-bold leading-none ${isActive ? 'text-white' : 'text-gray-300'}`}>{player.name}</span>
+                    <span className={`text-[13px] font-bold leading-none ${isActive ? 'text-white' : 'text-gray-300 group-hover:text-white'}`}>{player.name}</span>
 
                     {hasProp ? (
                         <div className="flex items-center gap-2 mt-0.5">
@@ -111,7 +89,7 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
             </div>
 
             {/* Plus Button / Active Indicator */}
-            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isActive ? 'bg-blue-500 text-white' : 'bg-[#27272a] text-gray-500'} self-start mt-0.5`}>
+            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isActive ? 'bg-[#007aff] text-white' : (isPlusYellow ? 'bg-[#facc15] hover:bg-yellow-400 text-black' : 'bg-[#ef4444] text-white')} self-start mt-0.5`}>
                 {isActive ? <LockOpen className="w-3 h-3" /> : <Plus className="w-3 h-3 font-bold" strokeWidth={4} />}
             </button>
         </div>
@@ -217,16 +195,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
         // 1. Time Filter
         let filteredSchedule = scheduleData;
         if (timeFilter === 'Today') {
-            // Use local date string comparison simply
-            const today = new Date().toISOString().split('T')[0]; // UTC date basically, or use local
-            // Given the mock environment, "2026-02-07" is the target.
-            // new Date() might be local.
-            // Ideally we check if game_date matches today.
-            // I'll use a safer check or just match the string from the "current" data.
-            // For this env, I'll match the mocked date '2026-02-07' if Today is selected, 
-            // assuming the user is "on that day".
-            // Actually, I'll just filter by exact date string match if possible.
-            // But to be generic:
             const now = new Date();
             const localYMD = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
             filteredSchedule = scheduleData.filter(g => g.game_date === localYMD);
@@ -265,12 +233,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
             if (gamePlayers.length > 0) {
                 result.push({ ...game, players: gamePlayers });
             } else if (gameMatchesSearch && searchTerm) {
-                // If searching for "Lakers", show the game even if no players have props? 
-                // User said: "Accordion... should only show players who actually have a 'PTS' line."
-                // If no players have lines, showing the game is empty.
-                // I'll hide the game if no players match the full criteria (Prop + Search).
+                // Show game if it matches search even if no players (optional UX choice)
             }
         });
+
+        // Auto-expand games if searching
+        if (searchTerm) {
+            const newExpanded: Record<string, boolean> = {};
+            result.forEach(g => newExpanded[g.game_id] = true);
+            // Side-effect in render is strict mode safe? Better to do in effect, but this logic is derived.
+            // We'll rely on user interaction or initial state mostly.
+        }
 
         return result;
     }, [scheduleData, players, statFilter, timeFilter, searchTerm]);
@@ -284,17 +257,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
 
     return (
         <>
-            {/* Mobile Sidebar */}
+            {/* 
+                Sidebar Container 
+                - Mobile: Fixed z-index for slide-over
+                - Desktop: Static flex column
+                - Visuals: Dark background, border right
+            */}
             <div className={`
-                // Mobile: Fixed z-index for slide-over
-                fixed inset-y-0 left-0 z-[60] w-[300px] transform transition-transform duration-300
+                fixed inset-y-0 left-0 z-[60] w-[300px] bg-[#050505] 
+                transform transition-transform duration-300 ease-in-out
                 ${isOpen ? 'translate-x-0' : '-translate-x-full'}
 
-                // Desktop: Static (flows naturally in the new Flex Row we just made)
-                lg:static lg:inset-auto lg:translate-x-0 lg:flex lg:flex-col lg:z-0
+                lg:static lg:inset-auto lg:translate-x-0 
+                lg:flex lg:flex-col lg:z-0
                 
-                // Borders/Colors
-                bg-[#050505] border-r border-[#27272a]
+                border-r border-[#27272a]
+                flex flex-col gap-3 p-4
             `}>
 
                 {/* Mobile Close Button */}
@@ -305,13 +283,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                     <X className="w-5 h-5" />
                 </button>
 
-                {/* Filters */}
-                <div className="flex gap-2 mb-1 lg:mt-0 mt-8">
+                {/* Filters Row */}
+                <div className="flex gap-2 mb-1 lg:mt-0 mt-8 shrink-0">
                     <div className="flex-1 relative">
                         <select
                             value={statFilter}
                             onChange={(e) => setStatFilter(e.target.value)}
-                            className="w-full bg-[#121214] hover:bg-[#1f1f22] text-white text-xs font-bold py-2 px-3 rounded-lg border border-border appearance-none cursor-pointer outline-none focus:border-blue-500"
+                            className="w-full bg-[#121214] hover:bg-[#1f1f22] text-white text-xs font-bold py-2 px-3 rounded-lg border border-[#27272a] appearance-none cursor-pointer outline-none focus:border-blue-500"
                         >
                             {STAT_FILTERS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
                         </select>
@@ -322,7 +300,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         <select
                             value={timeFilter}
                             onChange={(e) => setTimeFilter(e.target.value)}
-                            className="w-full bg-[#121214] hover:bg-[#1f1f22] text-white text-xs font-bold py-2 px-3 rounded-lg border border-border appearance-none cursor-pointer outline-none focus:border-blue-500"
+                            className="w-full bg-[#121214] hover:bg-[#1f1f22] text-white text-xs font-bold py-2 px-3 rounded-lg border border-[#27272a] appearance-none cursor-pointer outline-none focus:border-blue-500"
                         >
                             <option value="All Games">All Games</option>
                             <option value="Today">Today</option>
@@ -332,14 +310,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                 </div>
 
                 {/* Search */}
-                <div className="relative">
+                <div className="relative shrink-0">
                     <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
                     <input
                         type="text"
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         placeholder="Search players or teams..."
-                        className="w-full bg-[#121214] text-xs font-medium text-white placeholder-gray-500 py-2.5 pl-9 pr-4 rounded-lg border border-border focus:outline-none focus:border-gray-600 transition-colors"
+                        className="w-full bg-[#121214] text-xs font-medium text-white placeholder-gray-500 py-2.5 pl-9 pr-4 rounded-lg border border-[#27272a] focus:outline-none focus:border-gray-600 transition-colors"
                     />
                 </div>
 
@@ -352,7 +330,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                     )}
 
                     {processedGames.map((game) => {
-                        const isExpanded = expandedGames[game.game_id] || (searchTerm.length > 0); // Auto-expand on search? Maybe nice.
+                        const isExpanded = expandedGames[game.game_id] || (searchTerm.length > 0);
 
                         return (
                             <GameCard
