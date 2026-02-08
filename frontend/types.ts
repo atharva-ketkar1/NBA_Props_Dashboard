@@ -162,6 +162,13 @@ export interface PlayTypeData {
   rank: number;
 }
 
+export interface ShotTypeData {
+  type: string;
+  percentage: number;
+  attempts: number;
+  width?: number; // Optional for manual width control, else calculated
+}
+
 export interface SimilarPlayerGame {
   date: string;
   team: string;

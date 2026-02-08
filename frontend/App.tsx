@@ -96,15 +96,19 @@ function App() {
         <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-6">
 
           {/* Left Column in Grid */}
-          <div className="xl:col-span-4 flex flex-col gap-6">
-            <ShootingZones />
-            <PlayTypeAnalysis />
+          <div className="xl:col-span-4 flex flex-col gap-6 h-full">
+            <ShootingZones player={currentPlayer} />
+            <div className="flex-1 min-h-0">
+              <PlayTypeAnalysis />
+            </div>
           </div>
 
           {/* Right Column in Grid */}
-          <div className="xl:col-span-6 flex flex-col gap-6">
+          <div className="xl:col-span-6 flex flex-col gap-6 h-full">
             <ShotTypeAnalysis />
-            <SimilarPlayers />
+            <div className="flex-1 min-h-0">
+              <SimilarPlayers similarGames={undefined} />
+            </div>
           </div>
 
         </section>
