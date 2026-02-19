@@ -1,3 +1,4 @@
+import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -148,10 +149,16 @@ class NBAStatsEngine:
 if __name__ == "__main__":
     engine = NBAStatsEngine()
     final_stats = engine.get_player_data()
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_path = os.path.join(script_dir, "..", "data", "current", "season_stats.csv")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
     
     if not final_stats.empty:
         print(f"Total Players Processed: {len(final_stats)}")
+        final_stats.to_csv(output_path, index=False)
+        print(f"Saved to: {output_path}")
         #print(list(final_stats.columns))
-        final_stats.to_csv("stats.csv", index=False)
     else:
         print("Failed to retrieve data.")

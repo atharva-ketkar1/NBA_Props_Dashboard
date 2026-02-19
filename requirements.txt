@@ -8,3 +8,4 @@ requests
 notebook
 jupyter
 rapidfuzz
+pbpstats

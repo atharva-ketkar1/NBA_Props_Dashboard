@@ -50,6 +50,8 @@ NBA_Dashboard/
 ### 1. Run the Data Pipeline
 To update all data sources and regenerate the master feed, run the orchestration script:
 
+If you are running locally, streamline CORS from backend by running `npx serve --cors -p 5000` in the backend directory.
+
 ```bash
 python backend/run_pipeline.py
 ```

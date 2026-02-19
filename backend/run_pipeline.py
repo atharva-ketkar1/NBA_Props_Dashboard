@@ -21,7 +21,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data", "current")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # Define Paths
-STATS_PATH = os.path.join(DATA_DIR, "stats.csv")
+STATS_PATH = os.path.join(DATA_DIR, "season_stats.csv")
 DK_PATH = os.path.join(DATA_DIR, "draftkings.csv")
 FD_PATH = os.path.join(DATA_DIR, "fanduel.csv")
 LOGS_PATH = os.path.join(DATA_DIR, "gamelogs.csv")
@@ -91,7 +91,7 @@ def main():
         stats_path=STATS_PATH,
         dk_path=DK_PATH,
         fd_path=FD_PATH,
-        logs_path=LOGS_PATH, # <--- PASS NEW PATH
+        logs_path=LOGS_PATH, 
         output_path=MASTER_PATH
     )
 
