@@ -1,108 +1,157 @@
-from nba_api.stats.endpoints import leaguedashplayershotlocations
+import requests
 import pandas as pd
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+URL = "https://stats.nba.com/stats/leaguedashplayershotlocations"
 
+# ---- PROTECTION LAYER: HEADERS ----
 HEADERS = {
-    "Host": "stats.nba.com",
-    "Connection": "keep-alive",
-    "Accept": "application/json, text/plain, */*",
-    "x-nba-stats-origin": "stats",
-    "x-nba-stats-token": "true",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/121.0.0.0 Safari/537.36",
-    "Referer": "https://www.nba.com/",
-    "Origin": "https://www.nba.com",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Accept-Language": "en-US,en;q=0.9"
+    "accept": "*/*",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "accept-language": "en-US,en;q=0.9",
+    "connection": "keep-alive",
+    "dnt": "1",
+    "host": "stats.nba.com",
+    "origin": "https://www.nba.com",
+    "referer": "https://www.nba.com/",
+    "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 }
 
-def get_player_shooting_zones(player_id, season="2025-26"):
-    # 1. Fetch Data
-    print(f"Fetching Shooting Zones for Season {season}...")
-    shot_locs = leaguedashplayershotlocations.LeagueDashPlayerShotLocations(
-        season=season,
-        distance_range="By Zone", 
-        per_mode_detailed="PerGame",
-        headers=HEADERS,
-        timeout=120
-    )
-    
-    # 2. Extract Raw Data
-    data = shot_locs.get_dict()
-    rows = data['resultSets']['rowSet']
-    
-    # Handle empty data case
-    if not rows:
-        print("No data found.")
-        return pd.DataFrame()
+# ---- REQUIRED PARAMETERS ----
+PARAMS = {
+    "DistanceRange": "By Zone",
+    "LastNGames": "0",
+    "LeagueID": "00",
+    "MeasureType": "Base",
+    "Month": "0",
+    "OpponentTeamID": "0",
+    "PaceAdjust": "N",
+    "PerMode": "Totals",
+    "Period": "0",
+    "PlusMinus": "N",
+    "Rank": "N",
+    "Season": "2025-26",
+    "SeasonType": "Regular Season",
+    "TeamID": "0",
+}
 
-    # 3. DYNAMICALLY CALCULATE HEADERS
-    # We do this to match the exact width of the data returned
-    data_width = len(rows[0])
-    
-    # Get the list of zones (e.g., Restricted, Mid-Range, etc.)
-    zone_names = data['resultSets']['headers'][0]['columnNames']
-    
-    # Get the "span" (usually 3 columns per zone: FGM, FGA, FG%)
-    # Default to 3 if not found, but it's usually in the metadata
-    span = data['resultSets']['headers'][0].get('columnSpan', 3)
-    
-    # Calculate how many columns belong to zones
-    total_zone_cols = len(zone_names) * span
-    
-    # Calculate how many columns are left for Player Info (Base Columns)
-    # This automatically adjusts if they add "GP" or "Age" or anything else
-    num_base_cols = data_width - total_zone_cols
-    
-    # 4. Construct the Final Header List
-    # Get the base column names from the raw response (e.g., PLAYER_NAME, TEAM_ID)
-    raw_base_headers = data['resultSets']['headers'][1]['columnNames']
-    final_headers = raw_base_headers[:num_base_cols]
-    
-    # Append the formatted Zone headers
-    for zone in zone_names:
-        final_headers.append(f"{zone}_FGM")
-        final_headers.append(f"{zone}_FGA")
-        final_headers.append(f"{zone}_FG_PCT")
-        
-    # Safety Check
-    if len(final_headers) != data_width:
-        print(f"⚠️ Warning: Header mismatch. Generated {len(final_headers)} headers for {data_width} columns.")
-        # Fallback to avoid crash: just slice the data or pad headers
-        
-    # 5. Create DataFrame
-    df = pd.DataFrame(rows, columns=final_headers)
-    
-    # 6. Filter by Player
-    if player_id:
-        df = df[df['PLAYER_ID'] == int(player_id)]
-        
+# ---- SESSION WITH RETRIES ----
+def create_session():
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=0.5,
+                    status_forcelist=[429, 500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    return session
+
+
+def fetch_shot_locations():
+    session = create_session()
+
+    response = session.get(
+        URL,
+        headers=HEADERS,
+        params=PARAMS,
+        timeout=15
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    result_set = data["resultSets"]
+
+    columns = result_set["headers"][1]["columnNames"]
+    df = pd.DataFrame(result_set["rowSet"], columns=columns)
+
     return df
 
-# --- RUN IT ---
-try:
-    # Alperen Sengun ID: 1630578
-    df_zones = get_player_shooting_zones(player_id=1628973) 
 
-    # Dynamic Column Selector (Only picks columns that actually exist)
-    target_cols = [
-        'PLAYER_NAME',
-        'Restricted Area_FGA', 
-        'In The Paint (Non-RA)_FGA', 
-        'Mid-Range_FGA',
-        'Left Corner 3_FGA', 
-        'Right Corner 3_FGA', 
-        'Above the Break 3_FGA'
+# ---------------------------------------------------------
+# 🧠 Compute Shot Distribution for One Player
+# ---------------------------------------------------------
+def get_player_zone_distribution(df, player_name):
+
+    player = df[df["PLAYER_NAME"] == player_name]
+
+    if player.empty:
+        raise ValueError(f"Player '{player_name}' not found")
+
+    # Rename duplicate zone columns
+    zone_cols = [
+        "RA_FGM","RA_FGA","RA_PCT",
+        "PAINT_FGM","PAINT_FGA","PAINT_PCT",
+        "MID_FGM","MID_FGA","MID_PCT",
+        "LC3_FGM","LC3_FGA","LC3_PCT",
+        "RC3_FGM","RC3_FGA","RC3_PCT",
+        "AB3_FGM","AB3_FGA","AB3_PCT",
+        "BC_FGM","BC_FGA","BC_PCT",
+        "C3_FGM","C3_FGA","C3_PCT",
     ]
+
+    player.columns = list(player.columns[:6]) + zone_cols
+    p = player.iloc[0]
+
+    # Total attempts (exclude duplicate aggregate corner-3 column)
+    total_fga = (
+        p["RA_FGA"] +
+        p["PAINT_FGA"] +
+        p["MID_FGA"] +
+        p["LC3_FGA"] +
+        p["RC3_FGA"] +
+        p["AB3_FGA"]
+    )
+
+    distribution = {
+        "Restricted Area": p["RA_FGA"] / total_fga,
+        "Paint": p["PAINT_FGA"] / total_fga,
+        "Midrange": p["MID_FGA"] / total_fga,
+        "Left Corner 3": p["LC3_FGA"] / total_fga,
+        "Right Corner 3": p["RC3_FGA"] / total_fga,
+        "Above Break 3": p["AB3_FGA"] / total_fga,
+    }
+
+    # 1. Get raw percentages (e.g., 15.33203125)
+    raw_pcts = {zone: val * 100 for zone, val in distribution.items()}
     
-    # Filter to only existing columns (in case "Left Corner 3" is missing or named differently)
-    existing_cols = [c for c in target_cols if c in df_zones.columns]
+    # 2. Separate into integer parts and decimal remainders
+    int_pcts = {zone: int(val) for zone, val in raw_pcts.items()}
+    remainders = {zone: val - int(val) for zone, val in raw_pcts.items()}
     
-    if not df_zones.empty:
-        print(df_zones[existing_cols].T)
-    else:
-        print("Player not found.")
-        
-except Exception as e:
-    print(f"Error: {e}")
+    # 3. Calculate how many percentage points we need to reach exactly 100
+    shortfall = 100 - sum(int_pcts.values())
+    
+    # 4. Sort the zones by who had the highest decimal remainder
+    sorted_zones_by_remainder = sorted(remainders.keys(), key=lambda k: remainders[k], reverse=True)
+    
+    # 5. Distribute the missing points to those with the highest remainders
+    for i in range(shortfall):
+        zone_to_bump = sorted_zones_by_remainder[i]
+        int_pcts[zone_to_bump] += 1
+
+    return int_pcts
+
+# ---------------------------------------------------------
+# 🚀 MAIN
+# ---------------------------------------------------------
+def main():
+
+    df = fetch_shot_locations()
+
+    player_name = "Jalen Brunson"
+
+    dist = get_player_zone_distribution(df, player_name)
+
+    print(f"\nShot Distribution for {player_name} (2025-26):\n")
+
+    for zone, pct in dist.items():
+        print(f"{zone:<18} : {pct:>5}%")
+
+
+
+if __name__ == "__main__":
+    main()
