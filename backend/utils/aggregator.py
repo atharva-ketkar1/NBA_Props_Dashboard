@@ -62,10 +62,20 @@ def load_csv(path):
             return pd.DataFrame()
     return pd.DataFrame()
 
+def load_json(path):
+    """Loads a JSON if it exists, else empty dict."""
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, output_path):
     print(f"   🔨 Aggregating Data...")
 
     # A. Load All Data
@@ -73,8 +83,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, output_path):
     df_dk = load_csv(dk_path)
     df_fd = load_csv(fd_path)
     df_logs = load_csv(logs_path)
+    
+    shooting_data = load_json(shooting_path)
+    assists_data = load_json(assists_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)})")
 
     if df_stats.empty:
         print("   ❌ No stats found. Aborting.")
@@ -100,7 +113,14 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, output_path):
         for pid, group in df_logs.groupby('PLAYER_ID'):
             logs_map[int(pid)] = group.to_dict(orient='records')
 
-    # D. Build Master Dictionary
+    # D. Map assist data from pbpstats to PLAYER_ID
+    assists_by_pid = {}
+    for p_name, data in assists_data.items():
+        pid = matcher.match_player(p_name, 'UNK', [])
+        if pid:
+            assists_by_pid[pid] = data
+
+    # E. Build Master Dictionary
     master_data = {}
 
     for _, row in df_stats.iterrows():
@@ -117,6 +137,8 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, output_path):
             "team": row['TEAM_ABBREVIATION'],
             "stats": season_stats,
             "game_log": logs_map.get(pid, []), # <--- NEW: Injects the 30-game history
+            "shooting_zones": shooting_data.get(row['PLAYER_NAME'], None),
+            "assist_zones": assists_by_pid.get(pid, None),
             "props": {}
         }
 
@@ -185,5 +207,7 @@ if __name__ == "__main__":
         f"{base}/draftkings.csv",
         f"{base}/fanduel.csv",
         f"{base}/gamelogs.csv",
+        f"{base}/shooting_zones.json",
+        f"{base}/assist_zones.json",
         f"{base}/master_feed.json"
     )

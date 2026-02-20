@@ -72,14 +72,13 @@ def fetch_shot_locations():
 
 
 # ---------------------------------------------------------
-# 🧠 Compute Shot Distribution for One Player
+# 🧠 Compute Shot Distribution for All Players
 # ---------------------------------------------------------
-def get_player_zone_distribution(df, player_name):
-
-    player = df[df["PLAYER_NAME"] == player_name]
-
-    if player.empty:
-        raise ValueError(f"Player '{player_name}' not found")
+def get_all_player_zone_distributions(df):
+    results = {}
+    
+    if df.empty:
+        return results
 
     # Rename duplicate zone columns
     zone_cols = [
@@ -93,65 +92,93 @@ def get_player_zone_distribution(df, player_name):
         "C3_FGM","C3_FGA","C3_PCT",
     ]
 
-    player.columns = list(player.columns[:6]) + zone_cols
-    p = player.iloc[0]
+    df_zones = df.copy()
+    df_zones = df_zones.fillna(0)
+    try:
+        df_zones.columns = list(df_zones.columns[:6]) + zone_cols
+    except Exception as e:
+        print(f"Error renaming columns in shooting zones: {e}")
+        return results
 
-    # Total attempts (exclude duplicate aggregate corner-3 column)
-    total_fga = (
-        p["RA_FGA"] +
-        p["PAINT_FGA"] +
-        p["MID_FGA"] +
-        p["LC3_FGA"] +
-        p["RC3_FGA"] +
-        p["AB3_FGA"]
-    )
+    for _, p in df_zones.iterrows():
+        player_name = p["PLAYER_NAME"]
 
-    distribution = {
-        "Restricted Area": p["RA_FGA"] / total_fga,
-        "Paint": p["PAINT_FGA"] / total_fga,
-        "Midrange": p["MID_FGA"] / total_fga,
-        "Left Corner 3": p["LC3_FGA"] / total_fga,
-        "Right Corner 3": p["RC3_FGA"] / total_fga,
-        "Above Break 3": p["AB3_FGA"] / total_fga,
-    }
+        # Total attempts (exclude duplicate aggregate corner-3 column)
+        total_fga = (
+            p["RA_FGA"] +
+            p["PAINT_FGA"] +
+            p["MID_FGA"] +
+            p["LC3_FGA"] +
+            p["RC3_FGA"] +
+            p["AB3_FGA"]
+        )
 
-    # 1. Get raw percentages (e.g., 15.33203125)
-    raw_pcts = {zone: val * 100 for zone, val in distribution.items()}
-    
-    # 2. Separate into integer parts and decimal remainders
-    int_pcts = {zone: int(val) for zone, val in raw_pcts.items()}
-    remainders = {zone: val - int(val) for zone, val in raw_pcts.items()}
-    
-    # 3. Calculate how many percentage points we need to reach exactly 100
-    shortfall = 100 - sum(int_pcts.values())
-    
-    # 4. Sort the zones by who had the highest decimal remainder
-    sorted_zones_by_remainder = sorted(remainders.keys(), key=lambda k: remainders[k], reverse=True)
-    
-    # 5. Distribute the missing points to those with the highest remainders
-    for i in range(shortfall):
-        zone_to_bump = sorted_zones_by_remainder[i]
-        int_pcts[zone_to_bump] += 1
+        if total_fga == 0:
+            continue
 
-    return int_pcts
+        distribution = {
+            "restricted_area": p["RA_FGA"] / total_fga,
+            "paint": p["PAINT_FGA"] / total_fga,
+            "mid_range": p["MID_FGA"] / total_fga,
+            "left_corner": p["LC3_FGA"] / total_fga,
+            "right_corner": p["RC3_FGA"] / total_fga,
+            "top_key": p["AB3_FGA"] / total_fga,
+        }
+        
+        makes = {
+            "restricted_area": p["RA_FGM"],
+            "paint": p["PAINT_FGM"],
+            "mid_range": p["MID_FGM"],
+            "left_corner": p["LC3_FGM"],
+            "right_corner": p["RC3_FGM"],
+            "top_key": p["AB3_FGM"],
+        }
+
+        # 1. Get raw percentages (e.g., 15.33203125)
+        raw_pcts = {zone: val * 100 for zone, val in distribution.items()}
+        
+        # 2. Separate into integer parts and decimal remainders
+        int_pcts = {zone: int(val) for zone, val in raw_pcts.items()}
+        remainders = {zone: val - int(val) for zone, val in raw_pcts.items()}
+        
+        # 3. Calculate how many percentage points we need to reach exactly 100
+        shortfall = 100 - sum(int_pcts.values())
+        
+        # 4. Sort the zones by who had the highest decimal remainder
+        sorted_zones_by_remainder = sorted(remainders.keys(), key=lambda k: remainders[k], reverse=True)
+        
+        # 5. Distribute the missing points to those with the highest remainders
+        for i in range(shortfall):
+            zone_to_bump = sorted_zones_by_remainder[i]
+            int_pcts[zone_to_bump] += 1
+
+        results[player_name] = {
+            zone: {
+                "percentage": f"{int_pcts[zone]}%",
+                "makes": str(int(makes[zone]))
+            }
+            for zone in int_pcts.keys()
+        }
+
+    return results
+
+def get_shooting_zones_data():
+    """Entry point for the pipeline"""
+    try:
+        df = fetch_shot_locations()
+        return get_all_player_zone_distributions(df)
+    except Exception as e:
+        print(f"Error fetching shooting zones: {e}")
+        return {}
 
 # ---------------------------------------------------------
 # 🚀 MAIN
 # ---------------------------------------------------------
 def main():
-
-    df = fetch_shot_locations()
-
-    player_name = "Jalen Brunson"
-
-    dist = get_player_zone_distribution(df, player_name)
-
-    print(f"\nShot Distribution for {player_name} (2025-26):\n")
-
-    for zone, pct in dist.items():
-        print(f"{zone:<18} : {pct:>5}%")
-
-
+    data = get_shooting_zones_data()
+    print(f"Fetched shooting zones for {len(data)} players.")
+    if "Jalen Brunson" in data:
+        print("Jalen Brunson:", data["Jalen Brunson"])
 
 if __name__ == "__main__":
     main()

@@ -7,6 +7,7 @@ import { ShootingZones } from './components/ShootingZones';
 import { ShotTypeAnalysis } from './components/ShotTypeAnalysis';
 import { PlayTypeAnalysis } from './components/PlayTypeAnalysis';
 import { SimilarPlayers } from './components/SimilarPlayers';
+import { AssistZones } from './components/AssistZones';
 import { Player } from './types';
 
 function App() {
@@ -97,7 +98,11 @@ function App() {
 
           {/* Left Column in Grid */}
           <div className="xl:col-span-4 flex flex-col gap-6 h-full">
-            <ShootingZones player={currentPlayer} />
+            {activeTab === 'Assists' ? (
+              <AssistZones player={currentPlayer} />
+            ) : (
+              <ShootingZones player={currentPlayer} />
+            )}
             <div className="flex-1 min-h-0">
               <PlayTypeAnalysis />
             </div>

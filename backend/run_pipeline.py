@@ -12,8 +12,11 @@ from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
 from scrapers import season_stats_scrape as nba_stats
 from scrapers import gamelogs as gamelogs
-from scrapers import fetch_todays_games as schedule # <--- NEW IMPORT
+from scrapers import fetch_todays_games as schedule
+from scrapers import shooting_zones as shooting_zones
+from scrapers import assist_zones as assist_zones
 from utils import aggregator
+import json
 
 # CONFIGURATION
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,7 +29,9 @@ DK_PATH = os.path.join(DATA_DIR, "draftkings.csv")
 FD_PATH = os.path.join(DATA_DIR, "fanduel.csv")
 LOGS_PATH = os.path.join(DATA_DIR, "gamelogs.csv")
 MASTER_PATH = os.path.join(DATA_DIR, "master_feed.json")
-GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json") # <--- NEW PATH
+GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json")
+SHOOTING_PATH = os.path.join(DATA_DIR, "shooting_zones.json")
+ASSISTS_PATH = os.path.join(DATA_DIR, "assist_zones.json")
 
 def run_dk():
     print("   🔵 Starting DraftKings...")
@@ -65,6 +70,20 @@ def run_schedule():
     # The previous edit to fetch_todays_games.py handles the saving.
     return f"Schedule: {len(df)} games"
 
+def run_shooting_zones():
+    print("   🏀 Starting Shooting Zones...")
+    data = shooting_zones.get_shooting_zones_data()
+    with open(SHOOTING_PATH, "w") as f:
+        json.dump(data, f, indent=4)
+    return f"Shooting Zones: {len(data)} players"
+
+def run_assist_zones():
+    print("   🤝 Starting Assist Zones...")
+    data = assist_zones.get_assist_zones_data()
+    with open(ASSISTS_PATH, "w") as f:
+        json.dump(data, f, indent=4)
+    return f"Assist Zones: {len(data)} players"
+
 def main():
     start_time = time.time()
     print("🚀 PIPELINE STARTED")
@@ -76,7 +95,9 @@ def main():
             executor.submit(run_fd),
             executor.submit(run_stats),
             executor.submit(run_logs),
-            executor.submit(run_schedule) # <--- ADDED
+            executor.submit(run_schedule),
+            executor.submit(run_shooting_zones),
+            executor.submit(run_assist_zones)
         ]
         
         for future in concurrent.futures.as_completed(futures):
@@ -92,6 +113,8 @@ def main():
         dk_path=DK_PATH,
         fd_path=FD_PATH,
         logs_path=LOGS_PATH, 
+        shooting_path=SHOOTING_PATH,
+        assists_path=ASSISTS_PATH,
         output_path=MASTER_PATH
     )
 
