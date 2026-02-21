@@ -4,9 +4,10 @@ import { Player } from '../types';
 
 function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
-  if (pct >= 30) return '#a3c76c'; // Green (High Frequency)
-  if (pct >= 10) return '#e09f53'; // Orange (Medium Frequency)
-  return '#f2d875'; // Yellow (Low Frequency)
+  if (pct >= 30) return '#B0BB5A'; // Green
+  if (pct >= 15) return '#F4C51E'; // Yellow
+  if (pct >= 5) return '#ED8936';  // Orange
+  return '#E53E3E'; // Red
 }
 
 function processZoneData(zoneData: any) {
@@ -25,36 +26,14 @@ function processZoneData(zoneData: any) {
 }
 
 const CourtShape = ({ viewData }: { viewData: any }) => (
-  <svg viewBox="0 0 500 420" className="w-full h-full overflow-visible">
-    <rect x="0" y="0" width="500" height="420" fill="#050505" />
-
-    {/* Top Key / Arc 3 */}
-    <rect x="0" y="0" width="500" height="420" fill={viewData.top_key.color} rx="4" />
-
-    {/* Mid Range */}
-    <path
-      d="M36,0 L36,137 A237.5,237.5 0 0,0 464,137 L464,0 Z"
-      fill={viewData.mid_range.color}
-      stroke="black"
-      strokeWidth="2"
-    />
-
-    {/* Paint / Restricted Area combo (No paint zone for assists, RIM covers all) */}
-    <path d="M170,0 L330,0 L330,190 L170,190 Z" fill={viewData.restricted_area.color} stroke="black" strokeWidth="2" />
-    <path d="M170,190 A80,80 0 0,0 330,190" fill={viewData.restricted_area.color} stroke="black" strokeWidth="2" />
-
-    {/* Corners */}
-    <rect x="0" y="0" width="36" height="137" fill={viewData.left_corner.color} stroke="black" strokeWidth="2" />
-    <rect x="464" y="0" width="36" height="137" fill={viewData.right_corner.color} stroke="black" strokeWidth="2" />
-
-    {/* Hoop & Lines */}
-    <path d="M220,47 A30,30 0 0,0 280,47" fill="none" stroke="black" strokeWidth="2" />
-    <line x1="220" y1="35" x2="220" y2="47" stroke="black" strokeWidth="2" />
-    <line x1="280" y1="35" x2="280" y2="47" stroke="black" strokeWidth="2" />
-    <line x1="220" y1="40" x2="280" y2="40" stroke="black" strokeWidth="3" />
-    <circle cx="250" cy="47.5" r="7.5" fill="none" stroke="black" strokeWidth="2" />
-
-    <path d="M170,190 L330,190" stroke="black" strokeWidth="1" />
+  <svg viewBox="0 0 261 200" className="w-full h-full overflow-visible">
+    <path id="zone-top-key" d="M0 0H50L83 48.5H128H175.5L205 0H261V149H0V0Z" fill={viewData.top_key.color} transform="translate(0 52)"></path>
+    <path id="zone-mid-range" fillRule="evenodd" clipRule="evenodd" d="M228 2V1H227H157.881H156.881V2V98.9726H70.055V2V1H69.055H2H1V2V50.9863C1 106.785 46.7433 152 103.147 152H125.853C182.257 152 228 106.785 228 50.9863V2Z" fill={viewData.mid_range.color} transform="translate(16 -2)"></path>
+    <path id="zone-paint" fillRule="evenodd" clipRule="evenodd" d="M0 96V7.62939e-06H85V96H0ZM54.6429 19.4043H43.5119V22.5313C47.5052 23.0339 50.5952 26.4719 50.5952 30.6383C50.5952 35.1506 46.9709 38.8085 42.5 38.8085C38.0291 38.8085 34.4048 35.1506 34.4048 30.6383C34.4048 26.4719 37.4948 23.0339 41.4881 22.5313V19.4043H30.3571V17.3617H54.6429V19.4043ZM42.5 24.5106C39.1468 24.5106 36.4286 27.2541 36.4286 30.6383C36.4286 34.0225 39.1468 36.766 42.5 36.766C45.8532 36.766 48.5714 34.0225 48.5714 30.6383C48.5714 27.2541 45.8532 24.5106 42.5 24.5106ZM19.2262 0V26.8168C19.2262 39.6336 29.6359 50.0426 42.5 50.0426C55.3641 50.0426 65.7738 39.6336 65.7738 26.8168V7.62939e-06L67.7976 0V26.8168C67.7976 40.7825 56.4612 52.0851 42.5 52.0851C28.5389 52.0851 17.2024 40.7825 17.2024 26.8168V7.62939e-06L19.2262 0Z" fill={viewData.paint.color} transform="translate(87 0)"></path>
+    <path id="zone-restricted-area" d="M45.12 0H47V24.7135C47 37.5838 39.5 50 23.5 50C7.5 50 0 37.5838 0 24.7135V7.03101e-06L45.12 0Z" fill={viewData.restricted_area.color} transform="translate(106 0)"></path>
+    <path id="zone-corner-left" d="M16 50V0H0V50H16Z" fill={viewData.left_corner.color}></path>
+    <path id="zone-corner-right" d="M16 50V0H0V50H16Z" fill={viewData.right_corner.color} transform="translate(245 0)"></path>
+    <path id="court-lines" fillRule="evenodd" clipRule="evenodd" d="M228 2V1H227H157.881H156.881V2V98.9726H70.055V2V1H69.055H2H1V2V50.9863C1 106.785 46.7433 152 103.147 152H125.853C182.257 152 228 106.785 228 50.9863V2Z" strokeWidth="2" fill="none" stroke="#1A202C" transform="translate(16 -2)"></path>
   </svg>
 );
 
@@ -74,12 +53,12 @@ const ZoneLabel = ({ top, left, stat }: { top: string, left: string, stat: any }
 const CourtView = ({ viewData }: { viewData: any }) => (
   <div className="relative w-full aspect-[1.3] max-w-[340px] mx-auto">
     <CourtShape viewData={viewData} />
-    <ZoneLabel top="16%" left="8%" stat={viewData.left_corner} />
-    <ZoneLabel top="16%" left="92%" stat={viewData.right_corner} />
-    {/* For assists, there is only one big RIM label, let's put it at 45% (where Paint was) */}
-    <ZoneLabel top="45%" left="50%" stat={viewData.restricted_area} />
-    <ZoneLabel top="68%" left="50%" stat={viewData.mid_range} />
-    <ZoneLabel top="88%" left="50%" stat={viewData.top_key} />
+    <ZoneLabel top="12%" left="3%" stat={viewData.left_corner} />
+    <ZoneLabel top="12%" left="97%" stat={viewData.right_corner} />
+    <ZoneLabel top="12%" left="50%" stat={viewData.restricted_area} />
+    <ZoneLabel top="38%" left="50%" stat={viewData.paint} />
+    <ZoneLabel top="62%" left="50%" stat={viewData.mid_range} />
+    <ZoneLabel top="85%" left="50%" stat={viewData.top_key} />
   </div>
 );
 
@@ -100,12 +79,13 @@ export const AssistZones = ({ player }: { player: Player }) => {
             <h3 className="text-[15px] font-semibold text-white tracking-wide">Assist Zones</h3>
             <Info className="w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-300 transition-colors" />
           </div>
+          <div className="text-[12px] text-gray-400 font-medium">25/26 Season</div>
         </div>
 
         <div className="flex bg-[#0f0f11] rounded-[10px] p-1 border border-gray-800 items-center">
           <button
             onClick={() => setActiveTab('player')}
-            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'player' ? 'text-white bg-[#27272a] shadow-sm border border-[#3b82f6]' : 'text-gray-400 hover:text-white border border-transparent'
+            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'player' ? 'text-white bg-[#334155] shadow-sm' : 'text-gray-400 hover:text-white'
               }`}
           >
             Player
@@ -113,7 +93,7 @@ export const AssistZones = ({ player }: { player: Player }) => {
 
           <button
             onClick={() => setActiveTab('vs')}
-            className={`px-2 py-1 text-[11px] font-bold rounded-[6px] mx-1 h-fit transition-all ${activeTab === 'vs' ? 'text-white bg-[#475569]' : 'text-gray-500 bg-[#27272a]/50 hover:text-gray-300'
+            className={`px-2 py-1 text-[11px] font-bold rounded-[6px] mx-1 h-fit transition-all ${activeTab === 'vs' ? 'text-white bg-[#334155]' : 'text-gray-500 hover:text-gray-300'
               }`}
           >
             vs
@@ -121,7 +101,7 @@ export const AssistZones = ({ player }: { player: Player }) => {
 
           <button
             onClick={() => setActiveTab('opp')}
-            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'opp' ? 'text-white bg-[#27272a] shadow-sm border border-[#3b82f6]' : 'text-gray-400 hover:text-white border border-transparent'
+            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'opp' ? 'text-white bg-[#334155] shadow-sm' : 'text-gray-400 hover:text-white'
               }`}
           >
             Opp Defense
