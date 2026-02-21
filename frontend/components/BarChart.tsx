@@ -1,6 +1,5 @@
 import React, { useMemo } from 'react';
 import { Player } from '../types';
-import { ImageWithFallback } from './ui/ImageWithFallback';
 import { TEAM_IDS } from '../constants';
 
 interface BarChartProps {
@@ -24,25 +23,6 @@ const STAT_LABELS: Record<string, string> = {
     'Turnovers': 'TOV'
 };
 
-
-const TeamLogoCircle = ({ team, opponent, teamId }: { team: string, opponent: string, teamId?: number }) => {
-    // If we have teamId, use it. Otherwise assume team is tricode (fallback).
-    const logoUrl = teamId
-        ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`
-        : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${team}.svg`;
-
-    return (
-        <div className="w-5 h-5 rounded-full flex items-center justify-center border border-white/10 overflow-hidden bg-[#18181b] z-20 relative">
-            <ImageWithFallback
-                src={logoUrl}
-                fallbackComponent={<span className="text-[7px] text-white font-bold">{team}</span>}
-                alt={team}
-                className="w-full h-full object-contain p-0.5"
-            />
-        </div>
-    )
-}
-
 export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
 
@@ -56,7 +36,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         // 2. Prepare Data (Last 30 games max)
         const log = player.game_log.slice(0, 30).reverse();
 
-        const data = log.map(game => {
+        const data: any[] = log.map(game => {
             let val = game[statKey];
             if (val === undefined) {
                 if (statKey === 'PTS+REB+AST') val = (game.PTS || 0) + (game.REB || 0) + (game.AST || 0);
@@ -67,139 +47,253 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             }
 
             const parts = game.MATCHUP.split(' ');
-            const opponent = parts[parts.length - 1]; // "DEN"
+            const opponent = parts[parts.length - 1]; // e.g., "DEN"
             const opponentId = TEAM_IDS[opponent];
 
-            // Date formatting: "YYYY-MM-DD" -> "Nov 08"
+            // Resolve Logo URL for SVG
+            const logoUrl = opponentId
+                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${opponentId}.svg`
+                : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${opponent}.svg`;
+
+            // Date formatting: "YYYY-MM-DD" -> "Nov", "08"
             const [year, monthStr, day] = game.GAME_DATE.split('-');
             const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
             const month = months[parseInt(monthStr) - 1];
-
-            const dateObj = new Date(parseInt(year), parseInt(monthStr) - 1, parseInt(day));
-            const dateDayOfWeek = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
 
             return {
                 ...game,
                 score: val,
                 opponent,
-                opponentId,
+                logoUrl,
                 dateMonth: month,
-                dateDay: day,
-                dateDayOfWeek
+                dateDay: day
             };
+        });
+
+        // 3. Append mock upcoming game to match visual Target State
+        data.push({
+            score: null, // Special flag for upcoming game
+            opponent: 'HOU', // Hardcoding as requested to match visuals loosely
+            logoUrl: `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`,
+            dateMonth: 'Feb',
+            dateDay: '21',
+            isUpcoming: true
         });
 
         return { chartData: data, lineValue: line };
     }, [player, statKey, activeSportsbook]);
 
-    // Dynamic Scale: Ensure maxScore is divisible by 4 for clean ticks
-    const maxValue = Math.max(...chartData.map(d => d.score), lineValue);
-    const maxScore = Math.max(Math.ceil((maxValue * 1.1) / 4) * 4, 10);
-    const linePercent = (lineValue / maxScore) * 100;
-
     if (!player) return null;
 
+    // --- Responsive SVG Layout Constants ---
+    const VIEWBOX_WIDTH = 1000; // Internal coordinate system width
+    const VIEWBOX_HEIGHT = 400; // Internal coordinate system height
+    const X_START = 80;         // Left margin to leave room for Y-axis labels
+    const X_END = VIEWBOX_WIDTH - 20; // Right margin
+    const AVAILABLE_WIDTH = X_END - X_START;
+
+    // Dynamic Spacing: Distribute available width evenly based on number of games
+    const gameCount = Math.max(chartData.length, 1);
+    const spacing = AVAILABLE_WIDTH / gameCount;
+
+    // Dynamic Bar Width: Shrinks when there are many games, caps at 32px when few games
+    const barWidth = Math.min(spacing * 0.85, 32);
+
+    // Dynamic Scale: Calculate max value to ensure bars don't clip the top
+    const maxScore = Math.max(...chartData.map(d => d.score), lineValue + 5, 10);
+
+    // Helpers to calculate exact Y coordinates and Heights inside the SVG
+    const getY = (val: number) => {
+        const availableHeight = 250; // Keeps top margin and leaves room for logos at bottom
+        return VIEWBOX_HEIGHT - 120 - ((val / maxScore) * availableHeight);
+    };
+
+    const getBarHeight = (val: number) => {
+        const availableHeight = 250;
+        return (val / maxScore) * availableHeight;
+    };
+
+    const propLineY = getY(lineValue);
+
     return (
-        <div className="bg-[#09090b] w-full h-[400px] select-none relative rounded-xl border border-[#27272a]/50 shadow-2xl flex flex-col">
+        <div className="bg-[#000000] w-full h-full min-h-[400px] select-none relative rounded-xl border border-[#27272a]/50 shadow-2xl overflow-hidden flex flex-col">
 
-            {/* Header/Title overlay if needed, or clean */}
+            {/* Responsive SVG Container */}
+            <svg
+                viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
+                preserveAspectRatio="xMidYMid meet"
+                className="w-full h-full"
+            >
+                {/* 1. Y-Axis Grid Lines & Labels */}
+                <g className="text-[#71717a] font-bold" fill="currentColor" textAnchor="end" fontSize="12">
+                    <text x="50" y={getY(0)} dominantBaseline="middle">0</text>
+                    <text x="50" y={getY(maxScore * 0.5)} dominantBaseline="middle">{Math.round(maxScore * 0.5)}</text>
+                    <text x="50" y={getY(maxScore)} dominantBaseline="middle">{Math.round(maxScore)}</text>
 
-            {/* Y Axis Labels - Absolute Left */}
-            <div className="absolute left-3 top-10 bottom-24 flex flex-col justify-between text-[11px] text-[#71717a] font-bold py-1 z-10 h-auto leading-none">
-                {/* Use flex centering for labels to ensure they align with grid lines perfectly */}
-                <span className="translate-y-[-50%]">{Math.round(maxScore)}</span>
-                <span className="translate-y-[-50%]">{Math.round(maxScore * 0.75)}</span>
-                <span className="translate-y-[-50%]">{Math.round(maxScore * 0.5)}</span>
-                <span className="translate-y-[-50%]">{Math.round(maxScore * 0.25)}</span>
-                <span className="translate-y-[50%]">0</span>
-            </div>
+                    <line x1="60" x2="100%" y1={getY(0)} y2={getY(0)} stroke="#27272a" strokeOpacity="0.4" />
+                    <line x1="60" x2="100%" y1={getY(maxScore * 0.5)} y2={getY(maxScore * 0.5)} stroke="#27272a" strokeOpacity="0.4" />
+                    <line x1="60" x2="100%" y1={getY(maxScore)} y2={getY(maxScore)} stroke="#27272a" strokeOpacity="0.4" />
+                </g>
 
-            {/* CHART AREA WRAPPER */}
-            {/* Margins set the chart box. Top: 40px, Bottom: 96px (bottom-24), Left: 48px, Right: 24px */}
-            <div className="absolute left-10 right-6 top-10 bottom-24 z-0">
+                {/* 2. Map through GameLogs for Bars, Text, and Logos */}
+                {chartData.map((game, index) => {
+                    // Center the bar within its allocated spacing column
+                    const columnCenter = X_START + (index * spacing) + (spacing / 2);
+                    const xPos = columnCenter - (barWidth / 2);
+                    const yPos = getY(game.score);
+                    const barHeight = getBarHeight(game.score);
+                    const isOver = game.score >= lineValue;
 
-                {/* 1. Grid Lines (Relative to Chart Area) */}
-                <div className="w-full h-full flex flex-col justify-between pointer-events-none absolute inset-0 z-0">
-                    <div className="w-full h-px bg-[#27272a]/40"></div>
-                    <div className="w-full h-px bg-[#27272a]/40"></div>
-                    <div className="w-full h-px bg-[#27272a]/40"></div>
-                    <div className="w-full h-px bg-[#27272a]/40"></div>
-                    <div className="w-full h-px bg-[#27272a]/40"></div>
-                </div>
+                    // Dynamically scale inner elements if bars get very narrow
+                    const logoSize = Math.min(barWidth * 1.2, 28);
+                    const fontSize = Math.min(barWidth * 0.6, 14);
 
-                {/* 2. The LINE Overlay (Relative to Chart Area) */}
-                {/* FIX: Added 'h-0' and removed child translations. The wrapper is now a zero-height line at exact position. */}
-                <div
-                    className="absolute left-0 right-[-24px] z-20 flex items-center h-0 pointer-events-none transition-all duration-500 ease-out"
-                    style={{ bottom: `${linePercent}%` }}
-                >
-                    {/* Yellow Grip Handle - WITH VALUE */}
-                    <div className="h-6 px-1.5 bg-[#facc15] rounded-l-sm rounded-r-md flex items-center justify-center shadow-[0_0_15px_rgba(250,204,21,0.3)] -ml-[1px] z-30 min-w-[36px]">
-                        <span className="text-black font-extrabold text-[11px] leading-none">{lineValue}</span>
-                    </div>
-
-                    {/* The Line */}
-                    <div className="h-[2px] bg-[#facc15] w-full shadow-[0_0_8px_rgba(250,204,21,0.6)]"></div>
-                </div>
-
-                {/* 3. Bars Container */}
-                <div className="w-full h-full flex items-end justify-between gap-2 z-10 relative pl-2">
-                    {chartData.map((game, idx) => {
-                        const heightPercent = Math.min((game.score / maxScore) * 100, 100);
-                        const isOver = game.score >= lineValue;
-                        const barColor = isOver ? 'bg-[#22c55e]' : 'bg-[#ef4444]';
-
-                        return (
-                            <div key={idx} className="flex flex-col items-center group w-full h-full justify-end relative">
-                                {/* Hover Tooltip */}
-                                <div className="absolute -top-12 bg-gray-900 border border-gray-700 text-white text-[10px] px-2 py-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-50 pointer-events-none shadow-xl">
-                                    <div className="font-bold mb-0.5">{game.dateMonth} {game.dateDay} vs {game.opponent}</div>
-                                    <div className="text-gray-300">{game.score} {STAT_LABELS[activeTab]}</div>
-                                </div>
-
-                                {/* Bar */}
-                                <div
-                                    className={`w-full rounded-t-[4px] transition-all duration-300 hover:brightness-110 relative ${barColor}`}
-                                    style={{ height: `${heightPercent}%` }}
+                    return (
+                        <g key={index} className="group cursor-pointer">
+                            {/* The Bar */}
+                            {game.isUpcoming ? (
+                                <rect
+                                    x={xPos}
+                                    y={getY(lineValue + 2)} // arbitrary height for the placeholder
+                                    width={barWidth}
+                                    height={getBarHeight(lineValue + 2)}
+                                    rx="4"
+                                    ry="4"
+                                    fill="transparent"
+                                    stroke="#27272a"
+                                    strokeWidth="1.5"
+                                    strokeDasharray="4 4"
+                                    className="opacity-70"
                                 >
-                                    {/* Score Text - BIG & BOLD at bottom */}
-                                    <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-white font-black text-sm drop-shadow-lg leading-none tracking-tighter">
-                                        {game.score}
-                                    </span>
-                                </div>
+                                    <title>Upcoming Game</title>
+                                </rect>
+                            ) : (
+                                <rect
+                                    x={xPos}
+                                    y={yPos}
+                                    width={barWidth}
+                                    height={barHeight}
+                                    rx="4"
+                                    ry="4"
+                                    fill={isOver ? "#16a34a" : "#dc2626"}
+                                    className="transition-all duration-300 group-hover:brightness-110 group-hover:opacity-80"
+                                >
+                                    <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
+                                </rect>
+                            )}
 
-                                {/* X-Axis Group (Logo + Date) - ABSOLUTE below chart area */}
-                                <div className="absolute top-full mt-3 flex flex-col items-center gap-1 w-full">
-                                    {/* Team Logo */}
-                                    <div className="w-6 h-6 hover:scale-110 transition-transform">
-                                        <TeamLogoCircle team={game.opponent} opponent={game.opponent} teamId={game.opponentId} />
-                                    </div>
+                            {/* Stat Value Text Inside Bar */}
+                            <text
+                                x={columnCenter}
+                                y={game.isUpcoming ? VIEWBOX_HEIGHT - 128 : VIEWBOX_HEIGHT - 128}
+                                textAnchor="middle"
+                                fill={game.isUpcoming ? "#71717a" : "white"}
+                                fontWeight="900"
+                                fontSize={fontSize}
+                                className="pointer-events-none drop-shadow-md"
+                            >
+                                {game.isUpcoming ? '?' : game.score}
+                            </text>
 
-                                    {/* Stacked Date */}
-                                    <div className="flex flex-col items-center justify-center mt-1">
-                                        <span className="text-[9px] font-bold text-[#71717a] uppercase leading-none mb-[2px]">{game.dateMonth}</span>
-                                        <span className="text-[10px] font-extrabold text-[#e4e4e7] leading-none">{game.dateDay}</span>
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
+                            {/* Team Logo */}
+                            <image
+                                x={columnCenter - (logoSize / 2)}
+                                y={VIEWBOX_HEIGHT - 114}
+                                width={logoSize}
+                                height={logoSize}
+                                href={game.logoUrl}
+                            />
+
+                            {/* Stacked Date Label with connecting dots visualization */}
+                            {(() => {
+                                // Logic to determine if we should show connecting dots
+                                const nextGame = chartData[index + 1];
+                                const isConnected = nextGame && nextGame.dateMonth === game.dateMonth && !game.isUpcoming && parseInt(nextGame.dateDay) - parseInt(game.dateDay) === 1;
+
+                                const prevGame = index > 0 ? chartData[index - 1] : null;
+                                const isConnectedToPrev = prevGame && prevGame.dateMonth === game.dateMonth && !prevGame.isUpcoming && parseInt(game.dateDay) - parseInt(prevGame.dateDay) === 1;
+
+                                return (
+                                    <g>
+                                        <text
+                                            x={columnCenter}
+                                            y={VIEWBOX_HEIGHT - 75}
+                                            textAnchor="middle"
+                                        >
+                                            <tspan x={columnCenter} dy="0" fill="#71717a" fontSize="10" fontWeight="normal">
+                                                {game.dateMonth}
+                                            </tspan>
+                                            <tspan x={columnCenter} dy="1.2em" fill="#e4e4e7" fontSize="11" fontWeight="700">
+                                                {game.dateDay}
+                                            </tspan>
+                                        </text>
+
+                                        {/* Render connecting dots exactly centered between columns */}
+                                        {isConnected && (
+                                            <text
+                                                x={columnCenter + spacing / 2}
+                                                y={VIEWBOX_HEIGHT - 63}
+                                                textAnchor="middle"
+                                                fill="#71717a"
+                                                fontSize="11"
+                                                fontWeight="700"
+                                            >
+                                                ..
+                                            </text>
+                                        )}
+                                    </g>
+                                );
+                            })()}
+                        </g>
+                    );
+                })}
+
+                {/* 3. The Prop Line Threshold Overlay */}
+                <g>
+                    <line
+                        x1="60"
+                        x2="100%"
+                        y1={propLineY}
+                        y2={propLineY}
+                        stroke="#facc15"
+                        strokeWidth="2"
+                        strokeDasharray="4 4"
+                        className="drop-shadow-sm"
+                    />
+
+                    {/* Yellow Grip Handle */}
+                    <rect
+                        x="60"
+                        y={propLineY - 12}
+                        width="36"
+                        height="24"
+                        rx="4"
+                        fill="#facc15"
+                    />
+                    <text
+                        x="78"
+                        y={propLineY + 2}
+                        dominantBaseline="middle"
+                        textAnchor="middle"
+                        fontSize="12"
+                        fontWeight="900"
+                        fill="#000000"
+                    >
+                        {lineValue}
+                    </text>
+                </g>
+            </svg>
+
+            {/* LINE Legend element centered at bottom */}
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 z-20">
+                <div className="w-2.5 h-2.5 bg-[#facc15] rounded-[1px]" />
+                <span className="text-[#71717a] font-bold text-[9px] tracking-widest uppercase">LINE</span>
             </div>
 
-            {/* Line Label centered bottom */}
-            <div className="absolute bottom-1 left-1/2 -translate-x-1/2 z-30">
-                <div className="bg-[#18181b]/90 backdrop-blur-sm px-2.5 py-1 rounded-md text-[#facc15] text-[10px] font-black tracking-wide flex items-center gap-2 border border-[#facc15]/20 shadow-lg">
-                    <div className="w-2 h-2 bg-[#facc15] rounded-[2px] shadow-[0_0_6px_rgba(250,204,21,0.6)]"></div>
-                    LINE
-                </div>
-            </div>
-
-            {/* Footer / Watermark area */}
-            <div className="absolute bottom-3 left-3 flex items-center gap-2 pointer-events-none opacity-40">
+            {/* Footer / Watermark */}
+            <div className="absolute bottom-3 left-3 pointer-events-none opacity-40 z-20">
                 <span className="text-[10px] text-[#52525b] font-medium">PropsMadness</span>
             </div>
-
         </div>
     );
 };

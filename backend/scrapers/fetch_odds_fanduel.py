@@ -1,4 +1,4 @@
-
+import pandas as pd
 import requests
 import json
 import time
@@ -124,7 +124,7 @@ def extract_team_name(logo_url):
         return "UNK"
 
 def fetch_odds():
-    print("🚀 Starting FanDuel Odds Fetch...")
+    print("Starting FanDuel Odds Fetch...")
     main_page = get_nba_main_page_data()
     if not main_page: return []
 
@@ -164,6 +164,12 @@ def fetch_odds():
                     player_name_raw, prop_type_raw = market_name.rsplit(' - ', 1)
                 except: continue
 
+                prop_type_lower = prop_type_raw.lower()
+                exclusion_words = ['quarter', 'qtr', 'half', '1h', '2h', 'alt', 'alternate']
+                
+                if any(x in prop_type_lower for x in exclusion_words):
+                    continue
+
                 runners = market.get('runners', [])
                 if len(runners) != 2: continue
                 
@@ -191,7 +197,7 @@ def fetch_odds():
                 }
                 all_props.append(prop_entry)
     
-    print(f"✅ Finished. Collected {len(all_props)} props.")
+    print(f"Finished. Collected {len(all_props)} props.")
     return all_props
 
 if __name__ == "__main__":

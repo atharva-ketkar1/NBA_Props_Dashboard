@@ -41,9 +41,27 @@ const RealTeamLogo = ({ teamId, tricode, large = false }: { teamId: number, tric
 };
 
 const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, statFilter: string, isActive: boolean, onClick: () => void }) => {
-    const prop = player.props?.[statFilter]?.['dk'] || player.props?.[statFilter]?.['fd'];
+    const book =
+        player.props?.[statFilter]?.['dk']
+            ? 'dk'
+            : player.props?.[statFilter]?.['fd']
+                ? 'fd'
+                : null;
+
+    const prop = book ? player.props?.[statFilter]?.[book] : null;
     const hasProp = !!prop;
     const line = prop?.line;
+
+    const logoFile =
+        book === "dk"
+            ? "draftkings.webp"
+            : book === "fd"
+                ? "fanduel.webp"
+                : null;
+
+    const logoSrc = logoFile
+        ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/sportsbook_logos/${logoFile}`
+        : null;
     // Basic placeholder logic for color, can be enhanced later
     const isPlusYellow = true;
 
@@ -65,9 +83,14 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
 
                     {hasProp ? (
                         <div className="flex items-center gap-2 mt-0.5">
-                            <div className="bg-[#007aff] w-3.5 h-3.5 rounded-[3px] flex items-center justify-center">
-                                {/* Simple icon or just text */}
-                                <span className="text-[8px] font-bold text-white">P</span>
+                            <div className="w-3.5 h-3.5 rounded-[3px] overflow-hidden bg-white flex items-center justify-center">
+                                {logoSrc && (
+                                    <img
+                                        src={logoSrc}
+                                        alt={book}
+                                        className="w-full h-full object-contain"
+                                    />
+                                )}
                             </div>
                             <span className="text-white font-bold text-xs">{line}</span>
                             <div className="flex items-center gap-1">

@@ -17,7 +17,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, sidebarProps }) => {
       <TopNav onMenuClick={() => setIsSidebarOpen(true)} />
 
       {/* Main Container - adds gap between TopNav and content, and creates the grid layout */}
-      <div className="flex flex-1 overflow-hidden relative p-4 lg:p-6 gap-6">
+      <div className="flex flex-1 overflow-hidden relative p-4 lg:p-4 gap-4 pb-0">
 
         {/* Sidebar */}
         {/* The Sidebar component handles its own responsive positioning (fixed on mobile, static on desktop) */}

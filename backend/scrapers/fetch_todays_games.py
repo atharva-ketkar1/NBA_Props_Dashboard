@@ -173,13 +173,13 @@ print("NBA DASHBOARD DATA SUMMARY")
 print(f"{'='*80}")
 
 if not df.empty:
-    print(f"\n📊 Overview:")
+    print(f"\nOverview:")
     print(f"Total games: {len(df)}")
     print(f"Scheduled games: {df['is_scheduled'].sum()}")
     print(f"Live games: {df['is_live'].sum()}")
     print(f"Final games: {df['is_final'].sum()}")
 
-    print(f"\n🏀 Games Today:")
+    print(f"\nGames Today:")
 
     for idx, row in df.iterrows():
         if row['is_live']:
@@ -213,5 +213,5 @@ os.makedirs(os.path.dirname(output_path), exist_ok=True)
 with open(output_path, 'w') as f:
     json.dump(raw_data, f, indent=2, default=str)
 
-print(f"\n💾 Data saved to:")
+print(f"\nData saved to:")
 print(f"   - {output_path}")

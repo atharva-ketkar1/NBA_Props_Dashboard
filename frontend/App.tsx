@@ -69,7 +69,7 @@ function App() {
       },
       statFilter: activeTab // Optional: pass stat filter to sidebar if sidebar supports it
     }}>
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-4">
 
         {/* Merged Top Section (Header + Chart) */}
         <div className="bg-card rounded-xl border border-border shadow-lg animate-in fade-in duration-500 relative z-20">
@@ -94,10 +94,10 @@ function App() {
         </div>
 
         {/* Bottom Grid Section */}
-        <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-6">
+        <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-4">
 
           {/* Left Column in Grid */}
-          <div className="xl:col-span-4 flex flex-col gap-6 h-full">
+          <div className="xl:col-span-4 flex flex-col gap-4 h-full">
             {activeTab === 'Assists' ? (
               <AssistZones player={currentPlayer} />
             ) : (
@@ -109,7 +109,7 @@ function App() {
           </div>
 
           {/* Right Column in Grid */}
-          <div className="xl:col-span-6 flex flex-col gap-6 h-full">
+          <div className="xl:col-span-6 flex flex-col gap-4 h-full">
             <ShotTypeAnalysis />
             <div className="flex-1 min-h-0">
               <SimilarPlayers similarGames={undefined} />

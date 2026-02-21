@@ -72,7 +72,7 @@ def fetch_shot_locations():
 
 
 # ---------------------------------------------------------
-# 🧠 Compute Shot Distribution for All Players
+# Compute Shot Distribution for All Players
 # ---------------------------------------------------------
 def get_all_player_zone_distributions(df):
     results = {}
@@ -172,7 +172,7 @@ def get_shooting_zones_data():
         return {}
 
 # ---------------------------------------------------------
-# 🚀 MAIN
+# MAIN
 # ---------------------------------------------------------
 def main():
     data = get_shooting_zones_data()

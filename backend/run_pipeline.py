@@ -34,34 +34,34 @@ SHOOTING_PATH = os.path.join(DATA_DIR, "shooting_zones.json")
 ASSISTS_PATH = os.path.join(DATA_DIR, "assist_zones.json")
 
 def run_dk():
-    print("   🔵 Starting DraftKings...")
+    print("   Starting DraftKings...")
     data = draftkings.fetch_dk_odds()
     df = pd.DataFrame(data)
     df.to_csv(DK_PATH, index=False)
     return f"DraftKings: {len(df)} rows"
 
 def run_fd():
-    print("   🔵 Starting FanDuel...")
+    print("   Starting FanDuel...")
     data = fanduel.fetch_odds()
     df = pd.DataFrame(data)
     df.to_csv(FD_PATH, index=False)
     return f"FanDuel: {len(df)} rows"
 
 def run_stats():
-    print("   🟠 Starting Season Stats...")
+    print("   Starting Season Stats...")
     engine = nba_stats.NBAStatsEngine()
     df = engine.get_player_data()
     df.to_csv(STATS_PATH, index=False)
     return f"Season Stats: {len(df)} players"
 
 def run_logs():
-    print("   🟣 Starting Game Logs (Incremental)...")
+    print("   Starting Game Logs (Incremental)...")
     # This runs the fast update
     gamelogs.run_scrape(LOGS_PATH)
     return "Game Logs Updated"
 
 def run_schedule():
-    print("   📅 Starting Game Schedule...")
+    print("   Starting Game Schedule...")
     # This scraper saves its own file, so we just run it
     df, _ = schedule.get_dashboard_data()
     # Ensure it saves to the right place via the imported module if needed, 
@@ -71,14 +71,14 @@ def run_schedule():
     return f"Schedule: {len(df)} games"
 
 def run_shooting_zones():
-    print("   🏀 Starting Shooting Zones...")
+    print("   Starting Shooting Zones...")
     data = shooting_zones.get_shooting_zones_data()
     with open(SHOOTING_PATH, "w") as f:
         json.dump(data, f, indent=4)
     return f"Shooting Zones: {len(data)} players"
 
 def run_assist_zones():
-    print("   🤝 Starting Assist Zones...")
+    print("   Starting Assist Zones...")
     data = assist_zones.get_assist_zones_data()
     with open(ASSISTS_PATH, "w") as f:
         json.dump(data, f, indent=4)
@@ -86,7 +86,7 @@ def run_assist_zones():
 
 def main():
     start_time = time.time()
-    print("🚀 PIPELINE STARTED")
+    print("PIPELINE STARTED")
 
     # STEP 1: Run Scrapers (Parallel)
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -102,12 +102,12 @@ def main():
         
         for future in concurrent.futures.as_completed(futures):
             try:
-                print(f"   ✅ {future.result()}")
+                print(f"   {future.result()}")
             except Exception as e:
-                print(f"   ❌ Scraper Failed: {e}")
+                print(f"   Scraper Failed: {e}")
 
     # STEP 2: Run Aggregator
-    print("\n🔗 Running Aggregator...")
+    print("\nRunning Aggregator...")
     aggregator.run_aggregation(
         stats_path=STATS_PATH,
         dk_path=DK_PATH,
@@ -119,7 +119,7 @@ def main():
     )
 
     total_time = time.time() - start_time
-    print(f"\n✨ PIPELINE COMPLETE in {total_time:.2f} seconds")
+    print(f"\nPIPELINE COMPLETE in {total_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()

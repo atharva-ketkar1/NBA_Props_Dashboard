@@ -73,11 +73,11 @@ def fetch_tracking_data_for_date(date_str):
                 break 
 
             except Exception as e:
-                print(f"      ⚠️ Attempt {attempt + 1} failed for {PT} on {date_str}: {type(e).__name__} ({e})")
+                print(f"      Attempt {attempt + 1} failed for {PT} on {date_str}: {type(e).__name__} ({e})")
                 if attempt < max_retries - 1:
                     time.sleep(3 * (attempt + 1)) # Wait 3s, then 6s before retrying
                 else:
-                    print(f"      ❌ Giving up on {PT} for {date_str}.")
+                    print(f"      Giving up on {PT} for {date_str}.")
             
     if daily_merged is not None:
         daily_merged['DATE_STR'] = date_str
@@ -85,7 +85,7 @@ def fetch_tracking_data_for_date(date_str):
     return daily_merged
 
 def run_scrape(output_path, n_games=20):
-    print(f"   📅 Managing Game Logs at {output_path}")
+    print(f"   Managing Game Logs at {output_path}")
     
     # 1. DETERMINE SCRAPE STRATEGY
     target_dates = []
@@ -100,7 +100,7 @@ def run_scrape(output_path, n_games=20):
                 existing_df['GAME_DATE'] = pd.to_datetime(existing_df['GAME_DATE'])
             full_refresh = False
         except Exception as e:
-            print(f"      ⚠️ Corrupt CSV ({e}). forcing full refresh.")
+            print(f"      Corrupt CSV ({e}). forcing full refresh.")
             full_refresh = True
 
     # 2. FETCH BASE LOGS (Your original base log logic)
@@ -123,12 +123,12 @@ def run_scrape(output_path, n_games=20):
             break  # Success! Break out of the retry loop
             
         except Exception as e:
-            print(f"   ⚠️ Base log attempt {attempt + 1} failed: {type(e).__name__} ({e})")
+            print(f"   Base log attempt {attempt + 1} failed: {type(e).__name__} ({e})")
             if attempt < 2:
                 time.sleep(3) # Wait 3 seconds before trying again
                 
     if df_logs is None:
-        print("   ❌ Fatal Error: Could not fetch base LeagueGameLog after 3 attempts.")
+        print("   Fatal Error: Could not fetch base LeagueGameLog after 3 attempts.")
         return
 
     # 3. DEFINE DATES TO SCRAPE (Strictly < Today)
@@ -138,7 +138,7 @@ def run_scrape(output_path, n_games=20):
     
     if full_refresh:
         target_dates = valid_dates[:n_games+5]
-        print(f"      🔄 Full Refresh: Scraping last {len(target_dates)} COMPLETED dates.")
+        print(f"      Full Refresh: Scraping last {len(target_dates)} COMPLETED dates.")
     else:
         cutoff_date = datetime.now() - timedelta(days=UPDATE_WINDOW_DAYS)
         target_dates = [d for d in valid_dates if datetime.strptime(d, '%m/%d/%Y') >= cutoff_date]
@@ -147,14 +147,14 @@ def run_scrape(output_path, n_games=20):
             missed_dates = [d for d in valid_dates if datetime.strptime(d, '%m/%d/%Y') > last_saved_date]
             target_dates = list(set(target_dates + missed_dates))
             
-        print(f"      ➕ Incremental: Scraping {len(target_dates)} dates (Since {cutoff_date.strftime('%Y-%m-%d')}, excluding Today)")
+        print(f"      Incremental: Scraping {len(target_dates)} dates (Since {cutoff_date.strftime('%Y-%m-%d')}, excluding Today)")
 
     if not target_dates:
-        print("      ✅ Data is up to date (No completed games to fetch).")
+        print("      Data is up to date (No completed games to fetch).")
         return
 
     # 4. FETCH ADVANCED STATS (ThreadPool Speed!)
-    print(f"      🚀 Launching {MAX_WORKERS} threads for {len(target_dates)} dates...")
+    print(f"      Launching {MAX_WORKERS} threads for {len(target_dates)} dates...")
     advanced_data_list = []
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -168,7 +168,7 @@ def run_scrape(output_path, n_games=20):
                     advanced_data_list.append(result)
                 print(f"      [{i+1}/{len(target_dates)}] Completed {date_str}")
             except Exception as e:
-                print(f"      ⚠️ Failed {date_str}: {e}")
+                print(f"      Failed {date_str}: {e}")
 
     # 5. MERGE & SAVE
     if advanced_data_list:
@@ -185,7 +185,7 @@ def run_scrape(output_path, n_games=20):
         df_new_final['STL+BLK'] = df_new_final['STL'] + df_new_final['BLK']
 
         if not existing_df.empty:
-            print(f"      ✂️ Replacing overlapping data for {len(target_dates)} dates...")
+            print(f"      Replacing overlapping data for {len(target_dates)} dates...")
             existing_df = existing_df[~existing_df['DATE_STR'].isin(target_dates)]
             final_df = pd.concat([existing_df, df_new_final], ignore_index=True)
         else:
@@ -200,7 +200,7 @@ def run_scrape(output_path, n_games=20):
         
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         final_df.to_csv(output_path, index=False)
-        print(f"   💾 Updated logs saved! (Rows: {len(final_df)})")
+        print(f"   Updated logs saved! (Rows: {len(final_df)})")
 
 if __name__ == "__main__":
     current_script_dir = os.path.dirname(os.path.abspath(__file__))

@@ -43,7 +43,7 @@ const StatItem = ({ label, value, diff }: { label: string, value: string | numbe
 
   return (
     // REDUCED: px-4 -> px-3
-    <div className="flex flex-col items-center min-w-[50px] px-3 first:pl-0 shrink-0">
+    <div className="flex flex-col items-center px-1 lg:px-2 shrink-0">
       {/* REDUCED: text-[10px] -> text-[9px] */}
       <span className="text-[9px] text-[#71717a] uppercase tracking-wider font-bold mb-0.5 whitespace-nowrap">{label}</span>
       {/* REDUCED: text-[20px] -> text-[18px] */}
@@ -147,7 +147,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
       {/* Top Nav Tabs */}
       <div className="relative w-full border-b border-[#27272a] mb-0 px-5">
-        <div className="flex items-center gap-8 text-[13px] font-bold text-[#71717a] overflow-x-auto no-scrollbar pr-12 pb-3 pt-3 mask-linear-fade">
+        <div className="flex items-center justify-between gap-1 text-[11px] xl:text-[12px] font-bold text-[#71717a] pb-3 pt-3 w-full">
           {TAB_ORDER.map((tab, i) => {
             const isActive = tab === activeTab;
             const tabKey = STAT_LABELS[tab];
@@ -173,12 +173,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           })}
         </div>
 
-        {/* Gradient Fade */}
-        <div className="absolute right-0 top-0 bottom-[2px] w-20 bg-gradient-to-l from-[#050505] via-[#050505] to-transparent pointer-events-none flex items-center justify-end pr-5">
-          <div className="text-[#52525b]">
-            <ChevronRight className="w-5 h-5" />
-          </div>
-        </div>
+        {/* Gradient Fade removed to show all tabs */}
       </div>
 
       {/* Main Stats Row */}
@@ -186,7 +181,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
         {/* Section 1: Player Info */}
         {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex items-center gap-5 px-6 py-3.5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto shrink-0 justify-start">
+        <div className="flex items-center gap-3 lg:gap-4 px-3 lg:px-4 py-3.5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto justify-start">
           <div className="relative shrink-0 w-[58px] h-[58px]">
             <div className="w-full h-full rounded-full border-[2px] border-[#27272a] overflow-hidden bg-[#18181b]">
               <ImageWithFallback
@@ -284,7 +279,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
         {/* Section 2: Hit Rate */}
         {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex flex-col items-center justify-center px-8 py-3.5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto shrink-0 min-w-[180px]">
+        <div className="flex flex-col items-center justify-center px-4 lg:px-6 py-3.5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto shrink-0 min-w-[140px]">
           <span className="text-[10px] text-[#71717a] font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
           {hasLine ? (
             <span className={`text-[24px] font-bold tracking-tight leading-none mb-1 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
@@ -300,8 +295,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
         {/* Section 3: Stats Grid */}
         {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex-1 overflow-x-auto no-scrollbar py-3.5 px-6 w-full xl:w-auto">
-          <div className="flex items-center justify-between xl:justify-around min-w-max h-full gap-8">
+        <div className="flex-1 py-3.5 px-3 lg:px-4 w-full xl:w-auto">
+          <div className="flex items-center justify-between w-full h-full gap-1 lg:gap-2">
             {statsData.map((stat, i) => (
               <StatItem key={stat.label} label={stat.label} value={stat.value} diff={stat.diff} />
             ))}
@@ -310,9 +305,9 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
         {/* Section 4: Actions */}
         {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex items-center gap-6 px-6 py-3.5 xl:border-l border-[#27272a] w-full xl:w-auto justify-end shrink-0 bg-[#050505]">
-          <HelpCircle className="w-5 h-5 text-[#3f3f46] cursor-pointer hover:text-[#a1a1aa] transition-colors" />
-          <button className="flex items-center gap-2 bg-[#050505] border border-[#27272a] hover:bg-[#18181b] hover:border-[#3f3f46] text-white text-xs font-bold px-4 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
+        <div className="flex items-center gap-4 px-4 py-3.5 xl:border-l border-[#27272a] w-full xl:w-auto justify-end shrink bg-[#050505]">
+          <HelpCircle className="w-5 h-5 text-[#3f3f46] cursor-pointer hover:text-[#a1a1aa] transition-colors shrink-0" />
+          <button className="flex items-center gap-2 bg-[#050505] border border-[#27272a] hover:bg-[#18181b] hover:border-[#3f3f46] text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
             <SlidersHorizontal className="w-3.5 h-3.5" />
             Filters
           </button>

@@ -90,7 +90,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)})")
 
     if df_stats.empty:
-        print("   ❌ No stats found. Aborting.")
+        print("   No stats found. Aborting.")
         return
 
     # B. Prepare Stats Data (Calculate Combos)
@@ -195,9 +195,9 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(final_output, f, indent=4)
-        print(f"   ✅ Saved Master Feed ({len(final_output)} players) to {output_path}")
+        print(f"   Saved Master Feed ({len(final_output)} players) to {output_path}")
     except Exception as e:
-        print(f"   ❌ Error saving JSON: {e}")
+        print(f"   Error saving JSON: {e}")
 
 if __name__ == "__main__":
     # Test Run

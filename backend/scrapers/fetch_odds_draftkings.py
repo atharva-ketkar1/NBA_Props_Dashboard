@@ -84,7 +84,7 @@ def fetch_category(subcategory_id, prop_label):
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"  ❌ Error fetching {prop_label}: {e}")
+        print(f"Error fetching {prop_label}: {e}")
         return None
 
 def parse_dk_data(data, prop_type_key):
@@ -184,7 +184,7 @@ def parse_dk_data(data, prop_type_key):
     return parsed
 
 def fetch_dk_odds():
-    print("🚀 Starting DraftKings Odds Fetch...")
+    print("Starting DraftKings Odds Fetch...")
     all_props = []
     
     for prop_key, cat_id in PLAYER_PROP_CATEGORIES.items():
@@ -195,12 +195,12 @@ def fetch_dk_odds():
         # print(f"  Found {len(props)} props for '{prop_key}'")
         all_props.extend(props)
     
-    print(f"✅ Finished DK. Collected {len(all_props)} total props.")
+    print(f"Finished DK. Collected {len(all_props)} total props.")
 
     # --- DEBUG: Show user the formatted output with PLUS SIGNS ---
     if len(all_props) > 10:
         sample = all_props[10]
-        print("\n🔎 SAMPLE OUTPUT (With Formatting):")
+        print("\nSAMPLE OUTPUT (With Formatting):")
         print(f"Player: {sample['player']}")
         print(f"Line:   {sample['line']}")
         # Use our helper to show the plus sign
