@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Player } from '../types';
 import { TEAM_IDS } from '../constants';
+import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 
 interface BarChartProps {
     player?: Player;
@@ -25,6 +26,9 @@ const STAT_LABELS: Record<string, string> = {
 
 export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
+
+    // Hover State
+    const [hoverData, setHoverData] = useState<HoveredGameData | null>(null);
 
     const { chartData, lineValue } = useMemo(() => {
         if (!player || !player.game_log) return { chartData: [], lineValue: 0 };
@@ -149,7 +153,26 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     const fontSize = Math.min(barWidth * 0.6, 14);
 
                     return (
-                        <g key={index} className="group cursor-pointer">
+                        <g
+                            key={index}
+                            className="group cursor-pointer"
+                            onMouseEnter={(e) => {
+                                setHoverData({
+                                    game,
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                    lineValue,
+                                    statKey,
+                                    activeSportsbook
+                                });
+                            }}
+                            onMouseMove={(e) => {
+                                if (hoverData) {
+                                    setHoverData({ ...hoverData, x: e.clientX, y: e.clientY });
+                                }
+                            }}
+                            onMouseLeave={() => setHoverData(null)}
+                        >
                             {/* The Bar */}
                             {game.isUpcoming ? (
                                 <rect
@@ -294,6 +317,9 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             <div className="absolute bottom-3 left-3 pointer-events-none opacity-40 z-20">
                 <span className="text-[10px] text-[#52525b] font-medium">PropsMadness</span>
             </div>
+
+            {/* Hover Tooltip Overlay */}
+            <HoverTooltip data={hoverData} />
         </div>
     );
 };
