@@ -75,8 +75,8 @@ def load_json(path):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_def_path, games_path, output_path):
-    print(f"   🔨 Aggregating Data...")
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, output_path):
+    print(f"   Aggregating Data...")
 
     # A. Load All Data
     df_stats = load_csv(stats_path)
@@ -86,10 +86,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     
     shooting_data = load_json(shooting_path)
     assists_data = load_json(assists_path)
+    opp_assist_data = load_json(opp_assist_path)
     opp_def_data = load_json(opp_def_path)
     games_data = load_json(games_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppDef({len(opp_def_data)})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)})")
 
     if df_stats.empty:
         print("   No stats found. Aborting.")
@@ -193,11 +194,12 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         opp_info = team_games.get(team, None)
         opp_def_zones = None
         opp_def_zones_positional = None
+        opp_assist_zones = None
+        opp_assist_zones_positional = None
 
         if opp_info:
             opp_name = opp_info['opp_name']
             
-            # Get the exact opponent's defense against this position as well as overall
             if opp_name in opp_def_data:
                 team_def_data = opp_def_data[opp_name]
                 if 'ALL' in team_def_data:
@@ -211,10 +213,17 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                     print(f"DEBUG: Found {opp_name} but missing pos {sim_pos}")
             else:
                 print(f"DEBUG: Could not find team {opp_name} in opp_def_data keys: {list(opp_def_data.keys())[:5]}")
-        else:
-            if team not in team_games and team != '0.0' and team != '0' and team != 0 and team != 'UNK':
-                print(f"DEBUG: team '{team}' not found in team_games keys: {list(team_games.keys())}")
-
+                
+            if opp_name in opp_assist_data:
+                team_ast_data = opp_assist_data[opp_name]
+                if 'ALL' in team_ast_data:
+                    opp_assist_zones = team_ast_data['ALL']
+                elif sim_pos in team_ast_data:
+                    opp_assist_zones = team_ast_data[sim_pos]
+                    
+                if sim_pos in team_ast_data:
+                    opp_assist_zones_positional = team_ast_data[sim_pos]
+        
         master_data[pid] = {
             "id": pid,
             "name": row['PLAYER_NAME'],
@@ -224,6 +233,8 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             "game_log": logs_map.get(pid, []), # <--- NEW: Injects the 30-game history
             "shooting_zones": shooting_data.get(row['PLAYER_NAME'], None),
             "assist_zones": assists_by_pid.get(pid, None),
+            "opp_assist_zones": opp_assist_zones,
+            "opp_assist_zones_positional": opp_assist_zones_positional,
             "opp_def_zones": opp_def_zones,
             "opp_def_zones_positional": opp_def_zones_positional,
             "props": {}
@@ -296,6 +307,7 @@ if __name__ == "__main__":
         f"{base}/gamelogs.csv",
         f"{base}/shooting_zones.json",
         f"{base}/assist_zones.json",
+        f"{base}/opp_assist_zones.json",
         f"{base}/opp_def_zones.json",
         f"{base}/nba_dashboard_games.json",
         f"{base}/master_feed.json"

@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { Player } from '../types';
+import React, { useMemo, useState, useEffect } from 'react';
+import { Player, Game } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 
@@ -29,6 +29,17 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     // Hover State
     const [hoverData, setHoverData] = useState<HoveredGameData | null>(null);
+
+    // Schedule State for Upcoming Game 
+    const [scheduleData, setScheduleData] = useState<Game[]>([]);
+
+    useEffect(() => {
+        const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+        fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
+            .then(res => res.json())
+            .then(data => setScheduleData(data))
+            .catch(err => console.error("Error loading schedule:", err));
+    }, []);
 
     const { chartData, lineValue } = useMemo(() => {
         if (!player || !player.game_log) return { chartData: [], lineValue: 0 };
@@ -74,18 +85,45 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             };
         });
 
-        // 3. Append mock upcoming game to match visual Target State
+        // 3. Append upcoming game dynamically
+        let upcomingOpponent = 'TBD';
+        const today = new Date();
+        const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        let upcomingMonth = fallbackMonths[today.getMonth()];
+        let upcomingDay = String(today.getDate()).padStart(2, '0');
+
+        if (player.team && scheduleData.length > 0) {
+            const playerGame = scheduleData.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team);
+            if (playerGame) {
+                upcomingOpponent = playerGame.home_team_tricode === player.team ? playerGame.away_team_tricode : playerGame.home_team_tricode;
+                if (playerGame.game_date) {
+                    const [y, mStr, dStr] = playerGame.game_date.split('-');
+                    if (mStr && dStr) {
+                        upcomingMonth = fallbackMonths[parseInt(mStr) - 1];
+                        upcomingDay = dStr;
+                    }
+                }
+            }
+        }
+
+        const upcomingOpponentId = TEAM_IDS[upcomingOpponent];
+        const upcomingLogoUrl = upcomingOpponentId
+            ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponentId}.svg`
+            : upcomingOpponent === 'TBD'
+                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`
+                : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponent}.svg`;
+
         data.push({
             score: null, // Special flag for upcoming game
-            opponent: 'HOU', // Hardcoding as requested to match visuals loosely
-            logoUrl: `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`,
-            dateMonth: 'Feb',
-            dateDay: '21',
+            opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
+            logoUrl: upcomingLogoUrl,
+            dateMonth: upcomingMonth,
+            dateDay: upcomingDay,
             isUpcoming: true
         });
 
         return { chartData: data, lineValue: line };
-    }, [player, statKey, activeSportsbook]);
+    }, [player, statKey, activeSportsbook, scheduleData]);
 
     if (!player) return null;
 

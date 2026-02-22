@@ -10,16 +10,64 @@ function getZoneColor(percentageString: string) {
   return '#E53E3E'; // Red
 }
 
-function processZoneData(zoneData: any) {
-  if (!zoneData) return null;
+function getOppZoneColor(rankStr: string | number) {
+  const rank = typeof rankStr === 'string' ? parseInt(rankStr) : rankStr;
+  if (!rank) return '#121212';
+  if (rank <= 10) return '#E53E3E'; // Red (Hard)
+  if (rank <= 20) return '#F4C51E'; // Yellow (Average)
+  return '#B0BB5A'; // Green (Easy)
+}
+
+function processZoneData(zoneData: any, isOppData: boolean = false) {
+  if (!zoneData) {
+    return {
+      left_corner: { percentage: '0%', makes: '0', rank: '30', color: '#121212' },
+      right_corner: { percentage: '0%', makes: '0', rank: '30', color: '#121212' },
+      restricted_area: { percentage: '0%', makes: '0', rank: '30', color: '#121212' },
+      paint: { percentage: '0%', makes: '0', rank: '30', color: '#121212' },
+      mid_range: { percentage: '0%', makes: '0', rank: '30', color: '#121212' },
+      top_key: { percentage: '0%', makes: '0', rank: '30', color: '#121212' }
+    };
+  }
 
   const result: any = {};
   for (const key of ['left_corner', 'right_corner', 'restricted_area', 'paint', 'mid_range', 'top_key']) {
-    const raw = zoneData[key] || { percentage: '0%', makes: '0' };
+    const raw = zoneData[key] || { percentage: '0%', makes: '0', rank: '30' };
     result[key] = {
       percentage: raw.percentage,
       makes: raw.makes,
-      color: getZoneColor(raw.percentage)
+      rank: raw.rank || '30',
+      color: isOppData ? getOppZoneColor(raw.rank || '30') : getZoneColor(raw.percentage)
+    };
+  }
+  return result;
+}
+
+function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
+  const pPct = parseInt(pPctStr.replace('%', '')) || 0;
+  const oRank = typeof oRankStr === 'string' ? parseInt(oRankStr) : oRankStr;
+
+  if (!oRank) return '#121212';
+
+  // If player doesn't shoot much here (< 15%), it's a neutral matchup (Yellow)
+  if (pPct < 15) return '#F4C51E';
+
+  // Otherwise, it aligns with opponent defense difficulty
+  if (oRank <= 10) return '#ED8936'; // Orange (Tough)
+  if (oRank <= 20) return '#F4C51E'; // Yellow (Average)
+  return '#B0BB5A'; // Green (Easy)
+}
+
+function processVsZoneData(pZoneData: any, oZoneData: any) {
+  const pData = pZoneData || {};
+  const oData = oZoneData || {};
+
+  const result: any = {};
+  for (const key of ['left_corner', 'right_corner', 'restricted_area', 'paint', 'mid_range', 'top_key']) {
+    const pRaw = pData[key] || { percentage: '0%', makes: '0', rank: '30' };
+    const oRaw = oData[key] || { percentage: '0%', makes: '0', rank: '30' };
+    result[key] = {
+      color: getVsZoneColor(pRaw.percentage, oRaw.rank)
     };
   }
   return result;
@@ -45,44 +93,45 @@ const CourtShape = ({ viewData }: { viewData: any }) => (
   </svg>
 );
 
-const ZoneLabel = ({ top, left, stat, activeTab }: { top: string, left: string, stat: any, activeTab: string }) => {
-  let primaryText = '';
-  let secondaryText = '';
-
+const ZoneLabel = ({ top, left, pStat, oStat, activeTab }: { top: string, left: string, pStat: any, oStat: any, activeTab: string }) => {
   if (activeTab === 'player') {
-    primaryText = stat.percentage;
-  } else if (activeTab === 'opp') {
-    primaryText = stat.makes; // Using makes as a placeholder for the Opp Rank value
-  } else if (activeTab === 'vs') {
-    primaryText = stat.percentage;
-    secondaryText = stat.makes; // The secondary value showing on the right
-  }
-
-  return (
-    <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold border border-white z-10" style={{ top, left }}>
-      <div className={`px-1 py-0.5 text-black text-center tracking-tight ${!secondaryText ? 'min-w-[40px]' : 'min-w-[32px]'}`}>
-        {primaryText}
+    return (
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold border border-white z-10" style={{ top, left }}>
+        <div className="px-1 py-0.5 text-black text-center min-w-[40px] tracking-tight">{pStat.percentage}</div>
       </div>
-      {secondaryText && secondaryText !== '0' && (
-        <div className="px-1 py-0.5 bg-white text-black border-l border-gray-300 min-w-[22px] text-center tracking-tight">
-          {secondaryText}
+    );
+  } else if (activeTab === 'opp') {
+    return (
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold border border-white z-10" style={{ top, left }}>
+        <div className="px-1 py-0.5 text-black text-center min-w-[40px] tracking-tight">{oStat.rank}</div>
+      </div>
+    );
+  } else {
+    // VS Tab
+    return (
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold border border-white z-10 bg-white" style={{ top, left }}>
+        <div className="px-1 py-0.5 text-black text-center min-w-[32px] tracking-tight">
+          {pStat.percentage}
         </div>
-      )}
-    </div>
-  );
+        <div className="px-[5px] py-0.5 text-black border-l border-gray-400 min-w-[22px] text-center tracking-tight">
+          {oStat.rank}
+        </div>
+      </div>
+    );
+  }
 };
 
-const CourtView = ({ viewData, activeTab }: { viewData: any, activeTab: string }) => (
+const CourtView = ({ pView, oView, vsView, activeTab }: { pView: any, oView: any, vsView: any, activeTab: string }) => (
   <div className="relative w-full aspect-[1.3] max-w-[340px] mx-auto">
-    <CourtShape viewData={viewData} />
-    <ZoneLabel top="12%" left="3%" stat={viewData.left_corner} activeTab={activeTab} />
-    <ZoneLabel top="12%" left="97%" stat={viewData.right_corner} activeTab={activeTab} />
-    <ZoneLabel top="12%" left="50%" stat={viewData.restricted_area} activeTab={activeTab} />
+    <CourtShape viewData={activeTab === 'vs' ? vsView : (activeTab === 'opp' ? oView : pView)} />
+    <ZoneLabel top="12%" left="3%" pStat={pView.left_corner} oStat={oView.left_corner} activeTab={activeTab} />
+    <ZoneLabel top="12%" left="97%" pStat={pView.right_corner} oStat={oView.right_corner} activeTab={activeTab} />
+    <ZoneLabel top="12%" left="50%" pStat={pView.restricted_area} oStat={oView.restricted_area} activeTab={activeTab} />
 
     {/* Removed Paint label, Mid Range is now centered within the larger unified zone */}
-    <ZoneLabel top="50%" left="50%" stat={viewData.mid_range} activeTab={activeTab} />
+    <ZoneLabel top="50%" left="50%" pStat={pView.mid_range} oStat={oView.mid_range} activeTab={activeTab} />
 
-    <ZoneLabel top="85%" left="50%" stat={viewData.top_key} activeTab={activeTab} />
+    <ZoneLabel top="85%" left="50%" pStat={pView.top_key} oStat={oView.top_key} activeTab={activeTab} />
   </div>
 );
 
@@ -92,8 +141,9 @@ export const AssistZones = ({ player }: { player: Player }) => {
   const rawZones = (player as any)?.assist_zones;
   const isMissing = !rawZones || Object.keys(rawZones).length === 0;
 
-  const playerView = processZoneData(rawZones) || processZoneData({});
-  const oppView = processZoneData({}); // placeholders
+  const playerView = processZoneData((player as any)?.assist_zones);
+  const oppView = processZoneData((player as any)?.opp_assist_zones, true);
+  const vsView = processVsZoneData((player as any)?.assist_zones, (player as any)?.opp_assist_zones);
 
   return (
     <div className={`bg-[#0a0a0a] rounded-xl p-5 w-full border border-gray-800/50 ${isMissing ? 'opacity-50' : ''}`}>
@@ -144,7 +194,9 @@ export const AssistZones = ({ player }: { player: Player }) => {
 
         {/* Always render exactly one CourtView */}
         <CourtView
-          viewData={activeTab === 'opp' ? oppView : playerView}
+          pView={playerView}
+          oView={oppView}
+          vsView={vsView}
           activeTab={activeTab}
         />
       </div>
