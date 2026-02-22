@@ -209,7 +209,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           <div className="flex flex-col gap-1 min-w-0">
             <div className="flex items-baseline gap-2">
               <h1 className="text-xl font-bold text-white tracking-tight whitespace-nowrap truncate leading-none">
-                {player.name} <span className="text-[#52525b] font-bold text-sm ml-0.5">{player.position || 'G'}</span>
+                {player.name} <span className="text-[#52525b] font-bold text-sm ml-0.5">{player.position}</span>
               </h1>
             </div>
 

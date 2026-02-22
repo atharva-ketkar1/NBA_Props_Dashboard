@@ -75,7 +75,7 @@ def load_json(path):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_def_path, games_path, output_path):
     print(f"   🔨 Aggregating Data...")
 
     # A. Load All Data
@@ -86,8 +86,10 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     
     shooting_data = load_json(shooting_path)
     assists_data = load_json(assists_path)
+    opp_def_data = load_json(opp_def_path)
+    games_data = load_json(games_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppDef({len(opp_def_data)})")
 
     if df_stats.empty:
         print("   No stats found. Aborting.")
@@ -120,8 +122,45 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         if pid:
             assists_by_pid[pid] = data
 
+    # Define team mapping because games api returns mascots ("Suns") but stats api returns full names ("Phoenix Suns")
+    TEAM_FULL_NAMES = {
+        'Hawks': 'Atlanta Hawks', 'Celtics': 'Boston Celtics', 'Nets': 'Brooklyn Nets',
+        'Hornets': 'Charlotte Hornets', 'Bulls': 'Chicago Bulls', 'Cavaliers': 'Cleveland Cavaliers',
+        'Mavericks': 'Dallas Mavericks', 'Nuggets': 'Denver Nuggets', 'Pistons': 'Detroit Pistons',
+        'Warriors': 'Golden State Warriors', 'Rockets': 'Houston Rockets', 'Pacers': 'Indiana Pacers',
+        'Clippers': 'LA Clippers', 'Lakers': 'Los Angeles Lakers', 'Grizzlies': 'Memphis Grizzlies',
+        'Heat': 'Miami Heat', 'Bucks': 'Milwaukee Bucks', 'Timberwolves': 'Minnesota Timberwolves',
+        'Pelicans': 'New Orleans Pelicans', 'Knicks': 'New York Knicks', 'Thunder': 'Oklahoma City Thunder',
+        'Magic': 'Orlando Magic', '76ers': 'Philadelphia 76ers', 'Suns': 'Phoenix Suns',
+        'Trail Blazers': 'Portland Trail Blazers', 'Kings': 'Sacramento Kings', 'Spurs': 'San Antonio Spurs',
+        'Raptors': 'Toronto Raptors', 'Jazz': 'Utah Jazz', 'Wizards': 'Washington Wizards'
+    }
+
+    # D. Build Games Map
+    team_games = {}
+    for g in games_data:
+        home_team = g.get('home_team_tricode', '')
+        away_team = g.get('away_team_tricode', '')
+        
+        home_mascot = g.get('home_team_name', '')
+        away_mascot = g.get('away_team_name', '')
+        
+        home_full = TEAM_FULL_NAMES.get(home_mascot, home_mascot)
+        away_full = TEAM_FULL_NAMES.get(away_mascot, away_mascot)
+        
+        team_games[home_team] = {'opp_tricode': away_team, 'opp_name': away_full}
+        team_games[away_team] = {'opp_tricode': home_team, 'opp_name': home_full}
+
     # E. Build Master Dictionary
     master_data = {}
+
+    # Define simple position mapping
+    def get_simple_pos(pos_str):
+        if not pos_str: return 'G'
+        if 'G' in pos_str: return 'G'
+        if 'C' in pos_str: return 'C'
+        if 'F' in pos_str: return 'F'
+        return 'G'
 
     for _, row in df_stats.iterrows():
         pid = int(row['PLAYER_ID'])
@@ -131,14 +170,62 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         for k in DISPLAY_STATS:
             season_stats[k] = safe_float(row.get(k, 0))
 
+        # 2. Get opponent defense context
+        # Some stats rows have TEAM_ABBREVIATION as numeric 0.0 or a weird type if missing. 
+        # But we also have TEAM_ABBREVIATION in the logs or in master_data early. 
+        team = str(row['TEAM_ABBREVIATION'])
+        if team == '0.0' or team == '0':
+            # Fallback to logs
+            p_logs = logs_map.get(pid, [])
+            if p_logs and len(p_logs) > 0 and 'TEAM_ABBREVIATION' in p_logs[0]:
+                team = p_logs[0]['TEAM_ABBREVIATION']
+        
+        # Try getting exact position from season stats (from playerindex API), fallback to logs
+        exact_pos = str(row.get('POSITION', ''))
+        if not exact_pos or exact_pos == 'nan':
+            exact_pos = 'G'
+            p_logs = logs_map.get(pid, [])
+            if p_logs and len(p_logs) > 0 and 'START_POSITION' in p_logs[0]:
+                exact_pos = p_logs[0]['START_POSITION'] or 'G'
+        
+        sim_pos = get_simple_pos(exact_pos)
+
+        opp_info = team_games.get(team, None)
+        opp_def_zones = None
+        opp_def_zones_positional = None
+
+        if opp_info:
+            opp_name = opp_info['opp_name']
+            
+            # Get the exact opponent's defense against this position as well as overall
+            if opp_name in opp_def_data:
+                team_def_data = opp_def_data[opp_name]
+                if 'ALL' in team_def_data:
+                    opp_def_zones = team_def_data['ALL']
+                elif sim_pos in team_def_data: # Fallback
+                    opp_def_zones = team_def_data[sim_pos]
+                
+                if sim_pos in team_def_data:
+                    opp_def_zones_positional = team_def_data[sim_pos]
+                else:
+                    print(f"DEBUG: Found {opp_name} but missing pos {sim_pos}")
+            else:
+                print(f"DEBUG: Could not find team {opp_name} in opp_def_data keys: {list(opp_def_data.keys())[:5]}")
+        else:
+            if team not in team_games and team != '0.0' and team != '0' and team != 0 and team != 'UNK':
+                print(f"DEBUG: team '{team}' not found in team_games keys: {list(team_games.keys())}")
+
         master_data[pid] = {
             "id": pid,
             "name": row['PLAYER_NAME'],
-            "team": row['TEAM_ABBREVIATION'],
+            "team": team,
+            "position": exact_pos,
             "stats": season_stats,
             "game_log": logs_map.get(pid, []), # <--- NEW: Injects the 30-game history
             "shooting_zones": shooting_data.get(row['PLAYER_NAME'], None),
             "assist_zones": assists_by_pid.get(pid, None),
+            "opp_def_zones": opp_def_zones,
+            "opp_def_zones_positional": opp_def_zones_positional,
             "props": {}
         }
 
@@ -203,11 +290,13 @@ if __name__ == "__main__":
     # Test Run
     base = "backend/data/current"
     run_aggregation(
-        f"{base}/stats.csv",
+        f"{base}/season_stats.csv",
         f"{base}/draftkings.csv",
         f"{base}/fanduel.csv",
         f"{base}/gamelogs.csv",
         f"{base}/shooting_zones.json",
         f"{base}/assist_zones.json",
+        f"{base}/opp_def_zones.json",
+        f"{base}/nba_dashboard_games.json",
         f"{base}/master_feed.json"
     )

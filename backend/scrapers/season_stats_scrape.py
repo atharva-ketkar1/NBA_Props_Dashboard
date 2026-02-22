@@ -87,7 +87,8 @@ class NBAStatsEngine:
             "Base": base_url,
             "Passing": adv_url_template.format("Passing&Season=2025-26"),
             "Drives": adv_url_template.format("Drives&Season=2025-26"),
-            "Rebounding": adv_url_template.format("Rebounding&Season=2025-26")
+            "Rebounding": adv_url_template.format("Rebounding&Season=2025-26"),
+            "Index": "https://stats.nba.com/stats/playerindex?Historical=0&LeagueID=00&Season=2025-26&SeasonType=Regular%20Season"
         }
 
         # 2. Parallel Execution with Max Workers
@@ -131,6 +132,11 @@ class NBAStatsEngine:
         if not dfs.get("Rebounding", pd.DataFrame()).empty:
             reb_cols = merge_keys + ['REB_CHANCES', 'REB_CONTEST_PCT']
             main_df = main_df.merge(dfs["Rebounding"][reb_cols], on=merge_keys, how='left')
+
+        if not dfs.get("Index", pd.DataFrame()).empty:
+            index_df = dfs["Index"].rename(columns={'PERSON_ID': 'PLAYER_ID'})
+            if 'POSITION' in index_df.columns:
+                main_df = main_df.merge(index_df[['PLAYER_ID', 'POSITION']], on='PLAYER_ID', how='left')
 
         # 5. Calculate Edge Metrics
         main_df = main_df.fillna(0)

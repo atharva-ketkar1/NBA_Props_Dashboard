@@ -15,6 +15,7 @@ from scrapers import gamelogs as gamelogs
 from scrapers import fetch_todays_games as schedule
 from scrapers import shooting_zones as shooting_zones
 from scrapers import assist_zones as assist_zones
+from scrapers import opp_def_zones as opp_def_zones
 from utils import aggregator
 import json
 
@@ -32,6 +33,7 @@ MASTER_PATH = os.path.join(DATA_DIR, "master_feed.json")
 GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json")
 SHOOTING_PATH = os.path.join(DATA_DIR, "shooting_zones.json")
 ASSISTS_PATH = os.path.join(DATA_DIR, "assist_zones.json")
+OPP_DEF_PATH = os.path.join(DATA_DIR, "opp_def_zones.json")
 
 def run_dk():
     print("   Starting DraftKings...")
@@ -84,6 +86,13 @@ def run_assist_zones():
         json.dump(data, f, indent=4)
     return f"Assist Zones: {len(data)} players"
 
+def run_opp_def_zones():
+    print("   Starting Opponent Defense Zones...")
+    data = opp_def_zones.get_opp_def_zones_data()
+    with open(OPP_DEF_PATH, "w") as f:
+        json.dump(data, f, indent=4)
+    return f"Opp Defense Zones: {len(data)} teams"
+
 def main():
     start_time = time.time()
     print("PIPELINE STARTED")
@@ -97,7 +106,8 @@ def main():
             executor.submit(run_logs),
             executor.submit(run_schedule),
             executor.submit(run_shooting_zones),
-            executor.submit(run_assist_zones)
+            executor.submit(run_assist_zones),
+            executor.submit(run_opp_def_zones)
         ]
         
         for future in concurrent.futures.as_completed(futures):
@@ -115,6 +125,8 @@ def main():
         logs_path=LOGS_PATH, 
         shooting_path=SHOOTING_PATH,
         assists_path=ASSISTS_PATH,
+        opp_def_path=OPP_DEF_PATH,
+        games_path=GAMES_PATH,
         output_path=MASTER_PATH
     )
 
