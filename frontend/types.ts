@@ -106,6 +106,7 @@ export interface Player {
   stats: PlayerStats;
   game_log: GameLog[];
   props: PlayerProps;
+  [key: string]: any; // Allow generic injection like shot_type_analysis
 }
 
 export interface Game {
@@ -167,6 +168,8 @@ export interface ShotTypeData {
   percentage: number;
   attempts: number;
   width?: number; // Optional for manual width control, else calculated
+  rank?: number;  // Opponent defense rank
+  frequency?: number; // Calculated frequency of this shot type
 }
 
 export interface SimilarPlayerGame {

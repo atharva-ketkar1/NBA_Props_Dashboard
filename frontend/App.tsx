@@ -110,7 +110,47 @@ function App() {
 
           {/* Right Column in Grid */}
           <div className="xl:col-span-6 flex flex-col gap-4 h-full">
-            <ShotTypeAnalysis />
+            <ShotTypeAnalysis shotTypes={(() => {
+              if (!currentPlayer?.shot_type_analysis) return undefined;
+              const sta = currentPlayer.shot_type_analysis;
+              const p = sta.player || {};
+              const d = sta.opp_def || {};
+
+              const cs = p.catch_and_shoot;
+              const pu = p.pull_up;
+              const lt10 = p.less_than_10_ft;
+
+              if (!cs && !pu && !lt10) return undefined;
+
+              const totalAttempts = (cs?.attempts || 0) + (lt10?.attempts || 0) + (pu?.attempts || 0);
+
+              return [
+                {
+                  type: 'C&S',
+                  percentage: cs?.percentage || 0,
+                  attempts: Math.round(cs?.attempts || 0),
+                  frequency: totalAttempts ? Math.round(((cs?.attempts || 0) / totalAttempts) * 100) : 33,
+                  width: totalAttempts ? ((cs?.attempts || 0) / totalAttempts) * 100 : 33.3,
+                  rank: d.catch_and_shoot?.rank
+                },
+                {
+                  type: '< 10 ft',
+                  percentage: lt10?.percentage || 0,
+                  attempts: Math.round(lt10?.attempts || 0),
+                  frequency: totalAttempts ? Math.round(((lt10?.attempts || 0) / totalAttempts) * 100) : 33,
+                  width: totalAttempts ? ((lt10?.attempts || 0) / totalAttempts) * 100 : 33.3,
+                  rank: d.less_than_10_ft?.rank
+                },
+                {
+                  type: 'Pull Up',
+                  percentage: pu?.percentage || 0,
+                  attempts: Math.round(pu?.attempts || 0),
+                  frequency: totalAttempts ? Math.round(((pu?.attempts || 0) / totalAttempts) * 100) : 34,
+                  width: totalAttempts ? ((pu?.attempts || 0) / totalAttempts) * 100 : 33.3,
+                  rank: d.pull_up?.rank
+                }
+              ];
+            })()} />
             <div className="flex-1 min-h-0">
               <SimilarPlayers similarGames={undefined} />
             </div>

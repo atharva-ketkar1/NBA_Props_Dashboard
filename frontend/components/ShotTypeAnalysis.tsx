@@ -33,24 +33,36 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes })
          </div>
 
          {/* Bar */}
-         <div className="flex w-full h-14 rounded-lg overflow-hidden border border-black/20 text-xs">
-            {data.map((item, idx) => (
-               <div
-                  key={idx}
-                  className={`bg-[#facc15] flex items-center justify-center relative ${idx < data.length - 1 ? 'border-r border-black/10' : ''}`}
-                  style={{ width: `${item.width}%` }}
-               >
-                  <div className="bg-white px-1.5 py-0.5 rounded-[3px] text-[11px] font-bold text-black shadow-sm flex gap-1 items-center whitespace-nowrap">
-                     <span>{item.percentage}%</span>
-                     {item.attempts > 0 && (
-                        <>
-                           <span className="text-gray-300 text-[9px]">|</span>
-                           <span>{item.attempts}</span>
-                        </>
-                     )}
+         <div className="flex w-full h-14 rounded-lg overflow-hidden border border-black/40 text-xs">
+            {data.map((item, idx) => {
+               // Determine color based on opponent rank (1-30)
+               // Best defense (low rank 1-10) -> Red (tough matchup)
+               // Avg defense (11-20) -> Yellow
+               // Bad defense (21-30) -> Green (good matchup)
+               let bgColor = 'bg-[#eab308]'; // Default yellow
+               if (item.rank !== undefined) {
+                  if (item.rank <= 10) bgColor = 'bg-[#e45b5b]'; // Muted Red
+                  else if (item.rank >= 21) bgColor = 'bg-[#a5c15e]'; // Muted Green
+               }
+
+               return (
+                  <div
+                     key={idx}
+                     className={`${bgColor} flex items-center justify-center relative ${idx < data.length - 1 ? 'border-r-2 border-black/60' : ''}`}
+                     style={{ width: `${item.width}%` }}
+                  >
+                     <div className="bg-white px-1.5 py-0.5 rounded-[3px] text-[11px] font-bold text-black shadow-sm flex gap-1 items-center whitespace-nowrap">
+                        <span>{item.frequency !== undefined ? item.frequency : item.percentage}%</span>
+                        {(item.rank !== undefined || item.attempts > 0) && (
+                           <>
+                              <span className="text-gray-300 text-[9px]">|</span>
+                              <span>{item.rank !== undefined ? item.rank : item.attempts}</span>
+                           </>
+                        )}
+                     </div>
                   </div>
-               </div>
-            ))}
+               );
+            })}
          </div>
       </div>
    );

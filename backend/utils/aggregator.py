@@ -75,7 +75,7 @@ def load_json(path):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, output_path):
     print(f"   Aggregating Data...")
 
     # A. Load All Data
@@ -89,8 +89,9 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     opp_assist_data = load_json(opp_assist_path)
     opp_def_data = load_json(opp_def_path)
     games_data = load_json(games_path)
+    shot_type_data = load_json(shot_type_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)})")
 
     if df_stats.empty:
         print("   No stats found. Aborting.")
@@ -223,20 +224,67 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                     
                 if sim_pos in team_ast_data:
                     opp_assist_zones_positional = team_ast_data[sim_pos]
+
+        # --- SHOT TYPE ANALYSIS LOGIC ---
+        player_shot_type = shot_type_data.get('players', {}).get(row['PLAYER_NAME'], {}).copy()
         
+        # 1. Calculate the player's total points strictly from Field Goals
+        total_pts = season_stats.get('PTS', 0)
+        ftm = season_stats.get('FTM', 0)
+        floor_pts = total_pts - ftm 
+
+        # 2. Get the raw points from Catch & Shoot and Pull Ups
+        cs_pts = player_shot_type.get('catch_and_shoot', {}).get('points', 0)
+        pu_pts = player_shot_type.get('pull_up', {}).get('points', 0)
+
+        # 3. The Remainder is strictly <10ft points
+        lt10_pts = max(0, floor_pts - cs_pts - pu_pts)
+
+        # 4. Convert to Percentages
+        cs_pct, pu_pct, lt10_pct = 0, 0, 0
+        if floor_pts > 0:
+            cs_pct = round((cs_pts / floor_pts) * 100)
+            pu_pct = round((pu_pts / floor_pts) * 100)
+            # Use subtraction for the final bucket to ensure they always sum to exactly 100%
+            lt10_pct = 100 - cs_pct - pu_pct 
+
+        # 5. Format the Player Object
+        player_shot_type = {
+            'catch_and_shoot': {'points': cs_pts, 'percentage': cs_pct},
+            'pull_up': {'points': pu_pts, 'percentage': pu_pct},
+            'less_than_10_ft': {'points': round(lt10_pts, 1), 'percentage': lt10_pct}
+        }
+            
+        # 6. Get the Opponent Defensive Ranks
+        opp_shot_type_def = {}
+        if opp_info:
+            opp_name = opp_info['opp_name']
+            # This relies on your scraper pulling the actual 'less_than_10_ft' category 
+            # using leaguedashptdefend, rather than trying to calculate it organically here.
+            opp_shot_type_def = shot_type_data.get('teams', {}).get(opp_name, {}).copy()
+            
+            # Fallbacks just in case the scraper missed the team
+            if 'catch_and_shoot' not in opp_shot_type_def: opp_shot_type_def['catch_and_shoot'] = {'rank': 15}
+            if 'pull_up' not in opp_shot_type_def: opp_shot_type_def['pull_up'] = {'rank': 15}
+            if 'less_than_10_ft' not in opp_shot_type_def: opp_shot_type_def['less_than_10_ft'] = {'rank': 15}
+
         master_data[pid] = {
             "id": pid,
             "name": row['PLAYER_NAME'],
             "team": team,
             "position": exact_pos,
             "stats": season_stats,
-            "game_log": logs_map.get(pid, []), # <--- NEW: Injects the 30-game history
+            "game_log": logs_map.get(pid, []), 
             "shooting_zones": shooting_data.get(row['PLAYER_NAME'], None),
             "assist_zones": assists_by_pid.get(pid, None),
             "opp_assist_zones": opp_assist_zones,
             "opp_assist_zones_positional": opp_assist_zones_positional,
             "opp_def_zones": opp_def_zones,
             "opp_def_zones_positional": opp_def_zones_positional,
+            "shot_type_analysis": {
+                "player": player_shot_type,
+                "opp_def": opp_shot_type_def
+            },
             "props": {}
         }
 
@@ -310,5 +358,6 @@ if __name__ == "__main__":
         f"{base}/opp_assist_zones.json",
         f"{base}/opp_def_zones.json",
         f"{base}/nba_dashboard_games.json",
+        f"{base}/shot_type_analysis.json",
         f"{base}/master_feed.json"
     )
