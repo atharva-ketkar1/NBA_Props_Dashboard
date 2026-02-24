@@ -18,6 +18,8 @@ from scrapers import assist_zones as assist_zones
 from scrapers import opp_assist_zones as opp_assist_zones
 from scrapers import opp_def_zones as opp_def_zones
 from scrapers import shot_type_analysis as shot_type_analysis
+from scrapers.archive import old_assist_zones as old_assist_zones
+from scrapers.archive import old_opp_assist_zones as old_opp_assist_zones
 from utils import aggregator
 import json
 
@@ -82,20 +84,6 @@ def run_shooting_zones():
     with open(SHOOTING_PATH, "w") as f:
         json.dump(data, f, indent=4)
     return f"Shooting Zones: {len(data)} players"
-
-# def run_assist_zones():
-#     print("   Starting Assist Zones...")
-#     data = assist_zones.get_assist_zones_data()
-#     with open(ASSISTS_PATH, "w") as f:
-#         json.dump(data, f, indent=4)
-#     return f"Assist Zones: {len(data)} players"
-
-# def run_opp_assist_zones():
-#     print("   Starting Opponent Assist Zones...")
-#     data = opp_assist_zones.get_opp_assist_zones_data()
-#     with open(OPP_ASSIST_PATH, "w") as f:
-#         json.dump(data, f, indent=4)
-#     return f"Opp Assist Zones: {len(data)} teams"
 
 def run_assist_zones():
     print("   Starting Assist Zones...")
