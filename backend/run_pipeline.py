@@ -126,8 +126,8 @@ def main():
             executor.submit(run_logs),
             executor.submit(run_schedule),
             executor.submit(run_shooting_zones),
-            #executor.submit(run_assist_zones),
-            #executor.submit(run_opp_assist_zones),
+            executor.submit(run_assist_zones),
+            executor.submit(run_opp_assist_zones),
             executor.submit(run_opp_def_zones),
             executor.submit(run_shot_type_analysis)
         ]
