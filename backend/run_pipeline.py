@@ -83,6 +83,20 @@ def run_shooting_zones():
         json.dump(data, f, indent=4)
     return f"Shooting Zones: {len(data)} players"
 
+# def run_assist_zones():
+#     print("   Starting Assist Zones...")
+#     data = assist_zones.get_assist_zones_data()
+#     with open(ASSISTS_PATH, "w") as f:
+#         json.dump(data, f, indent=4)
+#     return f"Assist Zones: {len(data)} players"
+
+# def run_opp_assist_zones():
+#     print("   Starting Opponent Assist Zones...")
+#     data = opp_assist_zones.get_opp_assist_zones_data()
+#     with open(OPP_ASSIST_PATH, "w") as f:
+#         json.dump(data, f, indent=4)
+#     return f"Opp Assist Zones: {len(data)} teams"
+
 def run_assist_zones():
     print("   Starting Assist Zones...")
     data = assist_zones.get_assist_zones_data()

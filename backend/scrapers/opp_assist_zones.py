@@ -1,62 +1,63 @@
-import pandas as pd
 import requests
 import json
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-def fetch_opponent_assists_allowed(season="2025-26"):
-    """Fetches Opponent Assists Allowed by Zone for all 30 teams in a single request."""
-    url = "https://api.pbpstats.com/get-totals/nba"
+def fetch_defensive_shot_locations(season="2024-25"):
+    """Fetches Opponent Field Goals Made by Zone for all 30 teams."""
+    url = "https://stats.nba.com/stats/leaguedashteamshotlocations"
     
-    # By using Type="Opponent", we get Defensive stats (Assists Allowed by the team)
     params = {
-        "Season": season,
-        "SeasonType": "Regular Season",
-        "Type": "Opponent"
+        "DistanceRange": "By Zone", "LastNGames": "0", "LeagueID": "00", "MeasureType": "Opponent", 
+        "Month": "0", "OpponentTeamID": "0", "PaceAdjust": "N", "PerMode": "Totals", 
+        "Period": "0", "PlusMinus": "N", "Rank": "N", "Season": "2024-25",
+        "SeasonType": "Regular Season", "TeamID": "0",
     }
     
     headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://api.pbpstats.com",
-        "Referer": "https://api.pbpstats.com/docs",
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/141.0.0.0 Safari/537.36"
-        ),
-        "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"macOS"',
+        "accept": "application/json, text/plain, */*",
+        "accept-encoding": "gzip, deflate, br, zstd",
+        "accept-language": "en-US,en;q=0.9",
+        "origin": "https://www.nba.com",
+        "referer": "https://www.nba.com/",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
     }
 
     session = requests.Session()
-    retry = Retry(connect=3, read=3, redirect=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    retry = Retry(connect=3, read=3, redirect=3, backoff_factor=1, status_forcelist=[403, 429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('https://', adapter)
 
     try:
         response = session.get(url, params=params, headers=headers, timeout=45)
         response.raise_for_status()
-        data = response.json()
+        data = response.json()["resultSets"]
         
-        # PBPStats Totals endpoint returns a list of dictionaries for all teams
-        team_stats = data.get('multi_row_table_data', [])
+        cols = data["headers"][1]["columnNames"]
+        zone_cols = [
+            "RA_FGM","RA_FGA","RA_PCT",
+            "PAINT_FGM","PAINT_FGA","PAINT_PCT",
+            "MID_FGM","MID_FGA","MID_PCT",
+            "LC3_FGM","LC3_FGA","LC3_PCT",
+            "RC3_FGM","RC3_FGA","RC3_PCT",
+            "AB3_FGM","AB3_FGA","AB3_PCT",
+            "BC_FGM","BC_FGA","BC_PCT",
+            "C3_FGM","C3_FGA","C3_PCT",
+        ]
         
+        all_cols = list(cols[:2]) + zone_cols
         results = {}
-        for team in team_stats:
-            team_name = team.get('Name')
-            if not team_name:
-                continue
-                
-            # Extract assist zones allowed by the defense
-            rim = team.get('AtRimAssists', 0)
-            mid = team.get('ShortMidRangeAssists', 0) + team.get('LongMidRangeAssists', 0)
-            corner3 = team.get('Corner3Assists', 0)
-            arc3 = team.get('Arc3Assists', 0)
+        for row in data["rowSet"]:
+            team_name = row[1]
             
-            total = rim + mid + corner3 + arc3
+            # Extract assist zones allowed by the defense mapping to NBA Stats columns
+            rim = row[2]  # RA_FGM
+            mid = row[5] + row[8]  # PAINT_FGM (non-RA) + MID_FGM
+            lc3 = row[11] # LC3_FGM
+            rc3 = row[14] # RC3_FGM
+            ab3 = row[17] # AB3_FGM
+            
+            total = rim + mid + lc3 + rc3 + ab3
             if total == 0:
                 continue
                 
@@ -64,17 +65,17 @@ def fetch_opponent_assists_allowed(season="2025-26"):
             distribution = {
                 'restricted_area': rim / total,
                 'mid_range': mid / total,
-                'left_corner': (corner3 / 2) / total,
-                'right_corner': (corner3 / 2) / total,
-                'top_key': arc3 / total
+                'left_corner': lc3 / total,
+                'right_corner': rc3 / total,
+                'top_key': ab3 / total
             }
             
             makes = {
                 'restricted_area': rim,
                 'mid_range': mid,
-                'left_corner': corner3 / 2,
-                'right_corner': corner3 / 2,
-                'top_key': arc3
+                'left_corner': lc3,
+                'right_corner': rc3,
+                'top_key': ab3
             }
             
             raw_pcts = {zone: val * 100 for zone, val in distribution.items()}
@@ -88,8 +89,6 @@ def fetch_opponent_assists_allowed(season="2025-26"):
                 zone_to_bump = sorted_zones_by_remainder[i]
                 int_pcts[zone_to_bump] += 1
                 
-            # Calculate rank per zone over teams later, but we need ranks relative to other teams
-            # So first we collect everything then rank it
             results[team_name] = {
                 "makes": makes,
                 "int_pcts": int_pcts
@@ -98,7 +97,7 @@ def fetch_opponent_assists_allowed(season="2025-26"):
         return results
         
     except Exception as e:
-        print(f"Error fetching Opponent PBPStats: {e}")
+        print(f"Error fetching Opponent NBA Stats: {e}")
         return {}
 
 def convert_to_zones(team_data):
@@ -142,38 +141,24 @@ def convert_to_zones(team_data):
         
     return final_results
 
-TEAM_ABBR_TO_FULL = {
-    "ATL": "Atlanta Hawks", "BOS": "Boston Celtics", "BKN": "Brooklyn Nets",
-    "CHA": "Charlotte Hornets", "CHI": "Chicago Bulls", "CLE": "Cleveland Cavaliers",
-    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets", "DET": "Detroit Pistons",
-    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
-    "LAC": "LA Clippers", "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies",
-    "MIA": "Miami Heat", "MIL": "Milwaukee Bucks", "MIN": "Minnesota Timberwolves",
-    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks", "OKC": "Oklahoma City Thunder",
-    "ORL": "Orlando Magic", "PHI": "Philadelphia 76ers", "PHX": "Phoenix Suns",
-    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
-    "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards"
-}
+# Standardizing city names to match dashboard expectations
+# NBA Api Returns "Los Angeles Lakers" instead of LAL, already full name
+# Wait, let's verify if NBA api returns "Los Angeles Lakers" or "L.A. Lakers".
+# Yes, "Los Angeles Lakers", "LA Clippers"
 
 def get_opp_assist_zones_data():
-    raw_data = fetch_opponent_assists_allowed()
+    raw_data = fetch_defensive_shot_locations()
     zones_data = convert_to_zones(raw_data)
-    
-    # Map abbreviations back to full names
-    mapped_data = {}
-    for team_abbr, data in zones_data.items():
-        full_name = TEAM_ABBR_TO_FULL.get(team_abbr, team_abbr)
-        mapped_data[full_name] = data
         
-    return mapped_data
+    return zones_data
 
 def main():
-    print("Fetching all opponent assist zones in a single request...")
+    print("Fetching all opponent assist zones in a single request (via NBA Stats)...")
     data = get_opp_assist_zones_data()
     print(f"Fetched defensive assist zones for {len(data)} teams.\n")
     
     # Testing exactly for the LA Lakers
-    test_team = "Los Angeles Lakers"
+    test_team = "Detroit Pistons"
     if test_team in data:
         print(f"--- {test_team} (Assists Allowed) ---")
         print(json.dumps(data[test_team].get("ALL", {}), indent=2))
