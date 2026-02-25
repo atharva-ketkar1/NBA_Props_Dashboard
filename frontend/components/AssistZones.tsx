@@ -12,10 +12,15 @@ function getZoneColor(percentageString: string) {
 
 function getOppZoneColor(rankStr: string | number) {
   const rank = typeof rankStr === 'string' ? parseInt(rankStr) : rankStr;
-  if (!rank) return '#121212';
-  if (rank <= 10) return '#E53E3E'; // Red (Hard)
-  if (rank <= 20) return '#F4C51E'; // Yellow (Average)
-  return '#B0BB5A'; // Green (Easy)
+
+  if (!rank || rank < 1 || rank > 30) return '#121212'; // Fallback for missing/bad data
+
+  // PropsMadness 5-Tier Scale (1-30)
+  if (rank <= 6) return '#E53E3E';       // Red (Very Tough)
+  if (rank <= 12) return '#ED8936';      // Orange (Tough)
+  if (rank <= 18) return '#F4C51E';      // Yellow (Neutral)
+  if (rank <= 24) return '#CDE238';      // Light Green (Favorable)
+  return '#B0BB5A';                      // Green (Highly Favorable)
 }
 
 function processZoneData(zoneData: any, isOppData: boolean = false) {
@@ -47,15 +52,17 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
   const pPct = parseInt(pPctStr.replace('%', '')) || 0;
   const oRank = typeof oRankStr === 'string' ? parseInt(oRankStr) : oRankStr;
 
-  if (!oRank) return '#121212';
+  if (!oRank || oRank < 1 || oRank > 30) return '#121212';
 
-  // If player doesn't shoot much here (< 15%), it's a neutral matchup (Yellow)
+  // If player doesn't shoot/assist much here (< 15%), it remains a neutral matchup
   if (pPct < 15) return '#F4C51E';
 
-  // Otherwise, it aligns with opponent defense difficulty
-  if (oRank <= 10) return '#ED8936'; // Orange (Tough)
-  if (oRank <= 20) return '#F4C51E'; // Yellow (Average)
-  return '#B0BB5A'; // Green (Easy)
+  // Otherwise, it perfectly mirrors the 5-tier opponent defense difficulty
+  if (oRank <= 6) return '#E53E3E';       // Red 
+  if (oRank <= 12) return '#ED8936';      // Orange 
+  if (oRank <= 18) return '#F4C51E';      // Yellow 
+  if (oRank <= 24) return '#CDE238';      // Light Green 
+  return '#B0BB5A';                       // Green 
 }
 
 function processVsZoneData(pZoneData: any, oZoneData: any) {

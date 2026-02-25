@@ -12,10 +12,15 @@ function getZoneColor(percentageString: string) {
 
 function getOppZoneColor(rankStr: string | number) {
   const rank = typeof rankStr === 'string' ? parseInt(rankStr) : rankStr;
-  if (!rank) return '#121212';
-  if (rank <= 10) return '#E53E3E'; // Red (Hard)
-  if (rank <= 20) return '#F4C51E'; // Yellow (Average)
-  return '#B0BB5A'; // Green (Easy)
+
+  if (!rank || rank < 1 || rank > 30) return '#121212'; // Fallback
+
+  // PropsMadness 5-Tier Linear Scale
+  if (rank <= 6) return '#E53E3E';       // Red (Ranks 1-6)
+  if (rank <= 12) return '#ED8936';      // Orange (Ranks 7-12)
+  if (rank <= 18) return '#F4C51E';      // Yellow (Ranks 13-18)
+  if (rank <= 24) return '#B0BB5A';      // Olive/Light Green (Ranks 19-24)
+  return '#16a34a';                      // True Green (Ranks 25-30)
 }
 
 function processZoneData(zoneData: any, isOppData: boolean = false) {
@@ -59,15 +64,36 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
   const pPct = parseInt(pPctStr.replace('%', '')) || 0;
   const oRank = typeof oRankStr === 'string' ? parseInt(oRankStr) : oRankStr;
 
-  if (!oRank) return '#121212';
+  if (!oRank || oRank < 1 || oRank > 30) return '#121212';
 
-  // If player doesn't shoot much here (< 15%), it's a neutral matchup (Yellow)
-  if (pPct < 15) return '#F4C51E';
+  // 1. Establish the pure defensive Base Score (1 = Hard, 5 = Easy)
+  let baseScore = 3;
+  if (oRank <= 6) baseScore = 1;
+  else if (oRank <= 12) baseScore = 2;
+  else if (oRank <= 18) baseScore = 3;
+  else if (oRank <= 24) baseScore = 4;
+  else baseScore = 5;
 
-  // Otherwise, it aligns with opponent defense difficulty
-  if (oRank <= 10) return '#ED8936'; // Orange (Tough)
-  if (oRank <= 20) return '#F4C51E'; // Yellow (Average)
-  return '#B0BB5A'; // Green (Easy)
+  // 2. Apply "Gravity to Neutral" based on Player Shot Frequency
+  if (pPct < 10) {
+    // Very low volume: The matchup doesn't matter, force to Neutral
+    baseScore = 3;
+  } else if (pPct < 30) {
+    // Standard volume (< 30%): Soften the absolute extremes toward neutral
+    if (baseScore === 1) baseScore = 2; // Extreme Red softens to Orange
+    if (baseScore === 5) baseScore = 4; // Extreme Green softens to standard Green
+  }
+  // High volume (30%+) keeps the true base score intact
+
+  // 3. Map the final adjusted score to YOUR ORIGINAL hex codes
+  switch (baseScore) {
+    case 1: return '#E53E3E'; // Red (Extreme Tough)
+    case 2: return '#ED8936'; // Orange (Tough)
+    case 3: return '#F4C51E'; // Yellow (Neutral)
+    case 4: return '#B0BB5A'; // Green (Favorable)
+    case 5: return '#B0BB5A'; // Green (Extreme Favorable - fallback to your single green)
+    default: return '#F4C51E'; // Yellow fallback
+  }
 }
 
 function processVsZoneData(pZoneData: any, oZoneData: any) {
