@@ -2,25 +2,27 @@ import React, { useState } from 'react';
 import { Info } from 'lucide-react';
 import { Player } from '../types';
 
+import { colors } from '../utils/propsmadness_colors';
+
 function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
-  if (pct >= 30) return '#B0BB5A'; // Green
-  if (pct >= 15) return '#F4C51E'; // Yellow
-  if (pct >= 5) return '#ED8936';  // Orange
-  return '#E53E3E'; // Red
+  if (pct >= 30) return colors.courtGreen;
+  if (pct >= 15) return colors.courtYellow;
+  if (pct >= 5) return colors.courtOrange;
+  return colors.courtRed;
 }
 
 function getOppZoneColor(rankStr: string | number) {
   const rank = typeof rankStr === 'string' ? parseInt(rankStr) : rankStr;
 
-  if (!rank || rank < 1 || rank > 30) return '#121212'; // Fallback
+  if (!rank || rank < 1 || rank > 30) return colors.neutral1; // Fallback for missing/bad data
 
-  // PropsMadness 5-Tier Linear Scale
-  if (rank <= 6) return '#E53E3E';       // Red (Ranks 1-6)
-  if (rank <= 12) return '#ED8936';      // Orange (Ranks 7-12)
-  if (rank <= 18) return '#F4C51E';      // Yellow (Ranks 13-18)
-  if (rank <= 24) return '#B0BB5A';      // Olive/Light Green (Ranks 19-24)
-  return '#16a34a';                      // True Green (Ranks 25-30)
+  // PropsMadness 5-Tier Scale (1-30)
+  if (rank <= 6) return colors.courtRed;         // Red (Very Tough)
+  if (rank <= 12) return colors.courtOrange;     // Orange (Tough)
+  if (rank <= 18) return colors.courtYellow;     // Yellow (Neutral)
+  if (rank <= 24) return colors.courtLightGreen; // Light Green (Favorable)
+  return colors.courtGreen;                      // Green (Highly Favorable)
 }
 
 function processZoneData(zoneData: any, isOppData: boolean = false) {
@@ -56,7 +58,7 @@ const CourtShape = ({ viewData }: { viewData: any }) => (
     <path id="zone-restricted-area" d="M45.12 0H47V24.7135C47 37.5838 39.5 50 23.5 50C7.5 50 0 37.5838 0 24.7135V7.03101e-06L45.12 0Z" fill={viewData.restricted_area.color} transform="translate(106 0)"></path>
     <path id="zone-corner-left" d="M16 50V0H0V50H16Z" fill={viewData.left_corner.color}></path>
     <path id="zone-corner-right" d="M16 50V0H0V50H16Z" fill={viewData.right_corner.color} transform="translate(245 0)"></path>
-    <path id="court-lines" fillRule="evenodd" clipRule="evenodd" d="M228 2V1H227H157.881H156.881V2V98.9726H70.055V2V1H69.055H2H1V2V50.9863C1 106.785 46.7433 152 103.147 152H125.853C182.257 152 228 106.785 228 50.9863V2Z" strokeWidth="2" fill="none" stroke="#1A202C" transform="translate(16 -2)"></path>
+    <path id="court-lines" fillRule="evenodd" clipRule="evenodd" d="M228 2V1H227H157.881H156.881V2V98.9726H70.055V2V1H69.055H2H1V2V50.9863C1 106.785 46.7433 152 103.147 152H125.853C182.257 152 228 106.785 228 50.9863V2Z" strokeWidth="2" fill="none" stroke={colors.borderMedium} transform="translate(16 -2)"></path>
   </svg>
 );
 
@@ -64,9 +66,9 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
   const pPct = parseInt(pPctStr.replace('%', '')) || 0;
   const oRank = typeof oRankStr === 'string' ? parseInt(oRankStr) : oRankStr;
 
-  if (!oRank || oRank < 1 || oRank > 30) return '#121212';
+  if (!oRank || oRank < 1 || oRank > 30) return colors.neutral1;
 
-  // 1. Establish the pure defensive Base Score (1 = Hard, 5 = Easy)
+  // 1. Establish the pure defensive Base Score
   let baseScore = 3;
   if (oRank <= 6) baseScore = 1;
   else if (oRank <= 12) baseScore = 2;
@@ -74,25 +76,24 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
   else if (oRank <= 24) baseScore = 4;
   else baseScore = 5;
 
-  // 2. Apply "Gravity to Neutral" based on Player Shot Frequency
+  // 2. Apply "Gravity to Neutral" based on Player Volume
   if (pPct < 10) {
-    // Very low volume: The matchup doesn't matter, force to Neutral
-    baseScore = 3;
+    baseScore = 3; // Force Neutral
   } else if (pPct < 30) {
-    // Standard volume (< 30%): Soften the absolute extremes toward neutral
-    if (baseScore === 1) baseScore = 2; // Extreme Red softens to Orange
-    if (baseScore === 5) baseScore = 4; // Extreme Green softens to standard Green
+    // Soften extremes by 1 tier
+    if (baseScore === 1) baseScore = 2;
+    if (baseScore === 5) baseScore = 4;
   }
-  // High volume (30%+) keeps the true base score intact
+  // High volume (pPct >= 30) keeps the true base score intact
 
-  // 3. Map the final adjusted score to YOUR ORIGINAL hex codes
+  // 3. Map to final SSOT color
   switch (baseScore) {
-    case 1: return '#E53E3E'; // Red (Extreme Tough)
-    case 2: return '#ED8936'; // Orange (Tough)
-    case 3: return '#F4C51E'; // Yellow (Neutral)
-    case 4: return '#B0BB5A'; // Green (Favorable)
-    case 5: return '#B0BB5A'; // Green (Extreme Favorable - fallback to your single green)
-    default: return '#F4C51E'; // Yellow fallback
+    case 1: return colors.courtRed;
+    case 2: return colors.courtOrange;
+    case 3: return colors.courtYellow;
+    case 4: return colors.courtLightGreen;
+    case 5: return colors.courtGreen;
+    default: return colors.courtYellow;
   }
 }
 
@@ -161,7 +162,7 @@ export const ShootingZones = ({ player }: { player: Player | any }) => {
   const vsView = processVsZoneData((player as any)?.shooting_zones, (player as any)?.opp_def_zones);
 
   return (
-    <div className="bg-[#0a0a0a] rounded-xl p-5 w-full border border-gray-800/50">
+    <div className="bg-black rounded-xl p-5 w-full">
       <div className="flex justify-between items-start mb-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
@@ -171,10 +172,10 @@ export const ShootingZones = ({ player }: { player: Player | any }) => {
           <div className="text-[12px] text-gray-400 font-medium">25/26 Season</div>
         </div>
 
-        <div className="flex bg-[#0f0f11] rounded-[10px] p-1 border border-gray-800 items-center">
+        <div className="flex bg-bgCanvas rounded-[10px] p-1 border border-borderMuted items-center">
           <button
             onClick={() => setActiveTab('player')}
-            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'player' ? 'text-white bg-[#334155] shadow-sm' : 'text-gray-400 hover:text-white'
+            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'player' ? 'text-white bg-bgElevationAccent shadow-sm' : 'text-fgMuted hover:text-fixedWhite'
               }`}
           >
             Player
@@ -182,7 +183,7 @@ export const ShootingZones = ({ player }: { player: Player | any }) => {
 
           <button
             onClick={() => setActiveTab('vs')}
-            className={`px-2 py-1 text-[11px] font-bold rounded-[6px] mx-1 h-fit transition-all ${activeTab === 'vs' ? 'text-white bg-[#334155]' : 'text-gray-500 hover:text-gray-300'
+            className={`px-2 py-1 text-[11px] font-bold rounded-[6px] mx-1 h-fit transition-all ${activeTab === 'vs' ? 'text-white bg-bgElevationAccent' : 'text-fgDisabled hover:text-fgMuted'
               }`}
           >
             vs
@@ -190,7 +191,7 @@ export const ShootingZones = ({ player }: { player: Player | any }) => {
 
           <button
             onClick={() => setActiveTab('opp')}
-            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'opp' ? 'text-white bg-[#334155] shadow-sm' : 'text-gray-400 hover:text-white'
+            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'opp' ? 'text-white bg-bgElevationAccent shadow-sm' : 'text-fgMuted hover:text-fixedWhite'
               }`}
           >
             Opp Defense

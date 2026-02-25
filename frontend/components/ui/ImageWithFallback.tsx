@@ -24,7 +24,7 @@ export const ImageWithFallback: React.FC<ImageWithFallbackProps> = ({
             return <img src={fallbackSrc} alt={alt} className={className} {...props} />;
         }
         return (
-            <div className={`flex items-center justify-center bg-[#18181b] text-gray-500 ${className}`}>
+            <div className={`flex items-center justify-center bg-bgElevation1 text-gray-500 ${className}`}>
                 <ImageOff className="w-1/2 h-1/2" />
             </div>
         );

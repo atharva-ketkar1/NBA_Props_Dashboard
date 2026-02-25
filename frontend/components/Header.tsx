@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { Player } from '../types';
 import { HelpCircle, SlidersHorizontal, ChevronRight, Ban } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
-import { TEAM_IDS } from '../constants';
+import { TEAM_IDS, TEAM_COLORS } from '../constants';
 
 interface HeaderProps {
   player?: Player;
@@ -38,14 +38,14 @@ const SPORTSBOOKS = [
 const StatItem = ({ label, value, diff }: { label: string, value: string | number, diff?: string | number }) => {
   const diffVal = typeof diff === 'string' ? parseFloat(diff) : (diff || 0);
   const isPositive = diffVal > 0;
-  const diffClass = isPositive ? 'text-[#22c55e]' : (diffVal < 0 ? 'text-[#ef4444]' : 'text-gray-500');
+  const diffClass = isPositive ? 'text-green500' : (diffVal < 0 ? 'text-red500' : 'text-gray-500');
   const diffText = diffVal > 0 ? `+${diffVal.toFixed(1)}` : (diffVal === 0 ? '-' : `${diffVal.toFixed(1)}`);
 
   return (
     // REDUCED: px-4 -> px-3
     <div className="flex flex-col items-center px-1 lg:px-2 shrink-0">
       {/* REDUCED: text-[10px] -> text-[9px] */}
-      <span className="text-[9px] text-[#71717a] uppercase tracking-wider font-bold mb-0.5 whitespace-nowrap">{label}</span>
+      <span className="text-[9px] text-fgSubtle uppercase tracking-wider font-bold mb-0.5 whitespace-nowrap">{label}</span>
       {/* REDUCED: text-[20px] -> text-[18px] */}
       <span className="text-[18px] font-bold text-white leading-none mb-0.5">{typeof value === 'number' ? value.toFixed(1) : value}</span>
       {/* REDUCED: text-[11px] -> text-[10px] */}
@@ -132,22 +132,26 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
   const currentSbLogo = SPORTSBOOKS.find(sb => sb.id === activeSportsbook)?.logo;
 
-  // FIX: Team Logo Logic using TEAM_IDS
   const teamId = player && TEAM_IDS[player.team] ? TEAM_IDS[player.team] : null;
   const teamLogoUrl = teamId
     ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`
     : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${player?.team}.svg`;
 
+  const teamColors = player && TEAM_COLORS[player.team] ? TEAM_COLORS[player.team] : ["#27272a", "#18181b"];
+
+  const gradientStyle = {
+    background: `linear-gradient(to top right, ${teamColors[0]}, ${teamColors[1]})`,
+    padding: '2px'
+  };
 
   if (!player) return <div className="p-4 text-white">Select a player</div>;
 
   return (
-    // FIX: Removed overflow-hidden to allow dropdown to show
-    <div className="bg-[#050505] pt-0 px-0 pb-0 w-full rounded-t-xl border-b border-[#27272a]">
+    <div className="bg-black pt-0 px-0 pb-0 w-full rounded-t-xl">
 
       {/* Top Nav Tabs */}
-      <div className="relative w-full border-b border-[#27272a] mb-0 px-5">
-        <div className="flex items-center justify-between gap-1 text-[11px] xl:text-[12px] font-bold text-[#71717a] pb-3 pt-3 w-full">
+      <div className="relative w-full border-b border-borderMedium mb-0 px-5">
+        <div className="flex items-center justify-between gap-1 text-[11px] xl:text-[12px] font-bold text-fgSubtle pb-3 pt-3 w-full">
           {TAB_ORDER.map((tab, i) => {
             const isActive = tab === activeTab;
             const tabKey = STAT_LABELS[tab];
@@ -163,7 +167,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                   className={`
                         whitespace-nowrap transition-colors border-b-[2px] -mb-[14px] pb-3 flex items-center gap-1.5
                         ${isActive ? 'text-white border-white' : 'border-transparent'}
-                        ${hasTabLine ? 'cursor-pointer hover:text-white' : 'cursor-not-allowed opacity-40 hover:text-[#71717a]'}
+                        ${hasTabLine ? 'cursor-pointer hover:text-white' : 'cursor-not-allowed opacity-40 hover:text-fgSubtle'}
                     `}
                 >
                   {tab}
@@ -177,45 +181,47 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
       </div>
 
       {/* Main Stats Row */}
-      <div className="flex flex-col xl:flex-row items-center w-full bg-[#050505] relative z-30">
+      <div className="flex flex-col xl:flex-row items-center w-full bg-neutral950 relative z-30">
 
         {/* Section 1: Player Info */}
         {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex items-center gap-3 lg:gap-4 px-3 lg:px-4 py-3.5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto justify-start">
+        <div className="flex items-center gap-3 lg:gap-4 px-3 lg:px-4 py-3.5 border-b xl:border-b-0 border-borderMedium w-full xl:w-auto justify-start">
           <div className="relative shrink-0 w-[58px] h-[58px]">
-            <div className="w-full h-full rounded-full border-[2px] border-[#27272a] overflow-hidden bg-[#18181b]">
-              <ImageWithFallback
-                src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
-                alt={player.name}
-                className="w-full h-full object-cover transform scale-125 pt-1.5"
-              />
-            </div>
-            {/* FIX: Team Logo moved to Top Right Position, overlapping border */}
-            <div className="absolute -top-1 -right-1 bg-[#09090b] rounded-full p-[2px] z-10 w-6 h-6 flex items-center justify-center">
-              <div className="w-full h-full rounded-full flex items-center justify-center overflow-hidden border border-[#27272a] bg-[#18181b]">
-                {/* FIX: Use teamLogoUrl with proper ID */}
-                <img
-                  src={teamLogoUrl}
-                  alt={player.team}
-                  width={24}
-                  height={24}
-                  className="absolute top-0 w-6 h-6 object-contain bg-transparent"
-                  loading="eager"
+            <div
+              className="w-full h-full rounded-full overflow-hidden"
+              style={gradientStyle}
+            >
+              <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation1">
+                <ImageWithFallback
+                  src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
+                  alt={player.name}
+                  className="w-full h-full object-cover transform scale-125 pt-1.5"
                 />
               </div>
+            </div>
+            {/* FIX: Team Logo moved to Top Right Position, overlapping border */}
+            <div className="absolute -top-1 -right-1 z-10 w-6 h-6 flex items-center justify-center pointer-events-none drop-shadow-md">
+              <img
+                src={teamLogoUrl}
+                alt={player.team}
+                width={24}
+                height={24}
+                className="w-full h-full object-contain"
+                loading="eager"
+              />
             </div>
           </div>
 
           <div className="flex flex-col gap-1 min-w-0">
             <div className="flex items-baseline gap-2">
               <h1 className="text-xl font-bold text-white tracking-tight whitespace-nowrap truncate leading-none">
-                {player.name} <span className="text-[#52525b] font-bold text-sm ml-0.5">{player.position}</span>
+                {player.name} <span className="text-neutral600 font-bold text-sm ml-0.5">{player.position}</span>
               </h1>
             </div>
 
             <div className="flex items-center select-none"> {/* Added select-none to prevent selection during hover */}
               {/* FIX: Improved Hover Persistence via padding bridge */}
-              <div className={`bg-[#18181b] rounded-lg pl-1.5 pr-2.5 py-1.5 flex items-center gap-3 border ${hasLine ? 'border-[#27272a] hover:border-[#3f3f46]' : 'border-red-900/30'} relative group cursor-pointer transition-colors pb-1.5`}>
+              <div className={`bg-bgElevation1 rounded-lg pl-1.5 pr-2.5 py-1.5 flex items-center gap-3 border ${hasLine ? 'border-transparent hover:bg-bgElevation1/50' : 'border-red-900/30'} relative group cursor-pointer transition-colors pb-1.5`}>
 
                 {/* FIX: Restored Sportsbook Logo (Full Color if possible, or standardized container) */}
                 {/* User asked for the LOGO back, removing the blue box and invert if it hides colors */}
@@ -225,16 +231,16 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
                 {hasLine ? (
                   <span className="text-white font-bold text-[13px] whitespace-nowrap leading-none">
-                    {line} <span className="text-[#a1a1aa] font-medium text-[11px] ml-0.5">{STAT_LABELS[activeTab] === 'PTS' ? 'Pts' : STAT_LABELS[activeTab]}</span>
+                    {line} <span className="text-neutral400 font-medium text-[11px] ml-0.5">{STAT_LABELS[activeTab] === 'PTS' ? 'Pts' : STAT_LABELS[activeTab]}</span>
                   </span>
                 ) : (
                   <span className="text-red-500 font-bold text-[10px] whitespace-nowrap flex items-center gap-1">No Line</span>
                 )}
 
                 {hasLine && (
-                  <div className="flex gap-2.5 text-[11px] font-bold ml-0 border-l border-[#3f3f46] pl-3 whitespace-nowrap leading-none">
-                    <span className="text-[#52525b]">O <span className="text-[#22c55e]">{odds.over}</span></span>
-                    <span className="text-[#52525b]">U <span className="text-[#ef4444]">{odds.under}</span></span>
+                  <div className="flex gap-2.5 text-[11px] font-bold ml-0 border-l border-borderMuted pl-3 whitespace-nowrap leading-none">
+                    <span className="text-neutral600">O <span className="text-green500">{odds.over}</span></span>
+                    <span className="text-neutral600">U <span className="text-red500">{odds.under}</span></span>
                   </div>
                 )}
 
@@ -243,7 +249,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                     We need an invisible bridge covering that gap.
                     Added `before:h-4 before:-top-4` to bridge the gap properly.
                 */}
-                <div className="absolute top-full left-0 mt-2 bg-[#18181b] border border-[#27272a] rounded-md shadow-xl z-50 flex-col gap-1 p-1 hidden group-hover:flex min-w-[160px] 
+                <div className="absolute top-full left-0 mt-2 bg-bgElevation1 border border-borderMedium rounded-md shadow-xl z-50 flex-col gap-1 p-1 hidden group-hover:flex min-w-[160px] 
                                 before:absolute before:-top-4 before:left-0 before:w-full before:h-4 before:bg-transparent">
                   {SPORTSBOOKS.map(sb => {
                     const sbProp = player.props?.[statKey]?.[sb.id];
@@ -260,7 +266,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                         }}
                         className={`
                                         flex items-center gap-3 px-2 py-2 rounded text-xs font-bold text-left transition-colors relative
-                                        ${isSelected ? 'bg-[#27272a] text-white' : 'text-gray-400 hover:text-white hover:bg-[#27272a]/50'}
+                                        ${isSelected ? 'bg-borderMedium text-white' : 'text-gray-400 hover:text-white hover:bg-borderMedium/50'}
                                         ${!sbHasLine ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}
                                     `}
                       >
@@ -279,16 +285,16 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
         {/* Section 2: Hit Rate */}
         {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex flex-col items-center justify-center px-4 lg:px-6 py-3.5 border-b xl:border-b-0 xl:border-r border-[#27272a] w-full xl:w-auto shrink-0 min-w-[140px]">
-          <span className="text-[10px] text-[#71717a] font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
+        <div className="flex flex-col items-center justify-center px-4 lg:px-6 py-3.5 border-b xl:border-b-0 border-borderMedium w-full xl:w-auto shrink-0 min-w-[140px]">
+          <span className="text-[10px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
           {hasLine ? (
-            <span className={`text-[24px] font-bold tracking-tight leading-none mb-1 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+            <span className={`text-[24px] font-bold tracking-tight leading-none mb-1 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'}`}>
               {hitRateInfo?.rate}% <span className={`text-[18px] opacity-90`}>({hitRateInfo?.hits}/{hitRateInfo?.total})</span>
             </span>
           ) : (
-            <span className="text-[24px] font-bold text-[#27272a] leading-none mb-1">--.--%</span>
+            <span className="text-[24px] font-bold text-borderMedium leading-none mb-1">--.--%</span>
           )}
-          <span className="text-[10px] text-[#52525b] font-medium whitespace-nowrap">
+          <span className="text-[10px] text-neutral600 font-medium whitespace-nowrap">
             {hitRateInfo?.total || 0} of {hitRateInfo?.total || 0} games
           </span>
         </div>
@@ -304,10 +310,9 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         </div>
 
         {/* Section 4: Actions */}
-        {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex items-center gap-4 px-4 py-3.5 xl:border-l border-[#27272a] w-full xl:w-auto justify-end shrink bg-[#050505]">
-          <HelpCircle className="w-5 h-5 text-[#3f3f46] cursor-pointer hover:text-[#a1a1aa] transition-colors shrink-0" />
-          <button className="flex items-center gap-2 bg-[#050505] border border-[#27272a] hover:bg-[#18181b] hover:border-[#3f3f46] text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
+        <div className="flex items-center gap-4 px-4 py-3.5 border-borderMedium w-full xl:w-auto justify-end shrink bg-black">
+          <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" />
+          <button className="flex items-center gap-2 bg-black border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
             <SlidersHorizontal className="w-3.5 h-3.5" />
             Filters
           </button>

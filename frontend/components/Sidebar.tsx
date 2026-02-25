@@ -27,7 +27,7 @@ const RealTeamLogo = ({ teamId, tricode, large = false }: { teamId: number, tric
     // Keeping it simple with the Mock's visual style.
     return (
         <div className="flex flex-col items-center justify-center gap-1">
-            <div className={`${large ? 'w-10 h-10' : 'w-8 h-8'} rounded-full flex items-center justify-center font-bold text-white border border-white/10 overflow-hidden bg-[#18181b]`}>
+            <div className={`${large ? 'w-10 h-10' : 'w-8 h-8'} flex items-center justify-center font-bold text-white overflow-hidden`}>
                 <ImageWithFallback
                     src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`}
                     fallbackComponent={<span className="text-[8px]">{tricode}</span>}
@@ -68,10 +68,10 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
     return (
         <div
             onClick={onClick}
-            className={`flex items-center justify-between p-3 border-b border-[#27272a] bg-[#09090b] hover:bg-[#121214] transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-[#18181b]' : ''}`}
+            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 hover:bg-bgCanvas transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-bgElevation1' : ''}`}
         >
             <div className="flex items-center gap-3">
-                <div className="relative w-10 h-10 rounded-full border border-[#27272a] overflow-hidden bg-[#18181b]">
+                <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1">
                     <ImageWithFallback
                         src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
                         alt={player.name}
@@ -94,16 +94,16 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
                             </div>
                             <span className="text-white font-bold text-xs">{line}</span>
                             <div className="flex items-center gap-1">
-                                <div className="bg-[#18181b] px-1.5 py-0.5 rounded text-[10px] font-bold border border-[#27272a]">
-                                    <span className="text-[#71717a]">O</span> <span className="text-[#22c55e]">{prop?.over || '-'}</span>
+                                <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
+                                    <span className="text-fgSubtle">O</span> <span className="text-green500">{prop?.over || '-'}</span>
                                 </div>
-                                <div className="bg-[#18181b] px-1.5 py-0.5 rounded text-[10px] font-bold border border-[#27272a]">
-                                    <span className="text-[#71717a]">U</span> <span className="text-[#ef4444]">{prop?.under || '-'}</span>
+                                <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
+                                    <span className="text-fgSubtle">U</span> <span className="text-red500">{prop?.under || '-'}</span>
                                 </div>
                             </div>
                         </div>
                     ) : (
-                        <div className="flex items-center gap-1.5 bg-[#27272a] px-2 py-1 rounded-[4px] text-[10px] font-bold text-[#a1a1aa] border border-transparent w-fit mt-0.5">
+                        <div className="flex items-center gap-1.5 bg-borderMedium px-2 py-1 rounded-[4px] text-[10px] font-bold text-neutral400 border border-transparent w-fit mt-0.5">
                             <Lock className="w-2.5 h-2.5" />
                             UNLOCK
                         </div>
@@ -112,7 +112,7 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
             </div>
 
             {/* Plus Button / Active Indicator */}
-            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isActive ? 'bg-[#007aff] text-white' : (isPlusYellow ? 'bg-[#facc15] hover:bg-yellow-400 text-black' : 'bg-[#ef4444] text-white')} self-start mt-0.5`}>
+            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
                 {isActive ? <LockOpen className="w-3 h-3" /> : <Plus className="w-3 h-3 font-bold" strokeWidth={4} />}
             </button>
         </div>
@@ -126,14 +126,14 @@ interface ProcessedGame extends Game {
 const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, onSelectPlayer: (id: number) => void, statFilter: string }> = ({
     game, isExpanded, onToggle, activePlayerId, onSelectPlayer, statFilter
 }) => (
-    <div className={`transition-all duration-200 border rounded-lg overflow-hidden relative ${isExpanded ? 'bg-[#000000] border-[#27272a] mb-2' : 'bg-[#121214] hover:bg-[#1f1f22] border-transparent hover:border-border'}`}>
+    <div className={`transition-all duration-200 border rounded-lg overflow-hidden relative ${isExpanded ? 'bg-black border-borderMedium mb-2' : 'bg-bgCanvas hover:bg-bgSubtle border-transparent hover:border-border'}`}>
 
         {/* Active Game Indicator Line */}
-        {isExpanded && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-[#3b82f6] z-10"></div>}
+        {isExpanded && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-10"></div>}
 
         {/* Game Header */}
         <div
-            className={`p-3 flex items-center justify-between cursor-pointer ${isExpanded ? 'bg-[#050505] pb-4 border-b border-[#27272a] pl-4' : ''}`}
+            className={`p-3 flex items-center justify-between cursor-pointer ${isExpanded ? 'bg-neutral950 pb-4 border-b border-borderMedium pl-4' : ''}`}
             onClick={onToggle}
         >
             <div className="flex items-center gap-4 w-full justify-between">
@@ -142,7 +142,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                 </div>
 
                 <div className="flex flex-col items-center min-w-[80px]">
-                    <span className={`${isExpanded ? 'text-xs text-[#a1a1aa] font-medium' : 'text-[10px] text-gray-500 font-medium'}`}>
+                    <span className={`${isExpanded ? 'text-xs text-neutral400 font-medium' : 'text-[10px] text-gray-500 font-medium'}`}>
                         {game.is_live ? <span className="text-green-500 animate-pulse">LIVE</span> : (isExpanded ? 'Vs' : '@')}
                     </span>
                     <span className={`${isExpanded ? 'text-sm text-white' : 'text-xs text-gray-300'} font-bold whitespace-nowrap`}>
@@ -152,7 +152,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                         }
                     </span>
                     {!game.is_live && !game.is_final && (
-                        <span className="text-[10px] text-[#71717a] font-medium mt-0.5">
+                        <span className="text-[10px] text-fgSubtle font-medium mt-0.5">
                             {game.game_time_et}
                         </span>
                     )}
@@ -171,7 +171,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                     game.players.map(player => (
                         <div key={player.id} className="relative">
                             {/* Selected Player Blue Line */}
-                            {player.id === activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-[#3b82f6] z-20"></div>}
+                            {player.id === activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
                             <PlayerRow
                                 player={player}
                                 statFilter={statFilter}
@@ -287,14 +287,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                 - Visuals: Dark background, border right
             */}
             <div className={`
-                fixed inset-y-0 left-0 z-[60] w-[300px] bg-[#050505] 
+                fixed inset-y-0 left-0 z-[60] w-[300px] bg-black 
                 transform transition-transform duration-300 ease-in-out
                 ${isOpen ? 'translate-x-0' : '-translate-x-full'}
 
                 lg:static lg:inset-auto lg:translate-x-0 
                 lg:flex lg:flex-col lg:z-0
                 
-                border-r border-[#27272a]
                 flex flex-col gap-3 p-4
             `}>
 
@@ -312,7 +311,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         <select
                             value={statFilter}
                             onChange={(e) => setStatFilter(e.target.value)}
-                            className="w-full bg-[#121214] hover:bg-[#1f1f22] text-white text-xs font-bold py-2 px-3 rounded-lg border border-[#27272a] appearance-none cursor-pointer outline-none focus:border-blue-500"
+                            className="w-full bg-bgCanvas hover:bg-bgSubtle text-white text-xs font-bold py-2 px-3 rounded-lg border border-borderMedium appearance-none cursor-pointer outline-none focus:border-blue-500"
                         >
                             {STAT_FILTERS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
                         </select>
@@ -323,7 +322,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         <select
                             value={timeFilter}
                             onChange={(e) => setTimeFilter(e.target.value)}
-                            className="w-full bg-[#121214] hover:bg-[#1f1f22] text-white text-xs font-bold py-2 px-3 rounded-lg border border-[#27272a] appearance-none cursor-pointer outline-none focus:border-blue-500"
+                            className="w-full bg-bgCanvas hover:bg-bgSubtle text-white text-xs font-bold py-2 px-3 rounded-lg border border-borderMedium appearance-none cursor-pointer outline-none focus:border-blue-500"
                         >
                             <option value="All Games">All Games</option>
                             <option value="Today">Today</option>
@@ -340,7 +339,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         placeholder="Search players or teams..."
-                        className="w-full bg-[#121214] text-xs font-medium text-white placeholder-gray-500 py-2.5 pl-9 pr-4 rounded-lg border border-[#27272a] focus:outline-none focus:border-gray-600 transition-colors"
+                        className="w-full bg-bgCanvas text-xs font-medium text-white placeholder-gray-500 py-2.5 pl-9 pr-4 rounded-lg border border-borderMedium focus:outline-none focus:border-gray-600 transition-colors"
                     />
                 </div>
 

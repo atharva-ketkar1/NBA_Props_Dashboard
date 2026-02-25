@@ -2,6 +2,7 @@ import React, { useMemo, useState, useEffect } from 'react';
 import { Player, Game } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
+import { colors } from '../utils/propsmadness_colors';
 
 interface BarChartProps {
     player?: Player;
@@ -158,7 +159,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const propLineY = getY(lineValue);
 
     return (
-        <div className="bg-[#000000] w-full h-full min-h-[400px] select-none relative rounded-xl border border-[#27272a]/50 shadow-2xl overflow-hidden flex flex-col">
+        <div className="bg-black w-full h-full min-h-[400px] select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col">
 
             {/* Responsive SVG Container */}
             <svg
@@ -167,14 +168,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 className="w-full h-full"
             >
                 {/* 1. Y-Axis Grid Lines & Labels */}
-                <g className="text-[#71717a] font-bold" fill="currentColor" textAnchor="end" fontSize="12">
+                <g className="text-fgSubtle font-bold" fill="currentColor" textAnchor="end" fontSize="12">
                     <text x="50" y={getY(0)} dominantBaseline="middle">0</text>
                     <text x="50" y={getY(maxScore * 0.5)} dominantBaseline="middle">{Math.round(maxScore * 0.5)}</text>
                     <text x="50" y={getY(maxScore)} dominantBaseline="middle">{Math.round(maxScore)}</text>
 
-                    <line x1="60" x2="100%" y1={getY(0)} y2={getY(0)} stroke="#27272a" strokeOpacity="0.4" />
-                    <line x1="60" x2="100%" y1={getY(maxScore * 0.5)} y2={getY(maxScore * 0.5)} stroke="#27272a" strokeOpacity="0.4" />
-                    <line x1="60" x2="100%" y1={getY(maxScore)} y2={getY(maxScore)} stroke="#27272a" strokeOpacity="0.4" />
+                    <line x1="60" x2="100%" y1={getY(0)} y2={getY(0)} stroke={colors.borderMedium} strokeOpacity="0.4" />
+                    <line x1="60" x2="100%" y1={getY(maxScore * 0.5)} y2={getY(maxScore * 0.5)} stroke={colors.borderMedium} strokeOpacity="0.4" />
+                    <line x1="60" x2="100%" y1={getY(maxScore)} y2={getY(maxScore)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                 </g>
 
                 {/* 2. Map through GameLogs for Bars, Text, and Logos */}
@@ -221,7 +222,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                     rx="4"
                                     ry="4"
                                     fill="transparent"
-                                    stroke="#27272a"
+                                    stroke={colors.borderMedium}
                                     strokeWidth="1.5"
                                     strokeDasharray="4 4"
                                     className="opacity-70"
@@ -236,7 +237,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                     height={barHeight}
                                     rx="4"
                                     ry="4"
-                                    fill={isOver ? "#16a34a" : "#dc2626"}
+                                    fill={isOver ? colors.graphBarOver : colors.graphBarUnder}
                                     className="transition-all duration-300 group-hover:brightness-110 group-hover:opacity-80"
                                 >
                                     <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
@@ -248,7 +249,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                 x={columnCenter}
                                 y={game.isUpcoming ? VIEWBOX_HEIGHT - 128 : VIEWBOX_HEIGHT - 128}
                                 textAnchor="middle"
-                                fill={game.isUpcoming ? "#71717a" : "white"}
+                                fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
                                 fontWeight="900"
                                 fontSize={fontSize}
                                 className="pointer-events-none drop-shadow-md"
@@ -281,10 +282,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                             y={VIEWBOX_HEIGHT - 75}
                                             textAnchor="middle"
                                         >
-                                            <tspan x={columnCenter} dy="0" fill="#71717a" fontSize="10" fontWeight="normal">
+                                            <tspan x={columnCenter} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
                                                 {game.dateMonth}
                                             </tspan>
-                                            <tspan x={columnCenter} dy="1.2em" fill="#e4e4e7" fontSize="11" fontWeight="700">
+                                            <tspan x={columnCenter} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
                                                 {game.dateDay}
                                             </tspan>
                                         </text>
@@ -295,7 +296,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                                 x={columnCenter + spacing / 2}
                                                 y={VIEWBOX_HEIGHT - 63}
                                                 textAnchor="middle"
-                                                fill="#71717a"
+                                                fill={colors.fgSubtle}
                                                 fontSize="11"
                                                 fontWeight="700"
                                             >
@@ -316,7 +317,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         x2="100%"
                         y1={propLineY}
                         y2={propLineY}
-                        stroke="#facc15"
+                        stroke={colors.yellow400}
                         strokeWidth="2"
                         strokeDasharray="4 4"
                         className="drop-shadow-sm"
@@ -329,7 +330,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         width="36"
                         height="24"
                         rx="4"
-                        fill="#facc15"
+                        fill={colors.yellow400}
                     />
                     <text
                         x="78"
@@ -338,7 +339,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         textAnchor="middle"
                         fontSize="12"
                         fontWeight="900"
-                        fill="#000000"
+                        fill={colors.black}
                     >
                         {lineValue}
                     </text>
@@ -347,13 +348,13 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
             {/* LINE Legend element centered at bottom */}
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 z-20">
-                <div className="w-2.5 h-2.5 bg-[#facc15] rounded-[1px]" />
-                <span className="text-[#71717a] font-bold text-[9px] tracking-widest uppercase">LINE</span>
+                <div className="w-2.5 h-2.5 bg-yellow400 rounded-[1px]" />
+                <span className="text-fgSubtle font-bold text-[9px] tracking-widest uppercase">LINE</span>
             </div>
 
             {/* Footer / Watermark */}
             <div className="absolute bottom-3 left-3 pointer-events-none opacity-40 z-20">
-                <span className="text-[10px] text-[#52525b] font-medium">PropsMadness</span>
+                <span className="text-neutral600 font-medium text-[10px]">PropsMadness</span>
             </div>
 
             {/* Hover Tooltip Overlay */}

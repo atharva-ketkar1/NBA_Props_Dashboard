@@ -25,7 +25,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
     const isWin = game.score >= lineValue;
     const diff = Math.abs(game.score - lineValue);
     const badgeText = isWin ? `Won by ${diff}` : `Lost by ${diff}`;
-    const badgeColor = isWin ? 'bg-[#16a34a]' : 'bg-[#dc2626]';
+    const badgeColor = isWin ? 'bg-green600' : 'bg-red600';
 
     // Mock Odds (Since they aren't historically stored yet)
     const O_ODDS = '-125';
@@ -89,7 +89,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
 
         return rows.map((r, i) => (
             <div key={i} className="flex justify-between items-center text-[11px] leading-tight py-[3px]">
-                <span className="text-[#a1a1aa] font-medium">{r.label}</span>
+                <span className="text-neutral400 font-medium">{r.label}</span>
                 <span className="text-white font-bold">{r.value}</span>
             </div>
         ));
@@ -118,11 +118,11 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
 
     return (
         <div
-            className="fixed z-[100] w-56 flex flex-col bg-[#09090b] rounded-xl border border-[#27272a] shadow-2xl overflow-hidden pointer-events-none transform -translate-y-1/2"
+            className="fixed z-[100] w-56 flex flex-col bg-bgElevation0 rounded-xl border border-borderMedium shadow-2xl overflow-hidden pointer-events-none transform -translate-y-1/2"
             style={popoverStyle}
         >
             {/* Header Area */}
-            <div className="flex justify-between items-start p-3 pb-2 relative border-b border-[#27272a]">
+            <div className="flex justify-between items-start p-3 pb-2 relative border-b border-borderMedium">
                 <div className="flex flex-col gap-1.5 z-10">
                     <div className="text-white font-bold text-xs">
                         {game.GAME_DATE.replace(/-/g, '/').substring(5)} vs {game.opponent}
@@ -132,8 +132,8 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                             <img src={logoSrc} alt="book" className="w-3.5 h-3.5 rounded-full object-cover bg-white" />
                         )}
                         <span className="text-white">CL {lineValue}</span>
-                        <span className="text-white ml-0.5">O <span className="text-[#16a34a]">{O_ODDS}</span></span>
-                        <span className="text-white">U <span className="text-[#dc2626]">{U_ODDS}</span></span>
+                        <span className="text-white ml-0.5">O <span className="text-green600">{O_ODDS}</span></span>
+                        <span className="text-white">U <span className="text-red600">{U_ODDS}</span></span>
                     </div>
                 </div>
 
@@ -143,21 +143,21 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
             </div>
 
             {/* Dynamic Stats Table */}
-            <div className="p-3 bg-[#09090b] flex flex-col gap-1">
+            <div className="p-3 bg-bgElevation0 flex flex-col gap-1">
                 {renderTableRows()}
             </div>
 
             {/* DID NOT PLAY block */}
-            <div className="bg-[#18181b] border-t border-[#27272a]">
-                <div className="w-full text-center py-2 bg-[#27272a]/50 border-b border-[#27272a]">
-                    <span className="text-[#a1a1aa] font-bold text-[9px] uppercase tracking-wider">DID NOT PLAY [AVG PTS]</span>
+            <div className="bg-bgElevation1 border-t border-borderMedium">
+                <div className="w-full text-center py-2 bg-borderMedium/50 border-b border-borderMedium">
+                    <span className="text-neutral400 font-bold text-[9px] uppercase tracking-wider">DID NOT PLAY [AVG PTS]</span>
                 </div>
                 <div className="p-2 px-3 flex flex-col gap-2">
                     {inactivePlayers.map((p, i) => (
                         <div key={i} className="flex justify-between items-center">
                             <div className="flex items-center gap-2">
-                                <img src={p.img} alt={p.name} className="w-5 h-5 rounded-full bg-[#27272a] object-cover" />
-                                <span className="text-[#e4e4e7] font-bold text-[10px]">{p.name}</span>
+                                <img src={p.img} alt={p.name} className="w-5 h-5 rounded-full bg-borderMedium object-cover" />
+                                <span className="text-grayEmphasized font-bold text-[10px]">{p.name}</span>
                             </div>
                             <span className="text-white font-bold text-[10px]">({p.pts})</span>
                         </div>

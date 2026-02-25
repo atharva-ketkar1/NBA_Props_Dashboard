@@ -11,7 +11,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, sidebarProps }) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   return (
-    <div className="flex flex-col h-screen bg-background text-white font-sans overflow-hidden">
+    <div className="flex flex-col h-screen bg-bgCanvas text-white font-sans overflow-hidden">
 
       {/* Top Navigation */}
       <TopNav onMenuClick={() => setIsSidebarOpen(true)} />
