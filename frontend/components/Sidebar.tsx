@@ -20,22 +20,17 @@ interface SidebarProps {
     onSelectPlayer: (id: number) => void;
 }
 
-// Optimized TeamLogo that takes an ID
-const RealTeamLogo = ({ teamId, tricode, large = false }: { teamId: number, tricode: string, large?: boolean }) => {
-    // Determine background color based on team tricode (Mock logic)
-    // For now we use the dark default, or could enable the color map if desired.
-    // Keeping it simple with the Mock's visual style.
+const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-10 h-10" }: { teamId: number, tricode: string, sizeClass?: string }) => {
     return (
         <div className="flex flex-col items-center justify-center gap-1">
-            <div className={`${large ? 'w-10 h-10' : 'w-8 h-8'} flex items-center justify-center font-bold text-white overflow-hidden`}>
+            <div className={`${sizeClass} flex items-center justify-center font-bold text-white overflow-hidden`}>
                 <ImageWithFallback
                     src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`}
                     fallbackComponent={<span className="text-[8px]">{tricode}</span>}
                     alt={tricode}
-                    className="w-full h-full object-contain p-1.5"
+                    className="w-full h-full object-contain"
                 />
             </div>
-            <span className={`${large ? 'text-[10px]' : 'text-[9px]'} text-gray-400 font-bold tracking-wide mt-0.5`}>{tricode}</span>
         </div>
     );
 };
@@ -68,7 +63,7 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
     return (
         <div
             onClick={onClick}
-            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 hover:bg-bgCanvas transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-bgElevation1' : ''}`}
+            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 hover:bg-bgElevation1 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-bgElevation1' : ''}`}
         >
             <div className="flex items-center gap-3">
                 <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1">
@@ -125,70 +120,84 @@ interface ProcessedGame extends Game {
 
 const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, onSelectPlayer: (id: number) => void, statFilter: string }> = ({
     game, isExpanded, onToggle, activePlayerId, onSelectPlayer, statFilter
-}) => (
-    <div className={`transition-all duration-200 border rounded-lg overflow-hidden relative ${isExpanded ? 'bg-black border-borderMedium mb-2' : 'bg-bgCanvas hover:bg-bgSubtle border-transparent hover:border-border'}`}>
+}) => {
+    const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
-        {/* Active Game Indicator Line */}
-        {isExpanded && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-10"></div>}
+    // We use UTC time to construct a localized Date object, then generate the short weekday
+    const gameTimeObj = game.game_time_utc ? new Date(game.game_time_utc) : new Date(game.game_date + 'T23:59:59Z');
+    // For consistency with ET scheduling, checking day
+    const gameDay = gameTimeObj.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
 
-        {/* Game Header */}
-        <div
-            className={`p-3 flex items-center justify-between cursor-pointer ${isExpanded ? 'bg-neutral950 pb-4 border-b border-borderMedium pl-4' : ''}`}
-            onClick={onToggle}
-        >
-            <div className="flex items-center gap-4 w-full justify-between">
-                <div className="w-16 flex justify-center">
-                    <RealTeamLogo teamId={game.away_team_id} tricode={game.away_team_tricode} large={isExpanded} />
-                </div>
+    // Clean up time string: "07:30 PM ET" -> "7:30 PM"
+    const formattedTime = game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '';
 
-                <div className="flex flex-col items-center min-w-[80px]">
-                    <span className={`${isExpanded ? 'text-xs text-neutral400 font-medium' : 'text-[10px] text-gray-500 font-medium'}`}>
-                        {game.is_live ? <span className="text-green-500 animate-pulse">LIVE</span> : (isExpanded ? 'Vs' : '@')}
-                    </span>
-                    <span className={`${isExpanded ? 'text-sm text-white' : 'text-xs text-gray-300'} font-bold whitespace-nowrap`}>
-                        {game.is_live || game.is_final
-                            ? `${game.away_score} - ${game.home_score}`
-                            : game.game_status_text
-                        }
-                    </span>
-                    {!game.is_live && !game.is_final && (
-                        <span className="text-[10px] text-fgSubtle font-medium mt-0.5">
-                            {game.game_time_et}
+    return (
+        <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-3 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
+
+            {/* Active Game Indicator Line */}
+            {isExpanded && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-10"></div>}
+
+            {/* Game Header */}
+            <div
+                className={`p-4 flex items-center justify-between cursor-pointer ${isExpanded ? 'bg-neutral950 pb-4 border-b border-borderMedium' : ''}`}
+                onClick={onToggle}
+            >
+                <div className="flex items-center gap-2 w-full justify-between">
+                    <div className="flex flex-col items-center gap-2 w-[70px]">
+                        <RealTeamLogo teamId={game.away_team_id} tricode={game.away_team_tricode} sizeClass="w-10 h-10" />
+                        <span className="text-[13px] text-white font-medium">{getNickname(game.away_team_name)}</span>
+                    </div>
+
+                    <div className="flex flex-col items-center min-w-[70px] gap-1">
+                        {game.is_live ? (
+                            <span className="text-green-500 animate-pulse text-sm font-bold">LIVE</span>
+                        ) : game.is_final ? (
+                            <span className="text-[13px] text-gray-500 font-medium">FINAL</span>
+                        ) : (
+                            <span className="text-[14px] text-gray-400 font-medium">{gameDay}</span>
+                        )}
+
+                        <span className={`${isExpanded ? 'text-[15px] text-white' : 'text-[15px] text-white'} font-bold whitespace-nowrap`}>
+                            {game.is_live || game.is_final
+                                ? `${game.away_score} - ${game.home_score}`
+                                : formattedTime
+                            }
                         </span>
+                    </div>
+
+                    <div className="flex flex-col items-center gap-2 w-[70px]">
+                        <RealTeamLogo teamId={game.home_team_id} tricode={game.home_team_tricode} sizeClass="w-10 h-10" />
+                        <span className="text-[13px] text-white font-medium">{getNickname(game.home_team_name)}</span>
+                    </div>
+                </div>
+            </div>
+
+            {/* Expanded Player List */}
+            {isExpanded && (
+                <div className="flex flex-col pl-[3px]">
+                    {game.players.length > 0 ? (
+                        game.players.map(player => (
+                            <div key={player.id} className="relative">
+                                {/* Selected Player Blue Line */}
+                                {player.id === activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
+                                <PlayerRow
+                                    player={player}
+                                    statFilter={statFilter}
+                                    isActive={player.id === activePlayerId}
+                                    onClick={() => onSelectPlayer(player.id)}
+                                />
+                            </div>
+                        ))
+                    ) : (
+                        <div className="p-4 text-center text-xs text-gray-500">
+                            No players found matching filter.
+                        </div>
                     )}
                 </div>
-
-                <div className="w-16 flex justify-center">
-                    <RealTeamLogo teamId={game.home_team_id} tricode={game.home_team_tricode} large={isExpanded} />
-                </div>
-            </div>
+            )}
         </div>
-
-        {/* Expanded Player List */}
-        {isExpanded && (
-            <div className="flex flex-col pl-[3px]">
-                {game.players.length > 0 ? (
-                    game.players.map(player => (
-                        <div key={player.id} className="relative">
-                            {/* Selected Player Blue Line */}
-                            {player.id === activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
-                            <PlayerRow
-                                player={player}
-                                statFilter={statFilter}
-                                isActive={player.id === activePlayerId}
-                                onClick={() => onSelectPlayer(player.id)}
-                            />
-                        </div>
-                    ))
-                ) : (
-                    <div className="p-4 text-center text-xs text-gray-500">
-                        No players found matching filter.
-                    </div>
-                )}
-            </div>
-        )}
-    </div>
-);
+    );
+};
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, players, activePlayerId, onSelectPlayer }) => {
     const [statFilter, setStatFilter] = useState('PTS');
@@ -287,7 +296,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                 - Visuals: Dark background, border right
             */}
             <div className={`
-                fixed inset-y-0 left-0 z-[60] w-[300px] bg-black 
+                fixed inset-y-0 left-0 z-[60] w-[300px] bg-bgElevation0 
                 transform transition-transform duration-300 ease-in-out
                 ${isOpen ? 'translate-x-0' : '-translate-x-full'}
 
@@ -311,7 +320,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         <select
                             value={statFilter}
                             onChange={(e) => setStatFilter(e.target.value)}
-                            className="w-full bg-bgCanvas hover:bg-bgSubtle text-white text-xs font-bold py-2 px-3 rounded-lg border border-borderMedium appearance-none cursor-pointer outline-none focus:border-blue-500"
+                            className="w-full bg-bgElevation1 hover:bg-bgElevation2 text-white text-xs font-bold py-2 px-3 rounded-lg border-transparent appearance-none cursor-pointer outline-none focus:border-blue-500"
                         >
                             {STAT_FILTERS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
                         </select>
@@ -322,7 +331,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         <select
                             value={timeFilter}
                             onChange={(e) => setTimeFilter(e.target.value)}
-                            className="w-full bg-bgCanvas hover:bg-bgSubtle text-white text-xs font-bold py-2 px-3 rounded-lg border border-borderMedium appearance-none cursor-pointer outline-none focus:border-blue-500"
+                            className="w-full bg-bgElevation1 hover:bg-bgElevation2 text-white text-xs font-bold py-2 px-3 rounded-lg border-transparent appearance-none cursor-pointer outline-none focus:border-blue-500"
                         >
                             <option value="All Games">All Games</option>
                             <option value="Today">Today</option>
@@ -339,7 +348,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         placeholder="Search players or teams..."
-                        className="w-full bg-bgCanvas text-xs font-medium text-white placeholder-gray-500 py-2.5 pl-9 pr-4 rounded-lg border border-borderMedium focus:outline-none focus:border-gray-600 transition-colors"
+                        className="w-full bg-bgElevation1 text-xs font-medium text-white placeholder-gray-500 py-2.5 pl-9 pr-4 rounded-lg border-transparent focus:outline-none focus:border-gray-600 transition-colors"
                     />
                 </div>
 

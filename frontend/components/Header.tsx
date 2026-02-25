@@ -147,11 +147,11 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
   if (!player) return <div className="p-4 text-white">Select a player</div>;
 
   return (
-    <div className="bg-black pt-0 px-0 pb-0 w-full rounded-t-xl">
+    <div className="bg-bgElevation0 pt-0 px-0 pb-0 w-full rounded-t-xl">
 
       {/* Top Nav Tabs */}
-      <div className="relative w-full border-b border-borderMedium mb-0 px-5">
-        <div className="flex items-center justify-between gap-1 text-[11px] xl:text-[12px] font-bold text-fgSubtle pb-3 pt-3 w-full">
+      <div className="relative w-full border-b border-borderMedium mb-0 px-5 pt-3">
+        <div className="flex items-center justify-between gap-1 text-[11px] xl:text-[12px] font-bold text-fgSubtle w-full z-10 relative">
           {TAB_ORDER.map((tab, i) => {
             const isActive = tab === activeTab;
             const tabKey = STAT_LABELS[tab];
@@ -165,8 +165,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                     if (hasTabLine) onTabChange(tab)
                   }}
                   className={`
-                        whitespace-nowrap transition-colors border-b-[2px] -mb-[14px] pb-3 flex items-center gap-1.5
-                        ${isActive ? 'text-white border-white' : 'border-transparent'}
+                        whitespace-nowrap transition-colors flex items-center gap-1.5 px-3 py-2 rounded-t-lg border-b-0 -mb-[1px]
+                        ${isActive ? 'text-white border border-borderMedium bg-bgMainFixed' : 'border border-transparent hover:bg-bgElevation1/50'}
                         ${hasTabLine ? 'cursor-pointer hover:text-white' : 'cursor-not-allowed opacity-40 hover:text-fgSubtle'}
                     `}
                 >
@@ -310,9 +310,9 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         </div>
 
         {/* Section 4: Actions */}
-        <div className="flex items-center gap-4 px-4 py-3.5 border-borderMedium w-full xl:w-auto justify-end shrink bg-black">
+        <div className="flex items-center gap-4 px-4 py-3.5 border-borderMedium w-full xl:w-auto justify-end shrink bg-bgElevation0">
           <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" />
-          <button className="flex items-center gap-2 bg-black border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
+          <button className="flex items-center gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
             <SlidersHorizontal className="w-3.5 h-3.5" />
             Filters
           </button>

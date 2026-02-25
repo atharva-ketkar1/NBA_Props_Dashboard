@@ -173,7 +173,7 @@ export const AssistZones = ({ player }: { player: Player }) => {
   const vsView = processVsZoneData((player as any)?.assist_zones, (player as any)?.opp_assist_zones);
 
   return (
-    <div className={`bg-black rounded-xl p-5 w-full ${isMissing ? 'opacity-50' : ''}`}>
+    <div className={`bg-bgElevation0 rounded-xl p-5 w-full ${isMissing ? 'opacity-50' : ''}`}>
       <div className="flex justify-between items-start mb-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
@@ -183,7 +183,7 @@ export const AssistZones = ({ player }: { player: Player }) => {
           <div className="text-[12px] text-gray-400 font-medium">25/26 Season</div>
         </div>
 
-        <div className="flex bg-bgCanvas rounded-[10px] p-1 border border-borderMuted items-center">
+        <div className="flex bg-bgElevation1 rounded-[10px] p-1 border-transparent items-center">
           <button
             onClick={() => setActiveTab('player')}
             className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'player' ? 'text-white bg-bgElevationAccent shadow-sm' : 'text-fgMuted hover:text-fixedWhite'

@@ -72,7 +72,7 @@ function App() {
       <div className="flex flex-col gap-4">
 
         {/* Merged Top Section (Header + Chart) */}
-        <div className="bg-card rounded-xl border border-border shadow-lg animate-in fade-in duration-500 relative z-20">
+        <div className="bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 relative z-20">
           <Header
             player={currentPlayer}
             activeTab={activeTab}

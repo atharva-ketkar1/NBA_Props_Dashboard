@@ -159,7 +159,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const propLineY = getY(lineValue);
 
     return (
-        <div className="bg-black w-full h-full min-h-[400px] select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col">
+        <div className="bg-bgElevation0 w-full h-full min-h-[400px] select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col">
 
             {/* Responsive SVG Container */}
             <svg

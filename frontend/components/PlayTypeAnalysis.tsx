@@ -24,7 +24,7 @@ export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes })
   const data = playTypes || PLAY_TYPES;
 
   return (
-    <div className="bg-black rounded-lg p-5 w-full h-full">
+    <div className="bg-bgElevation0 rounded-lg p-5 w-full h-full">
       <div className="flex items-center gap-2 mb-1">
         <h3 className="text-sm font-bold text-white">Play Type Analysis</h3>
         <Info className="w-3.5 h-3.5 text-gray-400" />

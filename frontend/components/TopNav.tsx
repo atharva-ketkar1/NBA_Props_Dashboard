@@ -43,7 +43,7 @@ export const TopNav: React.FC<{ onMenuClick: () => void }> = ({ onMenuClick }) =
     const BASE_URL = "http://localhost:5000/assets/sport_logos";
 
     return (
-        <div className="h-16 bg-bgCanvas border-b border-borderMedium flex items-center justify-between px-4 lg:px-6 shrink-0 z-50 relative">
+        <div className="h-16 bg-bgElevation0 border-b border-bgElevation0 flex items-center justify-between px-4 lg:px-6 shrink-0 z-50 relative">
             <div className="flex items-center gap-1.5 hidden lg:flex">
                 <LeagueButton
                     label="NBA"

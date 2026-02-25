@@ -11,7 +11,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({ similarGames }) 
    const data = similarGames || SIMILAR_GAMES;
 
    return (
-      <div className="bg-black rounded-lg p-5 w-full flex flex-col h-full">
+      <div className="bg-bgElevation0 rounded-lg p-5 w-full flex flex-col h-full">
          <div className="flex justify-between items-start mb-4">
             <div>
                <div className="flex items-center gap-2 mb-1">
@@ -21,7 +21,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({ similarGames }) 
                <p className="text-xs text-gray-500">25/26 Season</p>
             </div>
 
-            <div className="flex bg-bgCanvas rounded-lg p-1 border border-border shrink-0 ml-2">
+            <div className="flex bg-bgElevation1 rounded-lg p-1 border border-border shrink-0 ml-2">
                <button className="text-xs font-bold px-3 py-1.5 rounded-md text-white bg-borderMedium shadow-sm border border-border/50 whitespace-nowrap">By PropsMadness</button>
                <button className="text-xs font-bold px-3 py-1.5 rounded-md text-gray-400 hover:text-white transition-colors whitespace-nowrap">By Position</button>
             </div>
@@ -57,7 +57,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({ similarGames }) 
 
                <div className="space-y-1">
                   {data.map((game, idx) => (
-                     <div key={idx} className="grid grid-cols-[1fr_1.5fr_2fr_1fr_1fr_1fr] text-xs items-center py-2.5 px-2 hover:bg-bgCanvas rounded transition-colors border-b border-borderMedium/40 last:border-0">
+                     <div key={idx} className="grid grid-cols-[1fr_1.5fr_2fr_1fr_1fr_1fr] text-xs items-center py-2.5 px-2 hover:bg-bgElevation1 rounded transition-colors border-b border-borderMedium/40 last:border-0">
                         <div className="text-gray-300 font-medium">{game.date}</div>
                         <div className="text-gray-300">{game.team}</div>
                         <div className="text-white font-medium truncate pr-2">{game.player}</div>
