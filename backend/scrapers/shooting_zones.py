@@ -103,26 +103,27 @@ def get_all_player_zone_distributions(df):
     for _, p in df_zones.iterrows():
         player_name = p["PLAYER_NAME"]
 
-        # Total attempts (exclude duplicate aggregate corner-3 column)
-        total_fga = (
-            p["RA_FGA"] +
-            p["PAINT_FGA"] +
-            p["MID_FGA"] +
-            p["LC3_FGA"] +
-            p["RC3_FGA"] +
-            p["AB3_FGA"]
-        )
+        # Total points from zones
+        pts = {
+            "restricted_area": p["RA_FGM"] * 2,
+            "paint": p["PAINT_FGM"] * 2,
+            "mid_range": p["MID_FGM"] * 2,
+            "left_corner": p["LC3_FGM"] * 3,
+            "right_corner": p["RC3_FGM"] * 3,
+            "top_key": p["AB3_FGM"] * 3,
+        }
+        total_pts = sum(pts.values())
 
-        if total_fga == 0:
+        if total_pts == 0:
             continue
 
         distribution = {
-            "restricted_area": p["RA_FGA"] / total_fga,
-            "paint": p["PAINT_FGA"] / total_fga,
-            "mid_range": p["MID_FGA"] / total_fga,
-            "left_corner": p["LC3_FGA"] / total_fga,
-            "right_corner": p["RC3_FGA"] / total_fga,
-            "top_key": p["AB3_FGA"] / total_fga,
+            "restricted_area": pts["restricted_area"] / total_pts,
+            "paint": pts["paint"] / total_pts,
+            "mid_range": pts["mid_range"] / total_pts,
+            "left_corner": pts["left_corner"] / total_pts,
+            "right_corner": pts["right_corner"] / total_pts,
+            "top_key": pts["top_key"] / total_pts,
         }
         
         makes = {
