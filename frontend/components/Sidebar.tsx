@@ -20,7 +20,7 @@ interface SidebarProps {
     onSelectPlayer: (id: number) => void;
 }
 
-const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-10 h-10" }: { teamId: number, tricode: string, sizeClass?: string }) => {
+const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-7 h-7" }: { teamId: number, tricode: string, sizeClass?: string }) => {
     return (
         <div className="flex flex-col items-center justify-center gap-1">
             <div className={`${sizeClass} flex items-center justify-center font-bold text-white overflow-hidden`}>
@@ -132,32 +132,32 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
     const formattedTime = game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '';
 
     return (
-        <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-3 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
+        <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-2 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
 
             {/* Active Game Indicator Line */}
             {isExpanded && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-10"></div>}
 
             {/* Game Header */}
             <div
-                className={`p-4 flex items-center justify-between cursor-pointer ${isExpanded ? 'bg-neutral950 pb-4 border-b border-borderMedium' : ''}`}
+                className={`py-3 px-4 flex items-center justify-between cursor-pointer ${isExpanded ? 'bg-neutral950 border-b border-borderMedium' : ''}`}
                 onClick={onToggle}
             >
                 <div className="flex items-center gap-2 w-full justify-between">
-                    <div className="flex flex-col items-center gap-2 w-[70px]">
-                        <RealTeamLogo teamId={game.away_team_id} tricode={game.away_team_tricode} sizeClass="w-10 h-10" />
-                        <span className="text-[13px] text-white font-medium">{getNickname(game.away_team_name)}</span>
+                    <div className="flex flex-col items-center gap-1.5 w-[70px]">
+                        <RealTeamLogo teamId={game.away_team_id} tricode={game.away_team_tricode} sizeClass="w-7 h-7" />
+                        <span className="text-xs text-white font-medium">{getNickname(game.away_team_name)}</span>
                     </div>
 
-                    <div className="flex flex-col items-center min-w-[70px] gap-1">
+                    <div className="flex flex-col items-center min-w-[70px] gap-0.5">
                         {game.is_live ? (
-                            <span className="text-green-500 animate-pulse text-sm font-bold">LIVE</span>
+                            <span className="text-green-500 animate-pulse text-xs font-bold">LIVE</span>
                         ) : game.is_final ? (
-                            <span className="text-[13px] text-gray-500 font-medium">FINAL</span>
+                            <span className="text-xs text-gray-500 font-medium">FINAL</span>
                         ) : (
-                            <span className="text-[14px] text-gray-400 font-medium">{gameDay}</span>
+                            <span className="text-xs text-gray-400 font-medium">{gameDay}</span>
                         )}
 
-                        <span className={`${isExpanded ? 'text-[15px] text-white' : 'text-[15px] text-white'} font-bold whitespace-nowrap`}>
+                        <span className={`${isExpanded ? 'text-[13px] text-white' : 'text-[13px] text-gray-300'} font-medium whitespace-nowrap`}>
                             {game.is_live || game.is_final
                                 ? `${game.away_score} - ${game.home_score}`
                                 : formattedTime
@@ -165,9 +165,9 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                         </span>
                     </div>
 
-                    <div className="flex flex-col items-center gap-2 w-[70px]">
-                        <RealTeamLogo teamId={game.home_team_id} tricode={game.home_team_tricode} sizeClass="w-10 h-10" />
-                        <span className="text-[13px] text-white font-medium">{getNickname(game.home_team_name)}</span>
+                    <div className="flex flex-col items-center gap-1.5 w-[70px]">
+                        <RealTeamLogo teamId={game.home_team_id} tricode={game.home_team_tricode} sizeClass="w-7 h-7" />
+                        <span className="text-xs text-white font-medium">{getNickname(game.home_team_name)}</span>
                     </div>
                 </div>
             </div>
@@ -289,8 +289,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
 
     return (
         <>
-            {/* 
-                Sidebar Container 
+            {/* Sidebar Container 
                 - Mobile: Fixed z-index for slide-over
                 - Desktop: Static flex column
                 - Visuals: Dark background, border right
@@ -348,7 +347,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         placeholder="Search players or teams..."
-                        className="w-full bg-bgElevation1 text-xs font-medium text-white placeholder-gray-500 py-2.5 pl-9 pr-4 rounded-lg border-transparent focus:outline-none focus:border-gray-600 transition-colors"
+                        className="w-full bg-bgElevation1 text-xs font-medium text-white placeholder-gray-500 py-2 pl-9 pr-4 rounded-lg border-transparent focus:outline-none focus:border-gray-600 transition-colors"
                     />
                 </div>
 
