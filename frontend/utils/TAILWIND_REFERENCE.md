@@ -1,0 +1,731 @@
+## TopNav.tsx translations
+
+1. Top Navigation Bar: `flex items-center w-[100%] bg-[#0A0A0A] px-6 py-6 my-6 rounded-lg`
+   - 1.1 Left Section Wrapper: `flex-1`
+     - 1.1.1 Leagues Container: `flex items-center bg-[#171717] rounded-lg p-1 gap-1 w-fit`
+       - 1.1.1.1 NBA Button: `flex items-center gap-2 px-4 py-1 rounded-md cursor-pointer opacity-100 bg-[rgba(0,0,0,0.15)] dark:bg-[rgba(255,255,255,0.15)] transition-colors duration-150 hover:bg-[#1C1C1C]`
+         - [SVG Icon]
+         - NBA Text: `text-[#F5F5F5] text-xs font-semibold uppercase`
+       - 1.1.1.2 WNBA Button: `flex items-center gap-2 px-4 py-1 rounded-md cursor-not-allowed opacity-40 bg-transparent transition-colors duration-150 hover:bg-transparent`
+         - [SVG Icon]
+         - WNBA Text: `text-[#F5F5F5] text-xs font-semibold uppercase`
+       - 1.1.1.3 NFL Button: `flex items-center gap-2 px-4 py-1 rounded-md cursor-not-allowed opacity-40 bg-transparent transition-colors duration-150 hover:bg-transparent`
+         - [SVG Icon]
+         - NFL Text: `text-[#F5F5F5] text-xs font-semibold uppercase`
+   - 1.2 Logo Link: `[No utility classes]`
+     - [SVG Icon] fills: `fill-[#FAFAFA]`
+   - 1.3 Right Section Wrapper: `flex items-center justify-end right-6 top-6 gap-4 flex-1 overflow-visible`
+     - 1.3.1 Glossary Dialog Trigger (Button): `px-4 py-2 cursor-pointer rounded-md border border-[#1C1C1C] bg-transparent focus:ring-0`
+       - [SVG Icon]: `fill-[#F5F5F5]`
+     - 1.3.2 Dialog Backdrop: `[No utility classes]`
+     - 1.3.3 Dialog Positioner: `pointer-events-none`
+       - 1.3.3.1 Dialog Content Container: `max-w-[320px] lg:max-w-[400px] max-h-[500px] lg:max-h-[700px] overflow-y-scroll min-w-0 p-8`
+         - 1.3.3.1.1 Glossary Header Area: `flex items-center pb-8`
+           - Title: `text-[#F5F5F5] text-lg font-medium grow`
+           - Close Trigger (Button): `ghost h-[20px] w-[20px] px-0 min-w-0`
+             - [SVG Icon]: `fill-[#404040]`
+         - 1.3.3.1.2 Glossary Rows Container: `flex flex-col gap-6 pb-16`
+           - Row Item (Repeated x24): `flex items-center gap-4`
+             - Acronym/Term: `text-[#A3A3A3] text-[0.625rem] uppercase tracking-wide w-[82px] shrink-0`
+             - Definition Text: `text-[#F5F5F5] text-[0.625rem] font-normal`
+         - 1.3.3.1.3 Notes Container: `flex flex-col gap-4`
+           - Note Row (Repeated x4): `text-[0.625rem] font-normal text-[#F5F5F5]`
+             - Note Label ("Note:"): `text-[#A3A3A3] text-[0.625rem] uppercase tracking-wide`
+     - 1.3.4 Check My Prop Link: `px-4 py-2 cursor-pointer rounded-md border border-[#1C1C1C] bg-transparent flex items-center gap-1 no-underline transition-colors duration-150 relative overflow-visible opacity-100 hover:bg-[#171717] focus:ring-0`
+       - [SVG Icon]: `text-[#F5F5F5]`
+       - Link Text ("Check My Prop"): `text-[#F5F5F5] text-xs font-semibold hidden lg:inline`
+       - "NEW" Badge: `absolute -top-2.5 lg:-top-3 -right-3 lg:-right-4 bg-[#16A34A] text-[#ffffff] text-[10px] font-semibold px-2 py-1 border border-[#15803D] rounded-sm`
+     - 1.3.5 User Profile/SignIn Button Wrapper: `w-[28px] h-[28px]`
+       - 1.3.5.1 SignIn Button: `cursor-pointer`
+         - [SVG Icon]: `fill-[#FAFAFA]`
+
+## Sidebar.tsx translations
+
+1. Sidebar Wrapper: `flex flex-col sticky top-6 bg-[#0A0A0A] rounded-lg max-h-[calc(100vh-77px)]`
+   - 1.1 Filters Container: `flex m-4 gap-4`
+     - 1.1.1 First Select Wrapper Container: `w-[50%]`
+       - 1.1.1.1 Select Root Container: `w-[100%] select__root select__root--size_sm select__root--variant_outline`
+         - 1.1.1.1.1 Select Control Wrapper: `select__control select__control--size_sm select__control--variant_outline`
+           - 1.1.1.1.1.1 Select Trigger Button: `select__trigger select__trigger--size_sm select__trigger--variant_outline`
+             - 1.1.1.1.1.1.1 Value Text Span: `truncate select__valueText select__valueText--size_sm select__valueText--variant_outline`
+             - 1.1.1.1.1.1.2 Indicator Div: `select__indicator select__indicator--size_sm select__indicator--variant_outline`
+               - [SVG Icon]: `fill-[#404040]`
+         - 1.1.1.1.2 Select Positioner Container: `select__positioner select__positioner--size_sm select__positioner--variant_outline`
+           - 1.1.1.1.2.1 Select Content Listbox: `max-h-[600px] overflow-y-auto select__content select__content--size_sm select__content--variant_outline`
+             - 1.1.1.1.2.1.1 Select Item (Points): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.1.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.1.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.2 Select Item (Assists): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.2.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.2.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.3 Select Item (Rebounds): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.3.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.3.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.4 Select Item (Threes): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.4.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.4.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.5 Select Item (Pts+Ast): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.5.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.5.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.6 Select Item (Pts+Reb): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.6.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.6.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.7 Select Item (Reb+Ast): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.7.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.7.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.8 Select Item (Pts+Reb+Ast): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.8.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.8.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.9 Select Item (Double Double): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.9.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.9.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.10 Select Item (Triple Double): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.10.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.10.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.11 Select Item (1Q Pts): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.11.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.11.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.12 Select Item (1Q Ast): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.12.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.12.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.13 Select Item (1Q Reb): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.13.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.13.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.14 Select Item (1H Pts): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.14.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.14.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.15 Select Item (Steals): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.15.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.15.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.16 Select Item (Blocks): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.16.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.16.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.17 Select Item (Stl+Blk): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.17.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.17.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.18 Select Item (Turnovers): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.18.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.18.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.19 Select Item (Fouls): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.19.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.19.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.1.1.2.1.20 Select Item (FT Attempted): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.1.1.2.1.20.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.1.1.2.1.20.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+     - 1.1.2 Second Select Wrapper Container: `w-[50%]`
+       - 1.1.2.1 Select Root Container: `w-[100%] select__root select__root--size_sm select__root--variant_outline`
+         - 1.1.2.1.1 Select Control Wrapper: `select__control select__control--size_sm select__control--variant_outline`
+           - 1.1.2.1.1.1 Select Trigger Button: `select__trigger select__trigger--size_sm select__trigger--variant_outline`
+             - 1.1.2.1.1.1.1 Value Text Span: `select__valueText select__valueText--size_sm select__valueText--variant_outline`
+             - 1.1.2.1.1.1.2 Indicator Div: `select__indicator select__indicator--size_sm select__indicator--variant_outline`
+               - [SVG Icon]: `fill-[#404040]`
+         - 1.1.2.1.2 Select Positioner Container: `select__positioner select__positioner--size_sm select__positioner--variant_outline`
+           - 1.1.2.1.2.1 Select Content Listbox: `select__content select__content--size_sm select__content--variant_outline`
+             - 1.1.2.1.2.1.1 Select Item (All Games): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.1.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.1.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.2 Select Item (GSW-MEM): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.2.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.2.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.3 Select Item (SAS-TOR): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.3.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.3.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.4 Select Item (OKC-DET): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.4.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.4.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.5 Select Item (SAC-HOU): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.5.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.5.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.6 Select Item (CLE-MIL): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.6.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.6.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.7 Select Item (BOS-DEN): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.7.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.7.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.8 Select Item (MIA-PHI): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.8.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.8.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.9 Select Item (CHA-IND): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.9.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.9.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.10 Select Item (WAS-ATL): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.10.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.10.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.11 Select Item (HOU-ORL): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.11.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.11.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.12 Select Item (SAS-BKN): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.12.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.12.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.13 Select Item (POR-CHI): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.13.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.13.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.14 Select Item (SAC-DAL): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.14.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.14.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.15 Select Item (LAL-PHX): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.15.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.15.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.16 Select Item (NOP-UTA): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.16.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.16.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.17 Select Item (MIN-LAC): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.17.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.17.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+             - 1.1.2.1.2.1.18 Select Item (NYK-MIL): `select__item select__item--size_sm select__item--variant_outline`
+               - 1.1.2.1.2.1.18.1 Indicator Container: `select__itemIndicator select__itemIndicator--size_sm select__itemIndicator--variant_outline`
+                 - [SVG Icon]: `fill-[#3B82F6]`
+               - 1.1.2.1.2.1.18.2 Item Text: `select__itemText select__itemText--size_sm select__itemText--variant_outline`
+   - 1.2 Divider Div: `border-b-[1px] w-auto border-b-[#1C1C1C] mx-4`
+   - 1.3 Search Input Container: `px-4 py-4`
+     - 1.3.1 Input Relative Wrapper: `relative`
+       - 1.3.1.1 Search Input Element: `w-[100%] py-2 pl-4 pr-[40px] text-[16px] lg:text-[14px] leading-[1.5] border border-[#1C1C1C] rounded-lg bg-[#171717] text-[#F5F5F5] focus:outline-none transition-all duration-200 ease-in-out focus:border-[#37474F] focus:bg-[#0A0A0A] focus:shadow-[0_0_0_3px_rgba(59,130,246,0.1)] placeholder:text-[#A3A3A3] placeholder:text-[14px]`
+   - 1.4 Main List Scroll Container: `flex items-center gap-4 flex-col flex-1 overflow-y-auto p-4`
+     - 1.4.1 Game Header (Warriors vs Grizzlies): `flex items-center gap-0 flex-col w-[100%]`
+       - 1.4.1.1 Game Details Container: `flex items-center justify-between overflow-hidden w-[100%] p-6 rounded-t-lg rounded-b-lg border border-[#1C1C1C] lg:hover:bg-[#171717] cursor-pointer select-none relative gap-4`
+         - 1.4.1.1.1 Away Team Wrapper: `flex flex-col flex-1 min-w-0 overflow-hidden gap-1`
+           - 1.4.1.1.1.1 Away Team Logo Container: `flex items-center justify-center`
+             - Away Logo Image: `object-cover rounded-none w-[var(--width)] h-[var(--height)]`
+           - 1.4.1.1.1.2 Away Team Name: `text-[#F5F5F5] text-xs font-medium text-center`
+         - 1.4.1.1.2 Time Information: `flex items-center justify-center gap-0 flex-col text-[0.625rem] font-semibold text-[#A3A3A3]`
+           - Day Span: `[No utility classes]`
+           - Time Span: `[No utility classes]`
+         - 1.4.1.1.3 Home Team Wrapper: `flex flex-col flex-1 min-w-0 overflow-hidden gap-1`
+           - 1.4.1.1.3.1 Home Team Logo Container: `flex items-center justify-center`
+             - Home Logo Image: `object-cover rounded-none w-[var(--width)] h-[var(--height)]`
+           - 1.4.1.1.3.2 Home Team Name: `text-[#F5F5F5] text-xs font-medium text-center`
+     - 1.4.2 Game Header (Spurs vs Raptors): `flex items-center gap-0 flex-col w-[100%]`
+       - [Omitted repeated structure]
+     - 1.4.3 Game Header (Thunder vs Pistons): `flex items-center gap-0 flex-col w-[100%]`
+       - [Omitted repeated structure]
+     - 1.4.4 Active Game Header (Kings vs Rockets): `flex items-center gap-0 flex-col w-[100%]`
+       - 1.4.4.1 Active Game Details: `flex items-center justify-between overflow-hidden w-[100%] p-6 rounded-t-lg rounded-b-0 border border-[#1C1C1C] bg-[#171717] cursor-pointer select-none relative gap-4`
+         - [Omitted repeated structure]
+       - 1.4.4.2 Player Card (Kevin Durant): `flex items-center p-6 w-[100%] gap-4 cursor-pointer first:border-t-0 last:rounded-b-lg border border-[#1C1C1C] relative hover:bg-[#171717]`
+         - Active Indicator Line: `absolute left-0 top-0 bottom-0 bg-[#37474F] w-[2px] rounded-l-md`
+         - Player Image Container: `flex items-center justify-center w-[40px] h-[40px] rounded-full p-[1px] shrink-0 relative`
+           - Player Headshot Image: `bg-[#0A0A0A] rounded-full object-cover rounded-full w-[var(--width)] h-[var(--height)]`
+         - Details Container: `flex flex-col gap-4 w-[100%] min-w-0`
+           - Name & Status Row: `flex justify-between gap-4 min-w-0`
+             - Player Name: `text-[#F5F5F5] text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap`
+             - Status Container: `flex items-center`
+           - Odds Row: `flex items-center justify-between gap-2 min-w-0`
+             - Line Details: `flex items-center shrink-0 gap-1`
+               - Sportsbook Logo: `object-cover rounded-sm w-[var(--width)] h-[var(--height)]`
+               - Over/Under Line ("24.5"): `text-[#F5F5F5] text-xs font-semibold`
+             - Odds Details: `flex items-center shrink-0 gap-1`
+               - Over Odds Pill: `flex items-center justify-center bg-[#1C1C1C] text-[0.625rem] font-semibold rounded-xs px-1 py-1 gap-1 min-w-[58px]`
+                 - 'O' Letter: `text-[#D4D4D4] text-[13px]`
+                 - Exact Odds: `text-[#16A34A] text-[0.625rem] font-semibold text-[13px]`
+               - Under Odds Pill: `flex items-center justify-center shrink-0 bg-[#1C1C1C] text-[0.625rem] font-semibold rounded-xs px-1 py-1 gap-1 min-w-[58px]`
+                 - 'U' Letter: `text-[#D4D4D4] text-[13px]`
+                 - Exact Odds: `text-[#DC2626] text-[13px]`
+       - 1.4.4.3 Locked Player Card (Tari Eason): `flex items-center p-6 w-[100%] gap-4 cursor-pointer first:border-t-0 last:rounded-b-lg border border-[#1C1C1C] relative hover:bg-[#171717]`
+         - Player Image Container: `flex items-center justify-center w-[40px] h-[40px] rounded-full p-[1px] shrink-0 relative`
+           - Player Image: `bg-[#0A0A0A] rounded-full object-cover rounded-full w-[var(--width)] h-[var(--height)]`
+         - Locked Details Container: `flex flex-col gap-4 w-[100%] min-w-0`
+           - Locked Name Row: `flex justify-between gap-4 min-w-0`
+             - Player Name: `text-[#F5F5F5] text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap`
+             - Empty Status Container: `flex items-center`
+           - Unlock Pill: `flex items-center px-1 py-[2px] gap-1 rounded-xs bg-[#37474F] select-none w-fit`
+             - [SVG Icon]: `fill-[#FAFAFA]`
+             - "UNLOCK" Text: `text-[#FAFAFA] text-[0.625rem] font-semibold`
+       - [Repeated Locked Player Cards Omitted (Capela, Finney-Smith, Okogie, Sengun, Smith Jr.)]
+       - 1.4.4.4 Locked Player Card with OUT Injury (Amen Thompson): `flex items-center p-6 w-[100%] gap-4 cursor-pointer first:border-t-0 last:rounded-b-lg border border-[#1C1C1C] relative hover:bg-[#171717]`
+         - [Player Details]
+         - Details Wrapper: `flex justify-between gap-4 min-w-0`
+           - Status Display Wrapper: `flex items-center`
+             - OUT Injury Badge: `flex bg-[#DC2626] p-[3px] rounded-[3px] w-fit`
+               - [SVG Icon]: `fill-[#FAFAFA]`
+       - [Repeated Locked Player Card Omitted (Sheppard)]
+       - 1.4.4.5 Player Show More Button: `flex items-center justify-between w-[100%] px-6 py-4 cursor-pointer bg-[#0A0A0A] border border-[#1C1C1C] border-t-[2px] border-t-[#1C1C1C] rounded-b-md hover:bg-[#171717] transition-all duration-200`
+         - Left Text ("+1 player without lines"): `text-[#D4D4D4] text-xs font-normal`
+         - Right Text Wrapper: `flex items-center gap-1`
+           - "Show" Text: `text-[#D4D4D4] text-[0.625rem] font-medium`
+           - [SVG Icon]: `fill-[#D4D4D4]`
+     - 1.4.5 Game Header (Cavaliers vs Bucks): `flex items-center gap-0 flex-col w-[100%]`
+       - [Omitted repeated structure]
+     - 1.4.6 Game Header (Celtics vs Nuggets): `flex items-center gap-0 flex-col w-[100%]`
+       - [Omitted repeated structure]
+     - [And So On Omitted...]
+     - 1.4.7 Active Game Header 2 (Rockets vs Magic): `flex items-center gap-0 flex-col w-[100%]`
+       - [Omitted repeated similar structure to Active Game 1]
+       - 1.4.7.1 Locked Player Card with GTD Injury (Jalen Suggs): `flex items-center p-6 w-[100%] gap-4 cursor-pointer first:border-t-0 last:rounded-b-lg border border-[#1C1C1C] relative hover:bg-[#171717]`
+         - [Player Details]
+         - Details Wrapper: `flex justify-between gap-4 min-w-0`
+           - Status Display Wrapper: `flex items-center`
+             - GTD Injury Badge: `flex bg-[#CA8A04] p-[3px] rounded-[3px] w-fit`
+               - [SVG Icon]: `fill-[#FAFAFA]`
+       - [Other Players Omitted]
+     - [Other Games Omitted]
+
+## Header.tsx translations
+
+1. Player Header Panel Container: `px-8 pt-8 pb-0 border-b-[1px] border-b-solid border-[#1C1C1C] tabs__root tabs__root--size_xs tabs__root--variant_line`
+   - 1.1 Tabs List Wrapper: `relative w-[100%] overflow-hidden`
+     - 1.1.1 Tabs Scroll Container: `overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] w-[100%] py-0 pt-1`
+       - 1.1.1.1 Tabs Listbox: `flex w-fit tabs__list tabs__list--size_xs tabs__list--variant_line`
+         - 1.1.1.1.1 Tab Trigger (Points): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.2 Tab Trigger (Assists): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.3 Tab Trigger (Rebounds): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.4 Tab Trigger (Threes): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.5 Tab Trigger (Pts+Ast): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.6 Tab Trigger (Pts+Reb): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.7 Tab Trigger (Reb+Ast): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.8 Tab Trigger (Pts+Reb+Ast): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.9 Tab Trigger (Double Double): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.10 Tab Trigger (Triple Double): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.11 Tab Trigger (1Q Points): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.12 Tab Trigger (1Q Assists): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.13 Tab Trigger (1Q Rebounds): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.14 Tab Trigger Disabled (1H Points): `text-[#525252] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line`
+         - 1.1.1.1.15 Tab Trigger (Steals): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.16 Tab Trigger (Blocks): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.17 Tab Trigger (Stl+Blk): `text-[#F5F5F5] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line opacity-50`
+         - 1.1.1.1.18 Tab Trigger Disabled (Turnovers): `text-[#525252] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line`
+         - 1.1.1.1.19 Tab Trigger Disabled (Fouls): `text-[#525252] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line`
+         - 1.1.1.1.20 Tab Trigger Disabled (FT Attempted): `text-[#525252] tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_line`
+         - 1.1.1.1.21 Tabs Indicator: `tabs__indicator tabs__indicator--size_xs tabs__indicator--variant_line absolute transition-all duration-150`
+     - 1.1.2 Tabs Right Gradient Fade: `absolute left-auto right-0 inset-y-0 flex items-center z-10 bg-gradient-to-l from-[#0A0A0A] from-70% to-transparent pl-6 pr-0 h-[100%]`
+       - 1.1.2.1 Config Button: `button button--variant_ghost button--size_xs animate-[fadeIn_0.2s_ease-in-out] rounded-full px-0 w-[24px] h-[24px] min-w-0 opacity-70 hover:opacity-100 hover:bg-[#1C1C1C]`
+         - [SVG Icon]: `fill-[#A3A3A3]`
+   - 1.2 Main Player Header Content: `flex flex-col px-8 py-8 gap-4 hidden lg:flex`
+     - 1.2.1 Top Row Flex Container: `flex items-center justify-between gap-6`
+       - 1.2.1.1 Left Player Info Group: `flex items-center gap-6 flex-1 min-w-0`
+         - 1.2.1.1.1 Player Identity Container: `flex items-center gap-6 min-w-0`
+           - 1.2.1.1.1.1 Headshot Wrapper: `relative shrink-0`
+             - 1.2.1.1.1.1.1 Gradient Ring Border: `flex items-center justify-center w-[60px] h-[60px] rounded-full p-[1px] shrink-0 relative bg-[conic-gradient(from_45deg,#CE1141,#000000,#CE1141)]`
+               - Player Headshot Image: `bg-[#0A0A0A] rounded-full object-cover rounded-full w-[var(--width)] h-[var(--height)]`
+             - 1.2.1.1.1.1.2 Team Logo Overlay: `absolute top-0 right-[-10px] bg-transparent overflow-visible object-cover rounded-none w-[var(--width)] h-[var(--height)]`
+           - 1.2.1.1.1.2 Name & Status Details: `flex flex-col min-w-0 flex-1 ml-1`
+             - 1.2.1.1.1.2.1 Name Row: `flex items-baseline gap-1`
+               - Player Name Span: `text-[#F5F5F5] text-base font-medium whitespace-normal`
+               - Player Position Span: `text-[#A3A3A3] text-xs font-normal shrink-0`
+             - 1.2.1.1.1.2.2 Odds Trigger Popover Row: `-ml-0.5`
+               - 1.2.1.1.1.2.2.1 Odds Popover Button: `flex items-center gap-[3px] mt-1 px-2 py-1 bg-[#1C1C1C] rounded-sm h-[24px] w-fit border-[1.5px] border-solid border-[#262626] cursor-pointer hover:bg-[#262626] hover:border-[#404040] transition-all duration-150 popover__trigger`
+                 - 1.2.1.1.1.2.2.1.1 Odds Content Inner Flex: `flex items-center gap-2 h-[16px]`
+                   - Sportsbook Logo Wrapper: `flex items-center shrink-0 gap-1`
+                     - Sportsbook Image Container: `w-[16px] h-[16px] shrink-0`
+                       - Sportsbook Image: `object-cover rounded-xs w-[var(--width)] h-[var(--height)]`
+                     - Divider: `w-[1px] h-[14px] bg-[#262626] shrink-0`
+                   - Over/Under Line Info: `flex items-center gap-[3px] whitespace-nowrap`
+                     - Line Threshold Span text: `text-[#F5F5F5] text-[10px] font-semibold leading-[14px]`
+                     - "Pts" Text Span text: `text-[#A3A3A3] text-[10px] font-semibold leading-[14px]`
+                   - Second Divider: `w-[1px] h-[14px] bg-[#262626]`
+                   - Odds Prices Wrapper: `flex items-center gap-2 whitespace-nowrap`
+                     - Over Price Group: `flex items-center gap-[1px]`
+                       - "O" Text Span text: `text-[#A3A3A3] text-[10px] font-semibold leading-[14px]`
+                       - Positive Odds text: `text-[#16A34A] text-[10px] font-semibold leading-[14px]`
+                     - Under Price Group: `flex items-center gap-[1px]`
+                       - "U" Text Span text: `text-[#A3A3A3] text-[10px] font-semibold leading-[14px]`
+                       - Negative Odds text: `text-[#DC2626] text-[10px] font-semibold leading-[14px]`
+               - 1.2.1.1.1.2.3 Compare Odds Popover Positioner: `popover__positioner absolute isolate min-w-max top-0 left-0 -translate-y-[100vh] z-[var(--z-index)]`
+                 - 1.2.1.1.1.2.3.1 Compare Odds Content Container: `w-auto min-w-[260px] bg-[#171717] rounded-[10px] shadow-[0_8px_24px_rgba(0,0,0,0.5)] ring-0 flex flex-col popover__content`
+                   - 1.2.1.1.1.2.3.1.1 Popover Header: `flex items-center justify-between shrink-0 px-4 py-2 border-b-[1px] border-b-solid border-b-[#1C1C1C]`
+                     - Title Span text: `text-[#F5F5F5] text-sm font-medium`
+                     - Buttons Wrapper: `flex gap-1`
+                       - Customize Button: `cursor-pointer opacity-60 hover:opacity-100 transition-opacity duration-150`
+                         - [SVG Icon]: `fill-rule-evenodd clip-rule-evenodd fill-[#A3A3A3]`
+                       - Default Button: `cursor-pointer opacity-60 hover:opacity-100 transition-opacity duration-150`
+                         - [SVG Icon]: `fill-[#A3A3A3]`
+                   - 1.2.1.1.1.2.3.1.2 Popover Body Wrapper:
+                     - 1.2.1.1.1.2.3.1.2.1 Unlock Box Container: `flex flex-col items-center justify-center h-[150px] gap-2 px-4`
+                       - Icon Circle: `p-2 rounded-full bg-[#171717] border-[1px] border-solid border-[#1C1C1C]`
+                         - [SVG Icon]: `fill-[#A3A3A3]`
+                       - "Unlock Live Odds" text: `text-[#F5F5F5] text-xs font-semibold`
+                       - Subdescription text: `text-[#A3A3A3] text-[10px] font-normal text-center`
+                       - "Learn More" Button: `px-2 py-[2px] bg-[#1C1C1C] rounded-md cursor-pointer hover:bg-[#262626]`
+                         - Button text: `text-[#F5F5F5] text-xs font-semibold`
+               - 1.2.1.1.1.2.4 Customize Sportsbooks Dialog Backdrop: `dialog__backdrop`
+               - 1.2.1.1.1.2.5 Customize Sportsbooks Dialog Positioner: `dialog__positioner pointer-events-none`
+                 - 1.2.1.1.1.2.5.1 Dialog Content Container: `max-w-[320px] lg:max-w-[600px] max-h-[500px] lg:max-h-[650px] overflow-y-auto p-6 min-w-[unset] relative dialog__content`
+                   - 1.2.1.1.1.2.5.1.1 Dialog Header: `flex items-center justify-between`
+                     - Title text: `text-[#F5F5F5] text-lg font-medium flex-1`
+                     - Close Button: `button button--variant_ghost button--size_md h-[20px] w-[20px] px-0 min-w-0`
+                       - [SVG Icon]: `fill-[#A3A3A3]`
+                   - 1.2.1.1.1.2.5.1.2 Dialog Body: `flex items-center justify-center pt-6`
+                     - Spinner Container: `spinner spinner--size_md border-b-transparent border-l-transparent`
+                       - Hidden "Loading..." text: `sr-only`
+         - 1.2.1.1.2 Vertical Divider: `border-r-[1px] border-solid border-[#1C1C1C] h-[50px] mx-6 shrink-0`
+         - 1.2.1.1.3 Stats Overview Group Container: `flex items-center flex-1 gap-2 min-w-0`
+           - 1.2.1.1.3.1 Stats Overflow Wrapper: `flex-1 overflow-hidden min-w-0`
+             - 1.2.1.1.3.1.1 Stats Flex Layout: `flex items-center flex-nowrap gap-4 flex-1 overflow-hidden min-w-0`
+               - 1.2.1.1.3.1.1.1 Hit Rate Box: `flex items-center gap-0 flex-col shrink-0 min-w-[120px]`
+                 - Label text: `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px]`
+                 - Value text: `text-[#16A34A] text-[18px] font-bold whitespace-nowrap`
+                 - Subtext: `text-[#A3A3A3] text-[10px] font-normal whitespace-nowrap`
+               - 1.2.1.1.3.1.1.2 Internal Vertical Divider: `border-r-[1px] border-solid border-[#1C1C1C] h-[50px] shrink-0`
+               - 1.2.1.1.3.1.1.3 Individual Stats Flex Layout: `flex items-center flex-nowrap gap-4 flex-1 overflow-hidden min-w-0`
+                 - 1.2.1.1.3.1.1.3.1 Pts Column: `shrink-0 block`
+                   - Pts Inner Flex: `flex items-center gap-0 flex-col min-w-[52px]`
+                     - Label text: `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px] underline decoration-[#A3A3A3] underline-offset-[2px]`
+                     - Value text: `text-[#F5F5F5] text-[16px] font-semibold`
+                     - Hover Trigger: `hoverCard__trigger`
+                       - Content text: `flex justify-center cursor-help w-[100%] ml-[-2px]`
+                         - Symbol span (`+`): `text-[#16A34A] text-[10px] font-semibold w-[7px] text-right`
+                         - Diff value span: `text-[#16A34A] text-[10px] font-semibold`
+                 - 1.2.1.1.3.1.1.3.2 Ast Column: `shrink-0 block`
+                   - Ast Inner Flex: `flex items-center gap-0 flex-col min-w-[52px]`
+                     - Label text: `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px] no-underline decoration-[#A3A3A3] underline-offset-[2px]`
+                     - Value text: `text-[#F5F5F5] text-[16px] font-semibold`
+                     - Hover Trigger: `hoverCard__trigger`
+                       - Content text: `flex justify-center cursor-help w-[100%] ml-[-2px]`
+                         - Symbol span (`+`): `text-[#16A34A] text-[10px] font-semibold w-[7px] text-right`
+                         - Diff value span: `text-[#16A34A] text-[10px] font-semibold`
+                 - 1.2.1.1.3.1.1.3.3 Reb Column: `shrink-0 block`
+                   - [Same structure as Ast Column]
+                 - 1.2.1.1.3.1.1.3.4 3PM Column: `shrink-0 block`
+                   - [Same structure as Ast Column]
+                 - 1.2.1.1.3.1.1.3.5 Mins Column: `shrink-0 block`
+                   - Mins Inner Flex: `flex items-center gap-0 flex-col min-w-[52px]`
+                     - Label text: `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px] no-underline decoration-[#A3A3A3] underline-offset-[2px]`
+                     - Value text: `text-[#F5F5F5] text-[16px] font-semibold`
+                     - Hover Trigger: `hoverCard__trigger`
+                       - Content text: `flex justify-center cursor-help w-[100%] ml-[-2px]`
+                         - Symbol span (`-`): `text-[#DC2626] text-[10px] font-semibold w-[7px] text-right`
+                         - Diff value span: `text-[#DC2626] text-[10px] font-semibold`
+                 - 1.2.1.1.3.1.1.3.6 Usage Column: `shrink-0 block`
+                   - [Same structure as Ast Column]
+                   - Content text Diff symbol (+): `text-[#16A34A] text-[10px] font-semibold w-[7px] text-right`
+                   - Content text Diff value (+2.3%): `text-[#16A34A] text-[10px] font-semibold`
+                 - 1.2.1.1.3.1.1.3.7 FGA Column: `shrink-0 block`
+                   - [Same structure as Ast Column]
+           - 1.2.1.1.3.2 Understanding Stats Dialog Trigger: `cursor-pointer p-1 rounded-sm hover:bg-[#1C1C1C] transition-all duration-150 dialog__trigger`
+             - [SVG Icon]: `w-[16px] h-[16px] fill-none stroke-[#A3A3A3] stroke-2 stroke-linecap-round stroke-linejoin-round`
+             - Dialog Backdrop: `dialog__backdrop`
+             - Dialog Positioner: `dialog__positioner pointer-events-none`
+               - Dialog Content Container: `max-w-[360px] lg:max-w-[420px] max-h-[85vh] lg:max-h-[700px] min-w-[unset] p-0 dialog__content`
+                 - Understanding Stats Header: `flex items-center px-6 py-4 border-b-[1px] border-b-solid border-[#1C1C1C]`
+                   - Title span text: `text-[#F5F5F5] text-base font-medium flex-1`
+                   - Close Button: `button button--variant_ghost button--size_md h-[24px] w-[24px] px-0 min-w-0 dialog__closeTrigger`
+                     - [SVG Icon]: `fill-[#A3A3A3]`
+                 - Understanding Stats Body: `px-6 py-4 overflow-y-auto max-h-[calc(85vh-60px)] lg:max-h-[640px]`
+                   - Layout Flex Wrapper: `flex items-stretch gap-6 flex-col`
+                     - 1. Hit Rate Explanation Block: `flex items-stretch gap-2 flex-col`
+                       - Section Title text: `text-[#F5F5F5] text-sm font-semibold`
+                       - Visual Box: `bg-[#1C1C1C] rounded-md p-2`
+                         - Inner wrapper: `flex items-center gap-1 flex-col`
+                           - Hit Rate numbers flex: `flex items-center gap-0 flex-col`
+                             - Label: `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px]`
+                             - Main Text: `text-[#16A34A] text-lg font-bold whitespace-nowrap`
+                           - Sub Text: `text-[#A3A3A3] text-[10px]`
+                         - Description text: `text-[#A3A3A3] text-xs font-normal leading-[1.4]`
+                     - Divider: `h-[1px] bg-[#1C1C1C]`
+                     - 2. Per-Game Stats Block: `flex items-stretch gap-2 flex-col`
+                       - Section Title text: `text-[#F5F5F5] text-sm font-semibold`
+                       - Visual Box: `bg-[#1C1C1C] rounded-md p-2`
+                         - Row Flex: `flex justify-center gap-4`
+                           - Stat Col (Pts): `flex items-center gap-0 flex-col min-w-[44px]`
+                             - Label (Active): `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px] underline decoration-[#A3A3A3] underline-offset-[2px]`
+                             - Value text: `text-[#F5F5F5] text-base font-semibold`
+                             - Diff Container: `flex justify-center w-[100%]`
+                               - Diff Symbol (`+`): `text-[#16A34A] text-[10px] font-semibold w-[7px] text-right`
+                               - Diff Value (`3.6`): `text-[#16A34A] text-[10px] font-semibold`
+                           - Stat Col (Ast): `flex items-center gap-0 flex-col min-w-[44px]`
+                             - Label (Inactive): `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px] no-underline decoration-[#A3A3A3] underline-offset-[2px]`
+                             - [Values same as Pts]
+                             - Diff Container: `flex justify-center w-[100%]`
+                               - Diff Symbol (`+`): `text-[#16A34A] text-[10px] font-semibold w-[7px] text-right`
+                               - Diff Value (`0.7`): `text-[#16A34A] text-[10px] font-semibold`
+                           - Stat Col (Reb): `flex items-center gap-0 flex-col min-w-[44px]`
+                             - Label (Inactive): `text-[#A3A3A3] text-[10px] font-medium uppercase tracking-[0.3px] no-underline decoration-[#A3A3A3] underline-offset-[2px]`
+                             - [Values same as Ast]
+                             - Diff Container: `flex justify-center w-[100%]`
+                               - Diff Symbol (`-` or empty): `text-[#DC2626] text-[10px] font-semibold w-[7px] text-right`
+                               - Diff Value (`1.2`): `text-[#DC2626] text-[10px] font-semibold`
+                       - Legend Text List: `flex items-stretch gap-[2px] flex-col`
+                         - Label Row: `flex items-center gap-1`
+                           - Bold Text: `text-[#D4D4D4] text-[10px] font-semibold`
+                           - Description Text: `text-[#A3A3A3] text-[10px]`
+                         - Value Row: `flex items-center gap-1` [Same structure]
+                         - Diff Row: `flex items-center gap-1` [Same structure]
+                       - Ex. Text Block Container: `bg-[#171717] rounded-sm p-1 mt-1`
+                         - Ex. text: `text-[#A3A3A3] text-[10px] leading-[1.5] italic`
+                     - Divider: `h-[1px] bg-[#1C1C1C]`
+                     - 3. Average vs Median Block: `flex items-stretch gap-2 flex-col`
+                       - Section Title text: `text-[#F5F5F5] text-sm font-semibold`
+                       - Visual Box: `bg-[#1C1C1C] rounded-md p-2`
+                         - Info Col Wrapper: `flex items-stretch gap-1 flex-col`
+                           - Top Row (Avg vs Med): `flex justify-center gap-6`
+                             - Avg Col: `flex items-center gap-0 flex-col`
+                               - Label text: `text-[#A3A3A3] text-[8px] uppercase`
+                               - Value text: `text-[#F5F5F5] text-base font-medium`
+                             - Med Col: `flex items-center gap-0 flex-col` [Same structure]
+                           - Bottom Row (Games List): `flex justify-center flex-wrap gap-1`
+                             - "Games:" text: `text-[#A3A3A3] text-[10px]`
+                             - Normal Game Value text: `text-[#D4D4D4] text-[10px] font-normal`
+                             - Outlier Game Value text (`40`): `text-[#16A34A] text-[10px] font-semibold`
+                         - Description text: `text-[#A3A3A3] text-xs font-normal leading-[1.4]`
+                     - Divider: `h-[1px] bg-[#1C1C1C]`
+                     - 4. Legend Colored Boxes Row: `flex justify-center gap-6 py-1`
+                       - Green Box Group: `flex items-center gap-1`
+                         - Green Color Swatch: `w-[10px] h-[10px] rounded-sm bg-[#16A34A]`
+                         - "Favorable for Over" text: `text-[#16A34A] text-[10px]`
+                       - Red Box Group: `flex items-center gap-1`
+                         - Red Color Swatch: `w-[10px] h-[10px] rounded-sm bg-[#DC2626]`
+                         - "Favorable for Under" text: `text-[#DC2626] text-[10px]`
+       - 1.2.1.2 Right Filters Button Wrapper: `flex items-center gap-2`
+         - 1.2.1.2.1 Filters Button: `button button--variant_outline button--size_sm gap-1 border-[#262626] hover:border-[#404040] hover:bg-[#1C1C1C]`
+           - [SVG Filter Icon Path]: `stroke-[#F5F5F5] stroke-[1.5] stroke-linecap-round`
+           - [SVG Filter Icon Circle]: `stroke-[#F5F5F5] stroke-[1.5]`
+           - Button Text Span: `text-[#F5F5F5] text-sm font-medium`
+
+## Barchart.tsx translations
+
+1. Barchart Top Spacer Container: `flex items-center gap-0 px-8 py-1 relative min-h-[36px]`
+   - 1.1 "Season undefined..." Text Wrapper: `flex items-center px-4 flex-1 lg:hidden`
+     - Text Span: `text-[#A3A3A3] text-xs opacity-50`
+
+2. SVG Graph Container (`<svg>`): `w-[100%] [&_.domain]:hidden`
+   - 2.1 Graph Bars Group (`<g>`):
+     - Under Bar Rects (`fill="var(--colors-graph-bar-under)"`): `fill-[#DC2626]`
+     - Over Bar Rects (`fill="var(--colors-graph-bar-over)"`): `fill-[#16A34A]`
+     - Future/Missing Bar Rect (`stroke="var(--colors-border-strong)" fill="transparent"`): `stroke-[#525252] fill-transparent`
+     - Value Text Above Bars (`fill="white"`): `fill-white`
+     - Question Mark Text (`fill="var(--colors-border-strong)"`): `fill-[#525252]`
+   - 2.2 Y-Axis Labels Group (`<g>`): `translate-x-[33.5px] -translate-y-[5px] fill-[#A3A3A3] text-[10px] font-semibold leading-[14px]`
+     - Tick Lines and Texts: `[Inherits fill and text styles from parent]`
+   - 2.3 Team Logos Group (`<g>`):
+     - Images: `[No custom utility classes]`
+   - 2.4 X-Axis Date Labels & B2B Dots Group (`<g>`): `text-[10px] font-semibold leading-[14px] fill-[#A3A3A3]`
+     - Date Label Groups (`<g>`): `[Inherits styles]`
+       - Date Texts: `fill-[#A3A3A3] font-medium`
+     - Back-to-Back (B2B) Dots (`<circle>`): `fill-[#A3A3A3]`
+   - 2.5 Hover Rectangles Group (`<g>`):
+     - Overlay Rects (`fill="transparent"`): `fill-transparent`
+   - 2.6 Player Stat Line (e.g. 24.5 Pts) Group (`<g>`):
+     - Horizontal Line (`stroke="var(--colors-graph-line-minutes)"`): `stroke-[#EAB308] stroke-[1px]`
+     - Line Label Group (Draggable Container): `[No utility classes]`
+       - Background Rect (`fill="transparent"`): `fill-transparent`
+       - Badge Rect (`fill="var(--colors-graph-line-minutes)"`): `fill-[#EAB308]`
+       - Value Text (`fill="#0A0A0A" font-size="14" font-weight="600"`): `fill-[#0A0A0A] text-sm font-semibold`
+   - 2.7 "LINE" Indicator Badge Group (`<g>`):
+     - Background Rect (`opacity="0.12"`): `fill-[#EAB308] opacity-[0.12] transition-opacity duration-200`
+     - Colored Square: `fill-[#EAB308]`
+     - "LINE" Text: `fill-[#A3A3A3] text-xs font-semibold tracking-[0.5px] text-left`
+   - 2.8 OddsJam Watermark SVG (`<g>`): `opacity-50`
+     - Path 1: `fill-[#A3A3A3]`
+     - Path 2: `fill-[#A3A3A3]`
+
+## ShootingZones.tsx translations
+
+1. Main Shooting Zones Widget Container: `rounded-md w-[100%] p-4 lg:p-6 bg-transparent lg:bg-[#0A0A0A]`
+   - 1.1 Header Wrapper: `flex flex-col lg:flex-row lg:justify-between gap-6 mb-2 lg:mb-0`
+     - 1.1.1 Title Left Section: `flex flex-col`
+       - 1.1.1.1 Title Row Wrapper: `flex items-center gap-1`
+         - "Shooting Zones" Text: `text-[#F5F5F5] text-xs font-medium`
+         - Info Hover Button: `hoverCard__trigger`
+           - [SVG Icon]: `fill-[#F5F5F5]`
+       - 1.1.1.2 Subtitle Text ("Season"): `text-[#A3A3A3] text-[10px] font-semibold`
+     - 1.1.2 Tabs Root Container: `w-fit mx-auto lg:mx-0 tabs__root tabs__root--size_xs tabs__root--variant_enclosed`
+       - 1.1.2.1 Tabs List Wrapper: `max-lg:bg-[#1C1C1C] max-lg:p-[2px] tabs__list tabs__list--size_xs tabs__list--variant_enclosed h-8`
+         - 1.1.2.1.1 "Player" Tab Trigger: `tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_enclosed h-[28px] min-w-[28px] px-[8px]`
+         - 1.1.2.1.2 "vs" Tab Trigger (Active): `tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_enclosed h-[28px] min-w-[28px] px-[8px]`
+         - 1.1.2.1.3 "Opp Defense" Tab Trigger: `tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_enclosed h-[28px] min-w-[28px] px-[8px]`
+         - 1.1.2.1.4 Tabs Indicator: `tabs__indicator tabs__indicator--size_xs tabs__indicator--variant_enclosed absolute transition-all duration-150`
+
+   - 1.2 Court & Stats Container Wrapper: `flex justify-center my-8`
+     - 1.2.1 Relative Positioning Box: `relative`
+
+       - 1.2.1.1 Stat Card 1 (Left Wing 11% / 8): `w-[48px] rounded-[4px] absolute text-center bg-[#FFFFFF] text-[#000000] text-[10px] font-semibold shadow-[0_1px_3px_0_rgba(0,0,0,0.10),0_1px_2px_0_rgba(0,0,0,0.06)] top-[17px] left-[105px]`
+         - 1.2.1.1.1 Stat Card Flex Layout: `flex`
+           - Left Value (11%): `w-[29px] text-[11px] text-center`
+           - Divider: `border-r-[1px] h-[unset] border-solid border-[#A3A3A3] my-[1px] mx-0`
+           - Right Value (8): `text-[11px] text-center w-[18px]`
+       - 1.2.1.2 Stat Card 2 (Left Mid 27% / 30): `w-[48px] rounded-[4px] absolute text-center bg-[#FFFFFF] text-[#000000] text-[10px] font-semibold shadow-[0_1px_3px_0_rgba(0,0,0,0.10),0_1px_2px_0_rgba(0,0,0,0.06)] top-[67px] left-[105px]`
+         - [Same Flex Layout Structure as above]
+       - 1.2.1.3 Stat Card 3 (Left Corner 27% / 24): `w-[48px] rounded-[4px] absolute text-center bg-[#FFFFFF] text-[#000000] text-[10px] font-semibold shadow-[0_1px_3px_0_rgba(0,0,0,0.10),0_1px_2px_0_rgba(0,0,0,0.06)] top-[117px] left-[105px]`
+         - [Same Flex Layout Structure as above]
+       - 1.2.1.4 Stat Card 4 (Top Left 1% / 18): `w-[48px] rounded-[4px] absolute text-center bg-[#FFFFFF] text-[#000000] text-[10px] font-semibold shadow-[0_1px_3px_0_rgba(0,0,0,0.10),0_1px_2px_0_rgba(0,0,0,0.06)] top-[17px] left-[-11px]`
+         - [Same Flex Layout Structure as above]
+       - 1.2.1.5 Stat Card 5 (Top Right 4% / 1): `w-[48px] rounded-[4px] absolute text-center bg-[#FFFFFF] text-[#000000] text-[10px] font-semibold shadow-[0_1px_3px_0_rgba(0,0,0,0.10),0_1px_2px_0_rgba(0,0,0,0.06)] top-[17px] right-[-11px]`
+         - [Same Flex Layout Structure as above]
+       - 1.2.1.6 Stat Card 6 (Bottom Left 30% / 19): `w-[48px] rounded-[4px] absolute text-center bg-[#FFFFFF] text-[#000000] text-[10px] font-semibold shadow-[0_1px_3px_0_rgba(0,0,0,0.10),0_1px_2px_0_rgba(0,0,0,0.06)] top-[167px] left-[105px]`
+         - [Same Flex Layout Structure as above]
+
+       - 1.2.1.7 Court SVG Wrapper (`<svg width="261" height="200">`):
+         - `fill_court.yellow` Path 1 (translate 0 52): `fill-[#F4C51E]`
+         - `fill_court.yellow` Path 2: `fill-[#F4C51E]`
+         - `fill_court.lightGreen stk_bg.elevation.0` Path 3 (translate 16 -2): `fill-[#B0BB5A] stroke-[#0A0A0A] stroke-2`
+         - `fill_court.lightGreen` Path 4 (translate 87 0): `fill-[#B0BB5A] stroke-none`
+         - `fill_court.yellow` Path 5 (translate 106 0): `fill-[#F4C51E]`
+         - `fill_court.yellow` Path 6 (translate 245 0): `fill-[#F4C51E]`
+
+## ShotTypeAnalysis.tsx translations
+
+1. Main Shot Type Analysis Container: `flex flex-col rounded-md w-[100%] p-4 lg:p-6 bg-transparent lg:bg-[#0A0A0A]`
+   - 1.1 Header Wrapper: `flex flex-col`
+     - 1.1.1 Title Row Wrapper: `flex items-center gap-1`
+       - "Shot Type Analysis" Text: `text-[#F5F5F5] text-xs font-medium`
+       - Info Hover Button: `hoverCard__trigger`
+         - [SVG Icon]: `fill-[#F5F5F5]`
+     - 1.1.2 Subtitle Text ("Season"): `text-[#A3A3A3] text-[10px] font-semibold`
+   - 1.2 Chart Wrapper: `mt-6 relative`
+     - 1.2.1 Content Flex Layout: `flex flex-col gap-6 w-[100%]`
+       - 1.2.1.1 Top Labels Row Wrapper: `flex flex-col gap-2`
+         - 1.2.1.1.1 Labels Row Flex Container: `flex w-[100%]`
+           - 1.2.1.1.1.1 Label 1 Wrapper (C&S): `flex justify-center overflow-hidden w-[20%]`
+             - Text Span: `text-[#A3A3A3] text-[10px] font-medium lg:text-xs lg:font-medium whitespace-nowrap overflow-hidden text-ellipsis`
+           - 1.2.1.1.1.2 Label 2 Wrapper (< 10 ft): `flex justify-center overflow-hidden w-[35%]`
+             - Text Span: `text-[#A3A3A3] text-[10px] font-medium lg:text-xs lg:font-medium whitespace-nowrap overflow-hidden text-ellipsis`
+           - 1.2.1.1.1.3 Label 3 Wrapper (Pull Up): `flex justify-center overflow-hidden w-[45%]`
+             - Text Span: `text-[#A3A3A3] text-[10px] font-medium lg:text-xs lg:font-medium whitespace-nowrap overflow-hidden text-ellipsis`
+       - 1.2.1.2 Stacked Bar Chart Relative Container: `relative`
+         - 1.2.1.2.1 Bar Progress Container: `flex w-[100%] h-[40px] lg:h-[48px] rounded-xl overflow-hidden bg-transparent`
+           - 1.2.1.2.1.1 Segment 1 (Yellow 20%): `bg-[#F4C51E] h-[100%] border-r-[2px] border-r-solid border-[#1C1C1C] rounded-l-xl transition-width duration-300 w-[20%]`
+           - 1.2.1.2.1.2 Segment 2 (Light Green 35%): `bg-[#B0BB5A] h-[100%] border-r-[2px] border-r-solid border-[#1C1C1C] transition-width duration-300 w-[35%]`
+           - 1.2.1.2.1.3 Segment 3 (Dark Green 45%): `bg-[#16A34A] h-[100%] rounded-r-xl transition-width duration-300 w-[45%]`
+         - 1.2.1.2.2 Percentage Overlay Container: `flex items-center absolute top-0 left-0 w-[100%] h-[40px] lg:h-[48px] pointer-events-none`
+           - 1.2.1.2.2.1 Percentage 1 Wrapper (20%): `flex items-center justify-center h-[100%] w-[20%]`
+             - Badge: `flex items-center gap-1 whitespace-nowrap bg-[#FFFFFF] px-2 py-1 rounded-[4px]`
+               - Text: `text-[#000000] text-[10px] font-semibold`
+           - 1.2.1.2.2.2 Percentage 2 Wrapper (35%): `flex items-center justify-center h-[100%] w-[35%]`
+             - Badge: `flex items-center gap-1 whitespace-nowrap bg-[#FFFFFF] px-2 py-1 rounded-[4px]`
+               - Text: `text-[#000000] text-[10px] font-semibold`
+           - 1.2.1.2.2.3 Percentage 3 Wrapper (45%): `flex items-center justify-center h-[100%] w-[45%]`
+             - Badge: `flex items-center gap-1 whitespace-nowrap bg-[#FFFFFF] px-2 py-1 rounded-[4px]`
+               - Text: `text-[#000000] text-[10px] font-semibold`
+
+## PlayTypeAnalysis.tsx translations
+
+1. Main Play Type Container: `rounded-md w-[100%] p-4 lg:p-6 bg-transparent lg:bg-[#0A0A0A] lg:h-[317px]`
+   - 1.1 Header Wrapper: `flex flex-col mb-2`
+     - 1.1.1 Title Row Wrapper: `flex items-center gap-1`
+       - "Play Type Analysis" Text: `text-[#F5F5F5] text-xs font-medium`
+       - Info Hover Button: `hoverCard__trigger`
+         - [SVG Icon]: `fill-[#F5F5F5]`
+     - 1.1.2 Subtitle Text ("Season"): `text-[#A3A3A3] text-[10px] font-semibold`
+   - 1.2 Table Wrapper: `relative`
+     - 1.2.1 Table Root: `table__root table__root--variant_plain table__root--size_sm`
+       - 1.2.1.1 Table Head `<thead>`: `table__head table__head--variant_plain table__head--size_sm`
+         - 1.2.1.1.1 Table Row `<tr>`: `table__row table__row--variant_plain table__row--size_sm`
+           - 1.2.1.1.1.1 Column 1 ("Play Type"): `table__header table__header--variant_plain table__header--size_sm`
+           - 1.2.1.1.1.2 Column 2 ("Player points"): `text-center table__header table__header--variant_plain table__header--size_sm`
+           - 1.2.1.1.1.3 Column 3 ("Opp def rank"): `text-center table__header table__header--variant_plain table__header--size_sm`
+       - 1.2.1.2 Table Body `<tbody>`: `table__body table__body--variant_plain table__body--size_sm`
+         - 1.2.1.2.1 Data Row 1 (Free Throws): `table__row table__row--variant_plain table__row--size_sm`
+           - 1.2.1.2.1.1 td: `w-[150px] table__cell table__cell--variant_plain table__cell--size_sm`
+           - 1.2.1.2.1.2 td: `text-center table__cell table__cell--variant_plain table__cell--size_sm`
+           - 1.2.1.2.1.3 td: `text-center uppercase table__cell table__cell--variant_plain table__cell--size_sm`
+             - Rank Badge (Dark Green 26): `inline-flex items-center justify-center bg-[#16A34A] h-[16px] w-[40px] rounded-xs text-[#000000] text-[10px] font-semibold`
+         - 1.2.1.2.2 Data Row 2 (Spot Up): `table__row table__row--variant_plain table__row--size_sm`
+           - 1.2.1.2.2.1 td: `w-[150px] table__cell table__cell--variant_plain table__cell--size_sm`
+           - 1.2.1.2.2.2 td: `text-center table__cell table__cell--variant_plain table__cell--size_sm`
+           - 1.2.1.2.2.3 td: `text-center uppercase table__cell table__cell--variant_plain table__cell--size_sm`
+             - Rank Badge (Yellow 16): `inline-flex items-center justify-center bg-[#F4C51E] h-[16px] w-[40px] rounded-xs text-[#000000] text-[10px] font-semibold`
+         - 1.2.1.2.3 Data Row 3 (Isolation): `table__row table__row--variant_plain table__row--size_sm`
+           - 1.2.1.2.3.1 td: `w-[150px] table__cell table__cell--variant_plain table__cell--size_sm`
+           - 1.2.1.2.3.2 td: `text-center table__cell table__cell--variant_plain table__cell--size_sm`
+           - 1.2.1.2.3.3 td: `text-center uppercase table__cell table__cell--variant_plain table__cell--size_sm`
+             - Rank Badge (Light Green 23): `inline-flex items-center justify-center bg-[#B0BB5A] h-[16px] w-[40px] rounded-xs text-[#000000] text-[10px] font-semibold`
+         - 1.2.1.2.4 Data Row 4 (PNR Ball Handler): `table__row table__row--variant_plain table__row--size_sm`
+           - [td structures same]
+             - Rank Badge (Orange 10): `inline-flex items-center justify-center bg-[#ED8936] h-[16px] w-[40px] rounded-xs text-[#000000] text-[10px] font-semibold`
+         - 1.2.1.2.5 Data Row 5 (Transition): `table__row table__row--variant_plain table__row--size_sm`
+           - [td structures same]
+             - Rank Badge (Light Green 24): `inline-flex items-center justify-center bg-[#B0BB5A] h-[16px] w-[40px] rounded-xs text-[#000000] text-[10px] font-semibold`
+         - 1.2.1.2.6 Data Row 6 (Handoff): `table__row table__row--variant_plain table__row--size_sm`
+           - [td structures same]
+             - Rank Badge (Red 4): `inline-flex items-center justify-center bg-[#EF4444] h-[16px] w-[40px] rounded-xs text-[#000000] text-[10px] font-semibold`
+
+## SimilarPlayers.tsx translations
+
+1. Main Similar Players Container: `flex flex-col rounded-md w-[100%] p-4 lg:p-6 bg-transparent lg:bg-[#0A0A0A] lg:h-[464px]`
+   - 1.1 Header Flex Layout (Row on Desktop, Col on Mobile): `flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2`
+     - 1.1.1 Title Information Group: `flex flex-col`
+       - 1.1.1.1 Title Row: `flex items-center gap-1`
+         - "Similar Players Pts vs Kings" Text: `text-[#F5F5F5] text-xs font-medium`
+         - Info Hover Button: `hoverCard__trigger`
+           - [SVG Icon]: `fill-[#F5F5F5]`
+       - 1.1.1.2 Subtitle Text ("25/26 Season"): `text-[#A3A3A3] text-[10px] font-semibold`
+     - 1.1.2 Tabs Root Container: `w-fit max-lg:mx-auto tabs__root tabs__root--size_xs tabs__root--variant_enclosed`
+       - 1.1.2.1 Tabs List Wrapper: `max-lg:bg-[#1C1C1C] max-lg:p-[2px] tabs__list tabs__list--size_xs tabs__list--variant_enclosed h-8`
+         - 1.1.2.1.1 "By PropsMadness" Tab Trigger (Active): `opacity-100 cursor-pointer tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_enclosed h-[28px] min-w-[28px] px-[8px]`
+         - 1.1.2.1.2 "By Position" Tab Trigger: `tabs__trigger tabs__trigger--size_xs tabs__trigger--variant_enclosed h-[28px] min-w-[28px] px-[8px]`
+         - 1.1.2.1.3 Tabs Indicator: `tabs__indicator tabs__indicator--size_xs tabs__indicator--variant_enclosed absolute transition-all duration-150`
+
+   - 1.2 Content Body Container: `flex flex-col flex-1 relative`
+     - 1.2.1 Avg Stats Row: `flex gap-6 my-4`
+       - 1.2.1.1 Stat Block 1 (AVG DIFF 1.10): `flex items-center gap-1 flex-col flex-1`
+         - Label: `text-[#A3A3A3] text-[10px] uppercase font-semibold tracking-[0.3px]`
+         - Value: `text-[#16A34A] text-base font-medium`
+       - 1.2.1.2 Stat Block 2 (AVG DIFF % 3%): `flex items-center gap-1 flex-col flex-1`
+         - Label: `text-[#A3A3A3] text-[10px] uppercase font-semibold tracking-[0.3px]`
+         - Value: `text-[#16A34A] text-base font-medium`
+       - 1.2.1.3 Stat Block 3 (HIT RATE 60% (3/5)): `flex items-center gap-1 flex-col flex-1`
+         - Label: `text-[#A3A3A3] text-[10px] uppercase font-semibold tracking-[0.3px]`
+         - Value: `text-[#16A34A] text-base font-medium`
+
+     - 1.2.2 Data Table Container: `flex flex-col flex-1 lg:min-h-[280px]`
+       - 1.2.2.1 Table Root: `table__root table__root--variant_plain table__root--size_sm`
+         - 1.2.2.1.1 Table Head `<thead>`: `table__head table__head--variant_plain table__head--size_sm`
+           - 1.2.2.1.1.1 Table Row `<tr>`: `table__row table__row--variant_plain table__row--size_sm`
+             - DATE th: `min-w-[50px] md:min-w-[60px] whitespace-nowrap pr-2 md:pr-4 table__header table__header--variant_plain table__header--size_sm`
+             - TEAM th: `min-w-[65px] md:min-w-[80px] text-left whitespace-nowrap pr-3 md:pr-4 table__header table__header--variant_plain table__header--size_sm`
+             - PLAYER th: `text-left whitespace-nowrap pr-2 md:pr-4 table__header table__header--variant_plain table__header--size_sm`
+             - Line th: `text-center whitespace-nowrap w-[60px] md:w-[70px] table__header table__header--variant_plain table__header--size_sm`
+             - Result th: `text-center whitespace-nowrap w-[60px] md:w-[70px] table__header table__header--variant_plain table__header--size_sm`
+             - Diff % th: `text-center whitespace-nowrap w-[60px] md:w-[70px] table__header table__header--variant_plain table__header--size_sm`
+
+         - 1.2.2.1.2 Table Body `<tbody>`: `table__body table__body--variant_plain table__body--size_sm`
+           - 1.2.2.1.2.1 Data Row 1 (P. Banchero - Over): `table__row table__row--variant_plain table__row--size_sm`
+             - DATE td: `min-w-[50px] md:min-w-[60px] whitespace-nowrap pr-2 md:pr-4 table__cell table__cell--variant_plain table__cell--size_sm`
+             - TEAM td: `min-w-[65px] md:min-w-[80px] text-left whitespace-nowrap pr-3 md:pr-4 table__cell table__cell--variant_plain table__cell--size_sm`
+             - PLAYER td: `min-w-[103px] whitespace-nowrap overflow-hidden text-ellipsis pr-2 md:pr-4 table__cell table__cell--variant_plain table__cell--size_sm`
+             - Line td: `text-center table__cell table__cell--variant_plain table__cell--size_sm`
+               - Over Pill (23.5): `inline-flex items-center justify-center h-[16px] min-w-[36px] px-[4px] text-[#FAFAFA] text-[10px] font-semibold rounded-xs bg-[#16A34A]`
+             - Result td: `text-center table__cell table__cell--variant_plain table__cell--size_sm`
+               - Over Pill (30): `inline-flex items-center justify-center h-[16px] min-w-[36px] px-[4px] text-[#FAFAFA] text-[10px] font-semibold rounded-xs bg-[#16A34A]`
+             - Diff % td: `text-center table__cell table__cell--variant_plain table__cell--size_sm`
+               - Over Pill (28%): `inline-flex items-center justify-center h-[16px] min-w-[36px] px-[4px] text-[#FAFAFA] text-[10px] font-semibold rounded-xs bg-[#16A34A]`
+           - 1.2.2.1.2.2 Data Row 2 (K. Leonard - Over): `table__row table__row--variant_plain table__row--size_sm`
+             - [td structures same]
+             - [Line, Result, Diff % Over Pills same styling]
+           - 1.2.2.1.2.3 Data Row 3 (B. Ingram - Under): `table__row table__row--variant_plain table__row--size_sm`
+             - [td structures same]
+             - Line Under Pill (23.5): `inline-flex items-center justify-center h-[16px] min-w-[36px] px-[4px] text-[#FAFAFA] text-[10px] font-semibold rounded-xs bg-[#DC2626]`
+             - Result Under Pill (23): `inline-flex items-center justify-center h-[16px] min-w-[36px] px-[4px] text-[#FAFAFA] text-[10px] font-semibold rounded-xs bg-[#DC2626]`
+             - Diff % Under Pill (-2%): `inline-flex items-center justify-center h-[16px] min-w-[36px] px-[4px] text-[#FAFAFA] text-[10px] font-semibold rounded-xs bg-[#DC2626]`
+           - 1.2.2.1.2.4 Data Row 4 (J. Butler - Under): `table__row table__row--variant_plain table__row--size_sm`
+             - [td structures same]
+             - [Line, Result, Diff % Under Pills same styling]
+           - 1.2.2.1.2.5 Data Row 5 (K. Leonard - Over 2): `table__row table__row--variant_plain table__row--size_sm`
+             - [td structures same]
+             - [Line, Result, Diff % Over Pills same styling]
