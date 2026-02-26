@@ -6,7 +6,8 @@ import { colors } from '../utils/propsmadness_colors';
 
 function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
-  if (pct >= 30) return colors.courtGreen;
+  if (pct >= 50) return colors.courtGreen;
+  if (pct >= 40) return colors.courtLightGreen;
   if (pct >= 15) return colors.courtYellow;
   if (pct >= 5) return colors.courtOrange;
   return colors.courtRed;
@@ -18,10 +19,10 @@ function getOppZoneColor(rankStr: string | number) {
   if (!rank || rank < 1 || rank > 30) return colors.neutral1; // Fallback for missing/bad data
 
   // PropsMadness 5-Tier Scale (1-30)
-  if (rank <= 6) return colors.courtRed;         // Red (Very Tough)
-  if (rank <= 12) return colors.courtOrange;     // Orange (Tough)
-  if (rank <= 18) return colors.courtYellow;     // Yellow (Neutral)
-  if (rank <= 24) return colors.courtLightGreen; // Light Green (Favorable)
+  if (rank <= 5) return colors.courtRed;         // Red (Very Tough)
+  if (rank <= 10) return colors.courtOrange;     // Orange (Tough)
+  if (rank <= 20) return colors.courtYellow;     // Yellow (Neutral)
+  if (rank <= 25) return colors.courtLightGreen; // Light Green (Favorable)
   return colors.courtGreen;                      // Green (Highly Favorable)
 }
 
@@ -58,10 +59,10 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
 
   // 1. Establish the pure defensive Base Score
   let baseScore = 3;
-  if (oRank <= 6) baseScore = 1;
-  else if (oRank <= 12) baseScore = 2;
-  else if (oRank <= 18) baseScore = 3;
-  else if (oRank <= 24) baseScore = 4;
+  if (oRank <= 5) baseScore = 1;
+  else if (oRank <= 10) baseScore = 2;
+  else if (oRank <= 20) baseScore = 3;
+  else if (oRank <= 25) baseScore = 4;
   else baseScore = 5;
 
   // 2. Apply "Gravity to Neutral" based on Player Volume
