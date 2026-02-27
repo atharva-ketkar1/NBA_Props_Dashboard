@@ -8,7 +8,7 @@ function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
   if (pct >= 50) return colors.courtGreen;
   if (pct >= 40) return colors.courtLightGreen;
-  if (pct >= 15) return colors.courtYellow;
+  if (pct > 15) return colors.courtYellow;
   if (pct >= 5) return colors.courtOrange;
   return colors.courtRed;
 }
@@ -65,15 +65,20 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
   else if (oRank <= 25) baseScore = 4;
   else baseScore = 5;
 
-  // 2. Apply "Gravity to Neutral" based on Player Volume
+  // 2. Apply "Gravity to Neutral" based on Player Volume tiers
   if (pPct < 10) {
-    baseScore = 3; // Force Neutral
+    // Very Low Volume (0-9%): Force Neutral
+    baseScore = 3;
+  } else if (pPct < 20) {
+    // Low Volume (10-19%): Soften ALL non-neutral tiers by 1 toward center
+    if (baseScore < 3) baseScore += 1;
+    else if (baseScore > 3) baseScore -= 1;
   } else if (pPct < 30) {
-    // Soften extremes by 1 tier
+    // Medium Volume (20-29%): Soften ONLY absolute extremes (1 and 5)
     if (baseScore === 1) baseScore = 2;
     if (baseScore === 5) baseScore = 4;
   }
-  // High volume (pPct >= 30) keeps the true base score intact
+  // High volume (pPct >= 30): Keeps the true base score intact
 
   // 3. Map to final SSOT color
   switch (baseScore) {
