@@ -122,31 +122,29 @@ function App() {
 
               if (!cs && !pu && !lt10) return undefined;
 
-              const totalAttempts = (cs?.attempts || 0) + (lt10?.attempts || 0) + (pu?.attempts || 0);
-
               return [
                 {
                   type: 'C&S',
                   percentage: cs?.percentage || 0,
-                  attempts: Math.round(cs?.attempts || 0),
-                  frequency: totalAttempts ? Math.round(((cs?.attempts || 0) / totalAttempts) * 100) : 33,
-                  width: totalAttempts ? ((cs?.attempts || 0) / totalAttempts) * 100 : 33.3,
+                  attempts: Math.round(cs?.points || 0),
+                  frequency: cs?.percentage || 0,
+                  width: cs?.percentage || 33.3,
                   rank: d.catch_and_shoot?.rank
                 },
                 {
                   type: '< 10 ft',
                   percentage: lt10?.percentage || 0,
-                  attempts: Math.round(lt10?.attempts || 0),
-                  frequency: totalAttempts ? Math.round(((lt10?.attempts || 0) / totalAttempts) * 100) : 33,
-                  width: totalAttempts ? ((lt10?.attempts || 0) / totalAttempts) * 100 : 33.3,
+                  attempts: Math.round(lt10?.points || 0),
+                  frequency: lt10?.percentage || 0,
+                  width: lt10?.percentage || 33.3,
                   rank: d.less_than_10_ft?.rank
                 },
                 {
                   type: 'Pull Up',
                   percentage: pu?.percentage || 0,
-                  attempts: Math.round(pu?.attempts || 0),
-                  frequency: totalAttempts ? Math.round(((pu?.attempts || 0) / totalAttempts) * 100) : 34,
-                  width: totalAttempts ? ((pu?.attempts || 0) / totalAttempts) * 100 : 33.3,
+                  attempts: Math.round(pu?.points || 0),
+                  frequency: pu?.percentage || 0,
+                  width: pu?.percentage || 33.3,
                   rank: d.pull_up?.rank
                 }
               ];

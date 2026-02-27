@@ -75,7 +75,7 @@ def load_json(path):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, output_path):
     print(f"   Aggregating Data...")
 
     # A. Load All Data
@@ -90,8 +90,9 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     opp_def_data = load_json(opp_def_path)
     games_data = load_json(games_path)
     shot_type_data = load_json(shot_type_path)
+    opp_shot_type_data = load_json(opp_shot_type_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)})")
 
     if df_stats.empty:
         print("   No stats found. Aborting.")
@@ -234,8 +235,12 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         floor_pts = total_pts - ftm 
 
         # 2. Get the raw points from Catch & Shoot and Pull Ups
-        cs_pts = player_shot_type.get('catch_and_shoot', {}).get('points', 0)
-        pu_pts = player_shot_type.get('pull_up', {}).get('points', 0)
+        pts_by_shot = player_shot_type.get('pointsByShotType', {})
+        matches_played = pts_by_shot.get('matchesPlayed', 1)
+        if matches_played == 0: matches_played = 1
+        
+        cs_pts = pts_by_shot.get('catchAndShoot', 0) / matches_played
+        pu_pts = pts_by_shot.get('pullups', 0) / matches_played
 
         # 3. The Remainder is strictly <10ft points
         lt10_pts = max(0, floor_pts - cs_pts - pu_pts)
@@ -245,13 +250,12 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         if floor_pts > 0:
             cs_pct = round((cs_pts / floor_pts) * 100)
             pu_pct = round((pu_pts / floor_pts) * 100)
-            # Use subtraction for the final bucket to ensure they always sum to exactly 100%
             lt10_pct = 100 - cs_pct - pu_pct 
 
         # 5. Format the Player Object
         player_shot_type = {
-            'catch_and_shoot': {'points': cs_pts, 'percentage': cs_pct},
-            'pull_up': {'points': pu_pts, 'percentage': pu_pct},
+            'catch_and_shoot': {'points': round(cs_pts, 1), 'percentage': cs_pct},
+            'pull_up': {'points': round(pu_pts, 1), 'percentage': pu_pct},
             'less_than_10_ft': {'points': round(lt10_pts, 1), 'percentage': lt10_pct}
         }
             
@@ -259,14 +263,15 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         opp_shot_type_def = {}
         if opp_info:
             opp_name = opp_info['opp_name']
-            # This relies on your scraper pulling the actual 'less_than_10_ft' category 
-            # using leaguedashptdefend, rather than trying to calculate it organically here.
-            opp_shot_type_def = shot_type_data.get('teams', {}).get(opp_name, {}).copy()
             
-            # Fallbacks just in case the scraper missed the team
-            if 'catch_and_shoot' not in opp_shot_type_def: opp_shot_type_def['catch_and_shoot'] = {'rank': 15}
-            if 'pull_up' not in opp_shot_type_def: opp_shot_type_def['pull_up'] = {'rank': 15}
-            if 'less_than_10_ft' not in opp_shot_type_def: opp_shot_type_def['less_than_10_ft'] = {'rank': 15}
+            opp_ranks = opp_shot_type_data.get(opp_name, {}).get('rankings', {})
+            
+            # Map the camelCase keys from opp_shot_type_analysis to the underscore keys we use
+            opp_shot_type_def = {
+                'catch_and_shoot': {'rank': opp_ranks.get('catchAndShoot', 15)},
+                'pull_up': {'rank': opp_ranks.get('pullups', 15)},
+                'less_than_10_ft': {'rank': opp_ranks.get('lessThanTenFeet', 15)}
+            }
 
         master_data[pid] = {
             "id": pid,
@@ -359,5 +364,6 @@ if __name__ == "__main__":
         f"{base}/opp_def_zones.json",
         f"{base}/nba_dashboard_games.json",
         f"{base}/shot_type_analysis.json",
+        f"{base}/opponent_defensive_ranks.json",
         f"{base}/master_feed.json"
     )

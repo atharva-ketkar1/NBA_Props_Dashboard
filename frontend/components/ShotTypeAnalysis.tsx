@@ -1,6 +1,16 @@
 import React from 'react';
 import { Info } from 'lucide-react';
 import { ShotTypeData } from '../types';
+import { colors } from '../utils/propsmadness_colors';
+
+function getOppRankColor(rank?: number) {
+   if (rank === undefined) return colors.bgElevation2; // default neutral
+   if (rank <= 6) return colors.courtRed;
+   if (rank <= 12) return colors.courtOrange;
+   if (rank <= 18) return colors.courtYellow;
+   if (rank <= 24) return colors.courtGreen;
+   return colors.courtLightGreen; // mapped to cover rank 29 as requested
+}
 
 interface ShotTypeAnalysisProps {
    shotTypes?: ShotTypeData[];
@@ -35,21 +45,13 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes })
          {/* Bar */}
          <div className="flex w-full h-14 rounded-lg overflow-hidden border border-black/40 text-xs">
             {data.map((item, idx) => {
-               // Determine color based on opponent rank (1-30)
-               // Best defense (low rank 1-10) -> Red (tough matchup)
-               // Avg defense (11-20) -> Yellow
-               // Bad defense (21-30) -> Green (good matchup)
-               let bgColor = 'bg-[#eab308]'; // Default yellow
-               if (item.rank !== undefined) {
-                  if (item.rank <= 10) bgColor = 'bg-[#e45b5b]'; // Muted Red
-                  else if (item.rank >= 21) bgColor = 'bg-[#a5c15e]'; // Muted Green
-               }
+               const bgColor = getOppRankColor(item.rank);
 
                return (
                   <div
                      key={idx}
-                     className={`${bgColor} flex items-center justify-center relative ${idx < data.length - 1 ? 'border-r-2 border-black/60' : ''}`}
-                     style={{ width: `${item.width}%` }}
+                     className={`flex items-center justify-center relative ${idx < data.length - 1 ? 'border-r-2 border-black/60' : ''}`}
+                     style={{ width: `${item.width}%`, backgroundColor: bgColor }}
                   >
                      <div className="bg-white px-1.5 py-0.5 rounded-[3px] text-[11px] font-bold text-black shadow-sm flex gap-1 items-center whitespace-nowrap">
                         <span>{item.frequency !== undefined ? item.frequency : item.percentage}%</span>

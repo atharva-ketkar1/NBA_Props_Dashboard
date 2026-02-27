@@ -18,6 +18,7 @@ from scrapers import assist_zones as assist_zones
 from scrapers import opp_assist_zones as opp_assist_zones
 from scrapers import opp_def_zones as opp_def_zones
 from scrapers import shot_type_analysis as shot_type_analysis
+from scrapers import opp_shot_type_analysis as opp_shot_type_analysis
 from scrapers.archive import old_assist_zones as old_assist_zones
 from scrapers.archive import old_opp_assist_zones as old_opp_assist_zones
 from utils import aggregator
@@ -40,6 +41,7 @@ ASSISTS_PATH = os.path.join(DATA_DIR, "assist_zones.json")
 OPP_ASSIST_PATH = os.path.join(DATA_DIR, "opp_assist_zones.json")
 OPP_DEF_PATH = os.path.join(DATA_DIR, "opp_def_zones.json")
 SHOT_TYPE_PATH = os.path.join(DATA_DIR, "shot_type_analysis.json")
+OPP_SHOT_TYPE_PATH = os.path.join(DATA_DIR, "opponent_defensive_ranks.json")
 
 def run_dk():
     print("   Starting DraftKings...")
@@ -113,6 +115,13 @@ def run_shot_type_analysis():
         json.dump(data, f, indent=4)
     return f"Shot Type Analysis: {len(data.get('players', {}))} players, {len(data.get('teams', {}))} teams"
 
+def run_opp_shot_type_analysis():
+    print("   Starting Opponent Shot Type Analysis...")
+    data = opp_shot_type_analysis.process_defensive_rankings()
+    with open(OPP_SHOT_TYPE_PATH, "w") as f:
+        json.dump(data, f, indent=4)
+    return f"Opp Shot Type Analysis: {len(data)} teams"
+
 def main():
     start_time = time.time()
     print("PIPELINE STARTED")
@@ -129,7 +138,8 @@ def main():
             executor.submit(run_assist_zones),
             executor.submit(run_opp_assist_zones),
             executor.submit(run_opp_def_zones),
-            executor.submit(run_shot_type_analysis)
+            executor.submit(run_shot_type_analysis),
+            executor.submit(run_opp_shot_type_analysis)
         ]
         
         for future in concurrent.futures.as_completed(futures):
@@ -151,6 +161,7 @@ def main():
         opp_def_path=OPP_DEF_PATH,
         games_path=GAMES_PATH,
         shot_type_path=SHOT_TYPE_PATH,
+        opp_shot_type_path=OPP_SHOT_TYPE_PATH,
         output_path=MASTER_PATH
     )
 
