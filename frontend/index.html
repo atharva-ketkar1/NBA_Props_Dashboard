@@ -436,15 +436,34 @@
               "gray3": "#222222",
               "red700": "#B91C1C",
               "green500": "#22C55E"
-},
+            },
             fontFamily: {
               sans: ['Inter', 'sans-serif'],
+              chakra: ['Chakra Petch', 'sans-serif'],
             }
           },
         },
       }
     </script>
     <style>
+      @font-face {
+          font-family: 'Inter';
+          font-style: normal;
+          font-weight: 100 900;
+          font-display: swap;
+          src: url(https://propsmadness.com/_next/static/media/19cfc7226ec3afaa-s.woff2) format("woff2");
+          unicode-range: u+0370-0377,u+037a-037f,u+0384-038a,u+038c,u+038e-03a1,u+03a3-03ff;
+      }
+
+      @font-face {
+          font-family: 'Chakra Petch';
+          font-style: normal;
+          font-weight: 500;
+          font-display: swap;
+          src: url(https://propsmadness.com/_next/static/media/6681946d7a6ccbb7-s.p.woff2) format("woff2");
+          unicode-range: u+00??,u+0131,u+0152-0153,u+02bb-02bc,u+02c6,u+02da,u+02dc,u+0304,u+0308,u+0329,u+2000-206f,u+20ac,u+2122,u+2191,u+2193,u+2212,u+2215,u+feff,u+fffd;
+      }
+
       body {
         background-color: #111111;
         color: #FAFAFA;

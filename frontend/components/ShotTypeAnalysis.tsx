@@ -55,7 +55,7 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes })
                         } ${idx < data.length - 1 ? 'border-r-2 border-black/60' : ''}`}
                      style={{ width: `${item.width}%`, backgroundColor: bgColor }}
                   >
-                     <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 bg-white px-1.5 py-0.5 rounded-[3px] text-[11px] font-bold text-black shadow-sm flex gap-1 items-center whitespace-nowrap">
+                     <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 bg-white px-1.5 py-0.5 rounded-[3px] text-[11px] font-bold font-chakra text-black shadow-sm flex gap-1 items-center whitespace-nowrap">
                         <span>{item.frequency !== undefined ? item.frequency : item.percentage}%</span>
                         {(item.rank !== undefined || item.attempts > 0) && (
                            <>

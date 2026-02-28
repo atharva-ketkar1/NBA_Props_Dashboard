@@ -31,15 +31,15 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({ similarGames }) 
          <div className="grid grid-cols-3 mb-6 gap-2">
             <div className="text-center">
                <div className="text-[10px] text-fgSubtle font-bold uppercase mb-1 whitespace-nowrap">Avg Diff</div>
-               <div className="text-green500 font-bold text-lg">0.19</div>
+               <div className="text-green500 font-bold font-chakra text-lg">0.19</div>
             </div>
             <div className="text-center">
                <div className="text-[10px] text-fgSubtle font-bold uppercase mb-1 whitespace-nowrap">Avg Diff %</div>
-               <div className="text-green500 font-bold text-lg">1%</div>
+               <div className="text-green500 font-bold font-chakra text-lg">1%</div>
             </div>
             <div className="text-center">
                <div className="text-[10px] text-fgSubtle font-bold uppercase mb-1 whitespace-nowrap">Hit Rate</div>
-               <div className="text-red500 font-bold text-lg whitespace-nowrap">38% (5/13)</div>
+               <div className="text-red500 font-bold font-chakra text-lg whitespace-nowrap">38% (5/13)</div>
             </div>
          </div>
 
@@ -62,17 +62,17 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({ similarGames }) 
                         <div className="text-gray-300">{game.team}</div>
                         <div className="text-white font-medium truncate pr-2">{game.player}</div>
                         <div className="text-center">
-                           <span className={`px-1.5 py-0.5 rounded text-white font-bold bg-borderMedium border border-borderMuted text-[11px] ${game.line > 24 ? 'text-red-400' : 'text-green-400'}`}>
+                           <span className={`px-1.5 py-0.5 rounded text-white font-bold font-chakra bg-borderMedium border border-borderMuted text-[11px] ${game.line > 24 ? 'text-red-400' : 'text-green-400'}`}>
                               {game.line}
                            </span>
                         </div>
                         <div className="text-center">
-                           <span className={`px-1.5 py-0.5 rounded-[4px] text-white font-bold text-[11px] min-w-[30px] inline-block ${game.result > game.line ? 'bg-green600' : 'bg-red600'}`}>
+                           <span className={`px-1.5 py-0.5 rounded-[4px] text-white font-bold font-chakra text-[11px] min-w-[30px] inline-block ${game.result > game.line ? 'bg-green600' : 'bg-red600'}`}>
                               {game.result}
                            </span>
                         </div>
                         <div className="text-right">
-                           <span className={`px-1.5 py-0.5 rounded-[4px] text-white font-bold text-[11px] min-w-[36px] inline-block text-center ${game.diffPercent > 0 ? 'bg-green600' : 'bg-red600'}`}>
+                           <span className={`px-1.5 py-0.5 rounded-[4px] text-white font-bold font-chakra text-[11px] min-w-[36px] inline-block text-center ${game.diffPercent > 0 ? 'bg-green600' : 'bg-red600'}`}>
                               {game.diffPercent}%
                            </span>
                         </div>

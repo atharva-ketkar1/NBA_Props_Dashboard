@@ -14,7 +14,7 @@ const RankBadge = ({ rank }: { rank: number }) => {
   if (rank > 20) colorClass = "bg-green500 text-white";
 
   return (
-    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-[4px] ${colorClass} min-w-[24px] text-center inline-block`}>
+    <span className={`text-[10px] font-bold font-chakra px-2 py-0.5 rounded-[4px] ${colorClass} min-w-[24px] text-center inline-block`}>
       {rank}
     </span>
   )
@@ -42,7 +42,7 @@ export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes })
           {data.map((item, idx) => (
             <div key={idx} className="grid grid-cols-[2fr_1fr_1fr] text-xs items-center border-b border-borderMedium/40 pb-2 last:border-0 hover:bg-borderMedium/20 rounded px-1 -mx-1 transition-colors">
               <div className="text-white font-medium">{item.type}</div>
-              <div className="text-gray-300 text-center">{item.points}</div>
+              <div className="text-gray-300 text-center font-chakra">{item.points}</div>
               <div className="text-right">
                 <RankBadge rank={item.rank} />
               </div>

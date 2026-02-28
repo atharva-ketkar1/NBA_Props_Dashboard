@@ -87,13 +87,13 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
                                     />
                                 )}
                             </div>
-                            <span className="text-white font-bold text-xs">{line}</span>
+                            <span className="text-white font-bold font-chakra text-xs">{line}</span>
                             <div className="flex items-center gap-1">
                                 <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">O</span> <span className="text-green500">{prop?.over || '-'}</span>
+                                    <span className="text-fgSubtle">O</span> <span className="text-green500 font-chakra">{prop?.over || '-'}</span>
                                 </div>
                                 <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">U</span> <span className="text-red500">{prop?.under || '-'}</span>
+                                    <span className="text-fgSubtle">U</span> <span className="text-red500 font-chakra">{prop?.under || '-'}</span>
                                 </div>
                             </div>
                         </div>

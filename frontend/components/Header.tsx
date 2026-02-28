@@ -49,7 +49,7 @@ const StatItem = ({ label, value, diff }: { label: string, value: string | numbe
       {/* REDUCED: text-[20px] -> text-[18px] */}
       <span className="text-[18px] font-bold text-white leading-none mb-0.5">{typeof value === 'number' ? value.toFixed(1) : value}</span>
       {/* REDUCED: text-[11px] -> text-[10px] */}
-      <span className={`text-[10px] font-bold ${diffClass}`}>{diffText}</span>
+      <span className={`text-[10px] font-bold font-chakra ${diffClass}`}>{diffText}</span>
     </div>
   );
 };
@@ -294,7 +294,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           ) : (
             <span className="text-[24px] font-bold text-borderMedium leading-none mb-1">--.--%</span>
           )}
-          <span className="text-[10px] text-neutral600 font-medium whitespace-nowrap">
+          <span className="text-[10px] text-neutral600 font-chakra font-medium whitespace-nowrap">
             {hitRateInfo?.total || 0} of {hitRateInfo?.total || 0} games
           </span>
         </div>
