@@ -6,7 +6,7 @@ A high-performance web application designed to be a functional clone of [propsma
 ## Core Features
 - **Live Odds Aggregation:** Automatically scrapes and standardizes player prop lines (Points, Assists, Rebounds, PRA, Threes, etc.) from DraftKings and FanDuel.
 - **Advanced Player Stats:** Calculates complex seasonal averages and integrates up to 30 past game logs natively.
-- **Spatial Analysis & Shot Tracking:** Visualizes "Shooting Zones", "Assist Zones", and "Shot Type Analysis" (Catch & Shoot, Pull Up, <10ft). Evaluates player performance dynamically against **Opponent Defense Ranks**.
+- **Spatial Analysis & Shot Tracking:** Visualizes "Shooting Zones", "Assist Zones", and "Shot Type Analysis" (Catch & Shoot, Pull Up, <10ft). Evaluates player performance dynamically against **Opponent Defense Ranks**, utilizing a custom **Matchup EV Score** logic that factors in defensive bell curves, player efficiency modifiers, and volume gravity to prevent betting traps.
 - **Resilient Pipeline Architecture:** Utilizes Cloudflare Worker proxies and NBA Stats fallbacks to intelligently bypass IP bans from strict upstream data sources like PBPStats.
 - **Fuzzy Name Reconciliation:** Automatically reconciles varying player names (e.g., "PJ Washington Jr." vs "P.J. Washington") across disparate betting/stat data sources.
 - **Interactive High-Density UI:** Modern, cyberpunk-inspired UI matching the Propsmadness layout precisely, featuring dynamic bar charts for hit-rates, Similar Player comparisons, and multi-view spatial canvases. All handled purely client-side for immediate interactions.

@@ -18,11 +18,11 @@ function getOppZoneColor(rankStr: string | number) {
 
   if (!rank || rank < 1 || rank > 30) return colors.neutral1; // Fallback for missing/bad data
 
-  // PropsMadness 5-Tier Scale (1-30)
-  if (rank <= 5) return colors.courtRed;         // Red (Very Tough)
+  // PropsMadness 5-Tier Scale (1-30) / Bell Curve
+  if (rank <= 6) return colors.courtRed;         // Red (Very Tough)
   if (rank <= 10) return colors.courtOrange;     // Orange (Tough)
-  if (rank <= 20) return colors.courtYellow;     // Yellow (Neutral)
-  if (rank <= 25) return colors.courtLightGreen; // Light Green (Favorable)
+  if (rank <= 20) return colors.courtYellow;     // Yellow (Neutral Noise)
+  if (rank <= 24) return colors.courtLightGreen; // Light Green (Favorable)
   return colors.courtGreen;                      // Green (Highly Favorable)
 }
 
@@ -51,7 +51,7 @@ function processZoneData(zoneData: any, isOppData: boolean = false) {
   return result;
 }
 
-function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
+function getVsZoneColor(pPctStr: string, pMakesStr: string, oRankStr: string | number) {
   const pPct = parseInt(pPctStr.replace('%', '')) || 0;
   const oRank = typeof oRankStr === 'string' ? parseInt(oRankStr) : oRankStr;
 
@@ -59,26 +59,22 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
 
   // 1. Establish the pure defensive Base Score
   let baseScore = 3;
-  if (oRank <= 5) baseScore = 1;
+  if (oRank <= 6) baseScore = 1;
   else if (oRank <= 10) baseScore = 2;
   else if (oRank <= 20) baseScore = 3;
-  else if (oRank <= 25) baseScore = 4;
+  else if (oRank <= 24) baseScore = 4;
   else baseScore = 5;
 
   // 2. Apply "Gravity to Neutral" based on Player Volume tiers
   if (pPct < 10) {
     // Very Low Volume (0-9%): Force Neutral
     baseScore = 3;
-  } else if (pPct < 20) {
-    // Low Volume (10-19%): Soften ALL non-neutral tiers by 1 toward center
-    if (baseScore < 3) baseScore += 1;
-    else if (baseScore > 3) baseScore -= 1;
-  } else if (pPct < 30) {
-    // Medium Volume (20-29%): Soften ONLY absolute extremes (1 and 5)
+  } else if (pPct <= 25) {
+    // Medium Volume (10-25%): Soften ONLY absolute extremes (1 and 5)
     if (baseScore === 1) baseScore = 2;
     if (baseScore === 5) baseScore = 4;
   }
-  // High volume (pPct >= 30): Keeps the true base score intact
+  // High volume (pPct > 25): Keeps the true base score intact
 
   // 3. Map to final SSOT color
   switch (baseScore) {
@@ -100,7 +96,7 @@ function processVsZoneData(pZoneData: any, oZoneData: any) {
     const pRaw = pData[key] || { percentage: '0%', makes: '0', rank: '30' };
     const oRaw = oData[key] || { percentage: '0%', makes: '0', rank: '30' };
     result[key] = {
-      color: getVsZoneColor(pRaw.percentage, oRaw.rank)
+      color: getVsZoneColor(pRaw.percentage, pRaw.makes, oRaw.rank)
     };
   }
   return result;
@@ -182,9 +178,14 @@ export const AssistZones = ({ player }: { player: Player }) => {
     <div className={`bg-bgElevation0 rounded-xl p-5 w-full ${isMissing ? 'opacity-50' : ''}`}>
       <div className="flex justify-between items-start mb-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center gap-2 mb-1 relative z-50">
             <h3 className="text-[15px] font-semibold text-white tracking-wide">Assist Zones</h3>
-            <Info className="w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-300 transition-colors" />
+            <div className="relative group flex items-center">
+              <Info className="w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-300 transition-colors" />
+              <div className="absolute left-1/2 -translate-x-1/2 top-full mt-2 hidden group-hover:block w-[280px] bg-[#1a1a1a] text-[#ededed] text-[13px] leading-relaxed rounded-lg p-3 shadow-2xl z-50 border border-[#333333] pointer-events-none">
+                Opponent ranks form a bell curve (1-6 Red/Tough, 25-30 Green/Easy). Colors adjust for Volume Gravity (zones with a low % of expected passes are pulled to Yellow/Neutral noise).
+              </div>
+            </div>
           </div>
           <div className="text-[12px] text-gray-400 font-medium">25/26 Season</div>
         </div>

@@ -18,11 +18,11 @@ function getOppZoneColor(rankStr: string | number) {
 
   if (!rank || rank < 1 || rank > 30) return colors.neutral1; // Fallback for missing/bad data
 
-  // PropsMadness 5-Tier Scale (1-30)
-  if (rank <= 5) return colors.courtRed;         // Red (Very Tough)
+  // PropsMadness 5-Tier Scale (1-30) / Bell Curve
+  if (rank <= 6) return colors.courtRed;         // Red (Very Tough)
   if (rank <= 10) return colors.courtOrange;     // Orange (Tough)
-  if (rank <= 20) return colors.courtYellow;     // Yellow (Neutral)
-  if (rank <= 25) return colors.courtLightGreen; // Light Green (Favorable)
+  if (rank <= 20) return colors.courtYellow;     // Yellow (Neutral Noise)
+  if (rank <= 24) return colors.courtLightGreen; // Light Green (Favorable)
   return colors.courtGreen;                      // Green (Highly Favorable)
 }
 
@@ -63,31 +63,39 @@ const CourtShape = ({ viewData }: { viewData: any }) => (
   </svg>
 );
 
-function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
-  const pPct = parseInt(pPctStr.replace('%', '')) || 0;
+function getVsZoneColor(pPctStr: string, oRankStr: string | number, pMakesStr: string, playerFgPct: number) {
+  const pPct = parseInt(pPctStr.replace('%', '')) || 0; // diet %
   const oRank = typeof oRankStr === 'string' ? parseInt(oRankStr) : oRankStr;
 
   if (!oRank || oRank < 1 || oRank > 30) return colors.neutral1;
 
   // 1. Establish the pure defensive Base Score
   let baseScore = 3;
-  if (oRank <= 5) baseScore = 1;
+  if (oRank <= 6) baseScore = 1;
   else if (oRank <= 10) baseScore = 2;
   else if (oRank <= 20) baseScore = 3;
-  else if (oRank <= 25) baseScore = 4;
+  else if (oRank <= 24) baseScore = 4;
   else baseScore = 5;
 
-  // 2. Apply "Gravity to Neutral" based on Player Volume
+  // 2. Player Efficiency Modifier (+/- 1 EV)
+  const fgPctInt = playerFgPct > 1 ? playerFgPct : playerFgPct * 100;
+  if (fgPctInt > 45) {
+    baseScore = Math.min(5, baseScore + 1);
+  } else if (fgPctInt > 0 && fgPctInt < 30) {
+    baseScore = Math.max(1, baseScore - 1);
+  }
+
+  // 3. Apply "Gravity to Neutral" based on Player Volume
   if (pPct < 10) {
     baseScore = 3; // Force Neutral
-  } else if (pPct < 30) {
+  } else if (pPct <= 25) {
     // Soften extremes by 1 tier
     if (baseScore === 1) baseScore = 2;
     if (baseScore === 5) baseScore = 4;
   }
-  // High volume (pPct >= 30) keeps the true base score intact
+  // High volume (pPct > 25) keeps the true base score intact
 
-  // 3. Map to final SSOT color
+  // 4. Map to final SSOT color
   switch (baseScore) {
     case 1: return colors.courtRed;
     case 2: return colors.courtOrange;
@@ -98,7 +106,7 @@ function getVsZoneColor(pPctStr: string, oRankStr: string | number) {
   }
 }
 
-function processVsZoneData(pZoneData: any, oZoneData: any) {
+function processVsZoneData(pZoneData: any, oZoneData: any, playerFgPct: number) {
   const pData = pZoneData || {};
   const oData = oZoneData || {};
 
@@ -107,7 +115,7 @@ function processVsZoneData(pZoneData: any, oZoneData: any) {
     const pRaw = pData[key] || { percentage: '0%', makes: '0', rank: '30' };
     const oRaw = oData[key] || { percentage: '0%', makes: '0', rank: '30' };
     result[key] = {
-      color: getVsZoneColor(pRaw.percentage, oRaw.rank)
+      color: getVsZoneColor(pRaw.percentage, oRaw.rank, pRaw.makes, playerFgPct)
     };
   }
   return result;
@@ -159,15 +167,22 @@ export const ShootingZones = ({ player }: { player: Player | any }) => {
 
   const playerView = processZoneData((player as any)?.shooting_zones);
   const oppView = processZoneData((player as any)?.opp_def_zones, true);
-  const vsView = processVsZoneData((player as any)?.shooting_zones, (player as any)?.opp_def_zones);
+
+  const playerFgPct = player?.stats?.FG_PCT || 0;
+  const vsView = processVsZoneData((player as any)?.shooting_zones, (player as any)?.opp_def_zones, playerFgPct);
 
   return (
     <div className="bg-bgElevation0 rounded-xl p-5 w-full">
       <div className="flex justify-between items-start mb-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center gap-2 mb-1 relative z-50">
             <h3 className="text-[15px] font-semibold text-white tracking-wide">Shooting Zones</h3>
-            <Info className="w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-300 transition-colors" />
+            <div className="relative group flex items-center">
+              <Info className="w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-300 transition-colors" />
+              <div className="absolute left-1/2 -translate-x-1/2 top-full mt-2 hidden group-hover:block w-[280px] bg-[#1a1a1a] text-[#ededed] text-[13px] leading-relaxed rounded-lg p-3 shadow-2xl z-50 border border-[#333333] pointer-events-none">
+                Opponent ranks form a bell curve (1-6 Red/Tough, 25-30 Green/Easy). Colors adjust for Player FG% (+/- 1 EV) and Volume Gravity (low attempts pull to Yellow/Neutral).
+              </div>
+            </div>
           </div>
           <div className="text-[12px] text-gray-400 font-medium">25/26 Season</div>
         </div>
