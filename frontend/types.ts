@@ -160,7 +160,7 @@ export interface PlayTypeData {
   type: string;
   points: string;
   percent: string;
-  rank: number;
+  rank: number | string;
 }
 
 export interface ShotTypeData {

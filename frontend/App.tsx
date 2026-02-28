@@ -104,7 +104,7 @@ function App() {
               <ShootingZones player={currentPlayer} />
             )}
             <div className="flex-1 min-h-0">
-              <PlayTypeAnalysis />
+              <PlayTypeAnalysis playTypes={currentPlayer?.play_type_analysis} />
             </div>
           </div>
 

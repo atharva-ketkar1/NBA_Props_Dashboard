@@ -75,7 +75,7 @@ def load_json(path):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, output_path):
     print(f"   Aggregating Data...")
 
     # A. Load All Data
@@ -91,8 +91,9 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     games_data = load_json(games_path)
     shot_type_data = load_json(shot_type_path)
     opp_shot_type_data = load_json(opp_shot_type_path)
+    play_type_data = load_json(play_type_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)}), PlayTypes({len(play_type_data.get('players', {}))})")
 
     if df_stats.empty:
         print("   No stats found. Aborting.")
@@ -273,6 +274,52 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                 'less_than_10_ft': {'rank': opp_ranks.get('lessThanTenFeet', 15)}
             }
 
+        # --- PLAY TYPE ANALYSIS LOGIC ---
+        player_play_type = play_type_data.get('players', {}).get(row['PLAYER_NAME'], {}).get('points', {})
+        
+        opp_play_type_def = {}
+        if opp_info:
+            opp_name = opp_info['opp_name']
+            opp_play_type_def = play_type_data.get('teams', {}).get(opp_name, {}).get('rankings', {})
+            
+        play_types_config = [
+            ("Free Throws", "freeThrows"),
+            ("Post Up", "postUp"),
+            ("PNR Roll Man", "pickAndRollRollMan"),
+            ("Putback", "putback"),
+            ("Spot Up", "spotUp"),
+            ("Cut", "cut"),
+            ("Isolation", "isolation"),
+            ("Transition", "transition"),
+            ("PNR Ball Handler", "pickAndRollBallHandler"),
+            ("Handoff", "handoff"),
+            ("Off Screen", "offScreen"),
+            ("Misc", "misc")
+        ]
+
+        total_play_type_pts = sum([player_play_type.get(key, {}).get('perMatch', 0) for _, key in play_types_config])
+        
+        play_type_array = []
+        for label, key in play_types_config:
+            pts = player_play_type.get(key, {}).get('perMatch', 0)
+            pct = round((pts / total_play_type_pts) * 100) if total_play_type_pts > 0 else 0
+            rank = opp_play_type_def.get(key, "N/A")
+            
+            if pts > 0:
+                play_type_array.append({
+                    "type": label,
+                    "points": f"{pts} ({pct}%)",
+                    "percent": f"{pct}%",
+                    "rank": rank,
+                    "raw_pts": pts
+                })
+                
+        # Sort by points descending
+        play_type_array.sort(key=lambda x: x['raw_pts'], reverse=True)
+        # Remove raw_pts
+        for item in play_type_array:
+            del item['raw_pts']
+
         master_data[pid] = {
             "id": pid,
             "name": row['PLAYER_NAME'],
@@ -290,6 +337,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                 "player": player_shot_type,
                 "opp_def": opp_shot_type_def
             },
+            "play_type_analysis": play_type_array,
             "props": {}
         }
 
@@ -365,5 +413,6 @@ if __name__ == "__main__":
         f"{base}/nba_dashboard_games.json",
         f"{base}/shot_type_analysis.json",
         f"{base}/opponent_defensive_ranks.json",
+        f"{base}/play_type_analysis.json",
         f"{base}/master_feed.json"
     )

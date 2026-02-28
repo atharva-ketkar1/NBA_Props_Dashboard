@@ -7,18 +7,28 @@ interface PlayTypeAnalysisProps {
   playTypes?: PlayTypeData[];
 }
 
-const RankBadge = ({ rank }: { rank: number }) => {
-  // 1-10 Red (Hard), 11-20 Yellow (Mid), 21+ Green (Easy)
-  let colorClass = "bg-yellow400 text-black";
-  if (rank <= 10) colorClass = "bg-red500 text-white";
-  if (rank > 20) colorClass = "bg-green500 text-white";
+function getPlayTypeRankColor(rank?: number | string) {
+  if (rank === 'N/A' || rank === undefined || rank === null) return { bg: '#1C1C1C', text: '#A3A3A3' }; // bgElevation2 / gray-400
+  const r = Number(rank);
+  if (r <= 6) return { bg: '#EF4444', text: '#FFFFFF' }; // courtRed
+  if (r <= 10) return { bg: '#ED8936', text: '#FFFFFF' }; // courtOrange
+  if (r <= 20) return { bg: '#F4C51E', text: '#000000' }; // courtYellow
+  if (r <= 24) return { bg: '#B0BB5A', text: '#000000' }; // courtLightGreen
+  return { bg: '#16A34A', text: '#FFFFFF' }; // courtGreen
+}
+
+const RankBadge = ({ rank }: { rank: number | string }) => {
+  const colors = getPlayTypeRankColor(rank);
 
   return (
-    <span className={`text-[10px] font-bold font-chakra px-2 py-0.5 rounded-[4px] ${colorClass} min-w-[24px] text-center inline-block`}>
+    <span
+      className="text-[10px] font-bold font-chakra px-2 py-0.5 rounded-[4px] min-w-[24px] text-center inline-block"
+      style={{ backgroundColor: colors.bg, color: colors.text }}
+    >
       {rank}
     </span>
-  )
-}
+  );
+};
 
 export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes }) => {
   const data = playTypes || PLAY_TYPES;
