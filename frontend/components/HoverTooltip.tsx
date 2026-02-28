@@ -41,7 +41,6 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
     const logoSrc = `${BASE_URL}${sbLogo}`;
 
     // --- Dynamic Stat Row Configuration based on current Tab (statKey) ---
-    // User requested different tables based on context (PTS vs AST vs PTS+REB+AST)
     const renderTableRows = () => {
         const rows: { label: string; value: string }[] = [
             { label: 'Minutes', value: `${game.MIN || 0}'` },
@@ -55,36 +54,82 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
             return `${mVal}/${aVal} (${Math.round((mVal / aVal) * 100)}%)`;
         };
 
-        if (statKey === 'PTS') {
-            rows.push({ label: 'Points', value: `${game.PTS || 0}` });
-            rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
-            rows.push({ label: '3PT Made', value: formatPct(game.FG3M, game.FG3A) });
-            rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
-            rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (0)` });
-        } else if (statKey === 'AST') {
-            rows.push({ label: 'Assists', value: `${game.AST || 0}` });
-            rows.push({ label: 'Potential Asts', value: `${game.POTENTIAL_AST || 0}` });
-            rows.push({ label: 'Passes', value: `${game.PASSES || 'N/A'}` });
-            rows.push({ label: 'Points Created', value: `${game.AST_POINTS_CREATED || 0}` });
-        } else if (statKey === 'REB') {
-            rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
-            rows.push({ label: 'Offensive', value: `${game.OREB || 0}` });
-            rows.push({ label: 'Defensive', value: `${game.DREB || 0}` });
-            rows.push({ label: 'Reb Chances', value: `${game.REB_CHANCES || 0}` });
-        } else if (statKey === 'PTS+REB+AST') {
-            rows.push({ label: 'Total P+R+A', value: `${game.score}` });
-            rows.push({ label: 'Points', value: `${game.PTS || 0}` });
-            rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
-            rows.push({ label: 'Assists', value: `${game.AST || 0}` });
-            rows.push({ label: 'Pot Asts', value: `${game.POTENTIAL_AST || 0}` });
-            rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
-            rows.push({ label: 'Reb Chances', value: `${game.REB_CHANCES || 0}` });
-        } else {
-            // Fallback generic mapping
-            rows.push({ label: statKey, value: `${game.score}` });
-            rows.push({ label: 'Points', value: `${game.PTS || 0}` });
-            rows.push({ label: 'Assists', value: `${game.AST || 0}` });
-            rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
+        // Note: The stats backend keys (statKey) are mapped from STAT_LABELS in BarChart.tsx
+        switch (statKey) {
+            case 'PTS':
+                rows.push({ label: 'Points', value: `${game.PTS || 0}` });
+                rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
+                rows.push({ label: '3PT Made', value: formatPct(game.FG3M, game.FG3A) });
+                rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` }); // Update if specific 1Q PF logic exists
+                break;
+            case 'AST':
+                rows.push({ label: 'Assists', value: `${game.AST || 0}` });
+                rows.push({ label: 'Potential AST', value: `${game.POTENTIAL_AST || 0}` });
+                rows.push({ label: 'Passes', value: `${game.PASSES || 'N/A'}` });
+                break;
+            case 'REB':
+                rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
+                rows.push({ label: 'Rebound Chances', value: `${game.REB_CHANCES || 0}` });
+                rows.push({ label: 'OREB', value: `${game.OREB || 0}` });
+                rows.push({ label: 'DREB', value: `${game.DREB || 0}` });
+                break;
+            case 'FG3M': // Threes
+                rows.push({ label: 'Points', value: `${game.PTS || 0}` });
+                rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
+                rows.push({ label: '3PT Made', value: formatPct(game.FG3M, game.FG3A) });
+                rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                break;
+            case 'PTS+AST':
+                rows.push({ label: 'Points', value: `${game.PTS || 0}` });
+                rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
+                rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
+                rows.push({ label: 'Assists', value: `${game.AST || 0}` });
+                rows.push({ label: 'Potential AST', value: `${game.POTENTIAL_AST || 0}` });
+                break;
+            case 'PTS+REB':
+                rows.push({ label: 'Points', value: `${game.PTS || 0}` });
+                rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
+                rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
+                rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
+                rows.push({ label: 'Rebound Chances', value: `${game.REB_CHANCES || 0}` });
+                break;
+            case 'REB+AST':
+                rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
+                rows.push({ label: 'Rebound Chances', value: `${game.REB_CHANCES || 0}` });
+                rows.push({ label: 'Assists', value: `${game.AST || 0}` });
+                rows.push({ label: 'Potential AST', value: `${game.POTENTIAL_AST || 0}` });
+                break;
+            case 'PTS+REB+AST':
+                rows.push({ label: 'Points', value: `${game.PTS || 0}` });
+                rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
+                rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
+                rows.push({ label: 'Rebound Chances', value: `${game.REB_CHANCES || 0}` });
+                rows.push({ label: 'Assists', value: `${game.AST || 0}` });
+                rows.push({ label: 'Potential AST', value: `${game.POTENTIAL_AST || 0}` });
+                break;
+            case 'STL':
+                rows.push({ label: 'Steals', value: `${game.STL || 0}` });
+                rows.push({ label: 'Blocks', value: `${game.BLK || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                break;
+            case 'BLK':
+                rows.push({ label: 'Blocks', value: `${game.BLK || 0}` });
+                rows.push({ label: 'Steals', value: `${game.STL || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                break;
+            case 'TOV':
+                rows.push({ label: 'Turnovers', value: `${game.TOV || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                break;
+            default:
+                // Fallback for props like Fantasy, Double Double, etc.
+                rows.push({ label: statKey, value: `${game.score}` });
+                rows.push({ label: 'Points', value: `${game.PTS || 0}` });
+                rows.push({ label: 'Assists', value: `${game.AST || 0}` });
+                rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
+                break;
         }
 
         return rows.map((r, i) => (
@@ -93,6 +138,23 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 <span className="text-white font-bold">{r.value}</span>
             </div>
         ));
+    };
+
+    // --- Dynamic 'DID NOT PLAY' Title resolver ---
+    const getDnpTitle = () => {
+        switch (statKey) {
+            case 'PTS': return 'DID NOT PLAY [AVG PTS]';
+            case 'AST': return 'DID NOT PLAY [AVG AST]';
+            case 'REB': return 'DID NOT PLAY [AVG REB]';
+            case 'FG3M': return 'DID NOT PLAY [AVG 3PT]';
+            case 'PTS+AST': return 'DID NOT PLAY [AVG PA]';
+            case 'PTS+REB': return 'DID NOT PLAY [AVG PR]';
+            case 'REB+AST': return 'DID NOT PLAY [AVG RA]';
+            case 'PTS+REB+AST': return 'DID NOT PLAY [AVG PRA]';
+            case 'STL': return 'DID NOT PLAY [AVG STL]';
+            case 'BLK': return 'DID NOT PLAY [AVG BLK]';
+            default: return `DID NOT PLAY [AVG ${statKey}]`;
+        }
     };
 
     // --- Hardcoded Placeholders for Did Not Play as requested ---
@@ -128,8 +190,10 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                         {game.GAME_DATE.replace(/-/g, '/').substring(5)} vs {game.opponent}
                     </div>
                     <div className="flex items-center gap-1.5 text-[10px] font-bold">
-                        {sbLogo && (
+                        {sbLogo ? (
                             <img src={logoSrc} alt="book" className="w-3.5 h-3.5 rounded-full object-cover bg-white" />
+                        ) : (
+                            <span className="text-white uppercase">{activeSportsbook}</span>
                         )}
                         <span className="text-white">CL {lineValue}</span>
                         <span className="text-white ml-0.5">O <span className="text-green600">{O_ODDS}</span></span>
@@ -150,7 +214,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
             {/* DID NOT PLAY block */}
             <div className="bg-bgElevation1 border-t border-borderMedium">
                 <div className="w-full text-center py-2 bg-borderMedium/50 border-b border-borderMedium">
-                    <span className="text-neutral400 font-bold text-[9px] uppercase tracking-wider">DID NOT PLAY [AVG PTS]</span>
+                    <span className="text-neutral400 font-bold text-[9px] uppercase tracking-wider">{getDnpTitle()}</span>
                 </div>
                 <div className="p-2 px-3 flex flex-col gap-2">
                     {inactivePlayers.map((p, i) => (
