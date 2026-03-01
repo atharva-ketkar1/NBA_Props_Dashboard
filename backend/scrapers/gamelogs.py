@@ -30,25 +30,24 @@ PT_MEASURE_TYPES = ["Passing", "Rebounding", "Drives"]
 
 def fetch_tracking_data_for_date(date_str):
     """
-    Fetches Drives, Passing, and Rebounding for a single date.
-    Uses your original requests logic for safety, but adds retry handling.
+    Fetches Drives, Passing, Rebounding, 1Q Stats, and 1H Stats for a single date.
+    Uses requests logic for safety, with retry handling and stealth pacing.
     """
     daily_merged = None
     encoded_date = urllib.parse.quote(date_str, safe='')
     
+    # --- 1. FETCH PT TRACKING DATA (Passing, Rebounds, Drives) ---
     for PT in PT_MEASURE_TYPES:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # 1.0s sleep combined with 2 workers keeps pacing perfectly human-like
                 time.sleep(1.0) 
                 
                 url = (f"https://stats.nba.com/stats/leaguedashptstats?DateFrom={encoded_date}&DateTo={encoded_date}&"
                        f"LastNGames=0&LeagueID=00&Month=0&OpponentTeamID=0&PORound=0&PerMode=PerGame&"
                        f"PlayerOrTeam=Player&PtMeasureType={PT}&Season=2025-26&SeasonType=Regular%20Season&TeamID=0")
                 
-                # Using your exact Code#1 requests implementation
-                resp = requests.get(url, headers=HEADERS, timeout=15)
+                resp = requests.get(url, headers=HEADERS, timeout=30)
                 
                 if resp.status_code != 200: 
                     raise ValueError(f"Bad status code: {resp.status_code}")
@@ -58,10 +57,10 @@ def fetch_tracking_data_for_date(date_str):
                 api_headers = r['resultSets'][0].get('headers', [])
                 
                 if not row_set: 
-                    break # Success, but no data for this specific tracking type today
+                    break 
                 
                 df_pt = pd.DataFrame(row_set, columns=api_headers)
-                cols_to_keep = ['PLAYER_ID', 'POTENTIAL_AST', 'AST_POINTS_CREATED', 'REB_CHANCES', 'REB_CONTEST_PCT', 'DRIVES', 'DRIVE_PTS', 'DRIVE_PASSES']
+                cols_to_keep = ['PLAYER_ID', 'POTENTIAL_AST', 'PASSES_MADE', 'AST_POINTS_CREATED', 'REB_CHANCES', 'REB_CONTEST_PCT', 'DRIVES', 'DRIVE_PTS', 'DRIVE_PASSES']
                 df_pt = df_pt[[c for c in cols_to_keep if c in df_pt.columns]]
 
                 if daily_merged is None: 
@@ -69,22 +68,97 @@ def fetch_tracking_data_for_date(date_str):
                 else: 
                     daily_merged = pd.merge(daily_merged, df_pt, on='PLAYER_ID', how='outer')
                 
-                # Success! Break the retry loop
                 break 
 
             except Exception as e:
                 print(f"      Attempt {attempt + 1} failed for {PT} on {date_str}: {type(e).__name__} ({e})")
                 if attempt < max_retries - 1:
-                    time.sleep(3 * (attempt + 1)) # Wait 3s, then 6s before retrying
+                    time.sleep(3 * (attempt + 1)) 
                 else:
                     print(f"      Giving up on {PT} for {date_str}.")
+
+    # --- 2. FETCH 1ST QUARTER STATS (Using MeasureType=Base) ---
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            time.sleep(1.0)
+            q1_url = (f"https://stats.nba.com/stats/leaguedashplayerstats?DateFrom={encoded_date}&DateTo={encoded_date}&"
+                      f"GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&OpponentTeamID=0&"
+                      f"Outcome=&PORound=0&PaceAdjust=N&PerMode=Totals&Period=1&PlusMinus=N&Rank=N&"
+                      f"Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&VsConference=&VsDivision=")
+            
+            resp = requests.get(q1_url, headers=HEADERS, timeout=15)
+            if resp.status_code != 200:
+                raise ValueError(f"Bad status code: {resp.status_code}")
+                
+            r = resp.json()
+            row_set = r['resultSets'][0].get('rowSet', [])
+            api_headers = r['resultSets'][0].get('headers', [])
+            
+            if row_set:
+                df_1q = pd.DataFrame(row_set, columns=api_headers)
+                q1_cols = ['PLAYER_ID', 'MIN', 'PTS', 'AST', 'REB', 'FG3M', 'FGM', 'FTM', 'PF']
+                df_1q = df_1q[[c for c in q1_cols if c in df_1q.columns]]
+                
+                rename_dict = {c: f"1Q_{c}" for c in q1_cols if c != 'PLAYER_ID'}
+                df_1q = df_1q.rename(columns=rename_dict)
+                
+                if daily_merged is None: 
+                    daily_merged = df_1q
+                else: 
+                    daily_merged = pd.merge(daily_merged, df_1q, on='PLAYER_ID', how='outer')
+            break
+        except Exception as e:
+            print(f"      Attempt {attempt + 1} failed for 1Q Stats on {date_str}: {type(e).__name__} ({e})")
+            if attempt < max_retries - 1:
+                time.sleep(3 * (attempt + 1))
+            else:
+                print(f"      Giving up on 1Q Stats for {date_str}.")
+
+    # --- 3. FETCH 1ST HALF STATS (Using MeasureType=Base) ---
+    for attempt in range(max_retries):
+        try:
+            time.sleep(1.0)
+            h1_url = (f"https://stats.nba.com/stats/leaguedashplayerstats?DateFrom={encoded_date}&DateTo={encoded_date}&"
+                      f"GameSegment=First%20Half&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&"
+                      f"OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=Totals&Period=0&PlusMinus=N&Rank=N&"
+                      f"Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&VsConference=&VsDivision=")
+            
+            resp = requests.get(h1_url, headers=HEADERS, timeout=15)
+            if resp.status_code != 200:
+                raise ValueError(f"Bad status code: {resp.status_code}")
+                
+            r = resp.json()
+            row_set = r['resultSets'][0].get('rowSet', [])
+            api_headers = r['resultSets'][0].get('headers', [])
+            
+            if row_set:
+                df_1h = pd.DataFrame(row_set, columns=api_headers)
+                h1_cols = ['PLAYER_ID', 'MIN', 'PTS', 'AST', 'REB', 'FG3M', 'FGM', 'FTM']
+                df_1h = df_1h[[c for c in h1_cols if c in df_1h.columns]]
+                
+                # Rename standard columns to 1H_ format
+                rename_dict = {c: f"1H_{c}" for c in h1_cols if c != 'PLAYER_ID'}
+                df_1h = df_1h.rename(columns=rename_dict)
+                
+                if daily_merged is None: 
+                    daily_merged = df_1h
+                else: 
+                    daily_merged = pd.merge(daily_merged, df_1h, on='PLAYER_ID', how='outer')
+            break
+        except Exception as e:
+            print(f"      Attempt {attempt + 1} failed for 1H Stats on {date_str}: {type(e).__name__} ({e})")
+            if attempt < max_retries - 1:
+                time.sleep(3 * (attempt + 1))
+            else:
+                print(f"      Giving up on 1H Stats for {date_str}.")
             
     if daily_merged is not None:
         daily_merged['DATE_STR'] = date_str
         
     return daily_merged
 
-def run_scrape(output_path, n_games=20):
+def run_scrape(output_path, n_games=85):
     print(f"   Managing Game Logs at {output_path}")
     
     # 1. DETERMINE SCRAPE STRATEGY
@@ -98,6 +172,7 @@ def run_scrape(output_path, n_games=20):
             existing_df = pd.read_csv(output_path)
             if 'GAME_DATE' in existing_df.columns:
                 existing_df['GAME_DATE'] = pd.to_datetime(existing_df['GAME_DATE'])
+                existing_df['DATE_STR'] = existing_df['GAME_DATE'].dt.strftime('%m/%d/%Y')
             full_refresh = False
         except Exception as e:
             print(f"      Corrupt CSV ({e}). forcing full refresh.")
@@ -197,6 +272,13 @@ def run_scrape(output_path, n_games=20):
         final_df['GAME_DATE'] = pd.to_datetime(final_df['GAME_DATE'])
         final_df = final_df.sort_values(by=['PLAYER_ID', 'GAME_DATE'], ascending=[True, False])
         final_df = final_df.groupby('PLAYER_ID').head(MAX_HISTORY_GAMES).reset_index(drop=True)
+        
+        cols_to_drop = [
+            'SEASON_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 
+            'TEAM_NAME', 'GAME_ID', 'VIDEO_AVAILABLE', 'DATE_STR',
+            'FG_PCT', 'FG3_PCT', 'FT_PCT'
+        ]
+        final_df = final_df.drop(columns=[c for c in cols_to_drop if c in final_df.columns])
         
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         final_df.to_csv(output_path, index=False)

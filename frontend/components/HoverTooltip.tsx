@@ -61,12 +61,12 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
                 rows.push({ label: '3PT Made', value: formatPct(game.FG3M, game.FG3A) });
                 rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
-                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` }); // Update if specific 1Q PF logic exists
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` }); // Update if specific 1Q PF logic exists
                 break;
             case 'AST':
                 rows.push({ label: 'Assists', value: `${game.AST || 0}` });
                 rows.push({ label: 'Potential AST', value: `${game.POTENTIAL_AST || 0}` });
-                rows.push({ label: 'Passes', value: `${game.PASSES || 'N/A'}` });
+                rows.push({ label: 'Passes', value: `${game.PASSES_MADE || 'N/A'}` });
                 break;
             case 'REB':
                 rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
@@ -79,7 +79,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
                 rows.push({ label: '3PT Made', value: formatPct(game.FG3M, game.FG3A) });
                 rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
-                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
             case 'PTS+AST':
                 rows.push({ label: 'Points', value: `${game.PTS || 0}` });
@@ -112,17 +112,49 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
             case 'STL':
                 rows.push({ label: 'Steals', value: `${game.STL || 0}` });
                 rows.push({ label: 'Blocks', value: `${game.BLK || 0}` });
-                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
             case 'BLK':
                 rows.push({ label: 'Blocks', value: `${game.BLK || 0}` });
                 rows.push({ label: 'Steals', value: `${game.STL || 0}` });
-                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
             case 'TOV':
                 rows.push({ label: 'Turnovers', value: `${game.TOV || 0}` });
-                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
+            // --- 1Q PROPS ---
+            case '1Q_PTS': // (Make sure your STAT_LABELS maps '1Q Points' to '1Q_PTS')
+                rows[0] = { label: '1Q Minutes', value: `${game['1Q_MIN'] || 0}'` }; // Overwrites full-game minutes
+                rows.push({ label: '1Q Points', value: `${game['1Q_PTS'] || 0}` });
+                rows.push({ label: '1Q FT Made', value: `${game['1Q_FTM'] || 0}` }); // No attempts scraped yet, so just showing Makes
+                rows.push({ label: '1Q 3PT Made', value: `${game['1Q_FG3M'] || 0}` });
+                rows.push({ label: '1Q FG Made', value: `${game['1Q_FGM'] || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
+                break;
+
+            case '1Q_AST':
+                rows[0] = { label: '1Q Minutes', value: `${game['1Q_MIN'] || 0}'` };
+                rows.push({ label: '1Q Assists', value: `${game['1Q_AST'] || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
+                break;
+
+            case '1Q_REB':
+                rows[0] = { label: '1Q Minutes', value: `${game['1Q_MIN'] || 0}'` };
+                rows.push({ label: '1Q Rebounds', value: `${game['1Q_REB'] || 0}` });
+                rows.push({ label: 'OREB', value: `${game.OREB || 0}` }); // Displaying full game OREB since 1Q OREB wasn't scraped
+                rows.push({ label: 'DREB', value: `${game.DREB || 0}` }); // Displaying full game DREB
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
+                break;
+
+            // --- 1H PROPS ---
+            case '1H_PTS':
+                rows[0] = { label: '1H Minutes', value: `${game['1H_MIN'] || 0}'` };
+                rows.push({ label: '1H Points', value: `${game['1H_PTS'] || 0}` });
+                rows.push({ label: '1H FG Made', value: `${game['1H_FGM'] || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
+                break;
+
             default:
                 // Fallback for props like Fantasy, Double Double, etc.
                 rows.push({ label: statKey, value: `${game.score}` });
