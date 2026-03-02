@@ -42,8 +42,11 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
 
     // --- Dynamic Stat Row Configuration based on current Tab (statKey) ---
     const renderTableRows = () => {
+        // Format helper for minutes (handles decimals from the NBA API)
+        const formatMin = (min: any) => Math.round(Number(min || 0));
+
         const rows: { label: string; value: string }[] = [
-            { label: 'Minutes', value: `${game.MIN || 0}'` },
+            { label: 'Minutes', value: `${formatMin(game.MIN)}'` },
         ];
 
         // Format helper for shooting percentages
@@ -125,7 +128,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 break;
             // --- 1Q PROPS ---
             case '1Q_PTS': // (Make sure your STAT_LABELS maps '1Q Points' to '1Q_PTS')
-                rows[0] = { label: '1Q Minutes', value: `${game['1Q_MIN'] || 0}'` }; // Overwrites full-game minutes
+                rows[0] = { label: '1Q Minutes', value: `${formatMin(game['1Q_MIN'])}'` }; // Overwrites full-game minutes
                 rows.push({ label: '1Q Points', value: `${game['1Q_PTS'] || 0}` });
                 rows.push({ label: '1Q FT Made', value: `${game['1Q_FTM'] || 0}` }); // No attempts scraped yet, so just showing Makes
                 rows.push({ label: '1Q 3PT Made', value: `${game['1Q_FG3M'] || 0}` });
@@ -134,13 +137,13 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 break;
 
             case '1Q_AST':
-                rows[0] = { label: '1Q Minutes', value: `${game['1Q_MIN'] || 0}'` };
+                rows[0] = { label: '1Q Minutes', value: `${formatMin(game['1Q_MIN'])}'` };
                 rows.push({ label: '1Q Assists', value: `${game['1Q_AST'] || 0}` });
                 rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
 
             case '1Q_REB':
-                rows[0] = { label: '1Q Minutes', value: `${game['1Q_MIN'] || 0}'` };
+                rows[0] = { label: '1Q Minutes', value: `${formatMin(game['1Q_MIN'])}'` };
                 rows.push({ label: '1Q Rebounds', value: `${game['1Q_REB'] || 0}` });
                 rows.push({ label: 'OREB', value: `${game.OREB || 0}` }); // Displaying full game OREB since 1Q OREB wasn't scraped
                 rows.push({ label: 'DREB', value: `${game.DREB || 0}` }); // Displaying full game DREB
@@ -149,7 +152,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
 
             // --- 1H PROPS ---
             case '1H_PTS':
-                rows[0] = { label: '1H Minutes', value: `${game['1H_MIN'] || 0}'` };
+                rows[0] = { label: '1H Minutes', value: `${formatMin(game['1H_MIN'])}'` };
                 rows.push({ label: '1H Points', value: `${game['1H_PTS'] || 0}` });
                 rows.push({ label: '1H FG Made', value: `${game['1H_FGM'] || 0}` });
                 rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
