@@ -20,6 +20,7 @@ from scrapers import opp_def_zones as opp_def_zones
 from scrapers import shot_type_analysis as shot_type_analysis
 from scrapers import opp_shot_type_analysis as opp_shot_type_analysis
 from scrapers import play_type_analysis as play_type_analysis
+from scrapers import boxscores as boxscores
 from scrapers.archive import old_assist_zones as old_assist_zones
 from scrapers.archive import old_opp_assist_zones as old_opp_assist_zones
 from utils import aggregator
@@ -44,6 +45,7 @@ OPP_DEF_PATH = os.path.join(DATA_DIR, "opp_def_zones.json")
 SHOT_TYPE_PATH = os.path.join(DATA_DIR, "shot_type_analysis.json")
 OPP_SHOT_TYPE_PATH = os.path.join(DATA_DIR, "opponent_defensive_ranks.json")
 PLAY_TYPE_PATH = os.path.join(DATA_DIR, "play_type_analysis.json")
+BOXSCORES_PATH = os.path.join(DATA_DIR, "boxscores.json")
 
 def run_dk():
     print("   Starting DraftKings...")
@@ -131,6 +133,11 @@ def run_play_type_analysis():
         json.dump(data, f, indent=4)
     return f"Play Type Analysis: {len(data.get('players', {}))} players, {len(data.get('teams', {}))} teams"
 
+def run_boxscores():
+    print("   Starting Boxscores...")
+    boxscores.run_scrape(BOXSCORES_PATH)
+    return "Boxscores Updated"
+
 def main():
     start_time = time.time()
     print("PIPELINE STARTED")
@@ -149,7 +156,8 @@ def main():
             executor.submit(run_opp_def_zones),
             executor.submit(run_shot_type_analysis),
             executor.submit(run_opp_shot_type_analysis),
-            executor.submit(run_play_type_analysis)
+            executor.submit(run_play_type_analysis),
+            executor.submit(run_boxscores)
         ]
         
         for future in concurrent.futures.as_completed(futures):
@@ -173,6 +181,7 @@ def main():
         shot_type_path=SHOT_TYPE_PATH,
         opp_shot_type_path=OPP_SHOT_TYPE_PATH,
         play_type_path=PLAY_TYPE_PATH,
+        boxscores_path=BOXSCORES_PATH,
         output_path=MASTER_PATH
     )
 

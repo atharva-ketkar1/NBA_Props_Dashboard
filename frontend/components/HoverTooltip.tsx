@@ -22,10 +22,13 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
     if (game.isUpcoming) return null;
 
     // Formatting utilities
-    const isWin = game.score >= lineValue;
-    const diff = Math.abs(game.score - lineValue);
-    const badgeText = isWin ? `Won by ${diff}` : `Lost by ${diff}`;
-    const badgeColor = isWin ? 'bg-green600' : 'bg-red600';
+    // Formatting utilities (Now using actual game score margin)
+    const margin = game.margin || 0;
+    const isGameWin = margin > 0;
+    const diff = Math.abs(margin);
+
+    const badgeText = isGameWin ? `Won by ${diff}` : `Lost by ${diff}`;
+    const badgeColor = isGameWin ? 'bg-green600' : 'bg-red600';
 
     // Mock Odds (Since they aren't historically stored yet)
     const O_ODDS = '-125';
@@ -192,12 +195,28 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
         }
     };
 
-    // --- Hardcoded Placeholders for Did Not Play as requested ---
-    const inactivePlayers = [
-        { name: "M. MCBRIDE", pts: "12.9", img: "https://cdn.nba.com/headshots/nba/latest/260x190/1630540.png" },
-        { name: "L. SHAMET", pts: "9.7", img: "https://cdn.nba.com/headshots/nba/latest/260x190/1629013.png" },
-        { name: "G. YABUSELE", pts: "3.5", img: "https://cdn.nba.com/headshots/nba/latest/260x190/1627824.png" }
-    ];
+    // --- Dynamic Did Not Play fetching from aggregated logs ---
+    // Use statKey to sort and display the correct stat average
+    const inactivePlayers = (game.dnps || [])
+        .map((dnp: any) => {
+            // Get stat value. The aggregator ensures keys match statKeys ('PTS', 'PTS+AST', etc).
+            const rawStat = dnp.stats?.[statKey] ?? 0;
+            // Format name (e.g., "Miles McBride" -> "M. MCBRIDE")
+            const nameParts = dnp.name.split(' ');
+            const shortName = nameParts.length > 1
+                ? `${nameParts[0][0]}. ${nameParts[nameParts.length - 1]}`
+                : dnp.name;
+
+            return {
+                name: shortName.toUpperCase(),
+                pts: rawStat.toFixed(1),
+                rawStat,
+                img: `https://cdn.nba.com/headshots/nba/latest/260x190/${dnp.id}.png`,
+                fallbackImg: `${BASE_URL}/assets/player_headshots/${dnp.id}.png`
+            };
+        })
+        .sort((a: any, b: any) => b.rawStat - a.rawStat)
+        .slice(0, 3);
 
     // Position constraints to ensure tooltip stays on screen
     const TOOLTIP_WIDTH = 224; // Tailwind w-56 is 224px
@@ -219,24 +238,28 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
             style={popoverStyle}
         >
             {/* Header Area */}
-            <div className="flex justify-between items-start p-3 pb-2 relative border-b border-borderMedium">
-                <div className="flex flex-col gap-1.5 z-10">
-                    <div className="text-white font-bold text-xs">
+            <div className="flex justify-between items-start p-3 pb-3 relative border-b border-borderMedium">
+                <div className="flex flex-col gap-2 z-10">
+                    {/* 1. Increased text to text-sm and removed the margin pill */}
+                    <div className="text-white font-bold text-sm flex items-center gap-1.5">
                         {game.GAME_DATE.replace(/-/g, '/').substring(5)} vs {game.opponent}
                     </div>
-                    <div className="flex items-center gap-1.5 text-[10px] font-bold">
+
+                    {/* 2. Increased font size to text-xs, logo size, and adjusted spacing */}
+                    <div className="flex items-center gap-2 text-xs font-bold">
                         {sbLogo ? (
-                            <img src={logoSrc} alt="book" className="w-3.5 h-3.5 rounded-full object-cover bg-white" />
+                            <img src={logoSrc} alt="book" className="w-4 h-4 rounded-full object-cover bg-white" />
                         ) : (
                             <span className="text-white uppercase">{activeSportsbook}</span>
                         )}
                         <span className="text-white">CL {lineValue}</span>
                         <span className="text-white ml-0.5">O <span className="text-green600">{O_ODDS}</span></span>
-                        <span className="text-white">U <span className="text-red600">{U_ODDS}</span></span>
+                        <span className="text-white ml-0.5">U <span className="text-red600">{U_ODDS}</span></span>
                     </div>
                 </div>
 
-                <div className={`${badgeColor} text-white font-bold text-[10px] px-2 py-1 rounded absolute top-2 right-2 z-10`}>
+                {/* 3. Positioned flush top-right with rounded bottom-left corner and larger text */}
+                <div className={`${badgeColor} text-white font-bold text-xs px-3 py-1.5 absolute top-0 right-0 rounded-bl-md z-10`}>
                     {badgeText}
                 </div>
             </div>
@@ -247,22 +270,38 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
             </div>
 
             {/* DID NOT PLAY block */}
-            <div className="bg-bgElevation1 border-t border-borderMedium">
-                <div className="w-full text-center py-2 bg-borderMedium/50 border-b border-borderMedium">
-                    <span className="text-neutral400 font-bold text-[9px] uppercase tracking-wider">{getDnpTitle()}</span>
-                </div>
-                <div className="p-2 px-3 flex flex-col gap-2">
-                    {inactivePlayers.map((p, i) => (
-                        <div key={i} className="flex justify-between items-center">
-                            <div className="flex items-center gap-2">
-                                <img src={p.img} alt={p.name} className="w-5 h-5 rounded-full bg-borderMedium object-cover" />
-                                <span className="text-grayEmphasized font-bold text-[10px]">{p.name}</span>
+            {inactivePlayers.length > 0 && (
+                <div className="bg-bgElevation1 border-t border-borderMedium">
+                    <div className="w-full text-center py-2 bg-borderMedium/50 border-b border-borderMedium">
+                        <span className="text-neutral400 font-bold text-[9px] uppercase tracking-wider">{getDnpTitle()}</span>
+                    </div>
+                    <div className="p-2 px-3 flex flex-col gap-2">
+                        {inactivePlayers.map((p: any, i: number) => (
+                            <div key={i} className="flex justify-between items-center">
+                                <div className="flex items-center gap-2">
+                                    <div className="w-5 h-5 rounded-full bg-borderLight flex items-center justify-center overflow-hidden border border-borderMedium">
+                                        <img
+                                            src={p.img}
+                                            alt={p.name}
+                                            className="w-full h-full object-cover"
+                                            onError={(e) => {
+                                                const target = e.target as HTMLImageElement;
+                                                if (target.src !== p.fallbackImg && target.src !== "https://cdn.nba.com/headshots/nba/latest/260x190/fallback.png") {
+                                                    target.src = p.fallbackImg;
+                                                } else if (target.src === p.fallbackImg) {
+                                                    target.src = "https://cdn.nba.com/headshots/nba/latest/260x190/fallback.png";
+                                                }
+                                            }}
+                                        />
+                                    </div>
+                                    <span className="text-grayEmphasized font-bold text-[10px]">{p.name}</span>
+                                </div>
+                                <span className="text-white font-bold text-[10px]">({p.pts})</span>
                             </div>
-                            <span className="text-white font-bold text-[10px]">({p.pts})</span>
-                        </div>
-                    ))}
+                        ))}
+                    </div>
                 </div>
-            </div>
+            )}
         </div>
     );
 };

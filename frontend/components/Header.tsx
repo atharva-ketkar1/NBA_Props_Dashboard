@@ -191,9 +191,10 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
               className="w-full h-full rounded-full overflow-hidden"
               style={gradientStyle}
             >
-              <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation1">
+              <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation1 flex items-center justify-center">
                 <ImageWithFallback
-                  src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
+                  src={`https://cdn.nba.com/headshots/nba/latest/260x190/${player.id}.png`}
+                  fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
                   alt={player.name}
                   className="w-full h-full object-cover transform scale-125 pt-1.5"
                 />

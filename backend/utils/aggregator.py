@@ -75,7 +75,7 @@ def load_json(path):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path):
     print(f"   Aggregating Data...")
 
     # A. Load All Data
@@ -92,6 +92,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     shot_type_data = load_json(shot_type_path)
     opp_shot_type_data = load_json(opp_shot_type_path)
     play_type_data = load_json(play_type_path)
+    boxscores_data = load_json(boxscores_path)
 
     print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)}), PlayTypes({len(play_type_data.get('players', {}))})")
 
@@ -111,13 +112,66 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     stats_records = df_stats[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].to_dict('records')
     matcher = PlayerMatcher(stats_records)
 
+    # Build ID to Stats Map for DNP lookup
+    id_to_stats_map = {}
+    for _, row in df_stats.iterrows():
+        id_to_stats_map[int(row['PLAYER_ID'])] = {
+            'PTS': safe_float(row.get('PTS', 0)),
+            'AST': safe_float(row.get('AST', 0)),
+            'REB': safe_float(row.get('REB', 0)),
+            'FG3M': safe_float(row.get('FG3M', 0)),
+            'STL': safe_float(row.get('STL', 0)),
+            'BLK': safe_float(row.get('BLK', 0)),
+            'TOV': safe_float(row.get('TOV', 0)),
+            'PTS+REB+AST': safe_float(row.get('PTS+REB+AST', 0)),
+            'PTS+REB': safe_float(row.get('PTS+REB', 0)),
+            'PTS+AST': safe_float(row.get('PTS+AST', 0)),
+            'REB+AST': safe_float(row.get('REB+AST', 0)),
+            'STL+BLK': safe_float(row.get('STL+BLK', 0)),
+            '1Q_PTS': safe_float(row.get('1Q_PTS', 0)),
+            '1Q_AST': safe_float(row.get('1Q_AST', 0)),
+            '1Q_REB': safe_float(row.get('1Q_REB', 0)),
+            '1H_PTS': safe_float(row.get('1H_PTS', 0)),
+        }
+
     # C. Prepare Game Logs (Group by Player)
     logs_map = {}
     if not df_logs.empty and 'PLAYER_ID' in df_logs.columns:
         df_logs = df_logs.fillna(0)
         # Group by ID and convert to list of dicts
         for pid, group in df_logs.groupby('PLAYER_ID'):
-            logs_map[int(pid)] = group.to_dict(orient='records')
+            player_logs = group.to_dict(orient='records')
+            for log in player_logs:
+                game_id = str(log.get('GAME_ID', '')).zfill(10)
+                if game_id in boxscores_data:
+                    b_data = boxscores_data[game_id]
+                    
+                    team = str(log.get('TEAM_ABBREVIATION', ''))
+                    if not team or team == '0' or team == '0.0':
+                        matchup = str(log.get('MATCHUP', ''))
+                        if ' @ ' in matchup:
+                            team = matchup.split(' @ ')[0]
+                        elif ' vs. ' in matchup:
+                            team = matchup.split(' vs. ')[0]
+                            
+                    log['margin'] = b_data['margins'].get(team, 0)
+                    
+                    team_dnps = []
+                    for dnp in b_data['dnps']:
+                        if dnp['team'] == team:
+                            dnp_pid = matcher.match_player(dnp['name'], team, [])
+                            d_stats = id_to_stats_map.get(dnp_pid, {}) if dnp_pid else {}
+                            if not d_stats:
+                                d_stats = {k: 0.0 for k in ['PTS', 'AST', 'REB', 'FG3M', 'STL', 'BLK', 'TOV', 'PTS+REB+AST', 'PTS+REB', 'PTS+AST', 'REB+AST', 'STL+BLK', '1Q_PTS', '1Q_AST', '1Q_REB', '1H_PTS']}
+                            
+                            team_dnps.append({
+                                'name': dnp['name'],
+                                'reason': dnp['reason'],
+                                'stats': d_stats,
+                                'id': dnp_pid
+                            })
+                    log['dnps'] = team_dnps
+            logs_map[int(pid)] = player_logs
 
     # D. Map assist data from pbpstats to PLAYER_ID
     assists_by_pid = {}
@@ -414,5 +468,6 @@ if __name__ == "__main__":
         f"{base}/shot_type_analysis.json",
         f"{base}/opponent_defensive_ranks.json",
         f"{base}/play_type_analysis.json",
+        f"{base}/boxscores.json",
         f"{base}/master_feed.json"
     )

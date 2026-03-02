@@ -66,9 +66,10 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
             className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 hover:bg-bgElevation1 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-bgElevation1' : ''}`}
         >
             <div className="flex items-center gap-3">
-                <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1">
+                <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1 flex items-center justify-center">
                     <ImageWithFallback
-                        src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
+                        src={`https://cdn.nba.com/headshots/nba/latest/260x190/${player.id}.png`}
+                        fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
                         alt={player.name}
                         className="w-full h-full object-cover transform scale-125 pt-1"
                     />
