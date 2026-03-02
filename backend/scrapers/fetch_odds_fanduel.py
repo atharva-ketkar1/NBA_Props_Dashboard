@@ -132,16 +132,7 @@ def fetch_odds():
     attachments = main_page.get('attachments', {})
     events_data = attachments.get('events', {})
     
-    # Parse Upcoming Games
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    
-    for event_id, event in events_data.items():
-        open_date = event.get('openDate')
-        if not open_date: continue
-        
-        # Simple date check (UTC to Local approximation for filtering)
-        if today_str in open_date or (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d') in open_date:
-             upcoming_events.append(event)
+    upcoming_events = [event for event in events_data.values() if not event.get("inPlay", False)]
 
     all_props = []
 
@@ -192,7 +183,7 @@ def fetch_odds():
                     "over_odds": int(over_odds),
                     "under_odds": int(under_odds),
                     "game": game_name,
-                    "game_date": today_str, # Using scrape date as strict game date for now
+                    "game_date": event.get("startDate"),
                     "sportsbook": "fanduel"
                 }
                 all_props.append(prop_entry)

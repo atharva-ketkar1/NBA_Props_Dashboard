@@ -134,24 +134,25 @@ def get_dashboard_data():
     print("Fetching NBA schedule data...")
     data = get_nba_schedule()
     
-    # 1. Determine "Today" in US Eastern Time (ET)
+    # 1. Determine "Today" and "Tomorrow" in US Eastern Time (ET)
     et_tz = timezone(timedelta(hours=-5))
     today_et = datetime.now(et_tz)
+    tomorrow_et = today_et + timedelta(days=1)
     
     # Format matches the 'gameDate' field: "MM/DD/YYYY 00:00:00"
     target_date_str = today_et.strftime("%m/%d/%Y 00:00:00")
-    print(f"Looking for games on: {target_date_str}")
+    tomorrow_date_str = tomorrow_et.strftime("%m/%d/%Y 00:00:00")
+    print(f"Looking for games on: {target_date_str} and {tomorrow_date_str}")
     
     game_dates = data.get('leagueSchedule', {}).get('gameDates', [])
     todays_games_list = []
     
-    # 2. Find the object for today's date
+    # 2. Find the object for today's and tomorrow's date
     for date_obj in game_dates:
-        if date_obj.get('gameDate') == target_date_str:
-            todays_games_list = date_obj.get('games', [])
-            break
+        if date_obj.get('gameDate') in [target_date_str, tomorrow_date_str]:
+            todays_games_list.extend(date_obj.get('games', []))
             
-    print(f"Found {len(todays_games_list)} games for today")
+    print(f"Found {len(todays_games_list)} games for today and tomorrow")
     
     all_games_data = []
     
