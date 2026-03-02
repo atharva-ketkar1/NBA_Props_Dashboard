@@ -8,8 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==========================================
 # CONFIGURATION
 # ==========================================
-UPDATE_WINDOW_DAYS = 5
-MAX_HISTORY_DAYS = 85
+MAX_HISTORY_DAYS = 300  # Check the whole season for missing games
 MAX_WORKERS = 10  # Because we only use the CDN now, we can max out the workers!
 
 HEADERS = {
@@ -121,32 +120,32 @@ def run_scrape(output_path):
     print(f"   Managing Boxscores at {output_path}")
 
     existing_data = {}
-    full_refresh = True
 
     if os.path.exists(output_path):
         try:
             with open(output_path, 'r') as f:
                 existing_data = json.load(f)
             if existing_data:
-                print("      Found existing logs. Running INCREMENTAL update.")
-                full_refresh = False
-            else:
-                full_refresh = True
+                print(f"      Found {len(existing_data)} existing logs. Identifying missing games for SMART INCREMENTAL update.")
         except Exception:
             print("      Corrupt JSON. Forcing full refresh.")
-            full_refresh = True
+            existing_data = {}
 
-    days_to_check = MAX_HISTORY_DAYS if full_refresh else UPDATE_WINDOW_DAYS
+    days_to_check = MAX_HISTORY_DAYS
     
     # Step 1: Get all Game IDs instantly from the Master Schedule
-    game_ids_to_process = get_all_recent_game_ids(days_to_check)
-    print(f"      Found {len(game_ids_to_process)} completed games in the {days_to_check}-day window.")
+    all_game_ids = get_all_recent_game_ids(days_to_check)
+    
+    # Step 2: Filter out games we already have
+    game_ids_to_process = [gid for gid in all_game_ids if gid not in existing_data]
+    
+    print(f"      Found {len(game_ids_to_process)} NEW completed games missing from boxscores.")
 
     if not game_ids_to_process:
-        print("      No games to process. Exiting.")
+        print("      No new games to process. Exiting.")
         return
 
-    # Step 2: Fetch the actual boxscores concurrently from the CDN
+    # Step 3: Fetch the actual boxscores concurrently from the CDN
     print(f"      Fetching Boxscore data with {MAX_WORKERS} workers...")
     valid_updates = 0
     
@@ -162,9 +161,9 @@ def run_scrape(output_path):
                 valid_updates += 1
             
             if (i + 1) % 25 == 0 or (i + 1) == len(game_ids_to_process):
-                print(f"      [{i+1}/{len(game_ids_to_process)}] Processed boxscores...")
+                print(f"      [{i+1}/{len(game_ids_to_process)}] Processed new boxscores...")
 
-    # Step 3: Save to data sink
+    # Step 4: Save to data sink
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
         json.dump(existing_data, f, indent=4)

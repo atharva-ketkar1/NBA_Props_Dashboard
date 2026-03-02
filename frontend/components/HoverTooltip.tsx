@@ -19,15 +19,14 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
 
     const { game, x, y, lineValue, statKey, activeSportsbook } = data;
 
-    if (game.isUpcoming) return null;
+    if (!game || game.isUpcoming) return null;
 
-    // Formatting utilities
-    // Formatting utilities (Now using actual game score margin)
-    const margin = game.margin || 0;
-    const isGameWin = margin > 0;
+    // Formatting utilities (Now using fallback for game score margin and WL)
+    const margin = game.margin !== undefined ? game.margin : (game.PLUS_MINUS || 0);
+    const isGameWin = game.margin !== undefined ? game.margin > 0 : (game.WL === 'W');
     const diff = Math.abs(margin);
 
-    const badgeText = isGameWin ? `Won by ${diff}` : `Lost by ${diff}`;
+    const badgeText = diff > 0 ? (isGameWin ? `Won by ${diff}` : `Lost by ${diff}`) : (isGameWin ? 'Won' : 'Lost');
     const badgeColor = isGameWin ? 'bg-green600' : 'bg-red600';
 
     // Mock Odds (Since they aren't historically stored yet)
@@ -53,9 +52,9 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
         ];
 
         // Format helper for shooting percentages
-        const formatPct = (m: number, a: number) => {
-            const mVal = m || 0;
-            const aVal = a || 0;
+        const formatPct = (m: any, a: any) => {
+            const mVal = Number(m) || 0;
+            const aVal = Number(a) || 0;
             if (aVal === 0) return `${mVal}/${aVal} (0%)`;
             return `${mVal}/${aVal} (${Math.round((mVal / aVal) * 100)}%)`;
         };
@@ -67,7 +66,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 rows.push({ label: 'FT Made', value: formatPct(game.FTM, game.FTA) });
                 rows.push({ label: '3PT Made', value: formatPct(game.FG3M, game.FG3A) });
                 rows.push({ label: 'FG Made', value: formatPct(game.FGM, game.FGA) });
-                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` }); // Update if specific 1Q PF logic exists
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
             case 'AST':
                 rows.push({ label: 'Assists', value: `${game.AST || 0}` });
@@ -130,29 +129,26 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
             // --- 1Q PROPS ---
-            case '1Q_PTS': // (Make sure your STAT_LABELS maps '1Q Points' to '1Q_PTS')
-                rows[0] = { label: '1Q Minutes', value: `${formatMin(game['1Q_MIN'])}'` }; // Overwrites full-game minutes
+            case '1Q_PTS':
+                rows[0] = { label: '1Q Minutes', value: `${formatMin(game['1Q_MIN'])}'` };
                 rows.push({ label: '1Q Points', value: `${game['1Q_PTS'] || 0}` });
-                rows.push({ label: '1Q FT Made', value: `${game['1Q_FTM'] || 0}` }); // No attempts scraped yet, so just showing Makes
+                rows.push({ label: '1Q FT Made', value: `${game['1Q_FTM'] || 0}` });
                 rows.push({ label: '1Q 3PT Made', value: `${game['1Q_FG3M'] || 0}` });
                 rows.push({ label: '1Q FG Made', value: `${game['1Q_FGM'] || 0}` });
                 rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
-
             case '1Q_AST':
                 rows[0] = { label: '1Q Minutes', value: `${formatMin(game['1Q_MIN'])}'` };
                 rows.push({ label: '1Q Assists', value: `${game['1Q_AST'] || 0}` });
                 rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
-
             case '1Q_REB':
                 rows[0] = { label: '1Q Minutes', value: `${formatMin(game['1Q_MIN'])}'` };
                 rows.push({ label: '1Q Rebounds', value: `${game['1Q_REB'] || 0}` });
-                rows.push({ label: 'OREB', value: `${game.OREB || 0}` }); // Displaying full game OREB since 1Q OREB wasn't scraped
-                rows.push({ label: 'DREB', value: `${game.DREB || 0}` }); // Displaying full game DREB
+                rows.push({ label: 'OREB', value: `${game.OREB || 0}` });
+                rows.push({ label: 'DREB', value: `${game.DREB || 0}` });
                 rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
-
             // --- 1H PROPS ---
             case '1H_PTS':
                 rows[0] = { label: '1H Minutes', value: `${formatMin(game['1H_MIN'])}'` };
@@ -162,8 +158,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                 break;
 
             default:
-                // Fallback for props like Fantasy, Double Double, etc.
-                rows.push({ label: statKey, value: `${game.score}` });
+                rows.push({ label: statKey, value: `${game.score || 0}` });
                 rows.push({ label: 'Points', value: `${game.PTS || 0}` });
                 rows.push({ label: 'Assists', value: `${game.AST || 0}` });
                 rows.push({ label: 'Rebounds', value: `${game.REB || 0}` });
@@ -196,23 +191,32 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
     };
 
     // --- Dynamic Did Not Play fetching from aggregated logs ---
-    // Use statKey to sort and display the correct stat average
-    const inactivePlayers = (game.dnps || [])
+    const dnpsSafeIter = Array.isArray(game.dnps) ? game.dnps : [];
+    const inactivePlayers = dnpsSafeIter
         .map((dnp: any) => {
-            // Get stat value. The aggregator ensures keys match statKeys ('PTS', 'PTS+AST', etc).
-            const rawStat = dnp.stats?.[statKey] ?? 0;
-            // Format name (e.g., "Miles McBride" -> "M. MCBRIDE")
-            const nameParts = dnp.name.split(' ');
-            const shortName = nameParts.length > 1
-                ? `${nameParts[0][0]}. ${nameParts[nameParts.length - 1]}`
-                : dnp.name;
+            const rawStat = Number(dnp?.stats?.[statKey] || 0);
+            const rawName = dnp?.name || 'Unknown Player';
+            const nameParts = rawName.split(' ');
+
+            let shortName = rawName;
+            if (nameParts.length > 1) {
+                // Check if the last part is a common suffix
+                const suffix = nameParts[nameParts.length - 1].replace(/\./g, '').toLowerCase();
+                const suffixes = ['jr', 'sr', 'ii', 'iii', 'iv'];
+
+                if (suffixes.includes(suffix) && nameParts.length > 2) {
+                    shortName = `${nameParts[0][0]}. ${nameParts[nameParts.length - 2]} ${nameParts[nameParts.length - 1]}`;
+                } else {
+                    shortName = `${nameParts[0][0]}. ${nameParts[nameParts.length - 1]}`;
+                }
+            }
 
             return {
                 name: shortName.toUpperCase(),
                 pts: rawStat.toFixed(1),
                 rawStat,
-                img: `https://cdn.nba.com/headshots/nba/latest/260x190/${dnp.id}.png`,
-                fallbackImg: `${BASE_URL}/assets/player_headshots/${dnp.id}.png`
+                img: `https://cdn.nba.com/headshots/nba/latest/260x190/${dnp?.id || 'fallback'}.png`,
+                fallbackImg: `${BASE_URL}/assets/player_headshots/${dnp?.id || 'fallback'}.png`
             };
         })
         .sort((a: any, b: any) => b.rawStat - a.rawStat)
@@ -224,13 +228,14 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
 
     // Check if right edge of tooltip would overflow the window width (with 20px safety margin)
     const isOverflowingRight = typeof window !== 'undefined' && (x + OFFSET + TOOLTIP_WIDTH + 20 > window.innerWidth);
-
     const tooltipX = isOverflowingRight ? x - TOOLTIP_WIDTH - OFFSET : x + OFFSET;
 
     const popoverStyle: React.CSSProperties = {
         left: `${tooltipX}px`,
         top: `${Math.max(y - 80, 20)}px`,
     };
+
+    const displayDate = game.GAME_DATE ? game.GAME_DATE.replace(/-/g, '/').substring(5) : 'Unknown Date';
 
     return (
         <div
@@ -240,12 +245,10 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
             {/* Header Area */}
             <div className="flex justify-between items-start p-3 pb-3 relative border-b border-borderMedium">
                 <div className="flex flex-col gap-2 z-10">
-                    {/* 1. Increased text to text-sm and removed the margin pill */}
                     <div className="text-white font-bold text-sm flex items-center gap-1.5">
-                        {game.GAME_DATE.replace(/-/g, '/').substring(5)} vs {game.opponent}
+                        {displayDate} vs {game.opponent || 'TBD'}
                     </div>
 
-                    {/* 2. Increased font size to text-xs, logo size, and adjusted spacing */}
                     <div className="flex items-center gap-2 text-xs font-bold">
                         {sbLogo ? (
                             <img src={logoSrc} alt="book" className="w-4 h-4 rounded-full object-cover bg-white" />
@@ -258,7 +261,6 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                     </div>
                 </div>
 
-                {/* 3. Positioned flush top-right with rounded bottom-left corner and larger text */}
                 <div className={`${badgeColor} text-white font-bold text-xs px-3 py-1.5 absolute top-0 right-0 rounded-bl-md z-10`}>
                     {badgeText}
                 </div>
