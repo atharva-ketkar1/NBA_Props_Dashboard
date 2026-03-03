@@ -10,10 +10,9 @@ It looks like magic on the frontend, but beneath the hood, it's driven by a rigo
 ## 2. How The Data Actually Flows (Read This First)
 The biggest mistake new devs make here is assuming the React frontend talks to a live Python backend. **It does not.** 
 
-1. **Python does the heavy lifting via cron/manual execution:** 
-   Run `python run_pipeline.py` inside the `backend` folder. This launches roughly 7-10 scrapers asynchronously. It pulls DraftKings/FanDuel odds, NBA.com stats, and shot charts. Because upstream services (like PBPStats) often impose **IP bans**, some of these scrapers use Cloudflare Worker proxies and NBA Stats fallbacks to bypass 403 blocks safely. 
-   
-   It merges all of this using intense string-matching logic (because betting sites spell names differently), and spits out one giant file: `backend/data/current/master_feed.json`.
+1. **Python does the heavy lifting via two execution tracks:** 
+   - **The Master Pipeline**: Run `python run_pipeline.py` inside the `backend` folder. This launches roughly 13 scrapers asynchronously. It pulls NBA.com stats, shot charts, boxscores, and game logs. Because upstream services (like PBPStats) often impose **IP bans**, some of these scrapers use Cloudflare Worker proxies and NBA Stats fallbacks to bypass 403 blocks safely. It merges all of this using intense string-matching logic and spits out one giant file: `backend/data/current/master_feed.json`.
+   - **The Intraday Scheduler**: Run `python scheduler.py` on the backend. This daemon runs continuously, fetching DraftKings and FanDuel odds at set intraday intervals (11am, 1pm, etc.) and precisely capturing closing lines right before tip-off.
 
 2. **React serves the finalized data locally:**
    The frontend (`npm run dev`) just does a network fetch for `master_feed.json`. That is its entire "backend API." Once that JSON is in `App.tsx` state, flipping between "DraftKings" and "FanDuel", checking "Assist Zones", or swapping to "Rebounds", is entirely instantaneous because all 20,000+ data points are already loaded into browser memory.
@@ -34,14 +33,21 @@ If you're making modifications, watch out for these landmines:
 
 ## 5. Development Command Cheat Sheet
 
-### Run the Data Generator (Do this to update the data feed)
+### Run the Data Generator (Do this to update the massive stats feed)
 ```bash
 cd backend
 source .venv/bin/activate # Assuming you made a venv
 python run_pipeline.py
 ```
 
-### Serve the Backend Data (Leave this running in terminal tab 1)
+### Run the Intraday Server (Keep this running to track odds movement)
+```bash
+cd backend
+source .venv/bin/activate
+python scheduler.py
+```
+
+### Serve the Backend Data (Leave this running in terminal tab)
 ```bash
 cd backend
 npx serve --cors -p 5000

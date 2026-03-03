@@ -7,6 +7,7 @@ backend/.env
 backend/maintainence
 utils/player_matcher.py
 utils/test_matcher.py
+backend/logs
 
 .DS_Store
 Thumbs.db

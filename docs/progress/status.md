@@ -34,7 +34,7 @@ This document provides a high-level overview of what has been achieved in the NB
 - Adding deeper compound props (e.g., Turnovers, Steals + Blocks) if supported by the UI.
 
 ### 2. Pipeline Automation
-- Currently `run_pipeline.py` is run locally/manually. The future goal is migrating this to a scheduled chron job (e.g., GitHub Actions, AWS EventBridge) to auto-generate the `master_feed.json` into a cloud bucket the frontend can read.
+- Currently, `run_pipeline.py` is run locally/manually for the master data generation, while `scheduler.py` runs as a continuous local daemon for intraday odds snapshots and closing line captures. The future goal is migrating both of these out of local terminals and into scheduled cloud chron jobs (e.g., AWS EventBridge, AWS Lambda, Google Cloud Run) to auto-generate the JSON feeds into a cloud bucket the frontend can read.
 
 ### 3. UI Performance Refinement
 - Continuing to optimize large prop datasets within React (`App.tsx`) to prevent excessive re-renders when switching between complex canvas zones and bar charts.
