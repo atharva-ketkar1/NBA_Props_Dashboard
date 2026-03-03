@@ -106,6 +106,8 @@ export interface Player {
   stats: PlayerStats;
   game_log: GameLog[];
   props: PlayerProps;
+  historical_odds?: Record<string, any>;
+  intraday_movements?: any[];
   [key: string]: any; // Allow generic injection like shot_type_analysis
 }
 

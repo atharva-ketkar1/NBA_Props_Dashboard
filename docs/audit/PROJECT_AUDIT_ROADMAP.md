@@ -39,3 +39,25 @@ The Tooltip component contains the most hardcoded and missing data:
 ### Short-Term Frontend Updates
 1. **Remove Danger Fallbacks:** Refactor `PlayTypeAnalysis`, `ShotTypeAnalysis`, and `HoverTooltip` (DNP Section) to remove their hardcoded arrays. Implement empty-state UI overlays (similar to `AssistZones`) so users do not accidentally formulate bets based on placeholder mock data.
 2. **Dynamic DNP Roster:** Map the HoverTooltip's DNP list to actual injured or inactive players for that specific historical game, utilizing the team's roster data.
+
+## Operational Architecture & File Dependencies
+With the recent introduction of PM2 and Cron, the backend is now rapidly shifting toward a fully daemonized, automated steady-state schedule.
+
+### 1. The Cron Job (Daily Master Scrape)
+* **Command:** `0 6 * * * /usr/bin/python3 .../backend/run_pipeline.py >> pipeline.log`
+* **Purpose:** Every morning at 6:00 AM, the cron job executes the heavy master pipeline. This spins up the 13+ parallel workers to scrape DK, FD, NBA Stats, Spatial Zones, and Game Logs.
+* **Dependencies Handled:** 
+  * Writes to temporary sinks in `data/current/` (e.g., `nba_dashboard_games.json`, `season_stats.csv`).
+  * Aggregates and finalizes `master_feed.json`, which the React frontend instantly consumes.
+  * Ensures that day-to-day, the user wakes up to freshly processed stats without manually running scripts.
+
+### 2. PM2 Processes (Steady-State Daemons)
+Currently, PM2 manages two critical persistent processes, ensuring continuous uptime:
+1. **`nba-json-server` (`npx serve --cors -p 5000`):** Acts as the local area network layer, ensuring the React app can infinitely fetch `master_feed.json` without CORS issues.
+2. **`nba-odds-scheduler` (`scheduler.py`):** The beating heart of the intraday tracking. It wakes up at specific intervals (11 AM, 1 PM, 3 PM, 5 PM) to scrape DraftKings and FanDuel and safely append the delta to `line_movements_today.json`.
+
+### 3. File Dependency Bottlenecks & Critical Risks
+While PM2 and Cron automate the execution triggers, a major internal file dependency disconnect currently threatens the closing line captures:
+* **The Schedule File Disconnect:** The PM2 `scheduler.py` daemon and its `snapshot_manager.py` heavily rely on loading a file named `today_schedule.json`. It expects this file to contain an object array with precisely formatted `closing_scrape_deadline` strings. However, the daily `fetch_todays_games.py` script currently outputs its payload to `nba_dashboard_games.json` and does *not* generate a `closing_scrape_deadline` field. 
+* **Impact:** Because of this disjointed dependency, the PM2 `scheduler.py` will actively record standard 2-hour intraday snapshots, but it will continuously fail to execute the dynamic "Closing Lines Scrape" (Gate 1 & Gate 2), silently failing.
+* **Day-to-Day Resolution Requirement:** For the system to achieve true "steady-state" perfection where `historical_odds.json` accurately logs closing lines day-to-day, `fetch_todays_games.py` must be refactored to output `today_schedule.json` with strict datetime ISO deadlines.

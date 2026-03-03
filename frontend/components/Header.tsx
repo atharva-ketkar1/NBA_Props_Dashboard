@@ -1,8 +1,9 @@
 import React, { useMemo } from 'react';
 import { Player } from '../types';
-import { HelpCircle, SlidersHorizontal, ChevronRight, Ban } from 'lucide-react';
+import { HelpCircle, SlidersHorizontal, ChevronRight, Ban, Activity } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { TEAM_IDS, TEAM_COLORS } from '../constants';
+import { LineMovementSparkline } from './LineMovementSparkline';
 
 interface HeaderProps {
   player?: Player;
@@ -55,6 +56,8 @@ const StatItem = ({ label, value, diff }: { label: string, value: string | numbe
 };
 
 export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange }) => {
+  const [sparklineMode, setSparklineMode] = React.useState<'line' | 'juice'>('line');
+  const [showFilters, setShowFilters] = React.useState(false);
 
   const statKey = STAT_LABELS[activeTab] || 'PTS';
 
@@ -310,13 +313,44 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           </div>
         </div>
 
-        {/* Section 4: Actions */}
-        <div className="flex items-center gap-4 px-4 py-3.5 border-borderMedium w-full xl:w-auto justify-end shrink bg-bgElevation0">
+        {/* Section 4: Actions & Line Movement */}
+        <div className="flex items-center gap-4 px-4 py-3.5 border-borderMedium w-full xl:w-auto justify-end shrink bg-bgElevation0 relative">
           <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" />
-          <button className="flex items-center gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            Filters
-          </button>
+
+          <div className="relative">
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className="flex items-center gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              Filters
+            </button>
+
+            {showFilters && (
+              <div className="absolute top-[120%] right-0 bg-bgElevation1 border border-borderMedium rounded-xl shadow-2xl z-50 p-4 w-[280px]">
+                {player.intraday_movements && player.intraday_movements.length > 0 ? (
+                  <div className="flex flex-col gap-3">
+                    <LineMovementSparkline
+                      movements={player.intraday_movements}
+                      playerId={player.id}
+                      statKey={statKey}
+                      activeSportsbook={activeSportsbook}
+                      mode={sparklineMode}
+                    />
+                    <button
+                      onClick={() => setSparklineMode(sparklineMode === 'line' ? 'juice' : 'line')}
+                      className="flex items-center justify-center w-full gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation2 hover:border-blue-500 hover:text-blue-400 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
+                      <Activity className="w-3.5 h-3.5" />
+                      {sparklineMode === 'line' ? 'View Over Juice' : 'View Line'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-gray-500 text-[10px] italic flex items-center justify-center p-2">
+                    No intraday movements available.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
       </div>

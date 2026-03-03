@@ -35,11 +35,14 @@ def parse_game_data(game):
     game_time_et_display = None
     game_date = None
     game_weekday = None
+    closing_scrape_deadline = None
     
     if game_time_et_raw:
         try:
             # Parse the EST time string from the API
             dt = datetime.strptime(game_time_et_raw, "%Y-%m-%dT%H:%M:%SZ")
+            dt_et = dt.replace(tzinfo=timezone(timedelta(hours=-5)))
+            closing_scrape_deadline = dt_et.isoformat()
             game_time_et_display = dt.strftime("%I:%M %p ET")
             game_date = dt.strftime("%Y-%m-%d")
             game_weekday = dt.strftime("%A")
@@ -104,6 +107,7 @@ def parse_game_data(game):
         'game_time_et': game_time_et_display,
         'game_date': game_date,
         'game_weekday': game_weekday,
+        'closing_scrape_deadline': closing_scrape_deadline,
         
         # Game status
         'game_status': game_status_num,
@@ -208,11 +212,21 @@ else:
 
 # Save to files
 output_path = os.path.join(os.path.dirname(__file__), '../data/current/nba_dashboard_games.json')
+schedule_path = os.path.join(os.path.dirname(__file__), '../data/current/today_schedule.json')
+
 # Ensure directory exists
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
 with open(output_path, 'w') as f:
     json.dump(raw_data, f, indent=2, default=str)
 
+# Write the schedule data for the PM2 scheduler
+schedule_data = {
+    "games": raw_data
+}
+with open(schedule_path, 'w') as f:
+    json.dump(schedule_data, f, indent=2, default=str)
+
 print(f"\nData saved to:")
 print(f"   - {output_path}")
+print(f"   - {schedule_path}")

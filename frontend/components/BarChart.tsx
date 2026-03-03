@@ -358,7 +358,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             </div>
 
             {/* Hover Tooltip Overlay */}
-            <HoverTooltip data={hoverData} />
+            <HoverTooltip data={hoverData} player={player} />
         </div>
     );
 };

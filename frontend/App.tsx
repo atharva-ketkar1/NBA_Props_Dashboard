@@ -20,10 +20,23 @@ function App() {
   // 1. Fetch data from backend
   useEffect(() => {
     const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-    fetch(`${apiUrl}/data/current/master_feed.json`)
-      .then(res => res.json())
-      .then(data => {
-        setRawData(data);
+
+    Promise.all([
+      fetch(`${apiUrl}/data/current/master_feed.json`).then(res => res.json()),
+      fetch(`${apiUrl}/data/archive/historical_odds.json`).then(res => res.json()).catch(() => ({})),
+      fetch(`${apiUrl}/data/current/line_movements_today.json`).then(res => res.json()).catch(() => ({ snapshots: [] }))
+    ])
+      .then(([masterFeed, historicalOdds, lineMovements]) => {
+        // Map historical & intraday odds into the master feed
+        const enhancedFeed = (Array.isArray(masterFeed) ? masterFeed : []).map((player: Player) => {
+          return {
+            ...player,
+            historical_odds: historicalOdds, // Using the full map so children can look up dates safely
+            intraday_movements: lineMovements?.snapshots || [] // Array of snapshots
+          };
+        });
+
+        setRawData(enhancedFeed);
         setLoading(false);
       })
       .catch(err => {

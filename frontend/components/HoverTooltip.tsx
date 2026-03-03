@@ -12,9 +12,10 @@ export interface HoveredGameData {
 
 interface TooltipProps {
     data: HoveredGameData | null;
+    player?: import('../types').Player;
 }
 
-export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
+export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
     if (!data) return null;
 
     const { game, x, y, lineValue, statKey, activeSportsbook } = data;
@@ -30,8 +31,9 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
     const badgeColor = isGameWin ? 'bg-green600' : 'bg-red600';
 
     // Mock Odds (Since they aren't historically stored yet)
-    const O_ODDS = '-125';
-    const U_ODDS = '-102';
+    let O_ODDS = '-125'; // Default mock
+    let U_ODDS = '-102'; // Default mock
+    let hasHistoricalData = false;
 
     // Sportsbook logo resolution for the header
     let sbLogo = '';
@@ -41,6 +43,34 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
     // Base API URL for local dev asset resolution
     const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
     const logoSrc = `${BASE_URL}${sbLogo}`;
+
+    // Extract historical odds if available
+    let displayLine = lineValue;
+    let isFallback = false;
+
+    if (player && player.historical_odds && game.GAME_DATE) {
+        // Find the record for this exact date
+        const dateRecord = player.historical_odds[game.GAME_DATE];
+        if (dateRecord) {
+            // Find the player in that date record
+            const playerRecord = dateRecord[player.id];
+            if (playerRecord && playerRecord.props) {
+                // Get the exact stat line from the historical prop tree
+                const histProp = playerRecord.props[statKey]?.[activeSportsbook];
+
+                // If it doesn't exist on the active sportsbook, try fallback to DK or FD
+                const fallbackProp = histProp || playerRecord.props[statKey]?.['dk'] || playerRecord.props[statKey]?.['fd'];
+
+                if (fallbackProp) {
+                    displayLine = fallbackProp.line;
+                    O_ODDS = fallbackProp.over > 0 ? `+${fallbackProp.over}` : `${fallbackProp.over}`;
+                    U_ODDS = fallbackProp.under > 0 ? `+${fallbackProp.under}` : `${fallbackProp.under}`;
+                    hasHistoricalData = true;
+                    isFallback = playerRecord.source === 'last_snapshot_fallback';
+                }
+            }
+        }
+    }
 
     // --- Dynamic Stat Row Configuration based on current Tab (statKey) ---
     const renderTableRows = () => {
@@ -255,10 +285,22 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data }) => {
                         ) : (
                             <span className="text-white uppercase">{activeSportsbook}</span>
                         )}
-                        <span className="text-white">CL {lineValue}</span>
-                        <span className="text-white ml-0.5">O <span className="text-green600">{O_ODDS}</span></span>
-                        <span className="text-white ml-0.5">U <span className="text-red600">{U_ODDS}</span></span>
+                        <span className="text-white relative">
+                            CL {displayLine}
+                            {isFallback && <span className="text-yellow-400 align-top text-[10px] ml-[1px] absolute -top-1">*</span>}
+                        </span>
+                        {hasHistoricalData && (
+                            <>
+                                <span className="text-white ml-0.5">O <span className="text-green600">{O_ODDS}</span></span>
+                                <span className="text-white ml-0.5">U <span className="text-red600">{U_ODDS}</span></span>
+                            </>
+                        )}
                     </div>
+                    {isFallback && (
+                        <div className="text-[9px] text-yellow-400 font-medium -mt-1 opacity-80">
+                            * Fallback Estimate
+                        </div>
+                    )}
                 </div>
 
                 <div className={`${badgeColor} text-white font-bold text-xs px-3 py-1.5 absolute top-0 right-0 rounded-bl-md z-10`}>
