@@ -1,16 +1,65 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { ChevronDown, Search, Lock, Plus, LockOpen, X } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-react';
 import { Player, Game } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 
-const STAT_FILTERS = [
-    { label: 'Points', key: 'PTS' },
-    { label: 'Assists', key: 'AST' },
-    { label: 'Rebounds', key: 'REB' },
-    { label: 'Threes', key: 'FG3M' },
-    { label: 'Fantasy', key: 'FAN' },
-    { label: 'PRA', key: 'PTS+REB+AST' }
-];
+const STAT_MAP: Record<string, string> = {
+    'Points': 'PTS', 'Assists': 'AST', 'Rebounds': 'REB', 'Threes': 'FG3M',
+    'Pts+Ast': 'PTS+AST', 'Pts+Reb': 'PTS+REB', 'Reb+Ast': 'REB+AST',
+    'Pts+Reb+Ast': 'PTS+REB+AST', 'Fantasy': 'FAN', 'Blocks': 'BLK',
+    'Steals': 'STL', 'Turnovers': 'TOV', '1Q Points': '1Q_PTS',
+    '1Q Assists': '1Q_AST', '1Q Rebounds': '1Q_REB', '1H Points': '1H_PTS',
+    'Double Double': 'DD2', 'Triple Double': 'TD3'
+};
+
+const CustomDropdown = ({ value, options, onChange, placeholder }: { value: string, options: { label: string, value: string, disabled?: boolean }[], onChange: (val: string) => void, placeholder?: string }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setIsOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const selectedLabel = options.find(o => o.value === value)?.label || placeholder || value;
+
+    return (
+        <div className="relative w-full" ref={dropdownRef}>
+            <div
+                className="w-full bg-bgElevation1 hover:bg-bgElevation2 text-white text-xs font-bold py-2 px-3 rounded-lg border border-transparent cursor-pointer flex justify-between items-center transition-colors"
+                onClick={() => setIsOpen(!isOpen)}
+            >
+                <span className="truncate">{selectedLabel}</span>
+                <ChevronDown className={`w-3.5 h-3.5 text-gray-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+            </div>
+            {isOpen && (
+                <div className="absolute top-full left-0 right-0 mt-1 bg-bgElevation1 border border-borderMedium rounded-lg shadow-xl z-50 py-1">
+                    {options.map((option) => (
+                        <div
+                            key={option.value}
+                            className={`px-3 py-2 text-xs font-bold flex items-center justify-between ${option.disabled ? 'text-gray-600 cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-bgElevation2 ' + (value === option.value ? 'text-white' : 'text-gray-400')}`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (!option.disabled) {
+                                    onChange(option.value);
+                                    setIsOpen(false);
+                                }
+                            }}
+                        >
+                            <span>{option.label}</span>
+                            {value === option.value && <Check className="w-3.5 h-3.5 text-gray-500" />}
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
 
 interface SidebarProps {
     isOpen?: boolean;
@@ -18,6 +67,8 @@ interface SidebarProps {
     players: Player[];
     activePlayerId?: number;
     onSelectPlayer: (id: number) => void;
+    activeTab?: string;
+    onTabChange?: (tab: string) => void;
 }
 
 const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-7 h-7" }: { teamId: number, tricode: string, sizeClass?: string }) => {
@@ -60,6 +111,13 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
     // Basic placeholder logic for color, can be enhanced later
     const isPlusYellow = true;
 
+    const formatOdds = (val: number | string | undefined) => {
+        if (val === undefined || val === null) return '-';
+        const num = Number(val);
+        if (isNaN(num)) return String(val);
+        return num > 0 ? `+${num}` : String(num);
+    };
+
     return (
         <div
             onClick={onClick}
@@ -91,10 +149,10 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
                             <span className="text-white font-bold font-chakra text-xs">{line}</span>
                             <div className="flex items-center gap-1">
                                 <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">O</span> <span className="text-green500 font-chakra">{prop?.over || '-'}</span>
+                                    <span className="text-fgSubtle">O</span> <span className="text-green500 font-chakra">{formatOdds(prop?.over)}</span>
                                 </div>
                                 <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">U</span> <span className="text-red500 font-chakra">{prop?.under || '-'}</span>
+                                    <span className="text-fgSubtle">U</span> <span className="text-red500 font-chakra">{formatOdds(prop?.under)}</span>
                                 </div>
                             </div>
                         </div>
@@ -200,9 +258,12 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
     );
 };
 
-export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, players, activePlayerId, onSelectPlayer }) => {
-    const [statFilter, setStatFilter] = useState('PTS');
-    const [timeFilter, setTimeFilter] = useState('All Games');
+export const Sidebar: React.FC<SidebarProps> = ({
+    isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
+    activeTab = 'Points', onTabChange = () => { }
+}) => {
+    const statFilter = STAT_MAP[activeTab] || 'PTS';
+    const [gameFilter, setGameFilter] = useState('All Games');
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
     const [expandedGames, setExpandedGames] = useState<Record<string, boolean>>({});
     const [searchTerm, setSearchTerm] = useState('');
@@ -221,16 +282,51 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
             .catch(err => console.error("Error loading schedule:", err));
     }, []);
 
+    // Dynamically generate prop options and game options
+    const propOptions = useMemo(() => {
+        const propSet = new Set<string>();
+        players.forEach(p => {
+            if (p.props) {
+                Object.keys(p.props).forEach(key => propSet.add(key));
+            }
+        });
+
+        // Exact tabs from Header
+        const TAB_ORDER = [
+            'Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast',
+            'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists',
+            '1Q Rebounds', '1H Points', 'Blocks', 'Steals', 'Turnovers', 'Fantasy'
+        ];
+
+        return TAB_ORDER.map(label => {
+            const key = STAT_MAP[label] || label;
+            return {
+                label,
+                value: label,
+                disabled: !propSet.has(key) // Greyed out if no players have the line
+            };
+        });
+    }, [players]);
+
+    const gameOptions = useMemo(() => {
+        const options = [{ label: 'All Games', value: 'All Games' }];
+        scheduleData.forEach(game => {
+            options.push({
+                label: `${game.away_team_tricode}-${game.home_team_tricode}`,
+                value: game.game_id
+            });
+        });
+        return options;
+    }, [scheduleData]);
+
     // Group active players into the schedule with Filters
     const processedGames = useMemo(() => {
         if (!scheduleData.length || !players.length) return [];
 
-        // 1. Time Filter
+        // 1. Game Filter
         let filteredSchedule = scheduleData;
-        if (timeFilter === 'Today') {
-            const now = new Date();
-            const localYMD = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
-            filteredSchedule = scheduleData.filter(g => g.game_date === localYMD);
+        if (gameFilter !== 'All Games') {
+            filteredSchedule = scheduleData.filter(g => g.game_id === gameFilter);
         }
 
         // 2. Process Games & Players
@@ -279,7 +375,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
         }
 
         return result;
-    }, [scheduleData, players, statFilter, timeFilter, searchTerm]);
+    }, [scheduleData, players, statFilter, gameFilter, searchTerm]);
 
     const toggleGame = (gameId: string) => {
         setExpandedGames(prev => ({
@@ -316,27 +412,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose, playe
 
                 {/* Filters Row */}
                 <div className="flex gap-2 mb-1 lg:mt-0 mt-8 shrink-0">
-                    <div className="flex-1 relative">
-                        <select
-                            value={statFilter}
-                            onChange={(e) => setStatFilter(e.target.value)}
-                            className="w-full bg-bgElevation1 hover:bg-bgElevation2 text-white text-xs font-bold py-2 px-3 rounded-lg border-transparent appearance-none cursor-pointer outline-none focus:border-blue-500"
-                        >
-                            {STAT_FILTERS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
-                        </select>
-                        <ChevronDown className="w-3.5 h-3.5 text-gray-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <div className="flex-1 w-1/2">
+                        <CustomDropdown value={activeTab} options={propOptions} onChange={onTabChange} placeholder="Select Prop" />
                     </div>
-
-                    <div className="flex-1 relative">
-                        <select
-                            value={timeFilter}
-                            onChange={(e) => setTimeFilter(e.target.value)}
-                            className="w-full bg-bgElevation1 hover:bg-bgElevation2 text-white text-xs font-bold py-2 px-3 rounded-lg border-transparent appearance-none cursor-pointer outline-none focus:border-blue-500"
-                        >
-                            <option value="All Games">All Games</option>
-                            <option value="Today">Today</option>
-                        </select>
-                        <ChevronDown className="w-3.5 h-3.5 text-gray-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <div className="flex-1 w-1/2">
+                        <CustomDropdown value={gameFilter} options={gameOptions} onChange={setGameFilter} placeholder="All Games" />
                     </div>
                 </div>
 

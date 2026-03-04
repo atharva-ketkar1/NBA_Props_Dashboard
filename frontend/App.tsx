@@ -10,12 +10,75 @@ import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { Player } from './types';
 
+const STAT_LABELS: Record<string, string> = {
+  'Points': 'PTS',
+  'Assists': 'AST',
+  'Rebounds': 'REB',
+  'Threes': 'FG3M',
+  'Pts+Ast': 'PTS+AST',
+  'Pts+Reb': 'PTS+REB',
+  'Reb+Ast': 'REB+AST',
+  'Pts+Reb+Ast': 'PTS+REB+AST',
+  'Fantasy': 'FAN',
+  'Blocks': 'BLK',
+  'Steals': 'STL',
+  'Turnovers': 'TOV'
+};
+
+const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
+
 function App() {
   const [rawData, setRawData] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [activeTab, setActiveTab] = useState('Points');
   const [activeSportsbook, setActiveSportsbook] = useState<'dk' | 'fd' | 'mgm' | 'cz'>('dk');
+
+  const playersWithProps = useMemo(() => {
+    if (!rawData) return [];
+    const feed = Array.isArray(rawData) ? rawData : [];
+    return feed.filter(p => p.props && Object.keys(p.props).length > 0);
+  }, [rawData]);
+
+  const currentPlayer = playersWithProps[selectedIndex];
+
+  const handleTabChange = (newTab: string) => {
+    setActiveTab(newTab);
+    if (!currentPlayer || !currentPlayer.props) return;
+
+    const statKey = STAT_LABELS[newTab] || 'PTS';
+    const hasProp = currentPlayer.props[statKey] && Object.keys(currentPlayer.props[statKey]).length > 0;
+
+    if (!hasProp) {
+      // Find all players on the SAME TEAM as currentPlayer who HAVE the selected prop
+      const teamPlayers = playersWithProps.filter(p => p.team === currentPlayer.team);
+      const eligiblePlayers = teamPlayers.filter(p => p.props && p.props[statKey] && Object.keys(p.props[statKey]).length > 0);
+
+      if (eligiblePlayers.length > 0) {
+        // Sort eligible players by their season average for the requested stat, descending
+        eligiblePlayers.sort((a, b) => {
+          const statA = (a.stats && a.stats[statKey]) ? Number(a.stats[statKey]) : 0;
+          const statB = (b.stats && b.stats[statKey]) ? Number(b.stats[statKey]) : 0;
+          return statB - statA;
+        });
+
+        const bestPlayer = eligiblePlayers[0];
+        const newIndex = playersWithProps.findIndex(p => p.id === bestPlayer.id);
+        if (newIndex !== -1) {
+          setSelectedIndex(newIndex);
+        }
+      } else {
+        // If NO ONE on the team has the prop, fall back to the old logic of finding a valid tab for the current player
+        const firstValidTab = TAB_ORDER.find(tab => {
+          const k = STAT_LABELS[tab];
+          return currentPlayer.props[k] && Object.keys(currentPlayer.props[k]).length > 0;
+        });
+        if (firstValidTab) {
+          setActiveTab(firstValidTab);
+        }
+      }
+    }
+  };
 
   // 1. Fetch data from backend
   useEffect(() => {
@@ -45,14 +108,35 @@ function App() {
       });
   }, []);
 
-  // 2. Filter data
-  const playersWithProps = useMemo(() => {
-    if (!rawData) return [];
-    const feed = Array.isArray(rawData) ? rawData : [];
-    return feed.filter(p => p.props && Object.keys(p.props).length > 0);
-  }, [rawData]);
+  const [isInitialized, setIsInitialized] = useState(false);
 
-  const currentPlayer = playersWithProps[selectedIndex];
+  // 3. Smart Default Selection (Run once on data load)
+  useEffect(() => {
+    if (playersWithProps.length > 0 && !isInitialized) {
+      // Find the earliest date any player plays
+      let earliestDateStr = "9999-99-99";
+      playersWithProps.forEach(p => {
+        const gameDate = p.game_log?.[0]?.GAME_DATE; // Logs are usually sorted descending, so [0] might be last game, but wait, we need the *next* game. 
+        // Typically in master_feed, 'props' implies they play soon. 
+        // We can just sort all players with props by Season PTS to find a "Star Player"
+      });
+
+      // Simple robust approach: Out of all players with props today/tomorrow, find the one with highest season PTS
+      let bestIndex = 0;
+      let maxPts = -1;
+
+      playersWithProps.forEach((p, idx) => {
+        const pts = (p.stats && p.stats.PTS) ? Number(p.stats.PTS) : 0;
+        if (pts > maxPts) {
+          maxPts = pts;
+          bestIndex = idx;
+        }
+      });
+
+      setSelectedIndex(bestIndex);
+      setIsInitialized(true);
+    }
+  }, [playersWithProps, isInitialized]);
 
   if (loading) {
     return (
@@ -80,7 +164,8 @@ function App() {
         const index = playersWithProps.findIndex(p => p.id === id);
         if (index !== -1) setSelectedIndex(index);
       },
-      statFilter: activeTab // Optional: pass stat filter to sidebar if sidebar supports it
+      activeTab: activeTab,
+      onTabChange: handleTabChange
     }}>
       <div className="flex flex-col gap-4">
 
@@ -89,7 +174,7 @@ function App() {
           <Header
             player={currentPlayer}
             activeTab={activeTab}
-            onTabChange={setActiveTab}
+            onTabChange={handleTabChange}
             activeSportsbook={activeSportsbook}
             onSportsbookChange={setActiveSportsbook}
           />

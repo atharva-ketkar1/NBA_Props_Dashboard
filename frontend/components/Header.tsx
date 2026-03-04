@@ -67,7 +67,13 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
     let prop = player.props?.[statKey]?.[activeSportsbook];
     const hasLine = !!prop;
     const lineVal = prop?.line || 0;
-    const oddsVal = { over: prop?.over || 0, under: prop?.under || 0 };
+
+    const formatOdds = (val: number | string) => {
+      const num = Number(val);
+      if (isNaN(num)) return val;
+      return num > 0 ? `+${num}` : `${num}`;
+    };
+    const oddsVal = { over: formatOdds(prop?.over || 0), under: formatOdds(prop?.under || 0) };
 
     const logs = player.game_log || [];
     const gamesPlayed = logs.length;
