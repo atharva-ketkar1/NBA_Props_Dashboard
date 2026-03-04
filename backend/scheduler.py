@@ -6,6 +6,7 @@ import concurrent.futures
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
@@ -171,8 +172,8 @@ def run_closing_lines_scrape():
                 for g in sched.get("games", []):
                     # tricode is like "BOS" "NYK"
                     # If we don't have strictly tri-codes, we handle what we have
-                    home = g.get("home_team", "")
-                    away = g.get("away_team", "")
+                    home = g.get("home_team_tricode", "")
+                    away = g.get("away_team_tricode", "")
                     if home: team_to_game[home] = g.get("game_id")
                     if away: team_to_game[away] = g.get("game_id")
         
@@ -187,39 +188,20 @@ def run_closing_lines_scrape():
         logger.info("Closing lines checked and processed.")
         
         # Write final snapshot
-        sm.write_snapshot("pre_game", players_data)
+        sm.write_snapshot("pre_game", players_data, bypass_dedupe=True)
         
     except Exception as e:
         logger.error(f"Failed closing lines scrape: {e}")
 
-def schedule_jobs():
-    logger.info("Initializing Daily Scheduler...")
-    scheduler = BlockingScheduler(timezone=timezone(timedelta(hours=-5))) # ET
-
-    # Schedule Intraday Scrapes
+def schedule_dynamic_jobs(scheduler):
+    logger.info("Scheduling dynamic pre-game closing line jobs...")
     now = get_et_now()
-    today_date = now.strftime("%Y-%m-%d")
-    
-    # 11:00 AM, 1:00 PM, 3:00 PM, 5:00 PM
-    intraday_times = [
-        ("open", "11:00:00"),
-        ("midday", "13:00:00"),
-        ("afternoon", "15:00:00"),
-        ("late_afternoon", "17:00:00")
-    ]
-    
-    for label, time_str in intraday_times:
-        try:
-            dt_str = f"{today_date}T{time_str}-05:00"
-            run_dt = datetime.fromisoformat(dt_str)
-            if now < run_dt:
-                scheduler.add_job(run_intraday_snapshot, DateTrigger(run_date=run_dt), args=[label])
-                logger.info(f"Scheduled intraday ({label}) for {run_dt}")
-        except Exception as e:
-            logger.error(f"Error scheduling intraday job: {e}")
-
-    # Schedule Dynamic Pre-Game Scrapes from today_schedule.json
     schedule_path = os.path.join(DATA_DIR, "today_schedule.json")
+    
+    for job in scheduler.get_jobs():
+        if job.id.startswith('dynamic_closing_'):
+            job.remove()
+            
     if os.path.exists(schedule_path):
         try:
             with open(schedule_path, 'r') as f:
@@ -230,20 +212,71 @@ def schedule_jobs():
                 deadline_str = game.get("closing_scrape_deadline")
                 if deadline_str:
                     try:
-                        deadline_dt = datetime.fromisoformat(deadline_str)
+                        # Subtract 5 minutes to run at 10:25 instead of 10:30
+                        deadline_dt = datetime.fromisoformat(deadline_str) - timedelta(minutes=5)
                         if now < deadline_dt:
                             unique_scrape_times.add(deadline_dt)
                     except ValueError:
                         pass
                         
-            # Register one job per unique scrape time (slate)
-            for dt in sorted(list(unique_scrape_times)):
-                scheduler.add_job(run_closing_lines_scrape, DateTrigger(run_date=dt))
+            for i, dt in enumerate(sorted(list(unique_scrape_times))):
+                scheduler.add_job(
+                    run_closing_lines_scrape, 
+                    DateTrigger(run_date=dt),
+                    id=f'dynamic_closing_{i}_{dt.strftime("%Y%m%d%H%M")}',
+                    replace_existing=True
+                )
                 logger.info(f"Scheduled closing lines scrape for {dt}")
         except Exception as e:
             logger.error(f"Error scheduling closing lines jobs: {e}")
     else:
         logger.warning(f"Schedule file not found: {schedule_path}")
+
+def schedule_jobs():
+    logger.info("Initializing Daily Scheduler...")
+    scheduler = BlockingScheduler(timezone=timezone(timedelta(hours=-5))) # ET
+
+    # Schedule Intraday Scrapes (Static - Every Day)
+    intraday_times = [
+        ("early_morning", 7, 0),
+        ("morning", 9, 0),
+        ("open", 11, 0),
+        ("midday", 13, 0),
+        ("afternoon", 15, 0),
+        ("late_afternoon", 17, 0),
+        ("evening", 19, 0),
+        ("night", 21, 0),
+        ("late_night", 23, 0)
+    ]
+    
+    for label, hour, minute in intraday_times:
+        try:
+            scheduler.add_job(
+                run_intraday_snapshot, 
+                CronTrigger(hour=hour, minute=minute), 
+                args=[label],
+                id=f'intraday_{label}',
+                replace_existing=True
+            )
+            logger.info(f"Scheduled intraday ({label}) for {hour:02d}:{minute:02d} daily")
+        except Exception as e:
+            logger.error(f"Error scheduling intraday job: {e}")
+
+    # Initial Run of Dynamic Jobs (for when process just started)
+    schedule_dynamic_jobs(scheduler)
+    
+    # Schedule Daily Reset for Dynamic Jobs at 6:30 AM (after 6:00 AM full pipeline run)
+    try:
+        scheduler.add_job(
+            schedule_dynamic_jobs,
+            CronTrigger(hour=6, minute=30),
+            args=[scheduler],
+            id='daily_dynamic_job_reset',
+            replace_existing=True
+        )
+        logger.info("Scheduled daily dynamic job re-evaluation at 6:30 AM")
+    except Exception as e:
+        logger.error(f"Error scheduling daily reset: {e}")
 
     logger.info("Starting blocking scheduler. Waiting for jobs to run...")
     try:

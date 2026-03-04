@@ -52,27 +52,26 @@ class SnapshotManager:
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
 
-    def write_snapshot(self, label, players_data):
-        """Append an intraday snapshot to line_movements_today.json"""
+    def write_snapshot(self, label, players_data, bypass_dedupe=False):
+        """Append an intraday snapshot with optional deduplication bypass."""
         now = get_et_now()
         today_date = now.strftime("%Y-%m-%d")
         timestamp_str = now.isoformat()
 
         data = self._read_json(self.line_movements_path, default={"date": today_date, "snapshots": []})
 
-        # Reset Detection Guardrail
         if data.get("date") != today_date:
             data = {"date": today_date, "snapshots": []}
 
-        # Snapshot Deduplication Guardrail (30 minutes)
-        if data.get("snapshots"):
+        # Deduplication Guardrail - skipped if bypass_dedupe is True
+        if not bypass_dedupe and data.get("snapshots"):
             last_snapshot = data["snapshots"][-1]
             last_timestamp_str = last_snapshot.get("timestamp")
             if last_timestamp_str:
                 try:
                     last_dt = datetime.fromisoformat(last_timestamp_str)
                     if (now - last_dt).total_seconds() < 1800:
-                        return False # Skipped
+                        return False 
                 except ValueError:
                     pass
 
@@ -150,7 +149,7 @@ class SnapshotManager:
                 else:
                     try:
                         deadline_dt = datetime.fromisoformat(deadline_str)
-                        if now < deadline_dt:
+                        if now <= deadline_dt:
                             gate_1_passed = True
                         else:
                             skip_reason = "gate_1_deadline_passed"
@@ -190,7 +189,7 @@ class SnapshotManager:
                     historical_odds[today_date][player_id] = {
                         "name": pdata.get("name"),
                         "team": pdata.get("team"),
-                        "props": fallback_props,
+                        "props": fallback_props.get("props", {}),
                         "source": "last_snapshot_fallback",
                         "captured_at": now.isoformat()
                     }

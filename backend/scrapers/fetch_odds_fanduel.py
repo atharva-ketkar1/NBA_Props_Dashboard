@@ -4,9 +4,13 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from dateutil import tz
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # CONSTANTS
-FANDUEL_PUBLIC_ACCESS_KEY = "FhMFpcPWXMeyZxOx" 
+FANDUEL_PUBLIC_ACCESS_KEY = os.getenv("FANDUEL_PUBLIC_ACCESS_KEY")
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'x-sportsbook-region': 'OH',
