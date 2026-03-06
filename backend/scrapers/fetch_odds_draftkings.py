@@ -4,9 +4,10 @@ import random
 import re
 from datetime import datetime
 from dateutil import tz
+import pandas as pd
 
 # CONSTANTS
-DK_API_BASE = "https://sportsbook-nash.draftkings.com/sites/US-OH-SB/api/sportscontent/controldata/league/leagueSubcategory/v1/markets"
+DK_API_BASE = "https://sportsbook-nash.draftkings.com/sites/US-IL-SB/api/sportscontent/controldata/league/leagueSubcategory/v1/markets"
 LEAGUE_ID = "42648" # NBA
 
 HEADERS = {
@@ -126,28 +127,36 @@ def parse_dk_data(data, prop_type_key):
         
         if not over_sel or not under_sel: continue
 
-        # Extract Name
-        market_name = market.get('name', '')
-        remove_terms = ["Points", "Rebounds", "Assists", "Threes", "Three", "Pointers", "Pointer", "3-Point", "Steals", "Blocks", "Turnovers", "O/U", "+", "Made"]
-        clean_name = market_name
-        tokens = clean_name.split()
-        player_tokens = []
-        for t in tokens:
-            if t in remove_terms or t == "O/U" or t.isdigit(): break
-            player_tokens.append(t)
-        player_name = " ".join(player_tokens).strip()
+        # --- DYNAMIC PLAYER NAME EXTRACTION ---
+        player_name = ""
+        
+        # 1. Try to pull exact name from the 'participants' array (New DraftKings Structure)
+        participants = over_sel.get('participants', [])
+        if not participants:
+            participants = under_sel.get('participants', [])
+            
+        for p in participants:
+            if p.get('type', '') == 'Player':
+                player_name = p.get('name', '')
+                break
+                
+        # 2. Fallback: Parse from Market Name (Old DraftKings Structure)
+        if not player_name:
+            market_name = market.get('name', '')
+            remove_terms = ["Points", "Rebounds", "Assists", "Threes", "Three", "Pointers", "Pointer", "3-Point", "Steals", "Blocks", "Turnovers", "O/U", "+", "Made"]
+            tokens = market_name.split()
+            player_tokens = []
+            for t in tokens:
+                if t in remove_terms or t == "O/U" or t.isdigit(): break
+                player_tokens.append(t)
+            player_name = " ".join(player_tokens).strip()
+
+        if not player_name: continue # Skip if we still can't figure out who the player is
 
         # Event Info
         event_id = market.get('eventId')
         event = event_map.get(event_id, {})
         game_name = event.get('name', 'Unknown')
-        
-        # Team Extraction
-        # DK typically has teamName1, teamName2, teamShortName1, teamShortName2
-        # We can't easily link the player directly to the team without more parsing,
-        # but we can return the matchup or both teams to help the matcher.
-        team1 = event.get('teamShortName1', 'UNK')
-        team2 = event.get('teamShortName2', 'UNK')
         
         start_date = event.get('startEventDate')
         game_date = datetime.now().strftime('%Y-%m-%d')
@@ -164,14 +173,11 @@ def parse_dk_data(data, prop_type_key):
         raw_over = over_sel.get('displayOdds', {}).get('american')
         raw_under = under_sel.get('displayOdds', {}).get('american')
 
-        # Store as INTEGER in the data (best practice)
         over_int = parse_odds(raw_over)
         under_int = parse_odds(raw_under)
 
         parsed.append({
             "player": normalize_player_name(player_name),
-            "team": "Unknown", # DK doesn't give us player-team link easily here, but we can use matchup
-            "team_options": [team1, team2], # NEW: Pass possible teams to matcher
             "prop_type": prop_type_key,
             "line": float(line),
             "over_odds": over_int,
@@ -210,4 +216,5 @@ def fetch_dk_odds():
     return all_props
 
 if __name__ == "__main__":
-    fetch_dk_odds()
+    df = pd.DataFrame(fetch_dk_odds())
+    df.to_csv("draftkings_odds.csv", index=False)
