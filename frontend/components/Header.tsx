@@ -12,6 +12,8 @@ interface HeaderProps {
   activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
   onSportsbookChange: (sb: 'dk' | 'fd' | 'mgm' | 'cz') => void;
   customLine?: number | null;
+  onToggleFilters?: () => void;
+  isFiltersOpen?: boolean;
 }
 
 const STAT_LABELS: Record<string, string> = {
@@ -50,7 +52,7 @@ const SPORTSBOOKS = [
 ] as const;
 
 
-const StatItem = ({ label, value, diff }: { label: string, value: string | number, diff?: string | number }) => {
+const StatItem = ({ label, value, diff, isCompact }: { label: string, value: string | number, diff?: string | number, isCompact?: boolean }) => {
   const diffVal = typeof diff === 'string' ? parseFloat(diff) : (diff || 0);
   const isPositive = diffVal > 0;
   const diffClass = isPositive ? 'text-green500' : (diffVal < 0 ? 'text-red500' : 'text-gray-500');
@@ -58,20 +60,16 @@ const StatItem = ({ label, value, diff }: { label: string, value: string | numbe
 
   return (
     // REDUCED: px-4 -> px-3
-    <div className="flex flex-col items-center px-1 lg:px-2 shrink-0">
-      {/* REDUCED: text-[10px] -> text-[9px] */}
-      <span className="text-[9px] text-fgSubtle uppercase tracking-wider font-bold mb-0.5 whitespace-nowrap">{label}</span>
-      {/* REDUCED: text-[20px] -> text-[18px] */}
-      <span className="text-[18px] font-bold text-white leading-none mb-0.5">{typeof value === 'number' ? value.toFixed(1) : value}</span>
-      {/* REDUCED: text-[11px] -> text-[10px] */}
-      <span className={`text-[10px] font-bold font-chakra ${diffClass}`}>{diffText}</span>
+    <div className={`flex flex-col items-center shrink-0 transition-all duration-300 ${isCompact ? 'px-0.5' : 'px-1 lg:px-2'}`}>
+      <span className={`text-fgSubtle uppercase tracking-wider font-bold mb-0.5 whitespace-nowrap transition-all duration-300 ${isCompact ? 'text-[8.5px]' : 'text-[9px]'}`}>{label}</span>
+      <span className={`font-bold text-white leading-none mb-0.5 transition-all duration-300 ${isCompact ? 'text-[15px]' : 'text-[18px]'}`}>{typeof value === 'number' ? value.toFixed(1) : value}</span>
+      <span className={`font-bold font-chakra ${diffClass} transition-all duration-300 ${isCompact ? 'text-[9px]' : 'text-[10px]'}`}>{diffText}</span>
     </div>
   );
 };
 
-export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine }) => {
+export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine, onToggleFilters, isFiltersOpen }) => {
   const [sparklineMode, setSparklineMode] = useState<'line' | 'juice'>('line');
-  const [showFilters, setShowFilters] = useState(false);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -270,10 +268,10 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
       </div>
 
       {/* Main Stats Row */}
-      <div className="flex flex-col xl:flex-row items-center w-full bg-bgElevation0 relative z-30 border-b border-borderMedium/40">
+      <div className="flex flex-col xl:flex-row items-center w-full bg-bgElevation0 relative z-30 border-b border-borderMedium/40 rounded-t-xl">
 
-        {/* Section 1: Player Info */}
-        <div className="flex items-center gap-3 lg:gap-4 px-3 lg:px-4 py-3 border-r border-borderMedium/40 w-full xl:w-auto justify-start">
+        {/* Section 1: Player Info (Should not squish) */}
+        <div className="flex items-center gap-3 lg:gap-4 px-3 lg:px-4 py-3 border-r border-borderMedium/40 w-full xl:w-auto justify-start shrink-0 min-w-max">
           <div className="relative shrink-0 w-[48px] h-[48px]">
             <div
               className="w-full h-full rounded-full overflow-hidden"
@@ -393,71 +391,49 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           </div>
         </div>
 
-        {/* Section 2: Hit Rate */}
-        {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex flex-col items-center justify-center px-4 lg:px-6 py-3.5 border-r border-borderMedium/40 w-full xl:w-auto shrink-0 min-w-[140px]">
-          <span className="text-[10px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
+        {/* Section 2: Hit Rate (Shrinks padding dynamically) */}
+        <div className={`flex flex-col items-center justify-center py-3.5 border-r border-borderMedium/40 w-full xl:w-auto shrink-0 transition-all duration-300 ${isFiltersOpen ? 'px-2 lg:px-3 min-w-[100px]' : 'px-4 lg:px-6 min-w-[140px]'}`}>
+          <span className={`text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase transition-all duration-300 ${isFiltersOpen ? 'text-[9px]' : 'text-[10px]'}`}>HIT RATE</span>
           {hasLine ? (
-            <span className={`text-[24px] font-bold tracking-tight leading-none mb-1 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'}`}>
-              {hitRateInfo?.rate}% <span className={`text-[15px] opacity-90`}>({hitRateInfo?.hits}/{hitRateInfo?.total})</span>
+            <span className={`font-bold tracking-tight leading-none mb-1 transition-all duration-300 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'} ${isFiltersOpen ? 'text-[20px]' : 'text-[24px]'}`}>
+              {hitRateInfo?.rate}% <span className={`opacity-90 transition-all duration-300 ${isFiltersOpen ? 'text-[12px]' : 'text-[15px]'}`}>({hitRateInfo?.hits}/{hitRateInfo?.total})</span>
             </span>
           ) : (
-            <span className="text-[24px] font-bold text-borderMedium leading-none mb-1">--.--%</span>
+            <span className={`font-bold text-borderMedium leading-none mb-1 transition-all duration-300 ${isFiltersOpen ? 'text-[20px]' : 'text-[24px]'}`}>--.--%</span>
           )}
-          <span className="text-[10px] text-neutral600 font-medium whitespace-nowrap">
+          <span className={`text-neutral600 font-medium whitespace-nowrap transition-all duration-300 ${isFiltersOpen ? 'text-[9px]' : 'text-[10px]'}`}>
             {hitRateInfo?.hits || 0} of {hitRateInfo?.total || 0} games
           </span>
         </div>
 
-        {/* Section 3: Stats Grid */}
-        {/* REDUCED: py-5 -> py-3.5 */}
-        <div className="flex-1 py-3 px-3 lg:px-4 w-full xl:w-auto">
-          <div className="flex items-center justify-between w-full h-full gap-1 lg:gap-2">
-            {statsData.map((stat, i) => (
-              <StatItem key={stat.label} label={stat.label} value={stat.value} diff={stat.diff} />
+        {/* Section 3: Stats Grid (Shrinks padding dynamically) */}
+        <div className={`flex-1 py-3 w-full xl:w-auto min-w-0 overflow-x-auto no-scrollbar transition-all duration-300 ${isFiltersOpen ? 'px-1 lg:px-2' : 'px-3 lg:px-4'}`}>
+          <div className={`flex items-center justify-between w-full h-full min-w-max px-2 transition-all duration-300 ${isFiltersOpen ? 'gap-1 lg:gap-2' : 'gap-2 lg:gap-4'}`}>
+            {(isFiltersOpen ? statsData.slice(0, 6) : statsData).map((stat, i) => (
+              <StatItem key={stat.label} label={stat.label} value={stat.value} diff={stat.diff} isCompact={isFiltersOpen} />
             ))}
           </div>
         </div>
 
         {/* Section 4: Actions & Line Movement */}
-        <div className="flex items-center gap-4 px-4 py-3.5 border-l border-borderMedium/40 w-full xl:w-auto justify-end shrink bg-bgElevation0 relative">
-          <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" />
+        {!isFiltersOpen && (
+          <div className="flex items-center gap-4 px-4 py-3.5 border-l border-borderMedium/40 w-full xl:w-auto justify-end shrink-0 bg-bgElevation0 relative transition-all duration-300">
+            <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" />
 
-          <div className="relative">
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className="flex items-center gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              Filters
-            </button>
-
-            {showFilters && (
-              <div className="absolute top-[120%] right-0 bg-bgElevation1 border border-borderMedium rounded-xl shadow-2xl z-50 p-4 w-[280px]">
-                {player.intraday_movements && player.intraday_movements.length > 0 ? (
-                  <div className="flex flex-col gap-3">
-                    <LineMovementSparkline
-                      movements={player.intraday_movements}
-                      playerId={player.id}
-                      statKey={statKey}
-                      activeSportsbook={activeSportsbook}
-                      mode={sparklineMode}
-                    />
-                    <button
-                      onClick={() => setSparklineMode(sparklineMode === 'line' ? 'juice' : 'line')}
-                      className="flex items-center justify-center w-full gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation2 hover:border-blue-500 hover:text-blue-400 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
-                      <Activity className="w-3.5 h-3.5" />
-                      {sparklineMode === 'line' ? 'View Over Juice' : 'View Line'}
-                    </button>
-                  </div>
-                ) : (
-                  <div className="text-gray-500 text-[10px] italic flex items-center justify-center p-2">
-                    No intraday movements available.
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  if (onToggleFilters) {
+                    onToggleFilters();
+                  }
+                }}
+                className="flex items-center gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                Filters
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
       </div>
     </div>

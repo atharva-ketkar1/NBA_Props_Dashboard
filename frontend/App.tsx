@@ -8,6 +8,7 @@ import { ShotTypeAnalysis } from './components/ShotTypeAnalysis';
 import { PlayTypeAnalysis } from './components/PlayTypeAnalysis';
 import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
+import { FiltersPanel } from './components/FiltersPanel';
 import { Player } from './types';
 
 const STAT_LABELS: Record<string, string> = {
@@ -34,6 +35,8 @@ function App() {
   const [activeTab, setActiveTab] = useState('Points');
   const [activeSportsbook, setActiveSportsbook] = useState<'dk' | 'fd' | 'mgm' | 'cz'>('dk');
   const [customLineValue, setCustomLineValue] = useState<number | null>(null);
+  const [isFiltersOpen, setIsFiltersOpen] = useState(false);
+  const [activeFilter, setActiveFilter] = useState<string | null>(null);
 
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
@@ -172,38 +175,58 @@ function App() {
       activeTab: activeTab,
       onTabChange: handleTabChange
     }}>
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col h-full w-full gap-4 relative pb-6">
 
-        {/* Merged Top Section (Header + Chart) */}
-        <div className="bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 relative z-20">
-          <Header
-            player={currentPlayer}
-            activeTab={activeTab}
-            onTabChange={handleTabChange}
-            activeSportsbook={activeSportsbook}
-            onSportsbookChange={(sb) => {
-              setActiveSportsbook(sb);
-              setCustomLineValue(null);
-            }}
-            customLine={customLineValue}
-          />
+        {/* Top Row: Merged Top Section + Filters Panel side-by-side */}
+        <div className="flex w-full relative z-20">
 
-          {/* Subtle separator */}
-          <div className="h-px w-full bg-border/50"></div>
-
-          <div className="p-0">
-            <BarChart
+          {/* Merged Top Section (Header + Chart) */}
+          <div className="flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0">
+            <Header
               player={currentPlayer}
               activeTab={activeTab}
+              onTabChange={handleTabChange}
               activeSportsbook={activeSportsbook}
+              onSportsbookChange={(sb) => {
+                setActiveSportsbook(sb);
+                setCustomLineValue(null);
+              }}
               customLine={customLineValue}
-              onCustomLineChange={setCustomLineValue}
+              onToggleFilters={() => setIsFiltersOpen(!isFiltersOpen)}
+              isFiltersOpen={isFiltersOpen}
             />
+
+            {/* Subtle separator */}
+            <div className="h-px w-full bg-border/50"></div>
+
+            <div className="p-0">
+              <BarChart
+                player={currentPlayer}
+                activeTab={activeTab}
+                activeSportsbook={activeSportsbook}
+                customLine={customLineValue}
+                onCustomLineChange={setCustomLineValue}
+                activeFilterOverlay={activeFilter}
+                isFiltersOpen={isFiltersOpen}
+              />
+            </div>
+          </div>
+
+          {/* The Split Screen Filter Panel (Absolute inside relative to maintain left-column height) */}
+          <div className={`transition-all duration-300 ease-in-out shrink-0 relative ${isFiltersOpen ? 'w-[320px] ml-4' : 'w-0 ml-0'}`}>
+            <div className={`absolute inset-0 bg-bgElevation0 rounded-xl shadow-lg border border-borderMedium/40 overflow-hidden transition-opacity duration-300 ${isFiltersOpen ? 'opacity-100' : 'opacity-0 border-none'}`}>
+              <FiltersPanel
+                isOpen={isFiltersOpen}
+                onClose={() => setIsFiltersOpen(false)}
+                activeFilter={activeFilter}
+                onFilterChange={setActiveFilter}
+              />
+            </div>
           </div>
         </div>
 
         {/* Bottom Grid Section */}
-        <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-4">
 
           {/* Left Column in Grid */}
           <div className="xl:col-span-4 flex flex-col gap-4 h-full">
@@ -263,7 +286,7 @@ function App() {
             </div>
           </div>
 
-        </section>
+        </div>
 
       </div>
     </Layout>

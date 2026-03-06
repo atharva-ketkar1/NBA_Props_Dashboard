@@ -10,6 +10,8 @@ interface BarChartProps {
     activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
     customLine?: number | null;
     onCustomLineChange?: (line: number | null) => void;
+    activeFilterOverlay?: string | null;
+    isFiltersOpen?: boolean;
 }
 
 const STAT_LABELS: Record<string, string> = {
@@ -27,7 +29,7 @@ const STAT_LABELS: Record<string, string> = {
     'Turnovers': 'TOV'
 };
 
-export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange }) => {
+export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
 
     // Hover State
@@ -50,15 +52,16 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             .catch(err => console.error("Error loading schedule:", err));
     }, []);
 
-    const { chartData, lineValue } = useMemo(() => {
-        if (!player || !player.game_log) return { chartData: [], lineValue: 0 };
+    const { chartData, lineValue, graphAvgSecondary, seasonAvgSecondary } = useMemo(() => {
+        if (!player || !player.game_log) return { chartData: [], lineValue: 0, graphAvgSecondary: 0, seasonAvgSecondary: 0 };
 
         // 1. Get Line based on Active Sportsbook
         const prop = player.props?.[statKey]?.[activeSportsbook];
         const line = prop?.line || 0;
 
-        // 2. Prepare Data (Last 30 games max)
-        const log = player.game_log.slice(0, 30).reverse();
+        // 2. Prepare Data (Last 30 games max, or 19 if filters are open to leave room)
+        const numGames = isFiltersOpen ? 19 : 30;
+        const log = player.game_log.slice(0, numGames).reverse();
 
         const data: any[] = log.map(game => {
             let val = game[statKey];
@@ -87,12 +90,22 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             return {
                 ...game,
                 score: val,
+                secondaryValue: activeFilterOverlay === 'Minutes' ? Number(game.MIN || 0) : null,
                 opponent,
                 logoUrl,
                 dateMonth: month,
                 dateDay: day
             };
         });
+
+        // Calculate Secondary averages if overlay is active
+        let seasonAvgSecondary = 0;
+        let graphAvgSecondary = 0;
+        if (activeFilterOverlay === 'Minutes') {
+            const sumGraph = data.reduce((acc, g) => acc + (g.secondaryValue || 0), 0);
+            graphAvgSecondary = data.length > 0 ? sumGraph / data.length : 0;
+            seasonAvgSecondary = Number(player.stats?.MIN || 0);
+        }
 
         // 3. Append upcoming game dynamically
         let upcomingOpponent = 'TBD';
@@ -124,6 +137,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
         data.push({
             score: null, // Special flag for upcoming game
+            secondaryValue: activeFilterOverlay === 'Minutes' ? graphAvgSecondary : null, // Expected default line connecting
             opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
             logoUrl: upcomingLogoUrl,
             dateMonth: upcomingMonth,
@@ -131,13 +145,13 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             isUpcoming: true
         });
 
-        return { chartData: data, lineValue: line };
-    }, [player, statKey, activeSportsbook, scheduleData]);
+        return { chartData: data, lineValue: line, graphAvgSecondary, seasonAvgSecondary };
+    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen]);
 
     if (!player) return null;
 
     // --- Responsive SVG Layout Constants ---
-    const VIEWBOX_WIDTH = 1000; // Internal coordinate system width
+    const VIEWBOX_WIDTH = isFiltersOpen ? 700 : 1000; // Internal coordinate system width dynamcially adjusts to prevent shrinking
     const VIEWBOX_HEIGHT = 400; // Internal coordinate system height
     const X_START = 80;         // Left margin to leave room for Y-axis labels
     const X_END = VIEWBOX_WIDTH - 20; // Right margin
@@ -151,12 +165,18 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const barWidth = Math.min(spacing * 0.85, 32);
 
     // Dynamic Scale: Calculate max value to ensure bars don't clip the top
-    const maxScore = Math.max(...chartData.map(d => d.score), lineValue + 5, 10);
+    const maxScore = Math.max(...chartData.map(d => Number(d.score || 0)), lineValue + 5, 10);
+    const maxSecondary = activeFilterOverlay ? Math.max(...chartData.map(d => Number(d.secondaryValue || 0)), 38) : 10;
 
     // Helpers to calculate exact Y coordinates and Heights inside the SVG
     const getY = (val: number) => {
         const availableHeight = 250; // Keeps top margin and leaves room for logos at bottom
         return VIEWBOX_HEIGHT - 120 - ((val / maxScore) * availableHeight);
+    };
+
+    const getSecondaryY = (val: number) => {
+        const availableHeight = 250;
+        return VIEWBOX_HEIGHT - 120 - ((val / maxSecondary) * availableHeight);
     };
 
     const getBarHeight = (val: number) => {
@@ -242,8 +262,18 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     <line x1="60" x2="100%" y1={getY(0)} y2={getY(0)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                     <line x1="60" x2="100%" y1={getY(maxScore / 3)} y2={getY(maxScore / 3)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                     <line x1="60" x2="100%" y1={getY((maxScore * 2) / 3)} y2={getY((maxScore * 2) / 3)} stroke={colors.borderMedium} strokeOpacity="0.4" />
-                    <line x1="60" x2="100%" y1={getY(maxScore)} y2={getY(maxScore)} stroke={colors.borderMedium} strokeOpacity="0.4" />
+                    <line x1="60" x2={activeFilterOverlay ? "100%" : X_END} y1={getY(maxScore)} y2={getY(maxScore)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                 </g>
+
+                {/* Secondary Y-Axis Grid Lines & Labels (Right Side) */}
+                {activeFilterOverlay && (
+                    <g className="text-blue500 font-bold" fill="currentColor" textAnchor="start" fontSize="12">
+                        <text x={X_END + 4} y={getSecondaryY(0)} dominantBaseline="middle">0</text>
+                        <text x={X_END + 4} y={getSecondaryY(maxSecondary / 3)} dominantBaseline="middle">{Math.round(maxSecondary / 3)}</text>
+                        <text x={X_END + 4} y={getSecondaryY((maxSecondary * 2) / 3)} dominantBaseline="middle">{Math.round((maxSecondary * 2) / 3)}</text>
+                        <text x={X_END + 4} y={getSecondaryY(maxSecondary)} dominantBaseline="middle">{Math.round(maxSecondary)}</text>
+                    </g>
+                )}
 
                 {/* 2. Map through GameLogs for Bars, Text, and Logos */}
                 {chartData.map((game, index) => {
@@ -380,6 +410,60 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     );
                 })}
 
+                {/* Secondary Line Chart Path Overlay */}
+                {activeFilterOverlay && (
+                    <g>
+                        <path
+                            d={chartData.map((d, i) => {
+                                const columnCenter = X_START + (i * spacing) + (spacing / 2);
+                                const yPos = getSecondaryY(d.secondaryValue || 0);
+                                if (d.isUpcoming) {
+                                    return ''; // Handled separately
+                                }
+                                return `${i === 0 ? 'M' : 'L'} ${columnCenter} ${yPos}`;
+                            }).join(' ')}
+                            fill="none"
+                            stroke={colors.blue500}
+                            strokeWidth="2.5"
+                            className="drop-shadow-sm"
+                        />
+                        {/* Connecting upcoming dotted line */}
+                        {chartData.length > 1 && (() => {
+                            const lastGameIndex = chartData.length - 2;
+                            const prevX = X_START + (lastGameIndex * spacing) + (spacing / 2);
+                            const prevY = getSecondaryY(chartData[lastGameIndex].secondaryValue || 0);
+
+                            const upcomingX = X_START + ((chartData.length - 1) * spacing) + (spacing / 2);
+                            const upcomingY = getSecondaryY(chartData[chartData.length - 1].secondaryValue || 0);
+
+                            return (
+                                <>
+                                    <line
+                                        x1={prevX}
+                                        y1={prevY}
+                                        x2={upcomingX}
+                                        y2={upcomingY}
+                                        fill="none"
+                                        stroke={colors.blue500}
+                                        strokeWidth="2.5"
+                                        strokeDasharray="6 4"
+                                    />
+                                    {/* Cap indicator for the upcoming expected node */}
+                                    <line
+                                        x1={upcomingX}
+                                        y1={upcomingY - 14}
+                                        x2={upcomingX}
+                                        y2={upcomingY + 14}
+                                        stroke={colors.blue500}
+                                        strokeWidth="2.5"
+                                        strokeDasharray="4 4"
+                                    />
+                                </>
+                            );
+                        })()}
+                    </g>
+                )}
+
                 {/* 3. The Interactive Prop Line Threshold Overlay */}
                 <g
                     className="group"
@@ -497,10 +581,23 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 </g>
             </svg>
 
-            {/* LINE Legend element centered at bottom */}
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 z-20">
-                <div className="w-2.5 h-2.5 bg-yellow400 rounded-[1px]" />
-                <span className="text-fgSubtle font-bold text-[9px] tracking-widest uppercase">LINE</span>
+            {/* Bottom Legend Container */}
+            <div className={`absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center justify-center gap-6 z-20 w-full`}>
+                <div className="flex items-center gap-1.5 flex-1 justify-end">
+                    <div className="w-2.5 h-2.5 bg-yellow400 rounded-[1px]" />
+                    <span className="text-fgSubtle font-bold text-[9px] tracking-widest uppercase">LINE</span>
+                </div>
+
+                {activeFilterOverlay === 'Minutes' ? (
+                    <div className="flex items-center gap-1.5 flex-1 justify-start">
+                        <div className="w-2.5 h-2.5 bg-blue500 rounded-[1px]" />
+                        <span className="text-blue500 font-bold text-[9px] tracking-widest uppercase whitespace-nowrap">
+                            MINUTES [GRAPH AVG: {graphAvgSecondary.toFixed(1)} | SEASON AVG: {seasonAvgSecondary.toFixed(1)}]
+                        </span>
+                    </div>
+                ) : (
+                    <div className="flex-1"></div>
+                )}
             </div>
 
             {/* Footer / Watermark */}
