@@ -174,8 +174,8 @@ def run_closing_lines_scrape():
                     # If we don't have strictly tri-codes, we handle what we have
                     home = g.get("home_team_tricode", "")
                     away = g.get("away_team_tricode", "")
-                    if home: team_to_game[home] = g.get("game_id")
-                    if away: team_to_game[away] = g.get("game_id")
+                    if home and home not in team_to_game: team_to_game[home] = g.get("game_id")
+                    if away and away not in team_to_game: team_to_game[away] = g.get("game_id")
         
         # Attach game_ids
         for pid, pdata in players_data.items():
