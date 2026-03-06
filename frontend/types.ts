@@ -83,6 +83,7 @@ export interface PlayerStats {
   "PTS+AST": number;
   "REB+AST": number;
   "STL+BLK": number;
+  USG_PCT?: number;
   [key: string]: any;
 }
 

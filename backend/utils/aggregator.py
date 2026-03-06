@@ -24,7 +24,7 @@ DISPLAY_STATS = [
     'REB', 'OREB', 'DREB', 'AST', 'TOV', 'STL', 'BLK', 'PF',
     # Advanced / Calculated
     'POTENTIAL_AST', 'DRIVES', 'DRIVE_PTS', 'REB_CHANCES', 
-    'PTS+REB+AST', 'PTS+REB', 'PTS+AST', 'REB+AST', 'STL+BLK'
+    'PTS+REB+AST', 'PTS+REB', 'PTS+AST', 'REB+AST', 'STL+BLK', 'USG_PCT'
 ]
 
 # ==========================================
@@ -206,8 +206,10 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         home_full = TEAM_FULL_NAMES.get(home_mascot, home_mascot)
         away_full = TEAM_FULL_NAMES.get(away_mascot, away_mascot)
         
-        team_games[home_team] = {'opp_tricode': away_team, 'opp_name': away_full}
-        team_games[away_team] = {'opp_tricode': home_team, 'opp_name': home_full}
+        if home_team and home_team not in team_games:
+            team_games[home_team] = {'opp_tricode': away_team, 'opp_name': away_full}
+        if away_team and away_team not in team_games:
+            team_games[away_team] = {'opp_tricode': home_team, 'opp_name': home_full}
 
     # E. Build Master Dictionary
     master_data = {}

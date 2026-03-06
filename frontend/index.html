@@ -483,6 +483,15 @@
       ::-webkit-scrollbar-thumb:hover {
         background: #484848;
       }
+      
+      /* Hide scrollbar for elements with the .no-scrollbar class */
+      .no-scrollbar::-webkit-scrollbar {
+        display: none;
+      }
+      .no-scrollbar {
+        -ms-overflow-style: none; /* IE and Edge */
+        scrollbar-width: none; /* Firefox */
+      }
     </style>
   <script type="importmap">
 {

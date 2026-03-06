@@ -8,6 +8,8 @@ interface BarChartProps {
     player?: Player;
     activeTab: string;
     activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
+    customLine?: number | null;
+    onCustomLineChange?: (line: number | null) => void;
 }
 
 const STAT_LABELS: Record<string, string> = {
@@ -25,11 +27,17 @@ const STAT_LABELS: Record<string, string> = {
     'Turnovers': 'TOV'
 };
 
-export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook }) => {
+export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
 
     // Hover State
     const [hoverData, setHoverData] = useState<HoveredGameData | null>(null);
+
+    // Dragging Line State
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragY, setDragY] = useState<number | null>(null);
+    const [currentValue, setCurrentValue] = useState<number | null>(null);
+    const svgRef = React.useRef<SVGSVGElement>(null);
 
     // Schedule State for Upcoming Game 
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
@@ -156,25 +164,84 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         return (val / maxScore) * availableHeight;
     };
 
-    const propLineY = getY(lineValue);
+    const propLineY = getY(customLine !== undefined && customLine !== null ? customLine : lineValue);
+
+    // Calculate live line value based on drag position
+    useEffect(() => {
+        if (isDragging && dragY !== null) {
+            const availableHeight = 250;
+            // Reverse math from getY
+            // y = VIEWBOX_HEIGHT - 120 - ((val / maxScore) * availableHeight)
+            // y - VIEWBOX_HEIGHT + 120 = - ((val / maxScore) * availableHeight)
+            // (VIEWBOX_HEIGHT - 120 - y) = (val / maxScore) * availableHeight
+            // val = ((VIEWBOX_HEIGHT - 120 - y) / availableHeight) * maxScore
+            const val = ((VIEWBOX_HEIGHT - 120 - dragY) / availableHeight) * maxScore;
+
+            // Snap to nearest 0.5 step to make it feel like a prop line
+            const snappedVal = Math.round(val * 2) / 2;
+            const finalVal = Math.max(0, Math.min(snappedVal, maxScore));
+            setCurrentValue(finalVal);
+            if (onCustomLineChange) onCustomLineChange(finalVal);
+        } else if (!isDragging && customLine === null) {
+            setCurrentValue(lineValue);
+        } else if (!isDragging && customLine !== null && customLine !== undefined) {
+            setCurrentValue(customLine);
+        }
+    }, [dragY, isDragging, maxScore, lineValue, onCustomLineChange, customLine]);
+
+    const handleMouseMove = (e: React.MouseEvent<SVGSVGElement> | React.TouchEvent<SVGSVGElement>) => {
+        if (!isDragging || !svgRef.current) return;
+        setHoverData(null); // Force hide tooltips while dragging
+
+        let clientY;
+        if ('touches' in e) {
+            clientY = e.touches[0].clientY;
+        } else {
+            clientY = (e as React.MouseEvent).clientY;
+        }
+
+        const point = svgRef.current.createSVGPoint();
+        point.y = clientY;
+        const ctm = svgRef.current.getScreenCTM();
+        if (ctm) {
+            const svgPoint = point.matrixTransform(ctm.inverse());
+            setDragY(Math.max(10, Math.min(VIEWBOX_HEIGHT - 120, svgPoint.y)));
+        }
+    };
+
+    const handleMouseUp = () => {
+        setIsDragging(false);
+    };
+
+    const activeLineThreshold = customLine !== undefined && customLine !== null ? customLine : lineValue;
 
     return (
-        <div className="bg-bgElevation0 w-full h-full min-h-[400px] select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col">
+        <div
+            className={`bg-bgElevation0 w-full h-full min-h-[400px] select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col ${isDragging ? 'cursor-grabbing' : ''}`}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+            onTouchEnd={handleMouseUp}
+        >
 
             {/* Responsive SVG Container */}
             <svg
+                ref={svgRef}
                 viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
                 preserveAspectRatio="xMidYMid meet"
                 className="w-full h-full"
+                onMouseMove={handleMouseMove}
+                onTouchMove={handleMouseMove}
             >
                 {/* 1. Y-Axis Grid Lines & Labels */}
                 <g className="text-fgSubtle font-bold" fill="currentColor" textAnchor="end" fontSize="12">
                     <text x="50" y={getY(0)} dominantBaseline="middle">0</text>
-                    <text x="50" y={getY(maxScore * 0.5)} dominantBaseline="middle">{Math.round(maxScore * 0.5)}</text>
+                    <text x="50" y={getY(maxScore / 3)} dominantBaseline="middle">{Math.round(maxScore / 3)}</text>
+                    <text x="50" y={getY((maxScore * 2) / 3)} dominantBaseline="middle">{Math.round((maxScore * 2) / 3)}</text>
                     <text x="50" y={getY(maxScore)} dominantBaseline="middle">{Math.round(maxScore)}</text>
 
                     <line x1="60" x2="100%" y1={getY(0)} y2={getY(0)} stroke={colors.borderMedium} strokeOpacity="0.4" />
-                    <line x1="60" x2="100%" y1={getY(maxScore * 0.5)} y2={getY(maxScore * 0.5)} stroke={colors.borderMedium} strokeOpacity="0.4" />
+                    <line x1="60" x2="100%" y1={getY(maxScore / 3)} y2={getY(maxScore / 3)} stroke={colors.borderMedium} strokeOpacity="0.4" />
+                    <line x1="60" x2="100%" y1={getY((maxScore * 2) / 3)} y2={getY((maxScore * 2) / 3)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                     <line x1="60" x2="100%" y1={getY(maxScore)} y2={getY(maxScore)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                 </g>
 
@@ -185,7 +252,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     const xPos = columnCenter - (barWidth / 2);
                     const yPos = getY(game.score);
                     const barHeight = getBarHeight(game.score);
-                    const isOver = game.score >= lineValue;
+                    const isOver = game.score >= activeLineThreshold;
 
                     // Dynamically scale inner elements if bars get very narrow
                     const logoSize = Math.min(barWidth * 1.2, 28);
@@ -206,11 +273,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                 });
                             }}
                             onMouseMove={(e) => {
+                                if (isDragging) return;
                                 if (hoverData) {
                                     setHoverData({ ...hoverData, x: e.clientX, y: e.clientY });
                                 }
                             }}
-                            onMouseLeave={() => setHoverData(null)}
+                            onMouseLeave={() => {
+                                if (!isDragging) setHoverData(null)
+                            }}
                         >
                             {/* The Bar */}
                             {game.isUpcoming ? (
@@ -310,39 +380,120 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     );
                 })}
 
-                {/* 3. The Prop Line Threshold Overlay */}
-                <g>
+                {/* 3. The Interactive Prop Line Threshold Overlay */}
+                <g
+                    className="group"
+                    style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
+                    onMouseDown={() => setIsDragging(true)}
+                    onTouchStart={() => setIsDragging(true)}
+                    onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        // Reset line to sportsbook default on double click
+                        if (onCustomLineChange) onCustomLineChange(null);
+                        setCurrentValue(lineValue);
+                    }}
+                >
+                    {/* Invisible thicker line for easier hovering/grabbing */}
                     <line
-                        x1="60"
+                        x1="16"
+                        x2="100%"
+                        y1={propLineY}
+                        y2={propLineY}
+                        stroke="transparent"
+                        strokeWidth="24"
+                    />
+
+                    {/* The Visual Yellow Line - Solid to match target */}
+                    <line
+                        x1="58"
                         x2="100%"
                         y1={propLineY}
                         y2={propLineY}
                         stroke={colors.yellow400}
-                        strokeWidth="2"
-                        strokeDasharray="4 4"
-                        className="drop-shadow-sm"
+                        strokeWidth="1.5"
+                        className={`drop-shadow-sm transition-opacity duration-150 ${isDragging ? 'opacity-80' : 'opacity-100'}`}
                     />
 
-                    {/* Yellow Grip Handle */}
+                    {/* Default Rectangular Handle (Hidden on Hover) */}
                     <rect
-                        x="60"
+                        x="16"
                         y={propLineY - 12}
-                        width="36"
+                        width="42"
                         height="24"
                         rx="4"
                         fill={colors.yellow400}
+                        className="group-hover:opacity-0 transition-opacity"
                     />
+
+                    {/* Default Handle Text (Aligned with the y-axis text right edge) */}
                     <text
-                        x="78"
-                        y={propLineY + 2}
+                        x="50"
+                        y={propLineY + 1}
                         dominantBaseline="middle"
-                        textAnchor="middle"
+                        textAnchor="end"
                         fontSize="12"
-                        fontWeight="900"
-                        fill={colors.black}
+                        className="font-bold fill-black group-hover:opacity-0 transition-opacity"
                     >
-                        {lineValue}
+                        {currentValue !== null ? currentValue : lineValue}
                     </text>
+
+                    {/* Grabbable 3x2 Dot Matrix Handle (Shown on Hover or Dragging) */}
+                    <g
+                        className={`transition-opacity ${isDragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                        transform={`translate(16, ${propLineY - 12})`}
+                    >
+                        {/* Background rounding for dots - Yellow */}
+                        <rect
+                            x="0"
+                            y="0"
+                            width="42"
+                            height="24"
+                            rx="4"
+                            fill={colors.yellow400}
+                        />
+
+                        {/* The 3x2 Dot Grid - Black */}
+                        <circle cx="15" cy="8" r="1.5" fill={colors.black} />
+                        <circle cx="21" cy="8" r="1.5" fill={colors.black} />
+                        <circle cx="27" cy="8" r="1.5" fill={colors.black} />
+
+                        <circle cx="15" cy="16" r="1.5" fill={colors.black} />
+                        <circle cx="21" cy="16" r="1.5" fill={colors.black} />
+                        <circle cx="27" cy="16" r="1.5" fill={colors.black} />
+                    </g>
+
+                    {/* Dragging Value Tooltip Bubble */}
+                    {isDragging && (
+                        <g transform={`translate(65, ${propLineY - 12})`}>
+                            {/* Little triangular point connecting bubble to line */}
+                            <polygon points="0,12 8,8 8,16" fill={colors.yellow400} />
+
+                            {/* Tooltip Background Bubble */}
+                            <rect
+                                x="6"
+                                y="0"
+                                width="44"
+                                height="24"
+                                rx="12"
+                                fill={colors.yellow400}
+                                className="drop-shadow-sm"
+                            />
+
+                            {/* Live Text Value */}
+                            <text
+                                x="28"
+                                y="13"
+                                dominantBaseline="middle"
+                                textAnchor="middle"
+                                fontSize="12"
+                                fontWeight="900"
+                                fill={colors.black}
+                                className="font-chakra tracking-tight font-bold"
+                            >
+                                {currentValue}
+                            </text>
+                        </g>
+                    )}
                 </g>
             </svg>
 

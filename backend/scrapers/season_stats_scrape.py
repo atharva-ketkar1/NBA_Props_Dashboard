@@ -81,10 +81,13 @@ class NBAStatsEngine:
         # 1. Define Endpoints
         base_url = "https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
+        adv_base_url = "https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
+        
         adv_url_template = "https://stats.nba.com/stats/leaguedashptstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PerMode=PerGame&PlayerExperience=&PlayerOrTeam=Player&PlayerPosition=&PtMeasureType={}&SeasonSegment=&SeasonType=Regular%20Season&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
         urls_map = {
             "Base": base_url,
+            "Advanced": adv_base_url,
             "Passing": adv_url_template.format("Passing&Season=2025-26"),
             "Drives": adv_url_template.format("Drives&Season=2025-26"),
             "Rebounding": adv_url_template.format("Rebounding&Season=2025-26"),
@@ -92,9 +95,9 @@ class NBAStatsEngine:
         }
 
         # 2. Parallel Execution with Max Workers
-        # Limited to 3 workers to be "polite" to the API (reduces instant load)
+        # Limited to 4 workers to be "polite" to the API (reduces instant load)
         dfs = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_to_url = {executor.submit(self._fetch_url, url, tag): tag for tag, url in urls_map.items()}
             for future in concurrent.futures.as_completed(future_to_url):
                 tag, df = future.result()
@@ -120,6 +123,11 @@ class NBAStatsEngine:
 
         # 4. Merge Advanced Stats
         merge_keys = ['PLAYER_ID', 'TEAM_ID']
+
+        if not dfs.get("Advanced", pd.DataFrame()).empty:
+            adv_cols = merge_keys + ['USG_PCT', 'TS_PCT', 'AST_PCT', 'REB_PCT', 'PACE', 'OFF_RATING', 'DEF_RATING', 'PIE']
+            actual_adv_cols = [c for c in adv_cols if c in dfs["Advanced"].columns]
+            main_df = main_df.merge(dfs["Advanced"][actual_adv_cols], on=merge_keys, how='left')
 
         if not dfs.get("Passing", pd.DataFrame()).empty:
             pass_cols = merge_keys + ['POTENTIAL_AST', 'PASSES_MADE']
@@ -165,6 +173,6 @@ if __name__ == "__main__":
         print(f"Total Players Processed: {len(final_stats)}")
         final_stats.to_csv(output_path, index=False)
         print(f"Saved to: {output_path}")
-        #print(list(final_stats.columns))
+        print(list(final_stats.columns))
     else:
         print("Failed to retrieve data.")

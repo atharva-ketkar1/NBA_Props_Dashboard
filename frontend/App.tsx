@@ -33,6 +33,7 @@ function App() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [activeTab, setActiveTab] = useState('Points');
   const [activeSportsbook, setActiveSportsbook] = useState<'dk' | 'fd' | 'mgm' | 'cz'>('dk');
+  const [customLineValue, setCustomLineValue] = useState<number | null>(null);
 
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
@@ -44,6 +45,7 @@ function App() {
 
   const handleTabChange = (newTab: string) => {
     setActiveTab(newTab);
+    setCustomLineValue(null);
     if (!currentPlayer || !currentPlayer.props) return;
 
     const statKey = STAT_LABELS[newTab] || 'PTS';
@@ -162,7 +164,10 @@ function App() {
       activePlayerId: currentPlayer?.id,
       onSelectPlayer: (id: number) => {
         const index = playersWithProps.findIndex(p => p.id === id);
-        if (index !== -1) setSelectedIndex(index);
+        if (index !== -1) {
+          setSelectedIndex(index);
+          setCustomLineValue(null);
+        }
       },
       activeTab: activeTab,
       onTabChange: handleTabChange
@@ -176,7 +181,11 @@ function App() {
             activeTab={activeTab}
             onTabChange={handleTabChange}
             activeSportsbook={activeSportsbook}
-            onSportsbookChange={setActiveSportsbook}
+            onSportsbookChange={(sb) => {
+              setActiveSportsbook(sb);
+              setCustomLineValue(null);
+            }}
+            customLine={customLineValue}
           />
 
           {/* Subtle separator */}
@@ -187,6 +196,8 @@ function App() {
               player={currentPlayer}
               activeTab={activeTab}
               activeSportsbook={activeSportsbook}
+              customLine={customLineValue}
+              onCustomLineChange={setCustomLineValue}
             />
           </div>
         </div>
