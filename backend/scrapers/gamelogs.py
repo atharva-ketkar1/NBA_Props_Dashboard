@@ -12,8 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIGURATION
 # ==========================================
 UPDATE_WINDOW_DAYS = 5
-MAX_HISTORY_GAMES = 35
-MAX_WORKERS = 4  # Used for incremental updates only; full refresh always uses 1
+MAX_HISTORY_GAMES = 85
+MAX_WORKERS = 4
 
 HEADERS = {
     "accept": "*/*",
@@ -28,19 +28,41 @@ HEADERS = {
 
 PT_MEASURE_TYPES = ["Passing", "Rebounding", "Drives"]
 
+# Core box score columns that should be filled with 0 if missing.
+# Tracking/advanced columns are intentionally left as NaN to signal missing data vs. true zero.
+CORE_FILL_ZERO_COLS = [
+    'PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'PF',
+    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PLUS_MINUS'
+]
+
 # Global cooldown tracker — shared across all fetch calls during full refresh
 _last_500_time = 0
 
 
+def _safe_pct_convert(df, cols):
+    """
+    Converts decimal percentage columns (e.g. 0.284) to whole-number form (28.4).
+    Guard: only multiplies if the column's max value is <= 1.0.
+    """
+    for col in cols:
+        if col in df.columns:
+            if df[col].dropna().empty:
+                continue
+            if df[col].max() <= 1.0:
+                df[col] = (df[col] * 100).round(1)
+    return df
+
+
 def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
     """
-    Fetches Drives, Passing, Rebounding, 1Q Stats, and 1H Stats for a single date.
-    In full refresh mode: slower pacing, exponential backoff, and global cooldown.
-    In incremental mode: fast pacing for daily updates.
+    Fetches Drives, Passing, Rebounding, 1Q Stats, 1H Stats, and Advanced Stats
+    for a single game date.
+    
+    Returns: (daily_merged, failed_endpoints)
     """
     global _last_500_time
+    max_retries = 3
 
-    # Global cooldown only needed during full refresh
     if is_full_refresh:
         elapsed = time.time() - _last_500_time
         if elapsed < 60:
@@ -49,28 +71,31 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
             time.sleep(wait)
 
     daily_merged = None
+    failed_endpoints = []
     encoded_date = urllib.parse.quote(date_str, safe='')
 
-    # Slower jittered sleep for full refresh, fast for incremental
     base_sleep = (4.0 + random.uniform(0.5, 2.0)) if is_full_refresh else 1.0
 
+    # -----------------------------------------------------------------------
     # 1. FETCH PT TRACKING DATA (Passing, Rebounds, Drives)
+    # -----------------------------------------------------------------------
     for PT in PT_MEASURE_TYPES:
-        max_retries = 3
         for attempt in range(max_retries):
             try:
                 time.sleep(base_sleep)
-
-                url = (f"https://stats.nba.com/stats/leaguedashptstats?DateFrom={encoded_date}&DateTo={encoded_date}&"
-                       f"LastNGames=0&LeagueID=00&Month=0&OpponentTeamID=0&PORound=0&PerMode=PerGame&"
-                       f"PlayerOrTeam=Player&PtMeasureType={PT}&Season=2025-26&SeasonType=Regular%20Season&TeamID=0")
-
+                url = (
+                    f"https://stats.nba.com/stats/leaguedashptstats"
+                    f"?DateFrom={encoded_date}&DateTo={encoded_date}"
+                    f"&LastNGames=0&LeagueID=00&Month=0&OpponentTeamID=0&PORound=0"
+                    f"&PerMode=PerGame&PlayerOrTeam=Player&PtMeasureType={PT}"
+                    f"&Season=2025-26&SeasonType=Regular%20Season&TeamID=0"
+                )
                 resp = requests.get(url, headers=HEADERS, timeout=30)
 
                 if resp.status_code == 500:
                     if is_full_refresh:
                         _last_500_time = time.time()
-                        wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                        wait = 30 * (2 ** attempt)
                         print(f"      Server overloaded (500) for {PT} on {date_str}. Cooling down {wait}s...")
                         time.sleep(wait)
                     raise ValueError("500 Internal Server Error")
@@ -86,8 +111,10 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
                     break
 
                 df_pt = pd.DataFrame(row_set, columns=api_headers)
-                cols_to_keep = ['PLAYER_ID', 'POTENTIAL_AST', 'PASSES_MADE', 'AST_POINTS_CREATED',
-                                'REB_CHANCES', 'REB_CONTEST_PCT', 'DRIVES', 'DRIVE_PTS', 'DRIVE_PASSES']
+                cols_to_keep = [
+                    'PLAYER_ID', 'POTENTIAL_AST', 'PASSES_MADE', 'AST_POINTS_CREATED',
+                    'REB_CHANCES', 'REB_CONTEST_PCT', 'DRIVES', 'DRIVE_PTS', 'DRIVE_PASSES'
+                ]
                 df_pt = df_pt[[c for c in cols_to_keep if c in df_pt.columns]]
 
                 if daily_merged is None:
@@ -102,18 +129,25 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
                 if attempt < max_retries - 1:
                     time.sleep(retry_wait)
                 else:
-                    print(f"      Giving up on {PT} for {date_str}.")
+                    print(f"      Fatal failure for {PT} on {date_str}. Saving partial.")
+                    failed_endpoints.append(PT)
+                    break
 
+    # -----------------------------------------------------------------------
     # 2. FETCH 1ST QUARTER STATS
-    max_retries = 3
+    # -----------------------------------------------------------------------
     for attempt in range(max_retries):
         try:
             time.sleep(base_sleep)
-            q1_url = (f"https://stats.nba.com/stats/leaguedashplayerstats?DateFrom={encoded_date}&DateTo={encoded_date}&"
-                      f"GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&OpponentTeamID=0&"
-                      f"Outcome=&PORound=0&PaceAdjust=N&PerMode=Totals&Period=1&PlusMinus=N&Rank=N&"
-                      f"Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&VsConference=&VsDivision=")
-
+            q1_url = (
+                f"https://stats.nba.com/stats/leaguedashplayerstats"
+                f"?DateFrom={encoded_date}&DateTo={encoded_date}"
+                f"&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base"
+                f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
+                f"&PerMode=Totals&Period=1&PlusMinus=N&Rank=N"
+                f"&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&ShotClockRange=&VsConference=&VsDivision="
+            )
             resp = requests.get(q1_url, headers=HEADERS, timeout=30)
 
             if resp.status_code == 500:
@@ -149,17 +183,25 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
             if attempt < max_retries - 1:
                 time.sleep(retry_wait)
             else:
-                print(f"      Giving up on 1Q Stats for {date_str}.")
+                print(f"      Fatal failure for 1Q Stats on {date_str}. Saving partial.")
+                failed_endpoints.append("1Q")
+                break
 
+    # -----------------------------------------------------------------------
     # 3. FETCH 1ST HALF STATS
+    # -----------------------------------------------------------------------
     for attempt in range(max_retries):
         try:
             time.sleep(base_sleep)
-            h1_url = (f"https://stats.nba.com/stats/leaguedashplayerstats?DateFrom={encoded_date}&DateTo={encoded_date}&"
-                      f"GameSegment=First%20Half&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&"
-                      f"OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=Totals&Period=0&PlusMinus=N&Rank=N&"
-                      f"Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&VsConference=&VsDivision=")
-
+            h1_url = (
+                f"https://stats.nba.com/stats/leaguedashplayerstats"
+                f"?DateFrom={encoded_date}&DateTo={encoded_date}"
+                f"&GameSegment=First%20Half&LastNGames=0&LeagueID=00&Location=&MeasureType=Base"
+                f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
+                f"&PerMode=Totals&Period=0&PlusMinus=N&Rank=N"
+                f"&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&ShotClockRange=&VsConference=&VsDivision="
+            )
             resp = requests.get(h1_url, headers=HEADERS, timeout=30)
 
             if resp.status_code == 500:
@@ -195,22 +237,29 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
             if attempt < max_retries - 1:
                 time.sleep(retry_wait)
             else:
-                print(f"      Giving up on 1H Stats for {date_str}.")
+                print(f"      Fatal failure for 1H Stats on {date_str}. Saving partial.")
+                failed_endpoints.append("1H")
+                break
 
+    # -----------------------------------------------------------------------
     # 4. FETCH ADVANCED STATS
+    # -----------------------------------------------------------------------
     for attempt in range(max_retries):
         try:
             time.sleep(base_sleep)
-            adv_url = (f"https://stats.nba.com/stats/leaguedashplayerstats?DateFrom={encoded_date}&DateTo={encoded_date}&"
-                      f"GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced&Month=0&"
-                      f"OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=Totals&Period=0&PlusMinus=N&Rank=N&"
-                      f"Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&VsConference=&VsDivision=")
-
+            adv_url = (
+                f"https://stats.nba.com/stats/leaguedashplayerstats"
+                f"?DateFrom={encoded_date}&DateTo={encoded_date}"
+                f"&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced"
+                f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
+                f"&PerMode=Totals&Period=0&PlusMinus=N&Rank=N"
+                f"&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&ShotClockRange=&VsConference=&VsDivision="
+            )
             resp = requests.get(adv_url, headers=HEADERS, timeout=30)
 
             if resp.status_code == 500:
                 if is_full_refresh:
-                    _last_500_time = time.time()
                     wait = 30 * (2 ** attempt)
                     print(f"      Server overloaded (500) for Advanced on {date_str}. Cooling down {wait}s...")
                     time.sleep(wait)
@@ -225,16 +274,11 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
 
             if row_set:
                 df_adv = pd.DataFrame(row_set, columns=api_headers)
-                
-                # Filter for the advanced metrics we want
                 adv_cols = ['PLAYER_ID', 'USG_PCT', 'AST_PCT', 'REB_PCT', 'TS_PCT', 'PIE']
                 df_adv = df_adv[[c for c in adv_cols if c in df_adv.columns]]
 
-                # Convert decimals to clean whole percentages (e.g., 0.284 -> 28.4)
-                cols_to_multiply = ['USG_PCT', 'AST_PCT', 'REB_PCT', 'TS_PCT', 'PIE']
-                for col in cols_to_multiply:
-                    if col in df_adv.columns:
-                        df_adv[col] = (df_adv[col] * 100).round(1)
+                pct_cols = ['USG_PCT', 'AST_PCT', 'REB_PCT', 'TS_PCT', 'PIE']
+                df_adv = _safe_pct_convert(df_adv, pct_cols)
 
                 if daily_merged is None:
                     daily_merged = df_adv
@@ -248,15 +292,25 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
             if attempt < max_retries - 1:
                 time.sleep(retry_wait)
             else:
-                print(f"      Giving up on Advanced Stats for {date_str}.")
+                print(f"      Fatal failure for Advanced Stats on {date_str}. Saving partial.")
+                failed_endpoints.append("Advanced")
+                break
 
     if daily_merged is not None:
         daily_merged['DATE_STR'] = date_str
 
-    return daily_merged
+    return daily_merged, failed_endpoints
 
 
-def run_scrape(output_path, n_games=85):
+def run_scrape(output_path=None):
+    if output_path is None:
+        output_path = os.environ.get("GAMELOGS_OUTPUT_PATH")
+    if output_path is None:
+        current_script_dir = os.path.dirname(os.path.abspath(__file__))
+        backend_dir = os.path.dirname(current_script_dir)
+        output_path = os.path.join(backend_dir, "data", "current", "gamelogs.csv")
+        print(f"      Warning: output_path not specified. Defaulting to {output_path}")
+
     print(f"   Managing Game Logs at {output_path}")
 
     target_dates = []
@@ -275,13 +329,13 @@ def run_scrape(output_path, n_games=85):
             print(f"      Corrupt CSV ({e}). Forcing full refresh.")
             full_refresh = True
 
-    # Fetch base game logs
     df_logs = None
     for attempt in range(3):
         try:
             game_log = leaguegamelog.LeagueGameLog(
                 season='2025-26',
                 player_or_team_abbreviation='P',
+                season_type_all_star='Regular Season',
                 direction='DESC',
                 sorter='DATE',
                 headers=HEADERS,
@@ -300,12 +354,16 @@ def run_scrape(output_path, n_games=85):
         print("   Fatal Error: Could not fetch base LeagueGameLog after 3 attempts.")
         return
 
-    all_active_dates = sorted(df_logs['DATE_STR'].unique().tolist(), key=lambda x: datetime.strptime(x, '%m/%d/%Y'), reverse=True)
+    all_active_dates = sorted(
+        df_logs['DATE_STR'].unique().tolist(),
+        key=lambda x: datetime.strptime(x, '%m/%d/%Y'),
+        reverse=True
+    )
     today_obj = datetime.now().date()
     valid_dates = [d for d in all_active_dates if datetime.strptime(d, '%m/%d/%Y').date() < today_obj]
 
     if full_refresh:
-        target_dates = valid_dates[:n_games + 5]
+        target_dates = valid_dates
         workers = 1
         print(f"      Full Refresh (Reliability Mode): Fetching {len(target_dates)} dates with 1 worker.")
     else:
@@ -315,6 +373,18 @@ def run_scrape(output_path, n_games=85):
             last_saved_date = existing_df['GAME_DATE'].max()
             missed_dates = [d for d in valid_dates if datetime.strptime(d, '%m/%d/%Y') > last_saved_date]
             target_dates = list(set(target_dates + missed_dates))
+
+            failed_manifest_path = output_path.replace(".csv", "_failed_dates.csv")
+            if os.path.exists(failed_manifest_path):
+                try:
+                    failed_df = pd.read_csv(failed_manifest_path)
+                    if 'date' in failed_df.columns:
+                        manifest_dates = [d for d in failed_df['date'].tolist() if d in valid_dates]
+                        target_dates = list(set(target_dates + manifest_dates))
+                        print(f"      Included {len(manifest_dates)} previously failed dates from manifest for recovery.")
+                except Exception as e:
+                    print(f"      Could not load failed manifest: {e}")
+
         workers = MAX_WORKERS
         print(f"      Incremental: Scraping {len(target_dates)} dates with {workers} workers (Since {cutoff_date.strftime('%Y-%m-%d')})")
 
@@ -324,6 +394,8 @@ def run_scrape(output_path, n_games=85):
 
     print(f"      Launching {workers} workers for {len(target_dates)} dates...")
     advanced_data_list = []
+    failed_dates = []
+    none_dates = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {executor.submit(fetch_tracking_data_for_date, d, full_refresh): d for d in target_dates}
@@ -331,24 +403,83 @@ def run_scrape(output_path, n_games=85):
         for i, future in enumerate(as_completed(future_map)):
             date_str = future_map[future]
             try:
-                result = future.result()
-                if result is not None:
-                    advanced_data_list.append(result)
-                print(f"      [{i+1}/{len(target_dates)}] Completed {date_str}")
+                daily_merged, missing_endpoints = future.result()
+                
+                if daily_merged is not None:
+                    advanced_data_list.append(daily_merged)
+                
+                if not missing_endpoints and daily_merged is not None:
+                    print(f"      [{i+1}/{len(target_dates)}] Completed {date_str}")
+                elif daily_merged is None:
+                    print(f"      [{i+1}/{len(target_dates)}] NULL RESULT (all endpoints failed) {date_str}")
+                    none_dates.append(date_str)
+                else:
+                    print(f"      [{i+1}/{len(target_dates)}] Partial {date_str} (Missing: {missing_endpoints})")
+                    failed_dates.append(date_str)
             except Exception as e:
-                print(f"      Failed {date_str}: {e}")
+                print(f"      Failed critically {date_str}: {e}")
+                failed_dates.append(date_str)
+
+    all_retry_dates = failed_dates + none_dates
+    if none_dates:
+        print(f"\n      Note: {len(none_dates)} dates returned None (all endpoints failed): {none_dates}")
+
+    if all_retry_dates:
+        print(f"\n      --- Commencing Retry for {len(all_retry_dates)} Failed/Null/Partial Dates ---")
+        print("      Cooling down for 30 seconds before retrying to clear API rate limits...")
+        time.sleep(30)
+
+        permanently_failed = []
+
+        for i, date_str in enumerate(all_retry_dates):
+            try:
+                print(f"      [RETRY {i+1}/{len(all_retry_dates)}] Fetching {date_str}...")
+                daily_merged, missing_endpoints = fetch_tracking_data_for_date(date_str, is_full_refresh=True)
+                
+                if daily_merged is not None:
+                    advanced_data_list.append(daily_merged)
+                
+                if not missing_endpoints and daily_merged is not None:
+                    print(f"      [RETRY SUCCESS] {date_str}")
+                elif daily_merged is None:
+                    print(f"      [RETRY FATAL] {date_str} returned None again. Marking as permanently failed.")
+                    permanently_failed.append({"date": date_str, "reason": "None after retry"})
+                else:
+                    print(f"      [RETRY PARTIAL] {date_str} is still missing: {missing_endpoints}")
+                    permanently_failed.append({"date": date_str, "reason": f"Missing: {missing_endpoints}"})
+            except Exception as e:
+                print(f"      [RETRY FATAL] {date_str} is persistently failing: {e}")
+                permanently_failed.append({"date": date_str, "reason": str(e)})
+
+        if permanently_failed:
+            failed_manifest_path = output_path.replace(".csv", "_failed_dates.csv")
+            pd.DataFrame(permanently_failed).to_csv(failed_manifest_path, index=False)
+            print(f"\n      {len(permanently_failed)} dates permanently failed (partial or complete).")
+            print(f"      Manifest written to: {failed_manifest_path}")
+            print(f"      Re-run the scraper with gamelogs.csv present — incremental mode will target only these gaps.")
+        else:
+            print(f"\n      All retried dates recovered successfully.")
+            failed_manifest_path = output_path.replace(".csv", "_failed_dates.csv")
+            if os.path.exists(failed_manifest_path):
+                os.remove(failed_manifest_path)
+                print("      Cleared the resolved failed manifest.")
 
     if advanced_data_list:
         df_advanced_new = pd.concat(advanced_data_list, ignore_index=True)
+        # Drop duplicates, keeping the most recent fetch (the retry pass)
+        df_advanced_new = df_advanced_new.drop_duplicates(subset=['PLAYER_ID', 'DATE_STR'], keep='last')
+        
         df_logs_filtered = df_logs[df_logs['DATE_STR'].isin(target_dates)]
         df_new_final = pd.merge(df_logs_filtered, df_advanced_new, on=['PLAYER_ID', 'DATE_STR'], how='left')
 
-        df_new_final = df_new_final.fillna(0)
+        core_cols_present = [c for c in CORE_FILL_ZERO_COLS if c in df_new_final.columns]
+        df_new_final[core_cols_present] = df_new_final[core_cols_present].fillna(0)
+
         df_new_final['PTS+REB+AST'] = df_new_final['PTS'] + df_new_final['REB'] + df_new_final['AST']
-        df_new_final['PTS+REB'] = df_new_final['PTS'] + df_new_final['REB']
-        df_new_final['PTS+AST'] = df_new_final['PTS'] + df_new_final['AST']
-        df_new_final['REB+AST'] = df_new_final['REB'] + df_new_final['AST']
-        df_new_final['STL+BLK'] = df_new_final['STL'] + df_new_final['BLK']
+        df_new_final['PTS+REB']     = df_new_final['PTS'] + df_new_final['REB']
+        df_new_final['PTS+AST']     = df_new_final['PTS'] + df_new_final['AST']
+        df_new_final['REB+AST']     = df_new_final['REB'] + df_new_final['AST']
+        df_new_final['STL+BLK']     = df_new_final['STL'] + df_new_final['BLK']
 
         if not existing_df.empty:
             print(f"      Replacing overlapping data for {len(target_dates)} dates...")
@@ -364,11 +495,7 @@ def run_scrape(output_path, n_games=85):
         final_df = final_df.sort_values(by=['PLAYER_ID', 'GAME_DATE'], ascending=[True, False])
         final_df = final_df.groupby('PLAYER_ID').head(MAX_HISTORY_GAMES).reset_index(drop=True)
 
-        cols_to_drop = [
-            'SEASON_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION',
-            'TEAM_NAME', 'VIDEO_AVAILABLE', 'DATE_STR',
-            'FG_PCT', 'FG3_PCT', 'FT_PCT'
-        ]
+        cols_to_drop = ['SEASON_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_NAME', 'VIDEO_AVAILABLE']
         final_df = final_df.drop(columns=[c for c in cols_to_drop if c in final_df.columns])
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -377,7 +504,5 @@ def run_scrape(output_path, n_games=85):
 
 
 if __name__ == "__main__":
-    current_script_dir = os.path.dirname(os.path.abspath(__file__))
-    backend_dir = os.path.dirname(current_script_dir)
-    output_path = os.path.join(backend_dir, "data", "current", "gamelogs.csv")
-    run_scrape(output_path)
+    env_path = os.environ.get("GAMELOGS_OUTPUT_PATH")
+    run_scrape(output_path=env_path)
