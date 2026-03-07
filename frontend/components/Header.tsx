@@ -14,6 +14,7 @@ interface HeaderProps {
   customLine?: number | null;
   onToggleFilters?: () => void;
   isFiltersOpen?: boolean;
+  historicalGameCount?: number;
 }
 
 const STAT_LABELS: Record<string, string> = {
@@ -53,27 +54,43 @@ const SPORTSBOOKS = [
 
 
 const StatItem = ({ label, value, diff, isCompact }: { label: string, value: string | number, diff?: string | number, isCompact?: boolean }) => {
+  const isDiffDefined = diff !== undefined;
   const diffVal = typeof diff === 'string' ? parseFloat(diff) : (diff || 0);
   const isPositive = diffVal > 0;
-  const diffClass = isPositive ? 'text-green500' : (diffVal < 0 ? 'text-red500' : 'text-gray-500');
-  const diffText = diffVal > 0 ? `+${diffVal.toFixed(1)}` : (diffVal === 0 ? '-' : `${diffVal.toFixed(1)}`);
+  const diffClass = isPositive ? 'text-green500' : (diffVal < 0 ? 'text-red500' : 'text-fgSubtle');
+  let diffText = '-';
+  if (isDiffDefined) {
+    diffText = diffVal > 0 ? `+${diffVal.toFixed(1)}` : (diffVal === 0 ? '0.0' : `${diffVal.toFixed(1)}`);
+  }
 
   return (
     // REDUCED: px-4 -> px-3
     <div className={`flex flex-col items-center flex-1 min-w-0 transition-all duration-300 ${isCompact ? 'px-0.5' : 'px-1 lg:px-2'}`}>
       <span className={`text-fgSubtle uppercase tracking-wider font-bold mb-0.5 whitespace-nowrap transition-all duration-300 ${isCompact ? 'text-[8.5px]' : 'text-[9px]'}`}>{label}</span>
       <span className={`font-bold text-white leading-none mb-0.5 transition-all duration-300 ${isCompact ? 'text-[15px]' : 'text-[18px]'}`}>{typeof value === 'number' ? value.toFixed(1) : value}</span>
-      <span className={`font-bold font-chakra ${diffClass} transition-all duration-300 ${isCompact ? 'text-[9px]' : 'text-[10px]'}`}>{diffText}</span>
+      <span className={`font-semibold tracking-wide mt-1 ${diffClass} transition-all duration-300 ${isCompact ? 'text-[10px]' : 'text-[11px]'}`}>{diffText}</span>
     </div>
   );
 };
 
-export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine, onToggleFilters, isFiltersOpen }) => {
+export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine, onToggleFilters, isFiltersOpen, historicalGameCount }) => {
   const [sparklineMode, setSparklineMode] = useState<'line' | 'juice'>('line');
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(true);
+
+  // Helper to format player names that are too long (e.g. Giannis Antetokounmpo -> G. Antetokounmpo)
+  const formatPlayerName = (name: string) => {
+    if (!name) return "";
+    if (name.length > 15 && name.includes(" ")) {
+      const parts = name.split(" ");
+      if (parts.length > 1) {
+        return `${parts[0][0]}. ${parts.slice(1).join(" ")}`;
+      }
+    }
+    return name;
+  };
 
   const checkScroll = () => {
     if (scrollContainerRef.current) {
@@ -113,12 +130,14 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
     const oddsVal = { over: formatOdds(prop?.over || 0), under: formatOdds(prop?.under || 0) };
 
     const logs = player.game_log || [];
-    const gamesPlayed = logs.length;
+    const visibleLogs = historicalGameCount ? logs.slice(0, historicalGameCount) : logs;
+    const gamesShown = visibleLogs.length;
+    const totalGames = logs.length;
     let hits = 0;
 
     if (hasLine) {
       const activeLine = customLine !== null && customLine !== undefined ? customLine : lineVal;
-      logs.forEach(game => {
+      visibleLogs.forEach(game => {
         let val = game[statKey];
         if (val === undefined) {
           if (statKey === 'PTS+REB+AST') val = (game.PTS || 0) + (game.REB || 0) + (game.AST || 0);
@@ -130,18 +149,9 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
       });
     }
 
-    const rate = (hasLine && gamesPlayed > 0) ? ((hits / gamesPlayed) * 100).toFixed(1) : '0.0';
+    const rate = (hasLine && gamesShown > 0) ? ((hits / gamesShown) * 100).toFixed(1) : '0.0';
 
     const seasonStats = player.stats || {};
-    const last5 = logs.slice(0, 5);
-
-    const calculateDiff = (key: string) => {
-      if (!last5.length) return 0;
-      const sum = last5.reduce((acc, g) => acc + (g[key] || 0), 0);
-      const avg = sum / last5.length;
-      const season = seasonStats[key] || 0;
-      return avg - season;
-    };
 
     const tickerItems = [
       { label: 'PTS', key: 'PTS' },
@@ -152,29 +162,43 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
       { label: 'USAGE', key: 'USG_PCT', fallback: '0.0%' }, // Fallback if no usage
       { label: 'FGA', key: 'FGA' },
     ].map(item => {
-      const val = seasonStats[item.key] || 0;
+      const seasonVal = seasonStats[item.key] || 0;
+
+      let avg = 0;
+      if (visibleLogs.length > 0) {
+        const sum = visibleLogs.reduce((acc, g) => acc + (g[item.key] || 0), 0);
+        avg = sum / visibleLogs.length;
+      }
+
+      if (historicalGameCount === 82) {
+        avg = item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal;
+      }
+
+      const diff = historicalGameCount === 82 ? 0 : avg - (item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal);
+
       if (item.key === 'USG_PCT') {
         return {
           label: item.label,
-          value: val > 0 ? `${(val * 100).toFixed(1)}%` : item.fallback,
-          diff: undefined // USG_PCT is not in gamelogs, so diff would be inaccurate
+          value: avg > 0 ? `${avg.toFixed(1)}%` : item.fallback,
+          diff: diff
         };
       }
+
       return {
         label: item.label,
-        value: val,
-        diff: calculateDiff(item.key)
+        value: avg,
+        diff: diff
       };
     });
 
     return {
       line: lineVal,
       odds: oddsVal,
-      hitRateInfo: { rate, hits, total: gamesPlayed },
+      hitRateInfo: { rate, hits, gamesShown, total: totalGames },
       statsData: tickerItems,
       hasLine
     };
-  }, [player, statKey, activeSportsbook, customLine]);
+  }, [player, statKey, activeSportsbook, customLine, historicalGameCount]);
 
   useEffect(() => {
     if (!player || !player.props || !player.props[statKey]) return;
@@ -207,7 +231,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
     <div className="bg-bgElevation0 pt-0 px-0 pb-0 w-full rounded-t-xl relative z-40">
 
       {/* Top Nav Tabs */}
-      <div className="relative w-full border-b border-borderMedium/40 mb-0 flex items-end select-none">
+      <div className="relative w-full mb-2 flex items-end select-none">
 
         {/* Left Arrow & Fade */}
         <div className={`absolute left-0 bottom-[1px] top-0 w-16 z-20 flex items-end justify-start bg-gradient-to-r from-bgElevation0 via-bgElevation0/90 to-transparent pointer-events-none transition-opacity ${canScrollLeft ? 'opacity-100' : 'opacity-0'}`}>
@@ -268,11 +292,11 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
       </div>
 
       {/* Main Stats Row */}
-      <div className="flex flex-col xl:flex-row items-center w-full bg-bgElevation0 relative z-30 border-b border-borderMedium/40 rounded-t-xl">
+      <div className="flex flex-col xl:flex-row items-center w-full bg-bgElevation0 relative z-30 rounded-t-xl h-[76px] mb-1">
 
-        {/* Section 1: Player Info (Should not squish) */}
-        <div className="flex items-center gap-3 lg:gap-4 px-3 lg:px-4 py-3 border-r border-borderMedium/40 w-full xl:w-auto justify-start shrink-0 min-w-max">
-          <div className="relative shrink-0 w-[48px] h-[48px]">
+        {/* Section 1: Player Info — sizes to content, never wraps */}
+        <div className="flex items-center gap-3 px-4 h-full w-auto min-w-max justify-start shrink-0">
+          <div className="relative shrink-0 w-[64px] h-[64px]">
             <div
               className="w-full h-full rounded-full overflow-hidden"
               style={gradientStyle}
@@ -282,7 +306,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                   src={`https://cdn.nba.com/headshots/nba/latest/260x190/${player.id}.png`}
                   fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
                   alt={player.name}
-                  className="w-full h-full object-cover transform scale-125 pt-1.5"
+                  className="w-full h-full object-cover transform scale-125 pt-2.5"
                 />
               </div>
             </div>
@@ -299,11 +323,12 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
             </div>
           </div>
 
-          <div className="flex flex-col min-w-0 pr-4">
-            <div className="flex items-baseline gap-1.5 mb-1">
-              <h1 className="text-lg font-bold text-gray-200 tracking-tight whitespace-nowrap truncate leading-none">
-                {player.name} <span className="text-neutral500 font-medium text-xs ml-0.5">{player.position}</span>
+          <div className="flex flex-col">
+            <div className="flex items-center gap-2 mb-1">
+              <h1 className={`font-bold text-gray-200 tracking-tight leading-none whitespace-nowrap ${formatPlayerName(player.name).length > 17 ? 'text-[14px]' : formatPlayerName(player.name).length > 13 ? 'text-[16px]' : 'text-[18px]'}`}>
+                {formatPlayerName(player.name)}
               </h1>
+              <span className="text-neutral500 font-medium text-[11px] whitespace-nowrap shrink-0">{player.position}</span>
             </div>
 
             <div className="flex items-center select-none"> {/* Added select-none to prevent selection during hover */}
@@ -371,8 +396,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
                         {sbHasLine && (
                           <div className="flex items-center gap-3 shrink-0 ml-4 font-chakra">
-                            <span className="text-[13px] text-white font-bold tracking-tight">{sbProp.line}</span>
-                            <div className="flex items-center gap-2.5 text-[11px] font-bold border-l border-borderMuted pl-3">
+                            <span className="text-[14px] text-white font-bold tracking-tight">{sbProp.line}</span>
+                            <div className="flex items-center gap-2.5 text-[13px] font-bold border-l border-borderMuted pl-3">
                               <span className="text-neutral500 flex items-center gap-1">
                                 O <span className="text-green500 tracking-tight">{formatOdds(sbProp.over)}</span>
                               </span>
@@ -391,24 +416,24 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           </div>
         </div>
 
-        {/* Section 2: Hit Rate (Shrinks padding dynamically) */}
-        <div className={`flex flex-col items-center justify-center py-3.5 border-r border-borderMedium/40 w-full xl:w-auto shrink-0 transition-all duration-300 ${isFiltersOpen ? 'px-2 lg:px-3 min-w-[100px]' : 'px-4 lg:px-6 min-w-[140px]'}`}>
+        {/* Section 2: Hit Rate */}
+        <div className={`flex flex-col items-center justify-center h-full border-l border-r border-white/5 w-[175px] shrink-0 transition-all duration-300 ${isFiltersOpen ? 'px-2' : 'px-3'}`}>
           <span className={`text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase transition-all duration-300 ${isFiltersOpen ? 'text-[9px]' : 'text-[10px]'}`}>HIT RATE</span>
           {hasLine ? (
-            <span className={`font-bold tracking-tight leading-none mb-1 transition-all duration-300 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'} ${isFiltersOpen ? 'text-[20px]' : 'text-[24px]'}`}>
-              {hitRateInfo?.rate}% <span className={`opacity-90 transition-all duration-300 ${isFiltersOpen ? 'text-[12px]' : 'text-[15px]'}`}>({hitRateInfo?.hits}/{hitRateInfo?.total})</span>
+            <span className={`font-bold tracking-tight leading-none mb-1 transition-all duration-300 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'} ${isFiltersOpen ? 'text-[14px]' : 'text-[18px]'}`}>
+              {hitRateInfo?.rate}% <span className={`opacity-90 transition-all duration-300 ${isFiltersOpen ? 'text-[14px]' : 'text-[18px]'}`}>({hitRateInfo?.hits}/{hitRateInfo?.gamesShown})</span>
             </span>
           ) : (
             <span className={`font-bold text-borderMedium leading-none mb-1 transition-all duration-300 ${isFiltersOpen ? 'text-[20px]' : 'text-[24px]'}`}>--.--%</span>
           )}
           <span className={`text-neutral600 font-medium whitespace-nowrap transition-all duration-300 ${isFiltersOpen ? 'text-[9px]' : 'text-[10px]'}`}>
-            {hitRateInfo?.hits || 0} of {hitRateInfo?.total || 0} games
+            {hitRateInfo?.gamesShown || 0} of {hitRateInfo?.total || 0} games
           </span>
         </div>
 
-        {/* Section 3: Stats Grid (Shrinks padding dynamically) */}
-        <div className={`flex-1 py-3 w-full xl:w-auto min-w-0 transition-all duration-300 ${isFiltersOpen ? 'px-1 lg:px-2' : 'px-1 lg:px-2'}`}>
-          <div className={`flex items-center justify-between w-full h-full px-1 transition-all duration-300 ${isFiltersOpen ? 'gap-0.5 lg:gap-1' : 'gap-1 lg:gap-2'}`}>
+        {/* Section 3: Stats Grid (Fills remaining space evenly) */}
+        <div className={`flex-1 h-full flex items-center w-full min-w-0 transition-all duration-300 ${isFiltersOpen ? 'px-2' : 'px-4'}`}>
+          <div className={`flex items-center justify-between w-full transition-all duration-300 gap-1 lg:gap-2`}>
             {(isFiltersOpen ? statsData.slice(0, 6) : statsData).map((stat, i) => (
               <StatItem key={stat.label} label={stat.label} value={stat.value} diff={stat.diff} isCompact={isFiltersOpen} />
             ))}
@@ -417,7 +442,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
         {/* Section 4: Actions & Line Movement */}
         {!isFiltersOpen && (
-          <div className="flex items-center gap-4 px-4 py-3.5 border-l border-borderMedium/40 w-full xl:w-auto justify-end shrink-0 bg-bgElevation0 relative transition-all duration-300">
+          <div className="flex items-center gap-4 px-4 h-full w-full xl:w-auto justify-end shrink-0 bg-bgElevation0 relative transition-all duration-300">
             <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" />
 
             <div className="relative">

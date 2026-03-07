@@ -201,10 +201,10 @@ function App() {
               customLine={customLineValue}
               onToggleFilters={() => setIsFiltersOpen(!isFiltersOpen)}
               isFiltersOpen={isFiltersOpen}
+              historicalGameCount={isFiltersOpen ? filterGameCount : 29}
             />
 
-            {/* Subtle separator */}
-            <div className="h-px w-full bg-border/50"></div>
+            {/* Subtle separator removed */}
 
             <div className="p-0">
               <BarChart
