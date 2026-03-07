@@ -60,7 +60,7 @@ const StatItem = ({ label, value, diff, isCompact }: { label: string, value: str
 
   return (
     // REDUCED: px-4 -> px-3
-    <div className={`flex flex-col items-center shrink-0 transition-all duration-300 ${isCompact ? 'px-0.5' : 'px-1 lg:px-2'}`}>
+    <div className={`flex flex-col items-center flex-1 min-w-0 transition-all duration-300 ${isCompact ? 'px-0.5' : 'px-1 lg:px-2'}`}>
       <span className={`text-fgSubtle uppercase tracking-wider font-bold mb-0.5 whitespace-nowrap transition-all duration-300 ${isCompact ? 'text-[8.5px]' : 'text-[9px]'}`}>{label}</span>
       <span className={`font-bold text-white leading-none mb-0.5 transition-all duration-300 ${isCompact ? 'text-[15px]' : 'text-[18px]'}`}>{typeof value === 'number' ? value.toFixed(1) : value}</span>
       <span className={`font-bold font-chakra ${diffClass} transition-all duration-300 ${isCompact ? 'text-[9px]' : 'text-[10px]'}`}>{diffText}</span>
@@ -407,8 +407,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         </div>
 
         {/* Section 3: Stats Grid (Shrinks padding dynamically) */}
-        <div className={`flex-1 py-3 w-full xl:w-auto min-w-0 overflow-x-auto no-scrollbar transition-all duration-300 ${isFiltersOpen ? 'px-1 lg:px-2' : 'px-3 lg:px-4'}`}>
-          <div className={`flex items-center justify-between w-full h-full min-w-max px-2 transition-all duration-300 ${isFiltersOpen ? 'gap-1 lg:gap-2' : 'gap-2 lg:gap-4'}`}>
+        <div className={`flex-1 py-3 w-full xl:w-auto min-w-0 transition-all duration-300 ${isFiltersOpen ? 'px-1 lg:px-2' : 'px-1 lg:px-2'}`}>
+          <div className={`flex items-center justify-between w-full h-full px-1 transition-all duration-300 ${isFiltersOpen ? 'gap-0.5 lg:gap-1' : 'gap-1 lg:gap-2'}`}>
             {(isFiltersOpen ? statsData.slice(0, 6) : statsData).map((stat, i) => (
               <StatItem key={stat.label} label={stat.label} value={stat.value} diff={stat.diff} isCompact={isFiltersOpen} />
             ))}

@@ -392,12 +392,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 - Visuals: Dark background, border right
             */}
             <div className={`
-                fixed inset-y-0 left-0 z-[60] w-[300px] bg-bgElevation0 
+                fixed inset-y-0 left-0 z-[60] w-[270px] bg-bgElevation0 
                 transform transition-transform duration-300 ease-in-out
                 ${isOpen ? 'translate-x-0' : '-translate-x-full'}
 
-                lg:static lg:inset-auto lg:translate-x-0 
-                lg:flex lg:flex-col lg:z-0
+                lg:sticky lg:top-0 lg:translate-x-0 lg:h-[calc(100vh-6rem)] lg:max-h-[850px]
+                lg:flex lg:flex-col lg:z-10 lg:rounded-xl lg:shadow-xl lg:border lg:border-borderMedium/40
                 
                 flex flex-col gap-3 p-4
             `}>

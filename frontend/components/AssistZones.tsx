@@ -165,7 +165,7 @@ const CourtView = ({ pView, oView, vsView, activeTab }: { pView: any, oView: any
 );
 
 export const AssistZones = ({ player }: { player: Player }) => {
-  const [activeTab, setActiveTab] = useState<'player' | 'vs' | 'opp'>('player');
+  const [activeTab, setActiveTab] = useState<'player' | 'vs' | 'opp'>('vs');
 
   const rawZones = (player as any)?.assist_zones;
   const isMissing = !rawZones || Object.keys(rawZones).length === 0;

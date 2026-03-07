@@ -8,9 +8,11 @@ interface FiltersPanelProps {
     activeFilter: string | null;
     onFilterChange: (filter: string | null) => void;
     player?: any;
+    gameCount: number;
+    onGameCountChange: (count: number) => void;
 }
 
-export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, activeFilter, onFilterChange, player }) => {
+export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, activeFilter, onFilterChange, player, gameCount, onGameCountChange }) => {
     const [activeTab, setActiveTab] = React.useState('Suggested');
     const [isSuggestedExpanded, setIsSuggestedExpanded] = React.useState(false);
 
@@ -114,16 +116,21 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                 {['10', '20', 'Max'].map(g => (
                                     <button
                                         key={g}
-                                        className={`flex-1 py-1 text-xs font-medium rounded transition-colors text-fgSubtle hover:text-white`}
+                                        onClick={() => {
+                                            if (g === '10') onGameCountChange(10);
+                                            else if (g === '20') onGameCountChange(20);
+                                            else if (g === 'Max') onGameCountChange(82);
+                                        }}
+                                        className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${(g === '10' && gameCount === 10) || (g === '20' && gameCount === 20) || (g === 'Max' && gameCount === 82) ? 'bg-blue500 text-white shadow-sm' : 'text-fgSubtle hover:text-white'}`}
                                     >
                                         {g}
                                     </button>
                                 ))}
                             </div>
                             <div className="flex items-center justify-between bg-bgElevation2 border border-borderMedium/50 rounded-md px-2 py-1 shrink-0 w-[70px]">
-                                <span className="text-fgSubtle text-xs cursor-pointer hover:text-white">-</span>
-                                <span className="text-white text-xs font-medium">12</span>
-                                <span className="text-fgSubtle text-xs cursor-pointer hover:text-white">+</span>
+                                <span onClick={() => onGameCountChange(Math.max(1, gameCount - 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1 py-0.5">-</span>
+                                <span className="text-white text-xs font-medium">{gameCount}</span>
+                                <span onClick={() => onGameCountChange(Math.min(82, gameCount + 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1 py-0.5">+</span>
                             </div>
                             <Lock className="w-4 h-4 text-borderMuted" />
                         </div>

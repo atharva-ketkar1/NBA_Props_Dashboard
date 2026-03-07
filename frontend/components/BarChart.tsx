@@ -3,6 +3,7 @@ import { Player, Game } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
+import { motion, AnimatePresence } from 'framer-motion';
 
 interface BarChartProps {
     player?: Player;
@@ -12,6 +13,7 @@ interface BarChartProps {
     onCustomLineChange?: (line: number | null) => void;
     activeFilterOverlay?: string | null;
     isFiltersOpen?: boolean;
+    historicalGameCount?: number;
 }
 
 const STAT_LABELS: Record<string, string> = {
@@ -29,7 +31,7 @@ const STAT_LABELS: Record<string, string> = {
     'Turnovers': 'TOV'
 };
 
-export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen }) => {
+export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen, historicalGameCount }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
 
     // Hover State
@@ -59,8 +61,8 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         const prop = player.props?.[statKey]?.[activeSportsbook];
         const line = prop?.line || 0;
 
-        // 2. Prepare Data (Last 30 games max, or 19 if filters are open to leave room)
-        const numGames = isFiltersOpen ? 19 : 30;
+        // 2. Prepare Data (Use historicalGameCount passed from App)
+        const numGames = historicalGameCount || (isFiltersOpen ? 19 : 29);
         const log = player.game_log.slice(0, numGames).reverse();
 
         const data: any[] = log.map(game => {
@@ -146,7 +148,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         });
 
         return { chartData: data, lineValue: line, graphAvgSecondary, seasonAvgSecondary };
-    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen]);
+    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen, historicalGameCount]);
 
     if (!player) return null;
 
@@ -157,11 +159,25 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const X_END = VIEWBOX_WIDTH - 20; // Right margin
     const AVAILABLE_WIDTH = X_END - X_START;
 
-    // Dynamic Spacing: Distribute available width evenly based on number of games
-    const gameCount = Math.max(chartData.length, 1);
-    const spacing = AVAILABLE_WIDTH / gameCount;
+    const currentVisibleCount = historicalGameCount || (isFiltersOpen ? 19 : 29);
+    // 1. Dynamic Spacing: For <= 19 games, map length based on 20 slots. For > 19, use full count.
+    const layoutSlots = currentVisibleCount <= 19 ? 20 : chartData.length;
+    const spacing = AVAILABLE_WIDTH / layoutSlots;
+    
+    // Calculate total layout width and padding for centering
+    const totalContentWidth = chartData.length * spacing;
+    const paddingLeft = currentVisibleCount <= 19 ? (AVAILABLE_WIDTH - totalContentWidth) / 2 : 0;
 
-    // Dynamic Bar Width: Shrinks when there are many games, caps at 32px when few games
+    const shouldCondense = isFiltersOpen && currentVisibleCount > 19;
+    const condensedLabels = new Set<number>();
+    if (shouldCondense) {
+        const numLabels = Math.min(8, chartData.length);
+        for (let i = 0; i < numLabels; i++) {
+            condensedLabels.add(Math.floor(i * (chartData.length - 1) / (numLabels - 1)));
+        }
+    }
+
+    // Dynamic Bar Width
     const barWidth = Math.min(spacing * 0.85, 32);
 
     // Dynamic Scale: Calculate max value to ensure bars don't clip the top
@@ -276,10 +292,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 )}
 
                 {/* 2. Map through GameLogs for Bars, Text, and Logos */}
+                <AnimatePresence>
                 {chartData.map((game, index) => {
                     // Center the bar within its allocated spacing column
-                    const columnCenter = X_START + (index * spacing) + (spacing / 2);
-                    const xPos = columnCenter - (barWidth / 2);
+                    const columnCenter = X_START + paddingLeft + (index * spacing) + (spacing / 2);
                     const yPos = getY(game.score);
                     const barHeight = getBarHeight(game.score);
                     const isOver = game.score >= activeLineThreshold;
@@ -287,10 +303,17 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     // Dynamically scale inner elements if bars get very narrow
                     const logoSize = Math.min(barWidth * 1.2, 28);
                     const fontSize = Math.min(barWidth * 0.6, 14);
+                    
+                    const uniqueKey = game.isUpcoming ? 'upcoming' : `${game.GAME_DATE}-${game.MATCHUP}`;
+                    const showLabel = !shouldCondense || condensedLabels.has(index);
 
                     return (
-                        <g
-                            key={index}
+                        <motion.g
+                            key={uniqueKey}
+                            initial={{ opacity: 0, y: 30, x: columnCenter }}
+                            animate={{ opacity: 1, y: 0, x: columnCenter }}
+                            exit={{ opacity: 0, y: 50, transition: { duration: 0.2 } }}
+                            transition={{ duration: 0.3 }}
                             className="group cursor-pointer"
                             onMouseEnter={(e) => {
                                 setHoverData({
@@ -314,86 +337,99 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         >
                             {/* The Bar */}
                             {game.isUpcoming ? (
-                                <rect
-                                    x={xPos}
-                                    y={getY(lineValue + 2)} // arbitrary height for the placeholder
+                                <motion.rect
+                                    initial={false}
+                                    animate={{ 
+                                        y: getY(lineValue),
+                                        height: getBarHeight(lineValue)
+                                    }}
+                                    transition={{ duration: 0.4, ease: "easeInOut" }}
+                                    x={-barWidth / 2}
                                     width={barWidth}
-                                    height={getBarHeight(lineValue + 2)}
                                     rx="4"
                                     ry="4"
-                                    fill="transparent"
-                                    stroke={colors.borderMedium}
+                                    fill="rgba(255, 255, 255, 0.05)"
+                                    stroke="#FFFFFF"
                                     strokeWidth="1.5"
                                     strokeDasharray="4 4"
-                                    className="opacity-70"
+                                    className="opacity-100"
                                 >
                                     <title>Upcoming Game</title>
-                                </rect>
+                                </motion.rect>
                             ) : (
-                                <rect
-                                    x={xPos}
-                                    y={yPos}
+                                <motion.rect
+                                    initial={false}
+                                    animate={{
+                                        y: yPos,
+                                        height: barHeight,
+                                        fill: isOver ? colors.graphBarOver : colors.graphBarUnder
+                                    }}
+                                    transition={{ duration: 0.4, ease: "easeInOut" }}
+                                    x={-barWidth / 2}
                                     width={barWidth}
-                                    height={barHeight}
                                     rx="4"
                                     ry="4"
-                                    fill={isOver ? colors.graphBarOver : colors.graphBarUnder}
-                                    className="transition-all duration-300 group-hover:brightness-110 group-hover:opacity-80"
+                                    className="group-hover:brightness-110 group-hover:opacity-80"
                                 >
                                     <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
-                                </rect>
+                                </motion.rect>
                             )}
 
                             {/* Stat Value Text Inside Bar */}
-                            <text
-                                x={columnCenter}
-                                y={game.isUpcoming ? VIEWBOX_HEIGHT - 128 : VIEWBOX_HEIGHT - 128}
-                                textAnchor="middle"
-                                fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
-                                fontWeight="900"
-                                fontSize={fontSize}
-                                className="pointer-events-none drop-shadow-md"
-                            >
-                                {game.isUpcoming ? '?' : game.score}
-                            </text>
+                            {!shouldCondense && (
+                                <text
+                                    x={0}
+                                    y={VIEWBOX_HEIGHT - 128}
+                                    textAnchor="middle"
+                                    fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
+                                    fontWeight="900"
+                                    fontSize={fontSize}
+                                    className="pointer-events-none drop-shadow-md transition-all duration-300"
+                                >
+                                    {game.isUpcoming ? '?' : game.score}
+                                </text>
+                            )}
 
-                            {/* Team Logo */}
-                            <image
-                                x={columnCenter - (logoSize / 2)}
-                                y={VIEWBOX_HEIGHT - 114}
-                                width={logoSize}
-                                height={logoSize}
-                                href={game.logoUrl}
-                            />
+                            {/* Visual Logic based on Games Count */}
+                            {!shouldCondense && (
+                                <>
+                                    {/* Team Logo */}
+                                    <image
+                                        x={-logoSize / 2}
+                                        y={VIEWBOX_HEIGHT - 114}
+                                        width={logoSize}
+                                        height={logoSize}
+                                        href={game.logoUrl}
+                                        className="transition-all duration-300"
+                                    />
+                                </>
+                            )}
 
                             {/* Stacked Date Label with connecting dots visualization */}
-                            {(() => {
+                            {showLabel && (() => {
                                 // Logic to determine if we should show connecting dots
                                 const nextGame = chartData[index + 1];
                                 const isConnected = nextGame && nextGame.dateMonth === game.dateMonth && !game.isUpcoming && parseInt(nextGame.dateDay) - parseInt(game.dateDay) === 1;
 
-                                const prevGame = index > 0 ? chartData[index - 1] : null;
-                                const isConnectedToPrev = prevGame && prevGame.dateMonth === game.dateMonth && !prevGame.isUpcoming && parseInt(game.dateDay) - parseInt(prevGame.dateDay) === 1;
-
                                 return (
-                                    <g>
+                                    <g className="transition-all duration-300">
                                         <text
-                                            x={columnCenter}
-                                            y={VIEWBOX_HEIGHT - 75}
+                                            x={0}
+                                            y={shouldCondense ? VIEWBOX_HEIGHT - 105 : VIEWBOX_HEIGHT - 75}
                                             textAnchor="middle"
                                         >
-                                            <tspan x={columnCenter} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
+                                            <tspan x={0} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
                                                 {game.dateMonth}
                                             </tspan>
-                                            <tspan x={columnCenter} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
+                                            <tspan x={0} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
                                                 {game.dateDay}
                                             </tspan>
                                         </text>
 
                                         {/* Render connecting dots exactly centered between columns */}
-                                        {isConnected && (
+                                        {!shouldCondense && isConnected && (
                                             <text
-                                                x={columnCenter + spacing / 2}
+                                                x={spacing / 2}
                                                 y={VIEWBOX_HEIGHT - 63}
                                                 textAnchor="middle"
                                                 fill={colors.fgSubtle}
@@ -406,16 +442,17 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                     </g>
                                 );
                             })()}
-                        </g>
+                        </motion.g>
                     );
                 })}
+                </AnimatePresence>
 
                 {/* Secondary Line Chart Path Overlay */}
                 {activeFilterOverlay && (
                     <g>
                         <path
                             d={chartData.map((d, i) => {
-                                const columnCenter = X_START + (i * spacing) + (spacing / 2);
+                                const columnCenter = X_START + paddingLeft + (i * spacing) + (spacing / 2);
                                 const yPos = getSecondaryY(d.secondaryValue || 0);
                                 if (d.isUpcoming) {
                                     return ''; // Handled separately
@@ -425,15 +462,15 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                             fill="none"
                             stroke={colors.blue500}
                             strokeWidth="2.5"
-                            className="drop-shadow-sm"
+                            className="drop-shadow-sm transition-all duration-300"
                         />
                         {/* Connecting upcoming dotted line */}
                         {chartData.length > 1 && (() => {
                             const lastGameIndex = chartData.length - 2;
-                            const prevX = X_START + (lastGameIndex * spacing) + (spacing / 2);
+                            const prevX = X_START + paddingLeft + (lastGameIndex * spacing) + (spacing / 2);
                             const prevY = getSecondaryY(chartData[lastGameIndex].secondaryValue || 0);
 
-                            const upcomingX = X_START + ((chartData.length - 1) * spacing) + (spacing / 2);
+                            const upcomingX = X_START + paddingLeft + ((chartData.length - 1) * spacing) + (spacing / 2);
                             const upcomingY = getSecondaryY(chartData[chartData.length - 1].secondaryValue || 0);
 
                             return (
@@ -478,30 +515,34 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     }}
                 >
                     {/* Invisible thicker line for easier hovering/grabbing */}
-                    <line
+                    <motion.line
+                        initial={false}
+                        animate={{ y1: propLineY, y2: propLineY }}
+                        transition={{ duration: isDragging ? 0 : 0.4, ease: "easeInOut" }}
                         x1="16"
                         x2="100%"
-                        y1={propLineY}
-                        y2={propLineY}
                         stroke="transparent"
                         strokeWidth="24"
                     />
 
                     {/* The Visual Yellow Line - Solid to match target */}
-                    <line
+                    <motion.line
+                        initial={false}
+                        animate={{ y1: propLineY, y2: propLineY }}
+                        transition={{ duration: isDragging ? 0 : 0.4, ease: "easeInOut" }}
                         x1="58"
                         x2="100%"
-                        y1={propLineY}
-                        y2={propLineY}
                         stroke={colors.yellow400}
                         strokeWidth="1.5"
                         className={`drop-shadow-sm transition-opacity duration-150 ${isDragging ? 'opacity-80' : 'opacity-100'}`}
                     />
 
                     {/* Default Rectangular Handle (Hidden on Hover) */}
-                    <rect
+                    <motion.rect
+                        initial={false}
+                        animate={{ y: propLineY - 12 }}
+                        transition={{ duration: isDragging ? 0 : 0.4, ease: "easeInOut" }}
                         x="16"
-                        y={propLineY - 12}
                         width="42"
                         height="24"
                         rx="4"
@@ -510,21 +551,25 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     />
 
                     {/* Default Handle Text (Aligned with the y-axis text right edge) */}
-                    <text
+                    <motion.text
+                        initial={false}
+                        animate={{ y: propLineY + 1 }}
+                        transition={{ duration: isDragging ? 0 : 0.4, ease: "easeInOut" }}
                         x="50"
-                        y={propLineY + 1}
                         dominantBaseline="middle"
                         textAnchor="end"
                         fontSize="12"
                         className="font-bold fill-black group-hover:opacity-0 transition-opacity"
                     >
                         {currentValue !== null ? currentValue : lineValue}
-                    </text>
+                    </motion.text>
 
                     {/* Grabbable 3x2 Dot Matrix Handle (Shown on Hover or Dragging) */}
-                    <g
+                    <motion.g
+                        initial={false}
+                        animate={{ y: propLineY - 12, x: 16 }}
+                        transition={{ duration: isDragging ? 0 : 0.4, ease: "easeInOut" }}
                         className={`transition-opacity ${isDragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-                        transform={`translate(16, ${propLineY - 12})`}
                     >
                         {/* Background rounding for dots - Yellow */}
                         <rect
@@ -544,11 +589,15 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         <circle cx="15" cy="16" r="1.5" fill={colors.black} />
                         <circle cx="21" cy="16" r="1.5" fill={colors.black} />
                         <circle cx="27" cy="16" r="1.5" fill={colors.black} />
-                    </g>
+                    </motion.g>
 
                     {/* Dragging Value Tooltip Bubble */}
                     {isDragging && (
-                        <g transform={`translate(65, ${propLineY - 12})`}>
+                        <motion.g 
+                            initial={false} 
+                            animate={{ y: propLineY - 12, x: 65 }} 
+                            transition={{ duration: 0 }}
+                        >
                             {/* Little triangular point connecting bubble to line */}
                             <polygon points="0,12 8,8 8,16" fill={colors.yellow400} />
 
@@ -576,7 +625,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                             >
                                 {currentValue}
                             </text>
-                        </g>
+                        </motion.g>
                     )}
                 </g>
             </svg>

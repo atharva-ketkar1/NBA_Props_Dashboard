@@ -163,7 +163,7 @@ const CourtView = ({ pView, oView, vsView, activeTab }: { pView: any, oView: any
 );
 
 export const ShootingZones = ({ player }: { player: Player | any }) => {
-  const [activeTab, setActiveTab] = useState<'player' | 'vs' | 'opp'>('player');
+  const [activeTab, setActiveTab] = useState<'player' | 'vs' | 'opp'>('vs');
 
   const playerView = processZoneData((player as any)?.shooting_zones);
   const oppView = processZoneData((player as any)?.opp_def_zones, true);

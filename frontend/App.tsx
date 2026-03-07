@@ -37,6 +37,7 @@ function App() {
   const [customLineValue, setCustomLineValue] = useState<number | null>(null);
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
+  const [filterGameCount, setFilterGameCount] = useState<number>(19);
 
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
@@ -114,6 +115,12 @@ function App() {
   }, []);
 
   const [isInitialized, setIsInitialized] = useState(false);
+
+  useEffect(() => {
+    if (!isFiltersOpen) {
+      setFilterGameCount(19);
+    }
+  }, [isFiltersOpen]);
 
   // 3. Smart Default Selection (Run once on data load)
   useEffect(() => {
@@ -208,6 +215,7 @@ function App() {
                 onCustomLineChange={setCustomLineValue}
                 activeFilterOverlay={activeFilter}
                 isFiltersOpen={isFiltersOpen}
+                historicalGameCount={isFiltersOpen ? filterGameCount : 29}
               />
             </div>
           </div>
@@ -221,6 +229,8 @@ function App() {
                 activeFilter={activeFilter}
                 onFilterChange={setActiveFilter}
                 player={currentPlayer}
+                gameCount={filterGameCount}
+                onGameCountChange={setFilterGameCount}
               />
             </div>
           </div>
@@ -229,63 +239,77 @@ function App() {
         {/* Bottom Grid Section */}
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-4">
 
-          {/* Left Column in Grid */}
-          <div className="xl:col-span-4 flex flex-col gap-4 h-full">
-            {activeTab === 'Assists' ? (
-              <AssistZones player={currentPlayer} />
-            ) : (
-              <ShootingZones player={currentPlayer} />
-            )}
-            <div className="flex-1 min-h-0">
-              <PlayTypeAnalysis playTypes={currentPlayer?.play_type_analysis} />
-            </div>
-          </div>
-
-          {/* Right Column in Grid */}
-          <div className="xl:col-span-6 flex flex-col gap-4 h-full">
-            <ShotTypeAnalysis shotTypes={(() => {
-              if (!currentPlayer?.shot_type_analysis) return undefined;
-              const sta = currentPlayer.shot_type_analysis;
-              const p = sta.player || {};
-              const d = sta.opp_def || {};
-
-              const cs = p.catch_and_shoot;
-              const pu = p.pull_up;
-              const lt10 = p.less_than_10_ft;
-
-              if (!cs && !pu && !lt10) return undefined;
-
-              return [
-                {
-                  type: 'C&S',
-                  percentage: cs?.percentage || 0,
-                  attempts: Math.round(cs?.points || 0),
-                  frequency: cs?.percentage || 0,
-                  width: cs?.percentage || 33.3,
-                  rank: d.catch_and_shoot?.rank
-                },
-                {
-                  type: '< 10 ft',
-                  percentage: lt10?.percentage || 0,
-                  attempts: Math.round(lt10?.points || 0),
-                  frequency: lt10?.percentage || 0,
-                  width: lt10?.percentage || 33.3,
-                  rank: d.less_than_10_ft?.rank
-                },
-                {
-                  type: 'Pull Up',
-                  percentage: pu?.percentage || 0,
-                  attempts: Math.round(pu?.points || 0),
-                  frequency: pu?.percentage || 0,
-                  width: pu?.percentage || 33.3,
-                  rank: d.pull_up?.rank
-                }
-              ];
-            })()} />
-            <div className="flex-1 min-h-0">
+          {['Rebounds', '1Q Rebounds', 'Double Double', 'Triple Double', 'Blocks', 'Steals', 'Turnovers', 'Fantasy'].includes(activeTab) ? (
+            <div className="xl:col-span-6 flex flex-col gap-4 h-full">
               <SimilarPlayers similarGames={undefined} />
             </div>
-          </div>
+          ) : (
+            <>
+              {/* Left Column in Grid */}
+              <div className="xl:col-span-4 flex flex-col gap-4 h-full">
+                {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
+                  <AssistZones player={currentPlayer} />
+                ) : (
+                  <ShootingZones player={currentPlayer} />
+                )}
+                
+                {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
+                  <div className="flex-1 min-h-0">
+                    <PlayTypeAnalysis playTypes={currentPlayer?.play_type_analysis} />
+                  </div>
+                )}
+              </div>
+
+              {/* Right Column in Grid */}
+              <div className="xl:col-span-6 flex flex-col gap-4 h-full">
+                {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
+                    <ShotTypeAnalysis shotTypes={(() => {
+                      if (!currentPlayer?.shot_type_analysis) return undefined;
+                      const sta = currentPlayer.shot_type_analysis;
+                      const p = sta.player || {};
+                      const d = sta.opp_def || {};
+
+                      const cs = p.catch_and_shoot;
+                      const pu = p.pull_up;
+                      const lt10 = p.less_than_10_ft;
+
+                      if (!cs && !pu && !lt10) return undefined;
+
+                      return [
+                        {
+                          type: 'C&S',
+                          percentage: cs?.percentage || 0,
+                          attempts: Math.round(cs?.points || 0),
+                          frequency: cs?.percentage || 0,
+                          width: cs?.percentage || 33.3,
+                          rank: d.catch_and_shoot?.rank
+                        },
+                        {
+                          type: '< 10 ft',
+                          percentage: lt10?.percentage || 0,
+                          attempts: Math.round(lt10?.points || 0),
+                          frequency: lt10?.percentage || 0,
+                          width: lt10?.percentage || 33.3,
+                          rank: d.less_than_10_ft?.rank
+                        },
+                        {
+                          type: 'Pull Up',
+                          percentage: pu?.percentage || 0,
+                          attempts: Math.round(pu?.points || 0),
+                          frequency: pu?.percentage || 0,
+                          width: pu?.percentage || 33.3,
+                          rank: d.pull_up?.rank
+                        }
+                      ];
+                    })()} />
+                )}
+                
+                <div className="flex-1 min-h-0 xl:col-span-12 w-full h-full">
+                  <SimilarPlayers similarGames={undefined} />
+                </div>
+              </div>
+            </>
+          )}
 
         </div>
 
