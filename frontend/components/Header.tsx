@@ -427,8 +427,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                     onToggleFilters();
                   }
                 }}
-                className="flex items-center gap-2 bg-bgElevation0 border border-borderMedium hover:bg-bgElevation1 hover:border-borderMuted text-white text-[11px] font-bold px-3 py-2 rounded-lg transition-all whitespace-nowrap uppercase tracking-wide">
-                <SlidersHorizontal className="w-3.5 h-3.5" />
+                className="flex items-center gap-1.5 bg-bgElevation0 hover:bg-bgElevation1 border border-borderMedium hover:border-borderMuted text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-all whitespace-nowrap">
+                <SlidersHorizontal className="w-4 h-4" />
                 Filters
               </button>
             </div>

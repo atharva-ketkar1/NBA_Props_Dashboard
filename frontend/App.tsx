@@ -220,6 +220,7 @@ function App() {
                 onClose={() => setIsFiltersOpen(false)}
                 activeFilter={activeFilter}
                 onFilterChange={setActiveFilter}
+                player={currentPlayer}
               />
             </div>
           </div>
