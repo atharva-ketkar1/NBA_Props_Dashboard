@@ -15,6 +15,13 @@ UPDATE_WINDOW_DAYS = 5
 MAX_HISTORY_GAMES = 85
 MAX_WORKERS = 4
 
+# Default season to scrape. The output CSV will be named gamelogs_{SEASON}.csv automatically.
+SEASON = "2025-26"
+
+# Seasons that are fully complete. When explicitly requested, the script will
+# do a one-time full fetch if the CSV doesn't exist yet, then never update again.
+COMPLETED_SEASONS = {"2024-25"}
+
 HEADERS = {
     "accept": "*/*",
     "accept-encoding": "gzip, deflate, br, zstd",
@@ -53,7 +60,7 @@ def _safe_pct_convert(df, cols):
     return df
 
 
-def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
+def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     """
     Fetches Drives, Passing, Rebounding, 1Q Stats, 1H Stats, and Advanced Stats
     for a single game date.
@@ -62,6 +69,8 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
     """
     global _last_500_time
     max_retries = 3
+    if season is None:
+        season = SEASON
 
     if is_full_refresh:
         elapsed = time.time() - _last_500_time
@@ -88,7 +97,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
                     f"?DateFrom={encoded_date}&DateTo={encoded_date}"
                     f"&LastNGames=0&LeagueID=00&Month=0&OpponentTeamID=0&PORound=0"
                     f"&PerMode=PerGame&PlayerOrTeam=Player&PtMeasureType={PT}"
-                    f"&Season=2025-26&SeasonType=Regular%20Season&TeamID=0"
+                    f"&Season={season}&SeasonType=Regular%20Season&TeamID=0"
                 )
                 resp = requests.get(url, headers=HEADERS, timeout=30)
 
@@ -145,7 +154,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
                 f"&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base"
                 f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
                 f"&PerMode=Totals&Period=1&PlusMinus=N&Rank=N"
-                f"&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
             resp = requests.get(q1_url, headers=HEADERS, timeout=30)
@@ -199,7 +208,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
                 f"&GameSegment=First%20Half&LastNGames=0&LeagueID=00&Location=&MeasureType=Base"
                 f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
                 f"&PerMode=Totals&Period=0&PlusMinus=N&Rank=N"
-                f"&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
             resp = requests.get(h1_url, headers=HEADERS, timeout=30)
@@ -253,7 +262,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
                 f"&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced"
                 f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
                 f"&PerMode=Totals&Period=0&PlusMinus=N&Rank=N"
-                f"&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
             resp = requests.get(adv_url, headers=HEADERS, timeout=30)
@@ -302,22 +311,41 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False):
     return daily_merged, failed_endpoints
 
 
-def run_scrape(output_path=None):
+def run_scrape(output_path=None, season=None):
+    if season is None:
+        season = os.environ.get("GAMELOGS_SEASON", SEASON)
     if output_path is None:
         output_path = os.environ.get("GAMELOGS_OUTPUT_PATH")
     if output_path is None:
         current_script_dir = os.path.dirname(os.path.abspath(__file__))
         backend_dir = os.path.dirname(current_script_dir)
-        output_path = os.path.join(backend_dir, "data", "current", "gamelogs.csv")
+        output_path = os.path.join(backend_dir, "data", "current", f"gamelogs_{season}.csv")
         print(f"      Warning: output_path not specified. Defaulting to {output_path}")
 
     print(f"   Managing Game Logs at {output_path}")
 
+    # ------------------------------------------------------------------
+    # Completed season guard: never incrementally update a finished season.
+    # If the CSV already exists AND no failed manifest exists, we're done.
+    # If a failed manifest exists, allow a recovery run.
+    # If no CSV at all, do a one-time full fetch.
+    # ------------------------------------------------------------------
+    if season in COMPLETED_SEASONS:
+        failed_manifest = output_path.replace(".csv", "_failed_dates.csv")
+        if os.path.exists(output_path) and not os.path.exists(failed_manifest):
+            print(f"   Season {season} is complete and data already exists. Nothing to do.")
+            return
+        elif os.path.exists(failed_manifest):
+            print(f"   Season {season} has unresolved failed dates. Attempting recovery...")
+        else:
+            print(f"   Season {season} is complete but no CSV found. Running one-time full fetch...")
+
     target_dates = []
     existing_df = pd.DataFrame()
     full_refresh = True
+    completed_season_recovery_dates = None  # Only set for completed season manifest recovery
 
-    if os.path.exists(output_path):
+    if season not in COMPLETED_SEASONS and os.path.exists(output_path):
         try:
             print("      Found existing logs. Running INCREMENTAL update.")
             existing_df = pd.read_csv(output_path)
@@ -328,12 +356,32 @@ def run_scrape(output_path=None):
         except Exception as e:
             print(f"      Corrupt CSV ({e}). Forcing full refresh.")
             full_refresh = True
+    elif season in COMPLETED_SEASONS and os.path.exists(output_path):
+        # Load existing data to merge recovered dates into
+        try:
+            existing_df = pd.read_csv(output_path)
+            if 'GAME_DATE' in existing_df.columns:
+                existing_df['GAME_DATE'] = pd.to_datetime(existing_df['GAME_DATE'])
+                existing_df['DATE_STR'] = existing_df['GAME_DATE'].dt.strftime('%m/%d/%Y')
+        except Exception as e:
+            print(f"      Could not load existing CSV for recovery ({e}). Starting fresh.")
+        # Load the failed manifest and target only those dates
+        failed_manifest = output_path.replace(".csv", "_failed_dates.csv")
+        if os.path.exists(failed_manifest):
+            try:
+                failed_df = pd.read_csv(failed_manifest)
+                if 'date' in failed_df.columns:
+                    completed_season_recovery_dates = failed_df['date'].tolist()
+                    full_refresh = False
+                    print(f"      Targeting {len(completed_season_recovery_dates)} failed dates from manifest.")
+            except Exception as e:
+                print(f"      Could not read failed manifest ({e}). Falling back to full refresh.")
 
     df_logs = None
     for attempt in range(3):
         try:
             game_log = leaguegamelog.LeagueGameLog(
-                season='2025-26',
+                season=season,
                 player_or_team_abbreviation='P',
                 season_type_all_star='Regular Season',
                 direction='DESC',
@@ -366,6 +414,11 @@ def run_scrape(output_path=None):
         target_dates = valid_dates
         workers = 1
         print(f"      Full Refresh (Reliability Mode): Fetching {len(target_dates)} dates with 1 worker.")
+    elif completed_season_recovery_dates is not None:
+        # Completed season: only re-fetch the specific dates that previously failed
+        target_dates = [d for d in completed_season_recovery_dates if d in valid_dates]
+        workers = MAX_WORKERS
+        print(f"      Completed Season Recovery: Fetching {len(target_dates)} failed dates with {workers} workers.")
     else:
         cutoff_date = datetime.now() - timedelta(days=UPDATE_WINDOW_DAYS)
         target_dates = [d for d in valid_dates if datetime.strptime(d, '%m/%d/%Y') >= cutoff_date]
@@ -398,7 +451,7 @@ def run_scrape(output_path=None):
     none_dates = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {executor.submit(fetch_tracking_data_for_date, d, full_refresh): d for d in target_dates}
+        future_map = {executor.submit(fetch_tracking_data_for_date, d, full_refresh, season): d for d in target_dates}
 
         for i, future in enumerate(as_completed(future_map)):
             date_str = future_map[future]
@@ -434,7 +487,7 @@ def run_scrape(output_path=None):
         for i, date_str in enumerate(all_retry_dates):
             try:
                 print(f"      [RETRY {i+1}/{len(all_retry_dates)}] Fetching {date_str}...")
-                daily_merged, missing_endpoints = fetch_tracking_data_for_date(date_str, is_full_refresh=True)
+                daily_merged, missing_endpoints = fetch_tracking_data_for_date(date_str, is_full_refresh=True, season=season)
                 
                 if daily_merged is not None:
                     advanced_data_list.append(daily_merged)
@@ -504,5 +557,18 @@ def run_scrape(output_path=None):
 
 
 if __name__ == "__main__":
-    env_path = os.environ.get("GAMELOGS_OUTPUT_PATH")
-    run_scrape(output_path=env_path)
+    import sys
+    # Usage:
+    #   python gamelogs.py              -> runs 2025-26 (current season) as normal
+    #   python gamelogs.py 2024-25      -> explicitly requests a completed season;
+    #                                      fetches once if CSV missing, skips if already present
+    cli_season = sys.argv[1] if len(sys.argv) > 1 else None
+
+    # Safety: don't accidentally run a completed season without explicitly asking for it
+    effective_season = cli_season or os.environ.get("GAMELOGS_SEASON", SEASON)
+    if effective_season in COMPLETED_SEASONS and cli_season is None:
+        print(f"   Season {effective_season} is in COMPLETED_SEASONS. "
+              f"Pass it explicitly as an argument to fetch it: python gamelogs.py {effective_season}")
+    else:
+        env_path = os.environ.get("GAMELOGS_OUTPUT_PATH")
+        run_scrape(output_path=env_path, season=effective_season)

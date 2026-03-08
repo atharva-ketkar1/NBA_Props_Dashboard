@@ -461,7 +461,7 @@ if __name__ == "__main__":
         f"{base}/season_stats.csv",
         f"{base}/draftkings.csv",
         f"{base}/fanduel.csv",
-        f"{base}/gamelogs.csv",
+        f"{base}/gamelogs_2025-26.csv",
         f"{base}/shooting_zones.json",
         f"{base}/assist_zones.json",
         f"{base}/opp_assist_zones.json",
