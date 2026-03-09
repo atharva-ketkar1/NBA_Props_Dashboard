@@ -54,8 +54,8 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             .catch(err => console.error("Error loading schedule:", err));
     }, []);
 
-    const { chartData, lineValue, graphAvgSecondary, seasonAvgSecondary } = useMemo(() => {
-        if (!player || !player.game_log) return { chartData: [], lineValue: 0, graphAvgSecondary: 0, seasonAvgSecondary: 0 };
+    const { chartData, lineValue, graphAvgSecondary, seasonAvgSecondary, isRankOverlay } = useMemo(() => {
+        if (!player || !player.game_log) return { chartData: [], lineValue: 0, graphAvgSecondary: 0, seasonAvgSecondary: 0, isRankOverlay: false };
 
         // 1. Get Line based on Active Sportsbook
         const prop = player.props?.[statKey]?.[activeSportsbook];
@@ -89,10 +89,20 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
             const month = months[parseInt(monthStr) - 1];
 
+            let secondaryVal = null;
+            if (activeFilterOverlay === 'Minutes') secondaryVal = Number(game.MIN || 0);
+            else if (activeFilterOverlay === 'USG%') secondaryVal = Number(game.USG_PCT || 0) * 100;
+            else if (activeFilterOverlay === 'FGA') secondaryVal = Number(game.FGA || 0);
+            else if (activeFilterOverlay === 'Def vs DPT') secondaryVal = game.opp_ranks?.dpt;
+            else if (activeFilterOverlay === 'Def vs DSZ') secondaryVal = game.opp_ranks?.dsz;
+            else if (activeFilterOverlay === 'Def vs DSZ2') secondaryVal = game.opp_ranks?.dsz2;
+            else if (activeFilterOverlay === 'Opp Paint Pts Allowed') secondaryVal = game.opp_ranks?.paint_allowed;
+            else if (activeFilterOverlay === 'Def vs Pull Up') secondaryVal = game.opp_ranks?.pull_up;
+
             return {
                 ...game,
                 score: val,
-                secondaryValue: activeFilterOverlay === 'Minutes' ? Number(game.MIN || 0) : null,
+                secondaryValue: secondaryVal,
                 opponent,
                 logoUrl,
                 dateMonth: month,
@@ -100,13 +110,23 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             };
         });
 
-        // Calculate Secondary averages if overlay is active
+        // 2b. Calculate global averages based on exact charted values
         let seasonAvgSecondary = 0;
         let graphAvgSecondary = 0;
-        if (activeFilterOverlay === 'Minutes') {
-            const sumGraph = data.reduce((acc, g) => acc + (g.secondaryValue || 0), 0);
-            graphAvgSecondary = data.length > 0 ? sumGraph / data.length : 0;
-            seasonAvgSecondary = Number(player.stats?.MIN || 0);
+        let isRankOverlay = activeFilterOverlay?.startsWith('Def vs') || activeFilterOverlay?.startsWith('Opp');
+
+        if (activeFilterOverlay) {
+            const validSecondary = data.filter(g => g.secondaryValue !== null && g.secondaryValue !== undefined);
+            const sumSecondary = validSecondary.reduce((acc, g) => acc + Number(g.secondaryValue), 0);
+            graphAvgSecondary = validSecondary.length > 0 ? sumSecondary / validSecondary.length : 0;
+            
+            if (!isRankOverlay) {
+                if (activeFilterOverlay === 'Minutes') seasonAvgSecondary = Number(player.stats?.MIN || 0);
+                if (activeFilterOverlay === 'USG%') seasonAvgSecondary = Number(player.stats?.USG_PCT || 0) * 100;
+                if (activeFilterOverlay === 'FGA') seasonAvgSecondary = Number(player.stats?.FGA || 0);
+            } else {
+                seasonAvgSecondary = graphAvgSecondary; // For ranks, the "season average" is just the graph average visually
+            }
         }
 
         // 3. Append upcoming game dynamically
@@ -115,6 +135,27 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         let upcomingMonth = fallbackMonths[today.getMonth()];
         let upcomingDay = String(today.getDate()).padStart(2, '0');
+
+        let upcomingSecondaryRank = null;
+        if (isRankOverlay) {
+            // Find dpt, dsz, etc to grab rank for the upcoming opponent (which is stored currently in the player object directly)
+            if (activeFilterOverlay === 'Def vs DPT') {
+                if (player?.play_type_analysis) {
+                    const sortedPlays = [...player.play_type_analysis].sort((a: any, b: any) => parseInt(b.percent) - parseInt(a.percent));
+                    upcomingSecondaryRank = sortedPlays[0]?.rank || null;
+                }
+            } else if (activeFilterOverlay === 'Def vs DSZ' || activeFilterOverlay === 'Def vs DSZ2') {
+                if (player?.shooting_zones) {
+                    const zones = Object.entries(player.shooting_zones).map(([zone, data]: any) => ({ zone, pct: parseInt(data.percentage) })).sort((a, b) => b.pct - a.pct);
+                    const targetZone = activeFilterOverlay === 'Def vs DSZ' ? zones[0]?.zone : zones[1]?.zone;
+                    upcomingSecondaryRank = player.opp_def_zones?.[targetZone]?.rank || null;
+                }
+            } else if (activeFilterOverlay === 'Opp Paint Pts Allowed') {
+                upcomingSecondaryRank = player?.opp_def_zones?.paint?.rank || null;
+            } else if (activeFilterOverlay === 'Def vs Pull Up') {
+                upcomingSecondaryRank = player?.shot_type_analysis?.opp_def?.pull_up?.rank || null;
+            }
+        }
 
         if (player.team && scheduleData.length > 0) {
             const playerGame = scheduleData.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team);
@@ -139,7 +180,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
         data.push({
             score: null, // Special flag for upcoming game
-            secondaryValue: activeFilterOverlay === 'Minutes' ? graphAvgSecondary : null, // Expected default line connecting
+            secondaryValue: isRankOverlay && upcomingSecondaryRank ? upcomingSecondaryRank : (activeFilterOverlay ? graphAvgSecondary : null), // Use upcoming rank or connect base avg
             opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
             logoUrl: upcomingLogoUrl,
             dateMonth: upcomingMonth,
@@ -147,7 +188,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             isUpcoming: true
         });
 
-        return { chartData: data, lineValue: line, graphAvgSecondary, seasonAvgSecondary };
+        return { chartData: data, lineValue: line, graphAvgSecondary, seasonAvgSecondary, isRankOverlay: !!isRankOverlay };
     }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen, historicalGameCount]);
 
     if (!player) return null;
@@ -182,7 +223,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     // Dynamic Scale: Calculate max value to ensure bars don't clip the top
     const maxScore = Math.max(...chartData.map(d => Number(d.score || 0)), lineValue + 5, 10);
-    const maxSecondary = activeFilterOverlay ? Math.max(...chartData.map(d => Number(d.secondaryValue || 0)), 38) : 10;
+    const maxSecondary = isRankOverlay ? 30 : (activeFilterOverlay ? Math.max(...chartData.map(d => Number(d.secondaryValue || 0)), 15) * 1.2 : 10);
 
     // Helpers to calculate exact Y coordinates and Heights inside the SVG
     const getY = (val: number) => {
@@ -190,8 +231,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         return VIEWBOX_HEIGHT - 120 - ((val / maxScore) * availableHeight);
     };
 
-    const getSecondaryY = (val: number) => {
+    const getSecondaryY = (val: number | null | undefined) => {
+        if (val === null || val === undefined) return 0; // Or some fallback
         const availableHeight = 250;
+        if (isRankOverlay) {
+            // For ranks, #1 is hardest (red) and should be high up, #30 is easiest and should be lower?
+            // Invert it so #1 is at bottom, #30 is at top
+            return VIEWBOX_HEIGHT - 120 - (((31 - val) / 30) * availableHeight);
+        }
         return VIEWBOX_HEIGHT - 120 - ((val / maxSecondary) * availableHeight);
     };
 
@@ -284,10 +331,21 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 {/* Secondary Y-Axis Grid Lines & Labels (Right Side) */}
                 {activeFilterOverlay && (
                     <g className="text-blue500 font-bold" fill="currentColor" textAnchor="start" fontSize="12">
-                        <text x={X_END + 4} y={getSecondaryY(0)} dominantBaseline="middle">0</text>
-                        <text x={X_END + 4} y={getSecondaryY(maxSecondary / 3)} dominantBaseline="middle">{Math.round(maxSecondary / 3)}</text>
-                        <text x={X_END + 4} y={getSecondaryY((maxSecondary * 2) / 3)} dominantBaseline="middle">{Math.round((maxSecondary * 2) / 3)}</text>
-                        <text x={X_END + 4} y={getSecondaryY(maxSecondary)} dominantBaseline="middle">{Math.round(maxSecondary)}</text>
+                        {isRankOverlay ? (
+                            <>
+                                <text x={X_END + 4} y={getSecondaryY(30)} dominantBaseline="middle">#30</text>
+                                <text x={X_END + 4} y={getSecondaryY(20)} dominantBaseline="middle">#20</text>
+                                <text x={X_END + 4} y={getSecondaryY(10)} dominantBaseline="middle">#10</text>
+                                <text x={X_END + 4} y={getSecondaryY(1)} dominantBaseline="middle">#1</text>
+                            </>
+                        ) : (
+                            <>
+                                <text x={X_END + 4} y={getSecondaryY(0)} dominantBaseline="middle">0</text>
+                                <text x={X_END + 4} y={getSecondaryY(maxSecondary / 3)} dominantBaseline="middle">{Math.round(maxSecondary / 3)}{activeFilterOverlay === 'USG%' ? '%' : ''}</text>
+                                <text x={X_END + 4} y={getSecondaryY((maxSecondary * 2) / 3)} dominantBaseline="middle">{Math.round((maxSecondary * 2) / 3)}{activeFilterOverlay === 'USG%' ? '%' : ''}</text>
+                                <text x={X_END + 4} y={getSecondaryY(maxSecondary)} dominantBaseline="middle">{Math.round(maxSecondary)}{activeFilterOverlay === 'USG%' ? '%' : ''}</text>
+                            </>
+                        )}
                     </g>
                 )}
 
@@ -468,10 +526,16 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         {chartData.length > 1 && (() => {
                             const lastGameIndex = chartData.length - 2;
                             const prevX = X_START + paddingLeft + (lastGameIndex * spacing) + (spacing / 2);
-                            const prevY = getSecondaryY(chartData[lastGameIndex].secondaryValue || 0);
+                            const prevY = getSecondaryY(chartData[lastGameIndex].secondaryValue);
 
                             const upcomingX = X_START + paddingLeft + ((chartData.length - 1) * spacing) + (spacing / 2);
-                            const upcomingY = getSecondaryY(chartData[chartData.length - 1].secondaryValue || 0);
+                            const upcomingY = getSecondaryY(chartData[chartData.length - 1].secondaryValue);
+
+                            // Skip if either value is invalid
+                            if (chartData[lastGameIndex].secondaryValue === null || chartData[lastGameIndex].secondaryValue === undefined || 
+                                chartData[chartData.length - 1].secondaryValue === null || chartData[chartData.length - 1].secondaryValue === undefined) {
+                                return null;
+                            }
 
                             return (
                                 <>
@@ -481,19 +545,20 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                         x2={upcomingX}
                                         y2={upcomingY}
                                         fill="none"
-                                        stroke={colors.blue500}
+                                        stroke="currentColor"
+                                        className="text-blue500 opacity-60"
                                         strokeWidth="2.5"
                                         strokeDasharray="6 4"
                                     />
                                     {/* Cap indicator for the upcoming expected node */}
                                     <line
                                         x1={upcomingX}
-                                        y1={upcomingY - 14}
+                                        y1={upcomingY - 5}
                                         x2={upcomingX}
-                                        y2={upcomingY + 14}
-                                        stroke={colors.blue500}
+                                        y2={upcomingY + 5}
+                                        stroke="currentColor"
+                                        className="text-blue500 opacity-60"
                                         strokeWidth="2.5"
-                                        strokeDasharray="4 4"
                                     />
                                 </>
                             );
@@ -637,11 +702,11 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     <span className="text-fgSubtle font-bold text-[9px] tracking-widest uppercase">LINE</span>
                 </div>
 
-                {activeFilterOverlay === 'Minutes' ? (
+                {activeFilterOverlay ? (
                     <div className="flex items-center gap-1.5 flex-1 justify-start">
                         <div className="w-2.5 h-2.5 bg-blue500 rounded-[1px]" />
                         <span className="text-blue500 font-bold text-[9px] tracking-widest uppercase whitespace-nowrap">
-                            MINUTES [GRAPH AVG: {graphAvgSecondary.toFixed(1)} | SEASON AVG: {seasonAvgSecondary.toFixed(1)}]
+                            {activeFilterOverlay} {isRankOverlay ? `[OPP RANK: #${Math.round(graphAvgSecondary)}]` : `[GRAPH AVG: ${graphAvgSecondary.toFixed(1)}${activeFilterOverlay === 'USG%' ? '%' : ''} | SEASON AVG: ${seasonAvgSecondary.toFixed(1)}${activeFilterOverlay === 'USG%' ? '%' : ''}]`}
                         </span>
                     </div>
                 ) : (

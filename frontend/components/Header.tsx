@@ -170,11 +170,11 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         avg = sum / visibleLogs.length;
       }
 
-      if (historicalGameCount === 82) {
+      if (historicalGameCount === 82 || historicalGameCount === totalGames) {
         avg = item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal;
       }
 
-      const diff = historicalGameCount === 82 ? 0 : avg - (item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal);
+      const diff = (historicalGameCount === 82 || historicalGameCount === totalGames) ? 0 : avg - (item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal);
 
       if (item.key === 'USG_PCT') {
         return {

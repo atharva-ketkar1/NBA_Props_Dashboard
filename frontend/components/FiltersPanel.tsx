@@ -113,24 +113,32 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                         <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[50px]">Games</span>
                         <div className="flex items-center gap-2 flex-1 ml-2">
                             <div className="flex bg-bgElevation1 rounded-md border border-borderMedium/40 p-0.5 flex-1">
-                                {['10', '20', 'Max'].map(g => (
-                                    <button
-                                        key={g}
-                                        onClick={() => {
-                                            if (g === '10') onGameCountChange(10);
-                                            else if (g === '20') onGameCountChange(20);
-                                            else if (g === 'Max') onGameCountChange(82);
-                                        }}
-                                        className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${(g === '10' && gameCount === 10) || (g === '20' && gameCount === 20) || (g === 'Max' && gameCount === 82) ? 'bg-blue500 text-white shadow-sm' : 'text-fgSubtle hover:text-white'}`}
-                                    >
-                                        {g}
-                                    </button>
-                                ))}
+                                {['10', '20', 'Max'].map(g => {
+                                    const maxGames = player?.game_log?.length || 82;
+                                    const isMax = g === 'Max';
+                                    const handleClick = () => {
+                                        if (g === '10') onGameCountChange(10);
+                                        else if (g === '20') onGameCountChange(20);
+                                        else if (isMax) onGameCountChange(maxGames);
+                                    };
+                                    const isActive = (g === '10' && gameCount === 10) || 
+                                                     (g === '20' && gameCount === 20) || 
+                                                     (isMax && gameCount === maxGames);
+                                    return (
+                                        <button
+                                            key={g}
+                                            onClick={handleClick}
+                                            className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : 'text-fgSubtle hover:text-white'}`}
+                                        >
+                                            {g}
+                                        </button>
+                                    );
+                                })}
                             </div>
                             <div className="flex items-center justify-between bg-bgElevation2 border border-borderMedium/50 rounded-md px-2 py-1 shrink-0 w-[70px]">
                                 <span onClick={() => onGameCountChange(Math.max(1, gameCount - 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1 py-0.5">-</span>
                                 <span className="text-white text-xs font-medium">{gameCount}</span>
-                                <span onClick={() => onGameCountChange(Math.min(82, gameCount + 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1 py-0.5">+</span>
+                                <span onClick={() => onGameCountChange(Math.min(player?.game_log?.length || 82, gameCount + 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1 py-0.5">+</span>
                             </div>
                             <Lock className="w-4 h-4 text-borderMuted" />
                         </div>
@@ -153,25 +161,22 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                     <>
                         {/* Suggested Tab Content - Pills */}
                         <div className="flex flex-wrap gap-1 mt-1">
-                            <button
-                                onClick={() => onFilterChange(activeFilter === 'Minutes' ? null : 'Minutes')}
-                                className={`px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === 'Minutes' ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-gray-200 border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
-                            >
-                                Minutes
-                            </button>
-                            <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                Def vs Position (PTS)
-                            </button>
-                            <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                H2H
-                            </button>
-                            <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                {!isSuggestedExpanded ? `Def vs ${dpt || 'DPT'} (DPT)` : 'Def vs DPT'} {dptRank && <span className={getRankColor(dptRank)}>#{dptRank}</span>}
-                            </button>
-                            <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                {!isSuggestedExpanded ? `Def vs ${dsz || 'DSZ'} (DSZ)` : 'Def vs DSZ'} {dszRank && <span className={getRankColor(dszRank)}>#{dszRank}</span>}
-                            </button>
-
+                            {['Minutes', 'Def vs Position (PTS)', 'H2H', `Def vs ${dpt || 'DPT'} (DPT)`, `Def vs ${dsz || 'DSZ'} (DSZ)`].map(stat => {
+                                const realLabel = stat.startsWith('Def vs') && stat.includes('(DPT)') ? 'Def vs DPT' : 
+                                                  stat.startsWith('Def vs') && stat.includes('(DSZ)') ? 'Def vs DSZ' : stat;
+                                const rankHtml = realLabel === 'Def vs DPT' && dptRank ? <span className={getRankColor(dptRank)}>#{dptRank}</span> :
+                                                 realLabel === 'Def vs DSZ' && dszRank ? <span className={getRankColor(dszRank)}>#{dszRank}</span> : null;
+                                const displayStat = !isSuggestedExpanded && realLabel.startsWith('Def vs') ? stat : realLabel;
+                                return (
+                                    <button
+                                        key={realLabel}
+                                        onClick={() => onFilterChange(activeFilter === realLabel ? null : realLabel)}
+                                        className={`px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === realLabel ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
+                                    >
+                                        {displayStat} {rankHtml}
+                                    </button>
+                                );
+                            })}
                             {!isSuggestedExpanded ? (
                                 <button
                                     onClick={() => setIsSuggestedExpanded(true)}
@@ -180,27 +185,23 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                 </button>
                             ) : (
                                 <>
-                                    <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                        Opp Paint Pts Allowed {paintPtsRank && <span className={getRankColor(paintPtsRank)}>#{paintPtsRank}</span>}
-                                    </button>
-                                    <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                        Opp DefRtg
-                                    </button>
-                                    <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                        Opp Pace <span className="text-green500">#5</span>
-                                    </button>
-                                    <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                        USG%
-                                    </button>
-                                    <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                        FGA
-                                    </button>
-                                    <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                        Def vs DSZ2 {dsz2Rank && <span className={getRankColor(dsz2Rank)}>#{dsz2Rank}</span>}
-                                    </button>
-                                    <button className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white">
-                                        Def vs Pull Up {pullupRank && <span className={getRankColor(pullupRank)}>#{pullupRank}</span>}
-                                    </button>
+                                    {[
+                                        { label: 'Opp Paint Pts Allowed', rank: paintPtsRank },
+                                        { label: 'Opp DefRtg', rank: null },
+                                        { label: 'Opp Pace', rank: null, customRank: <span className="text-green500">#5</span> },
+                                        { label: 'USG%', rank: null },
+                                        { label: 'FGA', rank: null },
+                                        { label: 'Def vs DSZ2', rank: dsz2Rank },
+                                        { label: 'Def vs Pull Up', rank: pullupRank }
+                                    ].map(stat => (
+                                        <button
+                                            key={stat.label}
+                                            onClick={() => onFilterChange(activeFilter === stat.label ? null : stat.label)}
+                                            className={`px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === stat.label ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
+                                        >
+                                            {stat.label} {stat.rank && <span className={getRankColor(stat.rank)}>#{stat.rank}</span>} {stat.customRank}
+                                        </button>
+                                    ))}
                                     <button
                                         onClick={() => setIsSuggestedExpanded(false)}
                                         className="p-1.5 rounded-full text-[13px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3 flex items-center justify-center w-[24px] h-[24px] mt-0.5 ml-1">
