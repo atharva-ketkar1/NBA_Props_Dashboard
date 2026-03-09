@@ -193,6 +193,19 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         'Trail Blazers': 'Portland Trail Blazers', 'Kings': 'Sacramento Kings', 'Spurs': 'San Antonio Spurs',
         'Raptors': 'Toronto Raptors', 'Jazz': 'Utah Jazz', 'Wizards': 'Washington Wizards'
     }
+    
+    ABBR_TO_FULL = {
+        'ATL': 'Atlanta Hawks', 'BKN': 'Brooklyn Nets', 'BOS': 'Boston Celtics',
+        'CHA': 'Charlotte Hornets', 'CHI': 'Chicago Bulls', 'CLE': 'Cleveland Cavaliers',
+        'DAL': 'Dallas Mavericks', 'DEN': 'Denver Nuggets', 'DET': 'Detroit Pistons',
+        'GSW': 'Golden State Warriors', 'HOU': 'Houston Rockets', 'IND': 'Indiana Pacers',
+        'LAC': 'LA Clippers', 'LAL': 'Los Angeles Lakers', 'MEM': 'Memphis Grizzlies',
+        'MIA': 'Miami Heat', 'MIL': 'Milwaukee Bucks', 'MIN': 'Minnesota Timberwolves',
+        'NOP': 'New Orleans Pelicans', 'NYK': 'New York Knicks', 'OKC': 'Oklahoma City Thunder',
+        'ORL': 'Orlando Magic', 'PHI': 'Philadelphia 76ers', 'PHX': 'Phoenix Suns',
+        'POR': 'Portland Trail Blazers', 'SAC': 'Sacramento Kings', 'SAS': 'San Antonio Spurs',
+        'TOR': 'Toronto Raptors', 'UTA': 'Utah Jazz', 'WAS': 'Washington Wizards'
+    }
 
     # D. Build Games Map
     team_games = {}
@@ -375,6 +388,57 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         # Remove raw_pts
         for item in play_type_array:
             del item['raw_pts']
+            
+        # Top Play Type and Shooting Zones for historical lookup
+        dpt_key = play_type_array[0]['type'] if len(play_type_array) > 0 else None
+        # Convert front-end label back to config key for looking up against opp_play_type_def
+        dpt_key_raw = next((key for label, key in play_types_config if label == dpt_key), None)
+        
+        player_zones = shooting_data.get(row['PLAYER_NAME'], {})
+        sorted_zones = sorted(
+            [{'zone': k, 'pct': int(v['percentage'])} for k, v in player_zones.items() if 'percentage' in v and str(v['percentage']).isdigit()],
+            key=lambda x: x['pct'], reverse=True
+        ) if player_zones else []
+        dsz_key = sorted_zones[0]['zone'] if len(sorted_zones) > 0 else None
+        dsz2_key = sorted_zones[1]['zone'] if len(sorted_zones) > 1 else None
+
+        # 7. Inject Historical Opponent Defensive Ranks into the Game Log
+        player_log_items = logs_map.get(pid, [])
+        for gl_idx, gl_item in enumerate(player_log_items):
+            matchup = str(gl_item.get('MATCHUP', ''))
+            parts = matchup.split(' ')
+            if parts:
+                opp_abbr = parts[-1] # "DEN"
+                hist_opp_name = ABBR_TO_FULL.get(opp_abbr, 'N/A')
+                
+                # Default null ranks
+                gl_item['opp_ranks'] = {
+                    'dpt': None,
+                    'dsz': None,
+                    'dsz2': None,
+                    'paint_allowed': None,
+                    'pull_up': None
+                }
+                
+                if hist_opp_name != 'N/A':
+                    # 1. Play Type Def (DPT)
+                    hist_opp_play_type = play_type_data.get('teams', {}).get(hist_opp_name, {}).get('rankings', {})
+                    if dpt_key_raw: gl_item['opp_ranks']['dpt'] = hist_opp_play_type.get(dpt_key_raw, None)
+                    
+                    # 2. Shot Zones (DSZ, DSZ2, Paint Allowed)
+                    hist_opp_def_zones = None
+                    if hist_opp_name in opp_def_data:
+                        team_def = opp_def_data[hist_opp_name]
+                        hist_opp_def_zones = team_def.get(sim_pos) or team_def.get('ALL', {})
+                    
+                    if hist_opp_def_zones:
+                        if dsz_key: gl_item['opp_ranks']['dsz'] = hist_opp_def_zones.get(dsz_key, {}).get('rank', None)
+                        if dsz2_key: gl_item['opp_ranks']['dsz2'] = hist_opp_def_zones.get(dsz2_key, {}).get('rank', None)
+                        gl_item['opp_ranks']['paint_allowed'] = hist_opp_def_zones.get('paint', {}).get('rank', None)
+                        
+                    # 3. Pull Up Def
+                    hist_opp_shot_type = opp_shot_type_data.get(hist_opp_name, {}).get('rankings', {})
+                    gl_item['opp_ranks']['pull_up'] = hist_opp_shot_type.get('pullups', None)
 
         master_data[pid] = {
             "id": pid,
@@ -382,7 +446,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             "team": team,
             "position": exact_pos,
             "stats": season_stats,
-            "game_log": logs_map.get(pid, []), 
+            "game_log": player_log_items, 
             "shooting_zones": shooting_data.get(row['PLAYER_NAME'], None),
             "assist_zones": assists_by_pid.get(pid, None),
             "opp_assist_zones": opp_assist_zones,

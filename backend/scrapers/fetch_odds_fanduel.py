@@ -20,11 +20,20 @@ HEADERS = {
     'Accept': 'application/json'
 }
 
+def _fetch_via_proxy(url):
+    """Helper clearly route request via Cloudflare Worker if set."""
+    proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
+    if not proxy_url:
+        print("WARNING: PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
+        return requests.get(url, headers=HEADERS, timeout=15)
+    return requests.get(proxy_url, params={"url": url}, headers=HEADERS, timeout=15)
+
 def get_nba_main_page_data():
     """Fetches the main NBA page."""
     url = f"https://api.sportsbook.fanduel.com/sbapi/content-managed-page?page=CUSTOM&customPageId=nba&pbHorizontal=false&_ak={FANDUEL_PUBLIC_ACCESS_KEY}&timezone=America%2FNew_York"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        #response = requests.get(url, headers=HEADERS, timeout=15)
+        response = _fetch_via_proxy(url)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -36,7 +45,7 @@ def get_player_props(event_id, prop_tab_name):
     cache_buster = int(time.time())
     url = f"https://api.sportsbook.fanduel.com/sbapi/event-page?_ak={FANDUEL_PUBLIC_ACCESS_KEY}&eventId={event_id}&tab={prop_tab_name}&_={cache_buster}"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        response = _fetch_via_proxy(url)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -48,7 +57,7 @@ def get_all_available_tabs(event_id):
     cache_buster = int(time.time())
     url = f"https://api.sportsbook.fanduel.com/sbapi/event-page?_ak={FANDUEL_PUBLIC_ACCESS_KEY}&eventId={event_id}&_={cache_buster}"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        response = _fetch_via_proxy(url)
         response.raise_for_status()
         data = response.json()
         tabs = data.get('layout', {}).get('tabs', {})

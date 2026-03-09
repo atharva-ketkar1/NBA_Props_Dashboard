@@ -5,6 +5,11 @@ import re
 from datetime import datetime
 from dateutil import tz
 import pandas as pd
+import os
+import urllib.parse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # CONSTANTS
 DK_API_BASE = "https://sportsbook-nash.draftkings.com/sites/US-IL-SB/api/sportscontent/controldata/league/leagueSubcategory/v1/markets"
@@ -80,8 +85,17 @@ def fetch_category(subcategory_id, prop_label):
         f"&_={timestamp}"
     )
     
+    proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
+    if not proxy_url:
+        print("WARNING: PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
+        proxy_url = url
+        params = {}
+    else:
+        params = {"url": url}
+    
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        #resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = requests.get(proxy_url, params=params, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
