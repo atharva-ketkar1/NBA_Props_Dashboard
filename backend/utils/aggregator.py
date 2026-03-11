@@ -77,6 +77,7 @@ def load_json(path):
 # ==========================================
 def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path):
     print(f"   Aggregating Data...")
+    import gc
 
     # A. Load All Data
     df_stats = load_csv(stats_path)
@@ -172,6 +173,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                             })
                     log['dnps'] = team_dnps
             logs_map[int(pid)] = player_logs
+            
+    # Free df_logs and boxscores from memory
+    del df_logs
+    del boxscores_data
+    gc.collect()
 
     # D. Map assist data from pbpstats to PLAYER_ID
     assists_by_pid = {}
@@ -244,8 +250,6 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             season_stats[k] = safe_float(row.get(k, 0))
 
         # 2. Get opponent defense context
-        # Some stats rows have TEAM_ABBREVIATION as numeric 0.0 or a weird type if missing. 
-        # But we also have TEAM_ABBREVIATION in the logs or in master_data early. 
         team = str(row['TEAM_ABBREVIATION'])
         if team == '0.0' or team == '0':
             # Fallback to logs
@@ -461,6 +465,19 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             "props": {}
         }
 
+    # Free df_stats and spatial/JSON objects now that master_data is fully built
+    # NOTE: del df_stats MUST be here, after the iterrows() loop above, not before it
+    del df_stats
+    del shooting_data
+    del assists_data
+    del opp_assist_data
+    del opp_def_data
+    del games_data
+    del shot_type_data
+    del opp_shot_type_data
+    del play_type_data
+    gc.collect()
+
     # E. Merge Betting Odds
     # Helper to process odds files
     def process_odds(df, book_name):
@@ -502,6 +519,10 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
     process_odds(df_dk, "dk")
     process_odds(df_fd, "fd")
+    
+    del df_dk
+    del df_fd
+    gc.collect()
 
     # F. Filter & Save
     # Only save players who have EITHER stats OR odds (removes G-League noise)

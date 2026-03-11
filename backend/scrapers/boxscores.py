@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIGURATION
 # ==========================================
 MAX_HISTORY_DAYS = 300  # Check the whole season for missing games
-MAX_WORKERS = 10  # Because we only use the CDN now, we can max out the workers!
+MAX_WORKERS = 1  # Reduced to 1 for memory safety
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -162,6 +162,9 @@ def run_scrape(output_path):
             
             if (i + 1) % 25 == 0 or (i + 1) == len(game_ids_to_process):
                 print(f"      [{i+1}/{len(game_ids_to_process)}] Processed new boxscores...")
+
+    import gc
+    gc.collect()
 
     # Step 4: Save to data sink
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

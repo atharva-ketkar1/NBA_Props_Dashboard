@@ -1,8 +1,10 @@
 import time
 import pandas as pd
-import concurrent.futures
 import os
 import sys
+import gc
+import psutil
+from datetime import datetime
 
 # Add path to scrapers
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
@@ -21,8 +23,6 @@ from scrapers import shot_type_analysis as shot_type_analysis
 from scrapers import opp_shot_type_analysis as opp_shot_type_analysis
 from scrapers import play_type_analysis as play_type_analysis
 from scrapers import boxscores as boxscores
-from scrapers.archive import old_assist_zones as old_assist_zones
-from scrapers.archive import old_opp_assist_zones as old_opp_assist_zones
 from utils import aggregator
 import json
 
@@ -30,6 +30,9 @@ import json
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data", "current")
 os.makedirs(DATA_DIR, exist_ok=True)
+
+LOG_PATH = os.path.join(BASE_DIR, "logs", "pipeline.log")
+os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 # Define Paths
 STATS_PATH = os.path.join(DATA_DIR, "season_stats.csv")
@@ -138,33 +141,46 @@ def run_boxscores():
     boxscores.run_scrape(BOXSCORES_PATH)
     return "Boxscores Updated"
 
+def log_memory(stage_name):
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / (1024 * 1024)
+    print(f"[{stage_name}] Memory Usage: {mem_mb:.1f} MB")
+
 def main():
     start_time = time.time()
-    print("PIPELINE STARTED")
+    start_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with open(LOG_PATH, 'w') as f:
+        f.write(f"Pipeline started: {start_str}\n")
+    print(f"PIPELINE STARTED: {start_str}")
+    log_memory("START")
 
-    # STEP 1: Run Scrapers (Parallel)
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(run_dk),
-            executor.submit(run_fd),
-            executor.submit(run_stats),
-            executor.submit(run_logs),
-            executor.submit(run_schedule),
-            executor.submit(run_shooting_zones),
-            executor.submit(run_assist_zones),
-            executor.submit(run_opp_assist_zones),
-            executor.submit(run_opp_def_zones),
-            executor.submit(run_shot_type_analysis),
-            executor.submit(run_opp_shot_type_analysis),
-            executor.submit(run_play_type_analysis),
-            executor.submit(run_boxscores)
-        ]
-        
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                print(f"   {future.result()}")
-            except Exception as e:
-                print(f"   Scraper Failed: {e}")
+    # STEP 1: Run Scrapers (Sequential - Memory Safe)
+    # Order: Schedule -> Zones -> Odds -> Stats -> Logs -> Boxscores
+    scrapers = [
+        ("Schedule", run_schedule),
+        ("Shooting Zones", run_shooting_zones),
+        ("Assist Zones", run_assist_zones),
+        ("Opp Assist Zones", run_opp_assist_zones),
+        ("Opp Defense Zones", run_opp_def_zones),
+        ("Shot Type Analysis", run_shot_type_analysis),
+        ("Opp Shot Type Analysis", run_opp_shot_type_analysis),
+        ("Play Type Analysis", run_play_type_analysis),
+        ("DraftKings", run_dk),
+        ("FanDuel", run_fd),
+        ("Season Stats", run_stats),
+        ("Game Logs", run_logs),
+        ("Boxscores", run_boxscores)
+    ]
+    
+    for name, func in scrapers:
+        try:
+            result = func()
+            print(f"   {result}")
+        except Exception as e:
+            print(f"   Scraper Failed [{name}]: {e}")
+        finally:
+            gc.collect()
+            log_memory(f"After {name}")
 
     # STEP 2: Run Aggregator
     print("\nRunning Aggregator...")
