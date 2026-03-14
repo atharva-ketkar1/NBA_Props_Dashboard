@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.cron import CronTrigger
+from zoneinfo import ZoneInfo
 
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
@@ -29,7 +30,7 @@ PROP_MAP = {
 }
 
 def get_et_now():
-    return datetime.now(timezone(timedelta(hours=-5)))
+    return datetime.now(ZoneInfo("America/New_York"))
 
 def load_name_to_id_map():
     """Load player name to ID mapping from master_feed.json"""
@@ -234,7 +235,7 @@ def schedule_dynamic_jobs(scheduler):
 
 def schedule_jobs():
     logger.info("Initializing Daily Scheduler...")
-    scheduler = BlockingScheduler(timezone=timezone(timedelta(hours=-5))) # ET
+    scheduler = BlockingScheduler(timezone=ZoneInfo("America/New_York")) # ET
 
     # Schedule Intraday Scrapes (Static - Every Day)
     intraday_times = [

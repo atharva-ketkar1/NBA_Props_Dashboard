@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 import json
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import os
 
 def get_nba_schedule():
@@ -41,7 +42,7 @@ def parse_game_data(game):
         try:
             # Parse the EST time string from the API
             dt = datetime.strptime(game_time_et_raw, "%Y-%m-%dT%H:%M:%SZ")
-            dt_et = dt.replace(tzinfo=timezone(timedelta(hours=-5)))
+            dt_et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
             closing_scrape_deadline = dt_et.isoformat()
             game_time_et_display = dt.strftime("%I:%M %p ET")
             game_date = dt.strftime("%Y-%m-%d")
@@ -139,7 +140,7 @@ def get_dashboard_data():
     data = get_nba_schedule()
     
     # 1. Determine "Today" and "Tomorrow" in US Eastern Time (ET)
-    et_tz = timezone(timedelta(hours=-5))
+    et_tz = ZoneInfo("America/New_York")
     today_et = datetime.now(et_tz)
     tomorrow_et = today_et + timedelta(days=1)
     

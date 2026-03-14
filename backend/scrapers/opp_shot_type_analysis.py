@@ -31,7 +31,20 @@ def create_session():
 SESSION = create_session()
 
 def fetch_dataframe(url, params):
-    r = SESSION.get(url, headers=HEADERS, params=params, timeout=20)
+    import os
+    from dotenv import load_dotenv
+
+    # Load environment variables from backend/.env
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+    load_dotenv(dotenv_path=env_path)
+    
+    proxy_url = os.getenv("PBPSTATS_PROXY_URL")
+    proxies = {
+        "http": proxy_url,
+        "https": proxy_url
+    } if proxy_url else None
+    
+    r = SESSION.get(url, headers=HEADERS, params=params, proxies=proxies, timeout=20)
     r.raise_for_status()
     data = r.json()["resultSets"][0]
     return pd.DataFrame(data["rowSet"], columns=data["headers"])
