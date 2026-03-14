@@ -17,7 +17,7 @@ load_dotenv()
 # ==========================================
 UPDATE_WINDOW_DAYS = 2
 MAX_HISTORY_GAMES = 85
-MAX_WORKERS = 4
+MAX_WORKERS = 1
 
 # Default season to scrape. The output CSV will be named gamelogs_{SEASON}.csv automatically.
 SEASON = "2025-26"

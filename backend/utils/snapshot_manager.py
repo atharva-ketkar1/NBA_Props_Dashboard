@@ -55,8 +55,14 @@ class SnapshotManager:
     def write_snapshot(self, label, players_data, bypass_dedupe=False):
         """Append an intraday snapshot with optional deduplication bypass."""
         now = get_et_now()
-        today_date = now.strftime("%Y-%m-%d")
         timestamp_str = now.isoformat()
+
+        # Key snapshots by the schedule's game date, not the calendar date.
+        # This prevents a reset at midnight when opening lines for tomorrow's
+        # games are scraped tonight — the snapshot is filed under tomorrow's
+        # game date and survives until the 6 AM pipeline flips the schedule.
+        schedule = self._read_json(self.schedule_path, default={})
+        today_date = schedule.get("date") or now.strftime("%Y-%m-%d")
 
         data = self._read_json(self.line_movements_path, default={"date": today_date, "snapshots": []})
 
