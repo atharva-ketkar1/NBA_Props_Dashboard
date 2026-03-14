@@ -14,6 +14,7 @@ interface BarChartProps {
     activeFilterOverlay?: string | null;
     isFiltersOpen?: boolean;
     historicalGameCount?: number;
+    activeSeason?: string;
 }
 
 const STAT_LABELS: Record<string, string> = {
@@ -31,7 +32,7 @@ const STAT_LABELS: Record<string, string> = {
     'Turnovers': 'TOV'
 };
 
-export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen, historicalGameCount }) => {
+export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
 
     // Hover State
@@ -130,66 +131,68 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         }
 
         // 3. Append upcoming game dynamically
-        let upcomingOpponent = 'TBD';
-        const today = new Date();
-        const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        let upcomingMonth = fallbackMonths[today.getMonth()];
-        let upcomingDay = String(today.getDate()).padStart(2, '0');
+        if (activeSeason !== '24/25') {
+            let upcomingOpponent = 'TBD';
+            const today = new Date();
+            const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            let upcomingMonth = fallbackMonths[today.getMonth()];
+            let upcomingDay = String(today.getDate()).padStart(2, '0');
 
-        let upcomingSecondaryRank = null;
-        if (isRankOverlay) {
-            // Find dpt, dsz, etc to grab rank for the upcoming opponent (which is stored currently in the player object directly)
-            if (activeFilterOverlay === 'Def vs DPT') {
-                if (player?.play_type_analysis) {
-                    const sortedPlays = [...player.play_type_analysis].sort((a: any, b: any) => parseInt(b.percent) - parseInt(a.percent));
-                    upcomingSecondaryRank = sortedPlays[0]?.rank || null;
+            let upcomingSecondaryRank = null;
+            if (isRankOverlay) {
+                // Find dpt, dsz, etc to grab rank for the upcoming opponent (which is stored currently in the player object directly)
+                if (activeFilterOverlay === 'Def vs DPT') {
+                    if (player?.play_type_analysis) {
+                        const sortedPlays = [...player.play_type_analysis].sort((a: any, b: any) => parseInt(b.percent) - parseInt(a.percent));
+                        upcomingSecondaryRank = sortedPlays[0]?.rank || null;
+                    }
+                } else if (activeFilterOverlay === 'Def vs DSZ' || activeFilterOverlay === 'Def vs DSZ2') {
+                    if (player?.shooting_zones) {
+                        const zones = Object.entries(player.shooting_zones).map(([zone, data]: any) => ({ zone, pct: parseInt(data.percentage) })).sort((a, b) => b.pct - a.pct);
+                        const targetZone = activeFilterOverlay === 'Def vs DSZ' ? zones[0]?.zone : zones[1]?.zone;
+                        upcomingSecondaryRank = player.opp_def_zones?.[targetZone]?.rank || null;
+                    }
+                } else if (activeFilterOverlay === 'Opp Paint Pts Allowed') {
+                    upcomingSecondaryRank = player?.opp_def_zones?.paint?.rank || null;
+                } else if (activeFilterOverlay === 'Def vs Pull Up') {
+                    upcomingSecondaryRank = player?.shot_type_analysis?.opp_def?.pull_up?.rank || null;
                 }
-            } else if (activeFilterOverlay === 'Def vs DSZ' || activeFilterOverlay === 'Def vs DSZ2') {
-                if (player?.shooting_zones) {
-                    const zones = Object.entries(player.shooting_zones).map(([zone, data]: any) => ({ zone, pct: parseInt(data.percentage) })).sort((a, b) => b.pct - a.pct);
-                    const targetZone = activeFilterOverlay === 'Def vs DSZ' ? zones[0]?.zone : zones[1]?.zone;
-                    upcomingSecondaryRank = player.opp_def_zones?.[targetZone]?.rank || null;
-                }
-            } else if (activeFilterOverlay === 'Opp Paint Pts Allowed') {
-                upcomingSecondaryRank = player?.opp_def_zones?.paint?.rank || null;
-            } else if (activeFilterOverlay === 'Def vs Pull Up') {
-                upcomingSecondaryRank = player?.shot_type_analysis?.opp_def?.pull_up?.rank || null;
             }
-        }
 
-        if (player.team && scheduleData.length > 0) {
-            const playerGame = scheduleData.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team);
-            if (playerGame) {
-                upcomingOpponent = playerGame.home_team_tricode === player.team ? playerGame.away_team_tricode : playerGame.home_team_tricode;
-                if (playerGame.game_date) {
-                    const [y, mStr, dStr] = playerGame.game_date.split('-');
-                    if (mStr && dStr) {
-                        upcomingMonth = fallbackMonths[parseInt(mStr) - 1];
-                        upcomingDay = dStr;
+            if (player.team && scheduleData.length > 0) {
+                const playerGame = scheduleData.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team);
+                if (playerGame) {
+                    upcomingOpponent = playerGame.home_team_tricode === player.team ? playerGame.away_team_tricode : playerGame.home_team_tricode;
+                    if (playerGame.game_date) {
+                        const [y, mStr, dStr] = playerGame.game_date.split('-');
+                        if (mStr && dStr) {
+                            upcomingMonth = fallbackMonths[parseInt(mStr) - 1];
+                            upcomingDay = dStr;
+                        }
                     }
                 }
             }
+
+            const upcomingOpponentId = TEAM_IDS[upcomingOpponent];
+            const upcomingLogoUrl = upcomingOpponentId
+                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponentId}.svg`
+                : upcomingOpponent === 'TBD'
+                    ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`
+                    : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponent}.svg`;
+
+            data.push({
+                score: null, // Special flag for upcoming game
+                secondaryValue: isRankOverlay && upcomingSecondaryRank ? upcomingSecondaryRank : (activeFilterOverlay ? graphAvgSecondary : null), // Use upcoming rank or connect base avg
+                opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
+                logoUrl: upcomingLogoUrl,
+                dateMonth: upcomingMonth,
+                dateDay: upcomingDay,
+                isUpcoming: true
+            });
         }
 
-        const upcomingOpponentId = TEAM_IDS[upcomingOpponent];
-        const upcomingLogoUrl = upcomingOpponentId
-            ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponentId}.svg`
-            : upcomingOpponent === 'TBD'
-                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`
-                : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponent}.svg`;
-
-        data.push({
-            score: null, // Special flag for upcoming game
-            secondaryValue: isRankOverlay && upcomingSecondaryRank ? upcomingSecondaryRank : (activeFilterOverlay ? graphAvgSecondary : null), // Use upcoming rank or connect base avg
-            opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
-            logoUrl: upcomingLogoUrl,
-            dateMonth: upcomingMonth,
-            dateDay: upcomingDay,
-            isUpcoming: true
-        });
-
         return { chartData: data, lineValue: line, graphAvgSecondary, seasonAvgSecondary, isRankOverlay: !!isRankOverlay };
-    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen, historicalGameCount]);
+    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason]);
 
     if (!player) return null;
 

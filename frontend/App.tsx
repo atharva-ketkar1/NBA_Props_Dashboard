@@ -38,6 +38,9 @@ function App() {
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [filterGameCount, setFilterGameCount] = useState<number>(19);
+  const [activeSeason, setActiveSeason] = useState<'25/26' | '24/25'>('25/26');
+  const [archiveGameLogs, setArchiveGameLogs] = useState<Record<string, any[]>>({});
+  const [isLoadingArchive, setIsLoadingArchive] = useState(false);
 
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
@@ -116,11 +119,72 @@ function App() {
 
   const [isInitialized, setIsInitialized] = useState(false);
 
+  // 2. Archive fetching when season filter changes
+  useEffect(() => {
+    if (activeSeason === '24/25' && Object.keys(archiveGameLogs).length === 0 && !isLoadingArchive) {
+      setIsLoadingArchive(true);
+      const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+      fetch(`${apiUrl}/data/archive/gamelogs_2024-25.csv`)
+        .then(res => {
+          if (!res.ok) throw new Error("Network response was not ok");
+          return res.text();
+        })
+        .then(csvText => {
+          const lines = csvText.trim().split('\n');
+          const headers = lines[0].split(',');
+          const logsByPlayer: Record<string, any[]> = {};
+
+          for (let i = 1; i < lines.length; i++) {
+            if (!lines[i]) continue;
+            const values = lines[i].split(',');
+            const row: any = {};
+            for (let j = 0; j < headers.length; j++) {
+                const head = headers[j]?.trim();
+                const val = values[j] ? values[j].trim() : '';
+                const numVal = Number(val);
+                if (val !== '' && !isNaN(numVal) && !['GAME_ID', 'PLAYER_ID', 'DATE_STR', 'GAME_DATE', 'TEAM_ABBREVIATION', 'MATCHUP', 'WL'].includes(head)) {
+                    row[head] = numVal;
+                } else {
+                    row[head] = val;
+                }
+            }
+            const pid = row['PLAYER_ID'];
+            if (!logsByPlayer[pid]) {
+                logsByPlayer[pid] = [];
+            }
+            logsByPlayer[pid].push(row);
+          }
+          
+          Object.keys(logsByPlayer).forEach(pid => {
+             logsByPlayer[pid].sort((a: any, b: any) => new Date(b.GAME_DATE).getTime() - new Date(a.GAME_DATE).getTime());
+          });
+
+          setArchiveGameLogs(logsByPlayer);
+          setIsLoadingArchive(false);
+        })
+        .catch(err => {
+          console.error("Failed to load archive logs", err);
+          setIsLoadingArchive(false);
+        });
+    }
+  }, [activeSeason, archiveGameLogs, isLoadingArchive]);
+
   useEffect(() => {
     if (!isFiltersOpen) {
       setFilterGameCount(19);
     }
   }, [isFiltersOpen]);
+
+  const displayPlayer = useMemo(() => {
+    if (!currentPlayer) return null;
+    if (activeSeason === '24/25') {
+      return {
+        ...currentPlayer,
+        game_log: archiveGameLogs[String(currentPlayer.id)] || []
+      } as Player;
+    }
+    return currentPlayer;
+  }, [currentPlayer, activeSeason, archiveGameLogs]);
 
   // 3. Smart Default Selection (Run once on data load)
   useEffect(() => {
@@ -171,7 +235,7 @@ function App() {
   return (
     <Layout sidebarProps={{
       players: playersWithProps,
-      activePlayerId: currentPlayer?.id,
+      activePlayerId: displayPlayer?.id,
       onSelectPlayer: (id: number) => {
         const index = playersWithProps.findIndex(p => p.id === id);
         if (index !== -1) {
@@ -190,7 +254,7 @@ function App() {
           {/* Merged Top Section (Header + Chart) */}
           <div className="flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0">
             <Header
-              player={currentPlayer}
+              player={displayPlayer}
               activeTab={activeTab}
               onTabChange={handleTabChange}
               activeSportsbook={activeSportsbook}
@@ -208,7 +272,7 @@ function App() {
 
             <div className="p-0">
               <BarChart
-                player={currentPlayer}
+                player={displayPlayer}
                 activeTab={activeTab}
                 activeSportsbook={activeSportsbook}
                 customLine={customLineValue}
@@ -216,6 +280,7 @@ function App() {
                 activeFilterOverlay={activeFilter}
                 isFiltersOpen={isFiltersOpen}
                 historicalGameCount={isFiltersOpen ? filterGameCount : 29}
+                activeSeason={activeSeason}
               />
             </div>
           </div>
@@ -228,9 +293,15 @@ function App() {
                 onClose={() => setIsFiltersOpen(false)}
                 activeFilter={activeFilter}
                 onFilterChange={setActiveFilter}
-                player={currentPlayer}
+                player={displayPlayer}
                 gameCount={filterGameCount}
                 onGameCountChange={setFilterGameCount}
+                activeSeason={activeSeason}
+                onSeasonChange={(s) => {
+                  if (s === '25/26' || s === '24/25') {
+                    setActiveSeason(s as any);
+                  }
+                }}
               />
             </div>
           </div>
@@ -248,14 +319,14 @@ function App() {
               {/* Left Column in Grid */}
               <div className="xl:col-span-4 flex flex-col gap-4 h-full">
                 {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
-                  <AssistZones player={currentPlayer} />
+                  <AssistZones player={displayPlayer} />
                 ) : (
-                  <ShootingZones player={currentPlayer} />
+                  <ShootingZones player={displayPlayer} />
                 )}
                 
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className="flex-1 min-h-0">
-                    <PlayTypeAnalysis playTypes={currentPlayer?.play_type_analysis} />
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
                   </div>
                 )}
               </div>
@@ -264,8 +335,8 @@ function App() {
               <div className="xl:col-span-6 flex flex-col gap-4 h-full">
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                     <ShotTypeAnalysis shotTypes={(() => {
-                      if (!currentPlayer?.shot_type_analysis) return undefined;
-                      const sta = currentPlayer.shot_type_analysis;
+                      if (!displayPlayer?.shot_type_analysis) return undefined;
+                      const sta = displayPlayer.shot_type_analysis;
                       const p = sta.player || {};
                       const d = sta.opp_def || {};
 

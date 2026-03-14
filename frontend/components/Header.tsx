@@ -4,6 +4,8 @@ import { HelpCircle, SlidersHorizontal, ChevronRight, ChevronLeft, Ban, Activity
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { TEAM_IDS, TEAM_COLORS } from '../constants';
 import { LineMovementSparkline } from './LineMovementSparkline';
+import { HelpModal } from './HelpModal';
+import { createPortal } from 'react-dom';
 
 interface HeaderProps {
   player?: Player;
@@ -75,6 +77,7 @@ const StatItem = ({ label, value, diff, isCompact }: { label: string, value: str
 
 export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine, onToggleFilters, isFiltersOpen, historicalGameCount }) => {
   const [sparklineMode, setSparklineMode] = useState<'line' | 'juice'>('line');
+  const [showHelp, setShowHelp] = useState(false);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -228,6 +231,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
   if (!player) return <div className="p-4 text-white">Select a player</div>;
 
   return (
+    <>
     <div className="bg-bgElevation0 pt-0 px-0 pb-0 w-full rounded-t-xl relative z-40">
 
       {/* Top Nav Tabs */}
@@ -440,11 +444,13 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           </div>
         </div>
 
-        {/* Section 4: Actions & Line Movement */}
+        {/* Section 4: Actions */}
         {!isFiltersOpen && (
           <div className="flex items-center gap-4 px-4 h-full w-full xl:w-auto justify-end shrink-0 bg-bgElevation0 relative transition-all duration-300">
-            <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" />
-
+            <HelpCircle
+              className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0"
+              onClick={() => setShowHelp(true)}
+            />
             <div className="relative">
               <button
                 onClick={() => {
@@ -461,6 +467,39 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         )}
 
       </div>
+
+      {/* Line Movement Strip — below stats row, full-width */}
+      {player?.intraday_movements && player.intraday_movements.length >= 2 && hasLine && (
+        <div className="flex items-center gap-4 px-4 py-1.5 border-t border-white/5 bg-bgElevation0/60">
+          <span className="text-[9px] font-bold uppercase tracking-widest text-fgSubtle shrink-0 opacity-70">Line Movement</span>
+          <div className="flex-1 min-w-0">
+            <LineMovementSparkline
+              movements={player.intraday_movements}
+              playerId={player.id}
+              statKey={statKey}
+              activeSportsbook={activeSportsbook}
+              mode={sparklineMode}
+            />
+          </div>
+          <div className="flex bg-bgElevation1 border border-borderMedium/40 rounded p-0.5 shrink-0">
+            {(['line', 'juice'] as const).map(m => (
+              <button
+                key={m}
+                onClick={() => setSparklineMode(m)}
+                className={`px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded transition-colors ${sparklineMode === m ? 'bg-blue500 text-white' : 'text-fgSubtle hover:text-white'}`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
+
+    {showHelp && createPortal(
+      <HelpModal onClose={() => setShowHelp(false)} />,
+      document.body
+    )}
+    </>
   );
 };

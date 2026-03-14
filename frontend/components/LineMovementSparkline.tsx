@@ -1,9 +1,10 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
+import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
 
 interface MovementSnapshot {
     timestamp: string;
     label: string;
-    players: Record<string, any>; // The large dump of player data
+    players: Record<string, any>;
 }
 
 interface SparklineProps {
@@ -14,133 +15,210 @@ interface SparklineProps {
     mode: 'line' | 'juice';
 }
 
+const SB_MAP: Record<string, string> = { dk: 'draftkings', fd: 'fanduel' };
+
+const impliedProb = (odds: number) => {
+    if (odds < 0) return (-odds) / (-odds + 100) * 100;
+    return 100 / (odds + 100) * 100;
+};
+
 export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, playerId, statKey, activeSportsbook, mode }) => {
-    const dataPoints = useMemo(() => {
-        if (!movements || movements.length === 0) return [];
+    // ── ALL HOOKS MUST BE ABOVE ANY EARLY RETURN ──────────────────────────────
+    const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
-        const pts: { time: Date, val: number, label: string }[] = [];
+    const { dataPoints, opening, current, delta, direction } = useMemo(() => {
+        if (!movements || movements.length === 0) return { dataPoints: [], opening: null, current: null, delta: null, direction: 'flat' as const };
 
-        // Scan each snapshot
+        const sbKey = SB_MAP[activeSportsbook] || activeSportsbook;
+        const pts: { time: Date; val: number; label: string }[] = [];
+
         movements.forEach(snap => {
             const pData = snap.players[String(playerId)];
             if (pData && pData.props) {
-                const propObj = pData.props[statKey]?.[activeSportsbook];
+                const propObj = pData.props[statKey]?.[sbKey];
                 if (propObj) {
-                    const val = mode === 'line' ? propObj.line : propObj.over; // tracking over juice
-                    pts.push({
-                        time: new Date(snap.timestamp),
-                        val: val,
-                        label: snap.label
-                    });
+                    const val = mode === 'line' ? Number(propObj.line) : Number(propObj.over);
+                    if (!isNaN(val)) pts.push({ time: new Date(snap.timestamp), val, label: snap.label });
                 }
             }
         });
 
-        // Sort chronologically
-        return pts.sort((a, b) => a.time.getTime() - b.time.getTime());
+        pts.sort((a, b) => a.time.getTime() - b.time.getTime());
+        if (pts.length === 0) return { dataPoints: pts, opening: null, current: null, delta: null, direction: 'flat' as const };
+
+        const opening = pts[0].val;
+        const current = pts[pts.length - 1].val;
+        const delta = +(current - opening).toFixed(1);
+        const direction: 'up' | 'down' | 'flat' = delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat';
+        return { dataPoints: pts, opening, current, delta, direction };
     }, [movements, playerId, statKey, activeSportsbook, mode]);
 
+    // Must also be above any early return (Rules of Hooks)
+    const displayDelta = useMemo(() => {
+        if (delta === null || opening === null || current === null) return null;
+        if (mode === 'line') {
+            return { text: delta > 0 ? `+${delta}` : delta === 0 ? 'No change' : String(delta), show: delta !== 0 };
+        }
+        // For juice: show implied probability shift (raw American-odds diff is meaningless)
+        const openProb = impliedProb(opening);
+        const nowProb = impliedProb(current);
+        const probDelta = +(nowProb - openProb).toFixed(1);
+        if (probDelta === 0) return { text: 'No change', show: false };
+        return { text: `${probDelta > 0 ? '+' : ''}${probDelta}% impl.`, show: true };
+    }, [delta, opening, current, mode]);
+
+    // ── EARLY RETURN (after all hooks) ────────────────────────────────────────
     if (dataPoints.length < 2) {
         return (
-            <div className="text-gray-500 text-[10px] italic flex items-center justify-center h-full">
-                Not enough line movement data available to generate a sparkline.
+            <div className="flex items-center gap-1.5 text-borderMuted text-[10px] italic opacity-50">
+                <Minus className="w-3 h-3" />
+                No movement data for this stat
             </div>
         );
     }
 
-    const { minVal, maxVal } = useMemo(() => {
-        let min = Math.min(...dataPoints.map(d => d.val));
-        let max = Math.max(...dataPoints.map(d => d.val));
+    // ── Derived display values (not hooks) ────────────────────────────────────
+    const strokeColor = direction === 'up' ? '#22c55e' : direction === 'down' ? '#ef4444' : '#6b7280';
+    const trendColor = direction === 'up' ? 'text-green500' : direction === 'down' ? 'text-red500' : 'text-fgSubtle';
+    const TrendIcon = direction === 'up' ? TrendingUp : direction === 'down' ? TrendingDown : Minus;
 
-        if (min === max) {
-            min -= mode === 'line' ? 1 : 10;
-            max += mode === 'line' ? 1 : 10;
-        } else {
-            const pad = (max - min) * 0.2;
-            min -= pad;
-            max += pad;
-        }
-        return { minVal: min, maxVal: max };
-    }, [dataPoints, mode]);
+    const formatVal = (v: number | null) => {
+        if (v === null) return '--';
+        if (mode === 'juice') return v > 0 ? `+${v}` : String(v);
+        return String(v);
+    };
 
-    // SVG parameters
-    const svgWidth = 250;
-    const svgHeight = 40;
-    const margin = { top: 5, right: 20, bottom: 5, left: 10 };
-    const chartWidth = svgWidth - margin.left - margin.right;
-    const chartHeight = svgHeight - margin.top - margin.bottom;
+    // SVG — full width via viewBox, rendered responsively
+    const VW = 600;
+    const VH = 30;
+    const PAD = { top: 3, right: 8, bottom: 3, left: 8 };
+    const cW = VW - PAD.left - PAD.right;
+    const cH = VH - PAD.top - PAD.bottom;
+
+    const vals = dataPoints.map(d => d.val);
+    let minV = Math.min(...vals);
+    let maxV = Math.max(...vals);
+    if (minV === maxV) {
+        minV -= mode === 'line' ? 0.5 : 5;
+        maxV += mode === 'line' ? 0.5 : 5;
+    } else {
+        const pad = (maxV - minV) * 0.3;
+        minV -= pad; maxV += pad;
+    }
+    const valRange = maxV - minV;
 
     const timeMin = dataPoints[0].time.getTime();
     const timeMax = dataPoints[dataPoints.length - 1].time.getTime();
     const timeRange = timeMax - timeMin || 1;
 
-    // Calculate coordinates
-    const points = dataPoints.map((dp, i) => {
-        const x = margin.left + ((dp.time.getTime() - timeMin) / timeRange) * chartWidth;
-        const y = margin.top + chartHeight - (((dp.val - minVal) / (maxVal - minVal)) * chartHeight);
-        return { ...dp, x, y };
-    });
+    const points = dataPoints.map(dp => ({
+        ...dp,
+        x: PAD.left + ((dp.time.getTime() - timeMin) / timeRange) * cW,
+        y: PAD.top + cH - ((dp.val - minV) / valRange) * cH,
+    }));
 
-    // Create SVG path string
-    const pathD = `M ${points.map(p => `${p.x},${p.y}`).join(' L ')}`;
+    const pathD = `M ${points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' L ')}`;
+    const fillId = `fill-${playerId}-${mode}`;
+    const fillD = `${pathD} L ${points[points.length - 1].x},${PAD.top + cH} L ${points[0].x},${PAD.top + cH} Z`;
+
+    const hovered = hoveredIdx !== null ? points[hoveredIdx] : null;
 
     return (
-        <div className="flex flex-col items-center justify-center w-[250px] relative mt-1">
-            <div className="text-[9px] text-fgSubtle uppercase font-bold tracking-widest self-start ml-2 mb-1">
-                Day Movement ({mode === 'line' ? 'Line' : 'Over Juice'})
+        <div className="flex items-center gap-4 w-full min-w-0">
+
+            {/* Opening / Current compact stats */}
+            <div className="flex items-center gap-3 shrink-0 text-[10px]">
+                <div className="flex items-center gap-1.5">
+                    <span className="text-fgSubtle/60 uppercase tracking-wider font-semibold text-[9px]">Open</span>
+                    <span className="text-neutral300 font-bold">{formatVal(opening)}</span>
+                </div>
+                <div className="w-px h-3 bg-borderMedium/40" />
+                <div className="flex items-center gap-1.5">
+                    <span className="text-fgSubtle/60 uppercase tracking-wider font-semibold text-[9px]">Now</span>
+                    <span className="text-white font-bold">{formatVal(current)}</span>
+                </div>
+                {displayDelta?.show && (
+                    <div className={`flex items-center gap-0.5 font-bold text-[10px] ${trendColor}`}>
+                        <TrendIcon className="w-3 h-3" />
+                        <span>{displayDelta.text}</span>
+                    </div>
+                )}
             </div>
 
-            <svg width={svgWidth} height={svgHeight} className="overflow-visible">
-                <path
-                    d={pathD}
-                    fill="none"
-                    stroke="#3b82f6"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                />
+            {/* Sparkline — fills remaining space */}
+            <div className="relative flex-1 min-w-0 h-[30px]">
+                <svg
+                    viewBox={`0 0 ${VW} ${VH}`}
+                    preserveAspectRatio="none"
+                    className="w-full h-full overflow-visible"
+                    style={{ display: 'block' }}
+                    onMouseLeave={() => setHoveredIdx(null)}
+                >
+                    <defs>
+                        <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor={strokeColor} stopOpacity="0.25" />
+                            <stop offset="100%" stopColor={strokeColor} stopOpacity="0.02" />
+                        </linearGradient>
+                    </defs>
 
-                {/* Render points */}
-                {points.map((p, i) => (
-                    <g key={i} className="group cursor-default">
-                        <circle
-                            cx={p.x}
-                            cy={p.y}
-                            r="3"
-                            fill="#1e3a8a"
-                            stroke="#60a5fa"
-                            strokeWidth="1.5"
-                            className="hover:r-4 transition-all duration-200"
-                        />
+                    {/* Subtle horizontal mid line */}
+                    <line x1={PAD.left} x2={VW - PAD.right} y1={VH / 2} y2={VH / 2} stroke="white" strokeOpacity="0.04" strokeWidth="1" />
 
-                        {/* Simple tooltip tag */}
-                        <text
-                            x={p.x}
-                            y={p.y - 8}
-                            textAnchor="middle"
-                            fontSize="9"
-                            fill="#93c5fd"
-                            fontWeight="bold"
-                            className="opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                            {mode === 'line' ? p.val : (p.val > 0 ? `+${p.val}` : p.val)}
-                        </text>
-                    </g>
-                ))}
+                    {/* Area fill */}
+                    <path d={fillD} fill={`url(#${fillId})`} />
 
-                {/* Current Value label at end vertex */}
-                {points.length > 0 && (
-                    <text
-                        x={points[points.length - 1].x + 6}
-                        y={points[points.length - 1].y + 3}
-                        fontSize="10"
-                        fill="#fff"
-                        fontWeight="bold"
+                    {/* Main line */}
+                    <path d={pathD} fill="none" stroke={strokeColor} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+
+                    {/* Last point dot */}
+                    {points.length > 0 && (
+                        <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3" fill={strokeColor} stroke="#111113" strokeWidth="1.5" />
+                    )}
+
+                    {/* Invisible hit areas for hover */}
+                    {points.map((p, i) => {
+                        const prevX = i === 0 ? 0 : (points[i - 1].x + p.x) / 2;
+                        const nextX = i === points.length - 1 ? VW : (p.x + (points[i + 1]?.x ?? VW)) / 2;
+                        return (
+                            <rect
+                                key={i}
+                                x={prevX}
+                                width={nextX - prevX}
+                                y={0}
+                                height={VH}
+                                fill="transparent"
+                                onMouseEnter={() => setHoveredIdx(i)}
+                            />
+                        );
+                    })}
+
+                    {/* Hover vertical line + dot */}
+                    {hovered && (
+                        <>
+                            <line x1={hovered.x} x2={hovered.x} y1={PAD.top} y2={PAD.top + cH} stroke={strokeColor} strokeWidth="1" strokeOpacity="0.5" strokeDasharray="2 2" />
+                            <circle cx={hovered.x} cy={hovered.y} r="3.5" fill={strokeColor} stroke="#111113" strokeWidth="1.5" />
+                        </>
+                    )}
+                </svg>
+
+                {/* Hover tooltip */}
+                {hovered && (
+                    <div
+                        className="absolute z-50 pointer-events-none bg-bgElevation0 border border-borderMedium/60 rounded-md px-2 py-1 text-[10px] whitespace-nowrap shadow-xl"
+                        style={{ left: `clamp(0px, ${(hovered.x / VW * 100).toFixed(1)}%, calc(100% - 80px))`, bottom: '100%', marginBottom: '6px' }}
                     >
-                        {mode === 'line' ? points[points.length - 1].val : (points[points.length - 1].val > 0 ? `+${points[points.length - 1].val}` : points[points.length - 1].val)}
-                    </text>
+                        <div className="text-white font-bold">{formatVal(hovered.val)}</div>
+                        <div className="text-fgSubtle">{hovered.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                    </div>
                 )}
-            </svg>
+            </div>
+
+            {/* Time labels */}
+            <div className="flex items-center gap-1 shrink-0 text-[9px] text-fgSubtle/50">
+                <span>{dataPoints[0].time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span className="opacity-40">→</span>
+                <span>{dataPoints[dataPoints.length - 1].time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            </div>
         </div>
     );
 };
