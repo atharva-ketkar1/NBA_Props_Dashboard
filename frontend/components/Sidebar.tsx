@@ -398,6 +398,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                 lg:static lg:inset-auto lg:translate-x-0 
                 lg:flex lg:flex-col lg:z-0
+                lg:sticky lg:top-0 lg:max-h-screen lg:self-start
 
                 flex flex-col gap-3 p-4
             `}>

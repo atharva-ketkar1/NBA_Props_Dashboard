@@ -10,9 +10,11 @@ interface FiltersPanelProps {
     player?: any;
     gameCount: number;
     onGameCountChange: (count: number) => void;
+    activeSeason?: string;
+    onSeasonChange?: (s: string) => void;
 }
 
-export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, activeFilter, onFilterChange, player, gameCount, onGameCountChange }) => {
+export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, activeFilter, onFilterChange, player, gameCount, onGameCountChange, activeSeason, onSeasonChange }) => {
     const [activeTab, setActiveTab] = React.useState('Suggested');
     const [isSuggestedExpanded, setIsSuggestedExpanded] = React.useState(false);
 
@@ -98,14 +100,19 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                     <div className="flex items-center justify-between">
                         <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[50px]">Season</span>
                         <div className="flex bg-bgElevation1 rounded-md border border-borderMedium/40 p-0.5 flex-1 ml-2">
-                            {['23/24', '24/25', '25/26', 'All'].map(s => (
+                            {['23/24', '24/25', '25/26', 'All'].map(s => {
+                                const isActive = s === (activeSeason || '25/26');
+                                const isClickable = s === '24/25' || s === '25/26';
+                                return (
                                 <button
                                     key={s}
-                                    className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${s === '25/26' ? 'bg-blue500 text-white shadow-sm' : 'text-fgSubtle hover:text-white'}`}
+                                    onClick={() => isClickable && onSeasonChange && onSeasonChange(s)}
+                                    className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : isClickable ? 'text-fgSubtle hover:text-white cursor-pointer' : 'text-fgSubtle/30 cursor-not-allowed'}`}
                                 >
                                     {s}
                                 </button>
-                            ))}
+                                );
+                            })}
                         </div>
                     </div>
 

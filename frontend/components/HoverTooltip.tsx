@@ -22,18 +22,21 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
 
     if (!game || game.isUpcoming) return null;
 
-    // Formatting utilities (Now using fallback for game score margin and WL)
-    const margin = game.margin !== undefined ? game.margin : (game.PLUS_MINUS || 0);
-    const isGameWin = game.margin !== undefined ? game.margin > 0 : (game.WL === 'W');
-    const diff = Math.abs(margin);
+    const isGameWin = game.WL === 'W' || (game.margin !== undefined && game.margin > 0);
+    const hasMargin = game.margin !== undefined && game.margin !== null;
+    const diff = hasMargin ? Math.abs(game.margin) : 0;
 
-    const badgeText = diff > 0 ? (isGameWin ? `Won by ${diff}` : `Lost by ${diff}`) : (isGameWin ? 'Won' : 'Lost');
+    const badgeText = hasMargin && diff > 0 
+        ? (isGameWin ? `Won by ${diff}` : `Lost by ${diff}`) 
+        : (isGameWin ? 'Won' : 'Lost');
     const badgeColor = isGameWin ? 'bg-green600' : 'bg-red600';
 
-    // Mock Odds (Since they aren't historically stored yet)
-    let O_ODDS = '-125'; // Default mock
-    let U_ODDS = '-102'; // Default mock
+    // Remove default mock odds and start with clean fallbacks
+    let displayLine: string | number = 'N/A';
+    let O_ODDS = 'N/A';
+    let U_ODDS = 'N/A';
     let hasHistoricalData = false;
+    let isFallback = false;
 
     // Sportsbook logo resolution for the header
     let sbLogo = '';
@@ -45,33 +48,39 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
     const logoSrc = `${BASE_URL}${sbLogo}`;
 
     // Extract historical odds if available
-    let displayLine = lineValue;
-    let isFallback = false;
-
     if (player && player.historical_odds && game.GAME_DATE) {
         // Find the record for this exact date
         const dateRecord = player.historical_odds[game.GAME_DATE];
         if (dateRecord) {
-            // Find the player in that date record
-            const playerRecord = dateRecord[player.id];
-            if (playerRecord && playerRecord.props) {
-                // Get the exact stat line from the historical prop tree
-                const histProp = playerRecord.props[statKey]?.[activeSportsbook];
+            // Find the player in that date record (by numeric or stringified ID)
+            const playerRecord = dateRecord[String(player.id)] || dateRecord[player.id];
+            
+            if (playerRecord && playerRecord.props && playerRecord.props.props) {
+                // The props tree is nested: playerRecord.props.props[statKey]
+                const statProps = playerRecord.props.props[statKey];
 
-                // If it doesn't exist on the active sportsbook, try fallback to DK or FD
-                const fallbackProp = histProp || playerRecord.props[statKey]?.['dk'] || playerRecord.props[statKey]?.['fd'];
+                if (statProps) {
+                    // Mappings from frontend abbreviation to backend database keys
+                    const mappedSbRaw = activeSportsbook === 'dk' ? 'draftkings' : activeSportsbook === 'fd' ? 'fanduel' : activeSportsbook;
+                    
+                    // Get the exact stat line from the historical prop tree
+                    const histProp = statProps[mappedSbRaw];
 
-                if (fallbackProp) {
-                    displayLine = fallbackProp.line;
-                    const formatOdds = (val: any) => {
-                        const num = Number(val);
-                        if (isNaN(num)) return String(val);
-                        return num > 0 ? `+${num}` : String(num);
-                    };
-                    O_ODDS = formatOdds(fallbackProp.over);
-                    U_ODDS = formatOdds(fallbackProp.under);
-                    hasHistoricalData = true;
-                    isFallback = playerRecord.source === 'last_snapshot_fallback';
+                    // If it doesn't exist on the active sportsbook, try fallback to DK or FD
+                    const fallbackProp = histProp || statProps['draftkings'] || statProps['fanduel'];
+
+                    if (fallbackProp) {
+                        displayLine = fallbackProp.line;
+                        const formatOdds = (val: any) => {
+                            const num = Number(val);
+                            if (isNaN(num)) return String(val);
+                            return num > 0 ? `+${num}` : String(num);
+                        };
+                        O_ODDS = formatOdds(fallbackProp.over);
+                        U_ODDS = formatOdds(fallbackProp.under);
+                        hasHistoricalData = true;
+                        isFallback = playerRecord.source === 'last_snapshot_fallback';
+                    }
                 }
             }
         }
