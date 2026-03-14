@@ -21,8 +21,6 @@ from scrapers import shot_type_analysis as shot_type_analysis
 from scrapers import opp_shot_type_analysis as opp_shot_type_analysis
 from scrapers import play_type_analysis as play_type_analysis
 from scrapers import boxscores as boxscores
-from scrapers.archive import old_assist_zones as old_assist_zones
-from scrapers.archive import old_opp_assist_zones as old_opp_assist_zones
 from utils import aggregator
 import json
 

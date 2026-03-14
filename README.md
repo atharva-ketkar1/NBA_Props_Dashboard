@@ -12,6 +12,12 @@ A high-performance web application designed to be a functional clone of [propsma
 - **Fuzzy Name Reconciliation:** Automatically reconciles varying player names (e.g., "PJ Washington Jr." vs "P.J. Washington") across disparate betting/stat data sources.
 - **Interactive High-Density UI:** Modern, cyberpunk-inspired UI matching the Propsmadness layout precisely, featuring dynamic bar charts for hit-rates, Similar Player comparisons, and multi-view spatial canvases. All handled purely client-side for immediate interactions.
 
+## Recent Architecture Updates
+- **GCP VM Deployment & Memory-Safe Pipeline:** The backend is now deployed on a Google Cloud Platform (GCP) Virtual Machine. To prevent OOM crashes on memory-constrained instances, the pipeline uses sequential execution for heavy scrapers, explicit garbage collection, and incremental appending for large temporal datasets like game logs.
+- **Unified Cron Director (`master_cron.py`):** Replaced individual crontab schedules with a single, every-5-minute director script. It seamlessly orchestrates **Priority 1** (6:00 AM Full Pipeline), **Priority 2** (Dynamic Pre-game Closing Lines), and **Priority 3** (Intraday Snapshots) while managing state files and process locks to prevent scraper collisions.
+- **Log File Organization:** Standardized logging where cron outputs are dynamically piped into timestamped daily files (e.g., `cron_output_YYYY-MM-DD.log`) and isolated into subdirectories like `logs/master_cron/` and `logs/pipeline/`.
+- **Proxy Integration:** Deployed a dedicated proxy configuration for the NBA `leaguegamelog` endpoints to resolve persistent connection timeouts from the VM.
+
 ## Tech Stack & Constraints
 ### Frontend
 - **Framework:** React 19 with Vite (`npm run dev`)
@@ -35,7 +41,7 @@ A high-performance web application designed to be a functional clone of [propsma
 - Python (3.9+ recommended)
 
 ### 1. Data Pipeline & Backend
-The backend operates on two tracks: a heavy manual pipeline and a continuous scheduler daemon for odds.
+The backend is fully orchestrated via a unified cron director in production but can be run manually for local development.
 
 ```bash
 # From the root directory, create a Virtual Environment
@@ -45,14 +51,18 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Track 1: Run the main data generator (run this once daily)
+# Manually trigger the full pipeline compilation
 cd backend
 python run_pipeline.py
-
-# Track 2: Run the Intraday Scheduler daemon (leave running for odds tracking)
-python scheduler.py
 ```
-`run_pipeline.py` concurrently fetches live odds and statistics, outputting temporary CSVs into `backend/data/current/` and ultimately producing the unified `master_feed.json`. `scheduler.py` tracks intraday odds and pre-game closing lines.
+`run_pipeline.py` sequentially fetches live odds and statistics (to preserve memory), outputting temporary CSVs into `backend/data/current/` and ultimately producing the unified `master_feed.json`.
+
+**Production Cron Setup (GCP VM):**
+In production, a single crontab entry executes the `master_cron.py` director every 5 minutes:
+```bash
+*/5 * * * * cd /home/ketkaravatar/NBA_Props_Dashboard/backend && /usr/bin/timeout 2700 /home/ketkaravatar/NBA_Props_Dashboard/.venv/bin/python cron_jobs/master_cron.py >> /home/ketkaravatar/NBA_Props_Dashboard/backend/logs/master_cron/cron_output_$(date +\%Y-\%m-\%d).log 2>&1
+```
+The director automatically handles the daily pipeline refresh at 6:00 AM, dynamic tracking of pre-game closing lines 10 minutes before tip-off, and 30-minute intraday snapshots.
 
 **Serving the Data API:**
 For local Vite development to access the data without CORS issues, serve the backend directory on port 5000:
@@ -78,6 +88,6 @@ The client will be running at `http://localhost:5173`. Make sure the `.env.local
 The system architecture is a **decoupled, periodic static-generation engine**:
 
 1. **Scraper Domain (`backend/scrapers/`):** Modular Python scripts designed to asynchronously pull isolated streams: DraftKings odds, FanDuel odds, NBA.com seasonal stats, recent game logs, shooting coordinates, assist vectors, shot types, opponent defensive ranks, and the active schedule (outputs `nba_dashboard_games.json` and `today_schedule.json` with closing deadlines). Uses Cloudflare proxies to prevent IP rate-limits.
-2. **Scheduling & Caching Pipeline (`backend/scheduler.py` & `backend/utils/snapshot_manager.py`):** Uses APScheduler to perform Intraday Line Movement captures (11 AM to 5 PM ET) and precise, pre-game Closing Line snapshots with immutability guarantees.
+2. **Scheduling & Caching Pipeline (`backend/cron_jobs/master_cron.py` & `backend/utils/snapshot_manager.py`):** A custom director script (`master_cron.py`) executes every 5 minutes via Linux crontab. It governs state and process locks while executing Intraday Line Movement captures and precise, pre-game Closing Line snapshots with immutability guarantees.
 3. **Aggregator Engine (`backend/utils/aggregator.py`):** The brain of the backend. It ingests all scraped datasets, normalizes disjointed player names into absolute IDs via the `PlayerMatcher` utility, calculates composite props, appends spatial structures, and emits `master_feed.json`.
 4. **Frontend Application (`frontend/App.tsx`):** A stateless React/TypeScript Single Page Application. Upon mount, it pulls the `master_feed.json`. All subsequent state—such as selecting a player, altering the target sportsbook, expanding Shot Type Analysis, or changing the stat filter—routes strictly through local React state with zero additional networking overhead.

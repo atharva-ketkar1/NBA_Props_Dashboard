@@ -117,3 +117,4 @@ widgetsnbextension==4.0.15
 tls-client
 python-dotenv
 apscheduler
+psutil
