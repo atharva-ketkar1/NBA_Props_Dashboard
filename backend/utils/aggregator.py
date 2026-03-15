@@ -2,7 +2,77 @@ import pandas as pd
 import json
 import os
 import numpy as np
+import gc
+import logging
 from utils.player_matcher import PlayerMatcher
+
+logger = logging.getLogger(__name__)
+
+# ==========================================
+# DB HELPERS
+# ==========================================
+
+def _safe_json(obj):
+    """
+    Recursively cast numpy scalar types to native Python types.
+    Supabase rejects np.float64 / np.int64 values in JSONB columns.
+    """
+    if isinstance(obj, dict):
+        return {k: _safe_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_safe_json(i) for i in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
+
+
+def upsert_players_to_db(master_data: dict):
+    """
+    Bulk-upsert player base data into the Supabase `players` table.
+    master_data is keyed by player_id (int) — iterate .values().
+    Props are NOT written here; they go through upsert_props.py.
+    Wrapped in try/except: DB failure never blocks local JSON save.
+    """
+    try:
+        from utils.supabase_client import get_supabase_client
+        sb = get_supabase_client()
+    except Exception as e:
+        logger.warning("Supabase client unavailable, skipping DB upsert: %s", e)
+        return
+
+    rows = []
+    for data in master_data.values():  # .values() — master_data is keyed by player_id
+        rows.append({
+            'id':                          data['id'],
+            'name':                        data['name'],
+            'team':                        data['team'],
+            'position':                    data.get('position'),
+            'stats':                       _safe_json(data.get('stats', {})),
+            'game_log':                    _safe_json(data.get('game_log', [])),
+            'shooting_zones':              _safe_json(data.get('shooting_zones')),
+            'assist_zones':                _safe_json(data.get('assist_zones')),
+            'opp_def_zones':               _safe_json(data.get('opp_def_zones')),
+            'opp_def_zones_positional':    _safe_json(data.get('opp_def_zones_positional')),
+            'opp_assist_zones':            _safe_json(data.get('opp_assist_zones')),
+            'opp_assist_zones_positional': _safe_json(data.get('opp_assist_zones_positional')),
+            'shot_type_analysis':          _safe_json(data.get('shot_type_analysis')),
+            'play_type_analysis':          data.get('play_type_analysis', []),  # already a list
+        })
+
+    logger.info("Upserting %d players to Supabase...", len(rows))
+
+    # Batch in chunks of 100 to stay within PostgREST request size limits
+    for i in range(0, len(rows), 100):
+        try:
+            sb.table('players').upsert(rows[i:i + 100]).execute()
+        except Exception as e:
+            logger.error("players upsert failed for chunk %d–%d: %s", i, i + 100, e)
+
+    logger.info("✅ players upsert complete (%d rows).", len(rows))
 
 # ==========================================
 # 1. CONFIGURATION MAPPINGS
@@ -538,6 +608,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         print(f"   Saved Master Feed ({len(final_output)} players) to {output_path}")
     except Exception as e:
         print(f"   Error saving JSON: {e}")
+
+    # --- DB Upsert (non-fatal) ---
+    # Only runs if SUPABASE_URL and SUPABASE_SERVICE_KEY are set.
+    # A failure here never blocks the local master_feed.json save above.
+    upsert_players_to_db(master_data)
 
 if __name__ == "__main__":
     # Test Run

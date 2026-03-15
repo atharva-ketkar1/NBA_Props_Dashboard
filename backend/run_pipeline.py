@@ -204,5 +204,19 @@ def main():
     total_time = time.time() - start_time
     print(f"\nPIPELINE COMPLETE in {total_time:.2f} seconds")
 
+    # STEP 3: Upsert props to Supabase (non-fatal)
+    # The players table was already upserted inside aggregator.run_aggregation().
+    # This call pushes the resolved prop lines (DK + FD) into player_props.
+    print("\nUpserting props to Supabase...")
+    try:
+        from utils.upsert_props import run_odds_update
+        run_odds_update(
+            dk_path=DK_PATH,
+            fd_path=FD_PATH,
+            stats_path=STATS_PATH,
+        )
+    except Exception as e:
+        print(f"   Warning: props upsert failed (non-fatal): {e}")
+
 if __name__ == "__main__":
     main()
