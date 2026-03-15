@@ -258,7 +258,19 @@ def main(dry_run=False):
             
         save_cron_state(state)
         logger.info("Closing sweeps complete!")
-        
+
+        # Upsert fresh props to Supabase (non-fatal)
+        # DATA_DIR is defined at module level in this file
+        try:
+            from utils.upsert_props import run_odds_update
+            run_odds_update(
+                dk_path=os.path.join(DATA_DIR, "draftkings.csv"),
+                fd_path=os.path.join(DATA_DIR, "fanduel.csv"),
+                stats_path=os.path.join(DATA_DIR, "season_stats.csv"),
+            )
+        except Exception as e:
+            logger.warning(f"Supabase props upsert failed (non-fatal): {e}")
+
     except Exception as e:
         logger.error(f"Failed to execute scrape: {e}")
 

@@ -53,7 +53,18 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                     run_pipeline.main()
                 except Exception as e:
                     logger.error(f"Pipeline failed: {e}")
-            
+
+                # Purge stale player_props rows (rolling 3-day window)
+                # historical_odds is intentionally NOT purged — it's our full-season archive
+                try:
+                    from datetime import date, timedelta
+                    from utils.supabase_client import get_supabase_client
+                    cutoff = (date.today() - timedelta(days=3)).isoformat()
+                    get_supabase_client().table("player_props").delete().lt("game_date", cutoff).execute()
+                    logger.info(f"Pruned player_props rows older than {cutoff}")
+                except Exception as e:
+                    logger.warning(f"player_props cleanup failed (non-fatal): {e}")
+
             # Update state regardless of internal failure to prevent endless looping
             state["last_pipeline_date"] = today_str
             # Reset scraped games for the new day

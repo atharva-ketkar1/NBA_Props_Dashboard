@@ -24,6 +24,18 @@ def run_intraday_snapshot(label="intraday"):
         success = sm.write_snapshot(label, players_data)
         if success:
             logger.info("Intraday snapshot written successfully.")
+            # Upsert fresh props to Supabase (non-fatal)
+            try:
+                from utils.upsert_props import run_odds_update
+                # Derive paths relative to this file — never import from run_pipeline.py
+                _data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "current")
+                run_odds_update(
+                    dk_path=os.path.join(_data_dir, "draftkings.csv"),
+                    fd_path=os.path.join(_data_dir, "fanduel.csv"),
+                    stats_path=os.path.join(_data_dir, "season_stats.csv"),
+                )
+            except Exception as e:
+                logger.warning(f"Supabase props upsert failed (non-fatal): {e}")
         else:
             logger.info("Intraday snapshot skipped (likely deduplication <30m).")
     except Exception as e:
