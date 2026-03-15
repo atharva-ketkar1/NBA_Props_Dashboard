@@ -89,33 +89,99 @@ function App() {
     }
   };
 
-  // 1. Fetch data from backend
+  // ──────────────────────────────────────────────────────────────
+  // Data fetching
+  // Set VITE_USE_DB=true in Vercel to fetch from Supabase.
+  // Set VITE_USE_DB=false (or omit) to fall back to master_feed.json.
+  // ──────────────────────────────────────────────────────────────
+  const USE_DB = import.meta.env.VITE_USE_DB === 'true';
+
+  /** Reconstruct the Player[] shape from Supabase rows. */
+  function mergeFeedFromDB(
+    players: any[],
+    props: any[],
+  ): Player[] {
+    // Build props lookup: player_id → stat_type → sportsbook → {line, over, under}
+    const propsMap: Record<number, Record<string, Record<string, any>>> = {};
+    for (const row of props ?? []) {
+      if (!propsMap[row.player_id]) propsMap[row.player_id] = {};
+      if (!propsMap[row.player_id][row.stat_type]) propsMap[row.player_id][row.stat_type] = {};
+      propsMap[row.player_id][row.stat_type][row.sportsbook] = {
+        line:    row.line,
+        over:    row.over_odds,
+        under:   row.under_odds,
+        implied: row.implied,
+      };
+    }
+
+    return (players ?? []).map((p: any) => ({
+      id:              p.id,
+      name:            p.name,
+      team:            p.team,
+      position:        p.position,
+      stats:           p.stats         ?? {},
+      game_log:        p.game_log      ?? [],   // null until lazy-loaded
+      props:           propsMap[p.id]  ?? {},
+      historical_odds: {},                       // null until lazy-loaded on player select
+      intraday_movements: [],
+      // Zone fields — null until lazy-loaded
+      shooting_zones:              null,
+      assist_zones:                null,
+      opp_def_zones:               null,
+      opp_def_zones_positional:    null,
+      opp_assist_zones:            null,
+      opp_assist_zones_positional: null,
+      shot_type_analysis:          null,
+      play_type_analysis:          p.play_type_analysis ?? [],
+    }));
+  }
+
+  // 1. Initial data fetch
   useEffect(() => {
-    const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-
-    Promise.all([
-      fetch(`${apiUrl}/data/current/master_feed.json`).then(res => res.json()),
-      fetch(`${apiUrl}/data/archive/historical_odds.json`).then(res => res.json()).catch(() => ({})),
-      fetch(`${apiUrl}/data/current/line_movements_today.json`).then(res => res.json()).catch(() => ({ snapshots: [] }))
-    ])
-      .then(([masterFeed, historicalOdds, lineMovements]) => {
-        // Map historical & intraday odds into the master feed
-        const enhancedFeed = (Array.isArray(masterFeed) ? masterFeed : []).map((player: Player) => {
-          return {
-            ...player,
-            historical_odds: historicalOdds, // Using the full map so children can look up dates safely
-            intraday_movements: lineMovements?.snapshots || [] // Array of snapshots
-          };
-        });
-
-        setRawData(enhancedFeed);
-        setLoading(false);
-      })
-      .catch(err => {
-        console.error("Failed to load data:", err);
-        setLoading(false);
+    if (USE_DB) {
+      // ── Supabase path ──
+      import('./utils/supabase').then(({ supabase }) => {
+        const today = new Date().toISOString().split('T')[0];
+        Promise.all([
+          // Lightweight: skip heavy JSONB on initial load
+          supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
+          supabase.from('player_props').select('*').eq('game_date', today),
+        ])
+          .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }]) => {
+            if (e1) console.error('[supabase] players error:', e1);
+            if (e2) console.error('[supabase] player_props error:', e2);
+            setRawData(mergeFeedFromDB(playersRows ?? [], propsRows ?? []));
+            setLoading(false);
+          })
+          .catch(err => {
+            console.error('Supabase fetch failed:', err);
+            setLoading(false);
+          });
       });
+    } else {
+      // ── JSON fallback (original behavior, unchanged) ──
+      const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+      Promise.all([
+        fetch(`${apiUrl}/data/current/master_feed.json`).then(res => res.json()),
+        fetch(`${apiUrl}/data/archive/historical_odds.json`).then(res => res.json()).catch(() => ({})),
+        fetch(`${apiUrl}/data/current/line_movements_today.json`).then(res => res.json()).catch(() => ({ snapshots: [] }))
+      ])
+        .then(([masterFeed, historicalOdds, lineMovements]) => {
+          const enhancedFeed = (Array.isArray(masterFeed) ? masterFeed : []).map((player: Player) => ({
+            ...player,
+            historical_odds: historicalOdds,
+            intraday_movements: lineMovements?.snapshots || [],
+          }));
+          setRawData(enhancedFeed);
+          setLoading(false);
+        })
+        .catch(err => {
+          console.error('Failed to load data:', err);
+          setLoading(false);
+        });
+    }
   }, []);
+
 
   const [isInitialized, setIsInitialized] = useState(false);
 
@@ -213,6 +279,37 @@ function App() {
       setIsInitialized(true);
     }
   }, [playersWithProps, isInitialized]);
+
+  // 4. Lazy-load heavy JSONB + historical odds when player changes (DB mode only)
+  useEffect(() => {
+    if (!USE_DB || !currentPlayer) return;
+    const playerId = currentPlayer.id;
+
+    import('./utils/supabase').then(({ supabase }) => {
+      // Fetch zones + game_log in one query
+      supabase
+        .from('players')
+        .select('game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis')
+        .eq('id', playerId)
+        .single()
+        .then(({ data: detail, error }) => {
+          if (error) { console.error('[supabase] player detail error:', error); return; }
+          setRawData(prev => prev.map(p => p.id === playerId ? { ...p, ...detail } : p));
+        });
+
+      // Fetch historical odds for this player
+      supabase
+        .from('historical_odds')
+        .select('game_date, props')
+        .eq('player_id', playerId)
+        .then(({ data, error }) => {
+          if (error) { console.error('[supabase] historical_odds error:', error); return; }
+          const map = Object.fromEntries((data ?? []).map(r => [r.game_date, r.props]));
+          setRawData(prev => prev.map(p => p.id === playerId ? { ...p, historical_odds: map } : p));
+        });
+    });
+  }, [selectedIndex, USE_DB]);
+
 
   if (loading) {
     return (
