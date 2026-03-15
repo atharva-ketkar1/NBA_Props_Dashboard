@@ -170,64 +170,65 @@ def get_dashboard_data():
     
     return df, all_games_data
 
-# Get the data
-df, raw_data = get_dashboard_data()
+if __name__ == "__main__":
+    # Get the data
+    df, raw_data = get_dashboard_data()
 
-# Display summary
-print(f"\n{'='*80}")
-print("NBA DASHBOARD DATA SUMMARY")
-print(f"{'='*80}")
+    # Display summary
+    print(f"\n{'='*80}")
+    print("NBA DASHBOARD DATA SUMMARY")
+    print(f"{'='*80}")
 
-if not df.empty:
-    print(f"\nOverview:")
-    print(f"Total games: {len(df)}")
-    print(f"Scheduled games: {df['is_scheduled'].sum()}")
-    print(f"Live games: {df['is_live'].sum()}")
-    print(f"Final games: {df['is_final'].sum()}")
+    if not df.empty:
+        print(f"\nOverview:")
+        print(f"Total games: {len(df)}")
+        print(f"Scheduled games: {df['is_scheduled'].sum()}")
+        print(f"Live games: {df['is_live'].sum()}")
+        print(f"Final games: {df['is_final'].sum()}")
 
-    print(f"\nGames Today:")
+        print(f"\nGames Today:")
 
-    for idx, row in df.iterrows():
-        if row['is_live']:
-            status_icon = "🟢 LIVE"
-            status_info = ""
-        elif row['is_final']:
-            status_icon = "✅ FINAL"
-            status_info = ""
-        else:
-            status_icon = "⏰"
-            status_info = row['game_time_et']
-        
-        print(f"\n{status_icon} {row['matchup']} {status_info}")
-        print(f"   Game ID: {row['game_id']}")
-        print(f"   Score: {row['display_score']}")
-        print(f"   Arena: {row['arena_full']}")
-        print(f"   Status: {row['game_status_text']}")
-        
-        if row.get('home_leader_name'):
-            print(f"   Home Leader: {row['home_leader_name']} ({row['home_leader_points']} pts)")
-        if row.get('away_leader_name'):
-            print(f"   Away Leader: {row['away_leader_name']} ({row['away_leader_points']} pts)")
-else:
-    print("No games found for today.")
+        for idx, row in df.iterrows():
+            if row['is_live']:
+                status_icon = "🟢 LIVE"
+                status_info = ""
+            elif row['is_final']:
+                status_icon = "✅ FINAL"
+                status_info = ""
+            else:
+                status_icon = "⏰"
+                status_info = row['game_time_et']
+            
+            print(f"\n{status_icon} {row['matchup']} {status_info}")
+            print(f"   Game ID: {row['game_id']}")
+            print(f"   Score: {row['display_score']}")
+            print(f"   Arena: {row['arena_full']}")
+            print(f"   Status: {row['game_status_text']}")
+            
+            if row.get('home_leader_name'):
+                print(f"   Home Leader: {row['home_leader_name']} ({row['home_leader_points']} pts)")
+            if row.get('away_leader_name'):
+                print(f"   Away Leader: {row['away_leader_name']} ({row['away_leader_points']} pts)")
+    else:
+        print("No games found for today.")
 
-# Save to files
-output_path = os.path.join(os.path.dirname(__file__), '../data/current/nba_dashboard_games.json')
-schedule_path = os.path.join(os.path.dirname(__file__), '../data/current/today_schedule.json')
+    # Save to files
+    output_path = os.path.join(os.path.dirname(__file__), '../data/current/nba_dashboard_games.json')
+    schedule_path = os.path.join(os.path.dirname(__file__), '../data/current/today_schedule.json')
 
-# Ensure directory exists
-os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-with open(output_path, 'w') as f:
-    json.dump(raw_data, f, indent=2, default=str)
+    with open(output_path, 'w') as f:
+        json.dump(raw_data, f, indent=2, default=str)
 
-# Write the schedule data for the PM2 scheduler
-schedule_data = {
-    "games": raw_data
-}
-with open(schedule_path, 'w') as f:
-    json.dump(schedule_data, f, indent=2, default=str)
+    # Write the schedule data for the PM2 scheduler
+    schedule_data = {
+        "games": raw_data
+    }
+    with open(schedule_path, 'w') as f:
+        json.dump(schedule_data, f, indent=2, default=str)
 
-print(f"\nData saved to:")
-print(f"   - {output_path}")
-print(f"   - {schedule_path}")
+    print(f"\nData saved to:")
+    print(f"   - {output_path}")
+    print(f"   - {schedule_path}")
