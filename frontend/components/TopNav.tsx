@@ -38,9 +38,10 @@ const LeagueButton = ({ label, logoColor, isActive, logoSrc }: { label: string, 
     );
 };
 
+import { ASSETS_BASE } from '../utils/config';
+
 export const TopNav: React.FC<{ onMenuClick: () => void }> = ({ onMenuClick }) => {
-    // Replace with your actual backend URL structure
-    const BASE_URL = "http://localhost:5000/assets/sport_logos";
+    const BASE_URL = `${ASSETS_BASE}/assets/sport_logos`;
 
     return (
         <div className="h-16 bg-bgElevation0 border-b border-bgElevation0 flex items-center justify-between px-4 lg:px-6 shrink-0 z-50 relative">

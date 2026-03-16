@@ -1,4 +1,5 @@
 import React from 'react';
+import { ASSETS_BASE } from '../utils/config';
 
 // Represents the data structure parsed by BarChart when hovering over a game
 export interface HoveredGameData {
@@ -40,12 +41,10 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
 
     // Sportsbook logo resolution for the header
     let sbLogo = '';
-    if (activeSportsbook === 'dk') sbLogo = '/assets/sportsbook_logos/draftkings.webp';
-    else if (activeSportsbook === 'fd') sbLogo = '/assets/sportsbook_logos/fanduel.webp';
+    if (activeSportsbook === 'dk') sbLogo = `/assets/sportsbook_logos/draftkings.webp`;
+    else if (activeSportsbook === 'fd') sbLogo = `/assets/sportsbook_logos/fanduel.webp`;
 
-    // Base API URL for local dev asset resolution
-    const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-    const logoSrc = `${BASE_URL}${sbLogo}`;
+    const logoSrc = `${ASSETS_BASE}${sbLogo}`;
 
     // Extract historical odds if available
     if (player && player.historical_odds && game.GAME_DATE) {
@@ -260,7 +259,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                 pts: rawStat.toFixed(1),
                 rawStat,
                 img: `https://cdn.nba.com/headshots/nba/latest/260x190/${dnp?.id || 'fallback'}.png`,
-                fallbackImg: `${BASE_URL}/assets/player_headshots/${dnp?.id || 'fallback'}.png`
+                fallbackImg: `${ASSETS_BASE}/assets/player_headshots/${dnp?.id || 'fallback'}.png`
             };
         })
         .sort((a: any, b: any) => b.rawStat - a.rawStat)

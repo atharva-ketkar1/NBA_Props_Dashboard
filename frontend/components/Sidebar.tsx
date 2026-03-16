@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-react';
 import { Player, Game } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
+import { ASSETS_BASE } from '../utils/config';
 
 const STAT_MAP: Record<string, string> = {
     'Points': 'PTS', 'Assists': 'AST', 'Rebounds': 'REB', 'Threes': 'FG3M',
@@ -76,7 +77,7 @@ const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-7 h-7" }: { teamId: numb
         <div className="flex flex-col items-center justify-center gap-1">
             <div className={`${sizeClass} flex items-center justify-center font-bold text-white overflow-hidden`}>
                 <ImageWithFallback
-                    src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`}
+                    src={`${ASSETS_BASE}/assets/team_logos/${teamId}.svg`}
                     fallbackComponent={<span className="text-[8px]">{tricode}</span>}
                     alt={tricode}
                     className="w-full h-full object-contain"
@@ -106,7 +107,7 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
                 : null;
 
     const logoSrc = logoFile
-        ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/sportsbook_logos/${logoFile}`
+        ? `${ASSETS_BASE}/assets/sportsbook_logos/${logoFile}`
         : null;
     // Basic placeholder logic for color, can be enhanced later
     const isPlusYellow = true;
@@ -127,7 +128,7 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
                 <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1 flex items-center justify-center">
                     <ImageWithFallback
                         src={`https://cdn.nba.com/headshots/nba/latest/260x190/${player.id}.png`}
-                        fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
+                        fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/${player.id}.png`}
                         alt={player.name}
                         className="w-full h-full object-cover transform scale-125 pt-1"
                     />

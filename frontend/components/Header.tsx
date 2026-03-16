@@ -6,6 +6,7 @@ import { TEAM_IDS, TEAM_COLORS } from '../constants';
 import { LineMovementSparkline } from './LineMovementSparkline';
 import { HelpModal } from './HelpModal';
 import { createPortal } from 'react-dom';
+import { ASSETS_BASE } from '../utils/config';
 
 interface HeaderProps {
   player?: Player;
@@ -50,8 +51,8 @@ const TAB_ORDER = [
 ];
 
 const SPORTSBOOKS = [
-  { id: 'dk', label: 'DraftKings', logo: `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/sportsbook_logos/draftkings.webp` },
-  { id: 'fd', label: 'FanDuel', logo: `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/sportsbook_logos/fanduel.webp` },
+  { id: 'dk', label: 'DraftKings', logo: `${ASSETS_BASE}/assets/sportsbook_logos/draftkings.webp` },
+  { id: 'fd', label: 'FanDuel', logo: `${ASSETS_BASE}/assets/sportsbook_logos/fanduel.webp` },
 ] as const;
 
 
@@ -218,8 +219,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
   const teamId = player && TEAM_IDS[player.team] ? TEAM_IDS[player.team] : null;
   const teamLogoUrl = teamId
-    ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`
-    : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${player?.team}.svg`;
+    ? `${ASSETS_BASE}/assets/team_logos/${teamId}.svg`
+    : `${ASSETS_BASE}/assets/team_logos/${player?.team}.svg`;
 
   const teamColors = player && TEAM_COLORS[player.team] ? TEAM_COLORS[player.team] : ["#27272a", "#18181b"];
 
@@ -308,7 +309,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
               <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation1 flex items-center justify-center">
                 <ImageWithFallback
                   src={`https://cdn.nba.com/headshots/nba/latest/260x190/${player.id}.png`}
-                  fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
+                  fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/${player.id}.png`}
                   alt={player.name}
                   className="w-full h-full object-cover transform scale-125 pt-2.5"
                 />

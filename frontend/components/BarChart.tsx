@@ -4,6 +4,7 @@ import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
 import { motion, AnimatePresence } from 'framer-motion';
+import { ASSETS_BASE } from '../utils/config';
 
 interface BarChartProps {
     player?: Player;
@@ -82,8 +83,8 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
             // Resolve Logo URL for SVG
             const logoUrl = opponentId
-                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${opponentId}.svg`
-                : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${opponent}.svg`;
+                ? `${ASSETS_BASE}/assets/team_logos/${opponentId}.svg`
+                : `${ASSETS_BASE}/assets/team_logos/${opponent}.svg`;
 
             // Date formatting: "YYYY-MM-DD" -> "Nov", "08"
             const [year, monthStr, day] = game.GAME_DATE.split('-');
@@ -120,7 +121,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             const validSecondary = data.filter(g => g.secondaryValue !== null && g.secondaryValue !== undefined);
             const sumSecondary = validSecondary.reduce((acc, g) => acc + Number(g.secondaryValue), 0);
             graphAvgSecondary = validSecondary.length > 0 ? sumSecondary / validSecondary.length : 0;
-            
+
             if (!isRankOverlay) {
                 if (activeFilterOverlay === 'Minutes') seasonAvgSecondary = Number(player.stats?.MIN || 0);
                 if (activeFilterOverlay === 'USG%') seasonAvgSecondary = Number(player.stats?.USG_PCT || 0) * 100;
@@ -175,10 +176,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
             const upcomingOpponentId = TEAM_IDS[upcomingOpponent];
             const upcomingLogoUrl = upcomingOpponentId
-                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponentId}.svg`
+                ? `${ASSETS_BASE}/assets/team_logos/${upcomingOpponentId}.svg`
                 : upcomingOpponent === 'TBD'
-                    ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`
-                    : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponent}.svg`;
+                    ? `${ASSETS_BASE}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`
+                    : `${ASSETS_BASE}/assets/team_logos/${upcomingOpponent}.svg`;
 
             data.push({
                 score: null, // Special flag for upcoming game
@@ -207,7 +208,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     // 1. Dynamic Spacing: For <= 19 games, map length based on 20 slots. For > 19, use full count.
     const layoutSlots = currentVisibleCount <= 19 ? 20 : chartData.length;
     const spacing = AVAILABLE_WIDTH / layoutSlots;
-    
+
     // Calculate total layout width and padding for centering
     const totalContentWidth = chartData.length * spacing;
     const paddingLeft = currentVisibleCount <= 19 ? (AVAILABLE_WIDTH - totalContentWidth) / 2 : 0;
@@ -354,158 +355,158 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
                 {/* 2. Map through GameLogs for Bars, Text, and Logos */}
                 <AnimatePresence>
-                {chartData.map((game, index) => {
-                    // Center the bar within its allocated spacing column
-                    const columnCenter = X_START + paddingLeft + (index * spacing) + (spacing / 2);
-                    const yPos = getY(game.score);
-                    const barHeight = getBarHeight(game.score);
-                    const isOver = game.score >= activeLineThreshold;
+                    {chartData.map((game, index) => {
+                        // Center the bar within its allocated spacing column
+                        const columnCenter = X_START + paddingLeft + (index * spacing) + (spacing / 2);
+                        const yPos = getY(game.score);
+                        const barHeight = getBarHeight(game.score);
+                        const isOver = game.score >= activeLineThreshold;
 
-                    // Dynamically scale inner elements if bars get very narrow
-                    const logoSize = Math.min(barWidth * 1.2, 28);
-                    const fontSize = Math.min(barWidth * 0.6, 14);
-                    
-                    const uniqueKey = game.isUpcoming ? 'upcoming' : `${game.GAME_DATE}-${game.MATCHUP}`;
-                    const showLabel = !shouldCondense || condensedLabels.has(index);
+                        // Dynamically scale inner elements if bars get very narrow
+                        const logoSize = Math.min(barWidth * 1.2, 28);
+                        const fontSize = Math.min(barWidth * 0.6, 14);
 
-                    return (
-                        <motion.g
-                            key={uniqueKey}
-                            initial={{ opacity: 0, y: 30, x: columnCenter }}
-                            animate={{ opacity: 1, y: 0, x: columnCenter }}
-                            exit={{ opacity: 0, y: 50, transition: { duration: 0.2 } }}
-                            transition={{ duration: 0.3 }}
-                            className="group cursor-pointer"
-                            onMouseEnter={(e) => {
-                                setHoverData({
-                                    game,
-                                    x: e.clientX,
-                                    y: e.clientY,
-                                    lineValue,
-                                    statKey,
-                                    activeSportsbook
-                                });
-                            }}
-                            onMouseMove={(e) => {
-                                if (isDragging) return;
-                                if (hoverData) {
-                                    setHoverData({ ...hoverData, x: e.clientX, y: e.clientY });
-                                }
-                            }}
-                            onMouseLeave={() => {
-                                if (!isDragging) setHoverData(null)
-                            }}
-                        >
-                            {/* The Bar */}
-                            {game.isUpcoming ? (
-                                <motion.rect
-                                    initial={false}
-                                    animate={{ 
-                                        y: getY(lineValue),
-                                        height: getBarHeight(lineValue)
-                                    }}
-                                    transition={{ duration: 0.4, ease: "easeInOut" }}
-                                    x={-barWidth / 2}
-                                    width={barWidth}
-                                    rx="4"
-                                    ry="4"
-                                    fill="rgba(255, 255, 255, 0.05)"
-                                    stroke="#FFFFFF"
-                                    strokeWidth="1.5"
-                                    strokeDasharray="4 4"
-                                    className="opacity-100"
-                                >
-                                    <title>Upcoming Game</title>
-                                </motion.rect>
-                            ) : (
-                                <motion.rect
-                                    initial={false}
-                                    animate={{
-                                        y: yPos,
-                                        height: barHeight,
-                                        fill: isOver ? colors.graphBarOver : colors.graphBarUnder
-                                    }}
-                                    transition={{ duration: 0.4, ease: "easeInOut" }}
-                                    x={-barWidth / 2}
-                                    width={barWidth}
-                                    rx="4"
-                                    ry="4"
-                                    className="group-hover:brightness-110 group-hover:opacity-80"
-                                >
-                                    <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
-                                </motion.rect>
-                            )}
+                        const uniqueKey = game.isUpcoming ? 'upcoming' : `${game.GAME_DATE}-${game.MATCHUP}`;
+                        const showLabel = !shouldCondense || condensedLabels.has(index);
 
-                            {/* Stat Value Text Inside Bar */}
-                            {!shouldCondense && (
-                                <text
-                                    x={0}
-                                    y={VIEWBOX_HEIGHT - 128}
-                                    textAnchor="middle"
-                                    fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
-                                    fontWeight="900"
-                                    fontSize={fontSize}
-                                    className="pointer-events-none drop-shadow-md transition-all duration-300"
-                                >
-                                    {game.isUpcoming ? '?' : game.score}
-                                </text>
-                            )}
+                        return (
+                            <motion.g
+                                key={uniqueKey}
+                                initial={{ opacity: 0, y: 30, x: columnCenter }}
+                                animate={{ opacity: 1, y: 0, x: columnCenter }}
+                                exit={{ opacity: 0, y: 50, transition: { duration: 0.2 } }}
+                                transition={{ duration: 0.3 }}
+                                className="group cursor-pointer"
+                                onMouseEnter={(e) => {
+                                    setHoverData({
+                                        game,
+                                        x: e.clientX,
+                                        y: e.clientY,
+                                        lineValue,
+                                        statKey,
+                                        activeSportsbook
+                                    });
+                                }}
+                                onMouseMove={(e) => {
+                                    if (isDragging) return;
+                                    if (hoverData) {
+                                        setHoverData({ ...hoverData, x: e.clientX, y: e.clientY });
+                                    }
+                                }}
+                                onMouseLeave={() => {
+                                    if (!isDragging) setHoverData(null)
+                                }}
+                            >
+                                {/* The Bar */}
+                                {game.isUpcoming ? (
+                                    <motion.rect
+                                        initial={false}
+                                        animate={{
+                                            y: getY(lineValue),
+                                            height: getBarHeight(lineValue)
+                                        }}
+                                        transition={{ duration: 0.4, ease: "easeInOut" }}
+                                        x={-barWidth / 2}
+                                        width={barWidth}
+                                        rx="4"
+                                        ry="4"
+                                        fill="rgba(255, 255, 255, 0.05)"
+                                        stroke="#FFFFFF"
+                                        strokeWidth="1.5"
+                                        strokeDasharray="4 4"
+                                        className="opacity-100"
+                                    >
+                                        <title>Upcoming Game</title>
+                                    </motion.rect>
+                                ) : (
+                                    <motion.rect
+                                        initial={false}
+                                        animate={{
+                                            y: yPos,
+                                            height: barHeight,
+                                            fill: isOver ? colors.graphBarOver : colors.graphBarUnder
+                                        }}
+                                        transition={{ duration: 0.4, ease: "easeInOut" }}
+                                        x={-barWidth / 2}
+                                        width={barWidth}
+                                        rx="4"
+                                        ry="4"
+                                        className="group-hover:brightness-110 group-hover:opacity-80"
+                                    >
+                                        <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
+                                    </motion.rect>
+                                )}
 
-                            {/* Visual Logic based on Games Count */}
-                            {!shouldCondense && (
-                                <>
-                                    {/* Team Logo */}
-                                    <image
-                                        x={-logoSize / 2}
-                                        y={VIEWBOX_HEIGHT - 114}
-                                        width={logoSize}
-                                        height={logoSize}
-                                        href={game.logoUrl}
-                                        className="transition-all duration-300"
-                                    />
-                                </>
-                            )}
+                                {/* Stat Value Text Inside Bar */}
+                                {!shouldCondense && (
+                                    <text
+                                        x={0}
+                                        y={VIEWBOX_HEIGHT - 128}
+                                        textAnchor="middle"
+                                        fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
+                                        fontWeight="900"
+                                        fontSize={fontSize}
+                                        className="pointer-events-none drop-shadow-md transition-all duration-300"
+                                    >
+                                        {game.isUpcoming ? '?' : game.score}
+                                    </text>
+                                )}
 
-                            {/* Stacked Date Label with connecting dots visualization */}
-                            {showLabel && (() => {
-                                // Logic to determine if we should show connecting dots
-                                const nextGame = chartData[index + 1];
-                                const isConnected = nextGame && nextGame.dateMonth === game.dateMonth && !game.isUpcoming && parseInt(nextGame.dateDay) - parseInt(game.dateDay) === 1;
+                                {/* Visual Logic based on Games Count */}
+                                {!shouldCondense && (
+                                    <>
+                                        {/* Team Logo */}
+                                        <image
+                                            x={-logoSize / 2}
+                                            y={VIEWBOX_HEIGHT - 114}
+                                            width={logoSize}
+                                            height={logoSize}
+                                            href={game.logoUrl}
+                                            className="transition-all duration-300"
+                                        />
+                                    </>
+                                )}
 
-                                return (
-                                    <g className="transition-all duration-300">
-                                        <text
-                                            x={0}
-                                            y={shouldCondense ? VIEWBOX_HEIGHT - 105 : VIEWBOX_HEIGHT - 75}
-                                            textAnchor="middle"
-                                        >
-                                            <tspan x={0} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
-                                                {game.dateMonth}
-                                            </tspan>
-                                            <tspan x={0} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
-                                                {game.dateDay}
-                                            </tspan>
-                                        </text>
+                                {/* Stacked Date Label with connecting dots visualization */}
+                                {showLabel && (() => {
+                                    // Logic to determine if we should show connecting dots
+                                    const nextGame = chartData[index + 1];
+                                    const isConnected = nextGame && nextGame.dateMonth === game.dateMonth && !game.isUpcoming && parseInt(nextGame.dateDay) - parseInt(game.dateDay) === 1;
 
-                                        {/* Render connecting dots exactly centered between columns */}
-                                        {!shouldCondense && isConnected && (
+                                    return (
+                                        <g className="transition-all duration-300">
                                             <text
-                                                x={spacing / 2}
-                                                y={VIEWBOX_HEIGHT - 63}
+                                                x={0}
+                                                y={shouldCondense ? VIEWBOX_HEIGHT - 105 : VIEWBOX_HEIGHT - 75}
                                                 textAnchor="middle"
-                                                fill={colors.fgSubtle}
-                                                fontSize="11"
-                                                fontWeight="700"
                                             >
-                                                ..
+                                                <tspan x={0} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
+                                                    {game.dateMonth}
+                                                </tspan>
+                                                <tspan x={0} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
+                                                    {game.dateDay}
+                                                </tspan>
                                             </text>
-                                        )}
-                                    </g>
-                                );
-                            })()}
-                        </motion.g>
-                    );
-                })}
+
+                                            {/* Render connecting dots exactly centered between columns */}
+                                            {!shouldCondense && isConnected && (
+                                                <text
+                                                    x={spacing / 2}
+                                                    y={VIEWBOX_HEIGHT - 63}
+                                                    textAnchor="middle"
+                                                    fill={colors.fgSubtle}
+                                                    fontSize="11"
+                                                    fontWeight="700"
+                                                >
+                                                    ..
+                                                </text>
+                                            )}
+                                        </g>
+                                    );
+                                })()}
+                            </motion.g>
+                        );
+                    })}
                 </AnimatePresence>
 
                 {/* Secondary Line Chart Path Overlay */}
@@ -535,7 +536,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                             const upcomingY = getSecondaryY(chartData[chartData.length - 1].secondaryValue);
 
                             // Skip if either value is invalid
-                            if (chartData[lastGameIndex].secondaryValue === null || chartData[lastGameIndex].secondaryValue === undefined || 
+                            if (chartData[lastGameIndex].secondaryValue === null || chartData[lastGameIndex].secondaryValue === undefined ||
                                 chartData[chartData.length - 1].secondaryValue === null || chartData[chartData.length - 1].secondaryValue === undefined) {
                                 return null;
                             }
@@ -661,9 +662,9 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
                     {/* Dragging Value Tooltip Bubble */}
                     {isDragging && (
-                        <motion.g 
-                            initial={false} 
-                            animate={{ y: propLineY - 12, x: 65 }} 
+                        <motion.g
+                            initial={false}
+                            animate={{ y: propLineY - 12, x: 65 }}
                             transition={{ duration: 0 }}
                         >
                             {/* Little triangular point connecting bubble to line */}

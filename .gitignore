@@ -28,6 +28,7 @@ frontend/utils/colors.txt
 frontend/utils/convert-colors.cjs
 frontend/utils/propsmadness_tokens.txt
 frontend/utils/convert_to_ts.cjs
+frontend/public/assets/player_headshots/
 
 frontend_old/
 frontend.zip
@@ -36,5 +37,6 @@ Propsmadness-Mock-UI/
 LLM_CONTEXT.md
 docs/prompts/
 docs/progress/
+docs/deployment/
 
 backend/scrapers/archive/

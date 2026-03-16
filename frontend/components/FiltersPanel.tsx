@@ -1,6 +1,7 @@
 import React from 'react';
 import { X, HelpCircle, Lock, ChevronRight, ChevronUp } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
+import { ASSETS_BASE } from '../utils/config';
 
 interface FiltersPanelProps {
     isOpen: boolean;
@@ -234,7 +235,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                         <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
                                             <ImageWithFallback
                                                 src="https://cdn.nba.com/headshots/nba/latest/260x190/1642275.png"
-                                                fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/1642275.png`}
+                                                fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/1642275.png`}
                                                 alt="J. Walsh"
                                                 className="w-full h-full object-cover transform scale-125 pt-1.5"
                                             />
@@ -257,7 +258,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                         <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
                                             <ImageWithFallback
                                                 src="https://cdn.nba.com/headshots/nba/latest/260x190/1628401.png"
-                                                fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/1628401.png`}
+                                                fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/1628401.png`}
                                                 alt="D. White"
                                                 className="w-full h-full object-cover transform scale-125 pt-1.5"
                                             />
@@ -277,7 +278,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                         <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
                                             <ImageWithFallback
                                                 src="https://cdn.nba.com/headshots/nba/latest/260x190/1630202.png"
-                                                fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/1630202.png`}
+                                                fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/1630202.png`}
                                                 alt="P. Pritchard"
                                                 className="w-full h-full object-cover transform scale-125 pt-1.5"
                                             />
