@@ -65,12 +65,13 @@ def upsert_players_to_db(master_data: dict):
 
     logger.info("Upserting %d players to Supabase...", len(rows))
 
-    # Batch in chunks of 100 to stay within PostgREST request size limits
-    for i in range(0, len(rows), 100):
+    # Batch in smaller chunks to stay within PostgREST request size and timeout limits
+    chunk_size = 25
+    for i in range(0, len(rows), chunk_size):
         try:
-            sb.table('players').upsert(rows[i:i + 100]).execute()
+            sb.table('players').upsert(rows[i:i + chunk_size]).execute()
         except Exception as e:
-            logger.error("players upsert failed for chunk %d–%d: %s", i, i + 100, e)
+            logger.error("players upsert failed for chunk %d–%d: %s", i, i + chunk_size, e)
 
     logger.info("✅ players upsert complete (%d rows).", len(rows))
 
