@@ -53,7 +53,7 @@ def upsert_games_to_db(raw_data: list) -> None:
 
         # Batch upsert (all games fit in one batch — max ~30 rows per day)
         result = supabase.table("games").upsert(rows, on_conflict="game_id").execute()
-        print(f"   ✅ games upsert: {len(rows)} games written to Supabase")
+        print(f"   games upsert: {len(rows)} games written to Supabase")
     except Exception as e:
         print(f"   Warning: games upsert failed (non-fatal): {e}")
 

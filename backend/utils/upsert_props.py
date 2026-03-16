@@ -144,7 +144,7 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
         except Exception as e:
             logger.error("Upsert failed for chunk %d-%d: %s", i, i + len(chunk), e)
 
-    logger.info("✅ player_props upsert complete.")
+    logger.info("player_props upsert complete.")
 
 
 if __name__ == "__main__":
