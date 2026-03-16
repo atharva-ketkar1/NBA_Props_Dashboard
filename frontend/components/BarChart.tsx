@@ -6,6 +6,8 @@ import { colors } from '../utils/propsmadness_colors';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ASSETS_BASE } from '../utils/config';
 
+const USE_DB = import.meta.env.VITE_USE_DB === 'true';
+
 interface BarChartProps {
     player?: Player;
     activeTab: string;
@@ -49,11 +51,37 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
 
     useEffect(() => {
-        const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-        fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
-            .then(res => res.json())
-            .then(data => setScheduleData(data))
-            .catch(err => console.error("Error loading schedule:", err));
+        if (USE_DB) {
+            const today = new Date();
+            const yyyy = today.getFullYear();
+            const mm = String(today.getMonth() + 1).padStart(2, '0');
+            const dd = String(today.getDate()).padStart(2, '0');
+            const todayStr = `${yyyy}-${mm}-${dd}`;
+
+            const tomorrow = new Date(today);
+            tomorrow.setDate(today.getDate() + 1);
+            const tyyyy = tomorrow.getFullYear();
+            const tmm = String(tomorrow.getMonth() + 1).padStart(2, '0');
+            const tdd = String(tomorrow.getDate()).padStart(2, '0');
+            const tomorrowStr = `${tyyyy}-${tmm}-${tdd}`;
+
+            import('../utils/supabase').then(({ supabase }) => {
+                supabase
+                    .from('games')
+                    .select('*')
+                    .in('game_date', [todayStr, tomorrowStr])
+                    .then(({ data, error }) => {
+                        if (error) { console.error('[supabase] games error:', error); return; }
+                        setScheduleData(data ?? []);
+                    });
+            });
+        } else {
+            const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+            fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
+                .then(res => res.json())
+                .then(data => setScheduleData(data))
+                .catch(err => console.error("Error loading schedule:", err));
+        }
     }, []);
 
     const { chartData, lineValue, graphAvgSecondary, seasonAvgSecondary, isRankOverlay } = useMemo(() => {

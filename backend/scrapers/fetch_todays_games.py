@@ -5,6 +5,59 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import os
 
+
+def upsert_games_to_db(raw_data: list) -> None:
+    """Upsert today's/tomorrow's game schedule into Supabase games table.
+    Non-fatal: logs errors and continues if Supabase is unavailable.
+    """
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from utils.supabase_client import get_supabase_client
+        supabase = get_supabase_client()
+
+        rows = []
+        for g in raw_data:
+            rows.append({
+                "game_id":              g["game_id"],
+                "game_date":            g["game_date"],
+                "home_team_id":         g["home_team_id"],
+                "home_team_name":       g["home_team_name"],
+                "home_team_city":       g["home_team_city"],
+                "home_team_tricode":    g["home_team_tricode"],
+                "home_team_wins":       g.get("home_team_wins"),
+                "home_team_losses":     g.get("home_team_losses"),
+                "home_score":           g.get("home_score", 0),
+                "away_team_id":         g["away_team_id"],
+                "away_team_name":       g["away_team_name"],
+                "away_team_city":       g["away_team_city"],
+                "away_team_tricode":    g["away_team_tricode"],
+                "away_team_wins":       g.get("away_team_wins"),
+                "away_team_losses":     g.get("away_team_losses"),
+                "away_score":           g.get("away_score", 0),
+                "arena_name":           g.get("arena_name"),
+                "arena_city":           g.get("arena_city"),
+                "game_time_utc":        g.get("game_time_utc"),
+                "game_time_et":         g.get("game_time_et"),
+                "game_status":          g.get("game_status"),
+                "game_status_text":     (g.get("game_status_text") or "").strip(),
+                "is_live":              bool(g.get("is_live", False)),
+                "is_final":             bool(g.get("is_final", False)),
+                "is_scheduled":         bool(g.get("is_scheduled", True)),
+                "matchup":              g.get("matchup"),
+                "closing_scrape_deadline": g.get("closing_scrape_deadline"),
+            })
+
+        if not rows:
+            return
+
+        # Batch upsert (all games fit in one batch — max ~30 rows per day)
+        result = supabase.table("games").upsert(rows, on_conflict="game_id").execute()
+        print(f"   ✅ games upsert: {len(rows)} games written to Supabase")
+    except Exception as e:
+        print(f"   Warning: games upsert failed (non-fatal): {e}")
+
+
 def get_nba_schedule():
     """Get NBA schedule data"""
     url = 'https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json'

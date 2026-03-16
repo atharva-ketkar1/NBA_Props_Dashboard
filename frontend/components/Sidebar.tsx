@@ -4,6 +4,8 @@ import { Player, Game } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
 
+const USE_DB = import.meta.env.VITE_USE_DB === 'true';
+
 const STAT_MAP: Record<string, string> = {
     'Points': 'PTS', 'Assists': 'AST', 'Rebounds': 'REB', 'Threes': 'FG3M',
     'Pts+Ast': 'PTS+AST', 'Pts+Reb': 'PTS+REB', 'Reb+Ast': 'REB+AST',
@@ -269,18 +271,48 @@ export const Sidebar: React.FC<SidebarProps> = ({
     const [expandedGames, setExpandedGames] = useState<Record<string, boolean>>({});
     const [searchTerm, setSearchTerm] = useState('');
 
-    // Fetch live game data
+    // Fetch live game schedule
     useEffect(() => {
-        const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-        fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
-            .then(res => res.json())
-            .then(data => {
-                const sortedGames = data.sort((a: Game, b: Game) => {
-                    return new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime();
-                });
-                setScheduleData(sortedGames);
-            })
-            .catch(err => console.error("Error loading schedule:", err));
+        if (USE_DB) {
+            // Fetch from Supabase games table (today + tomorrow)
+            const today = new Date();
+            const yyyy = today.getFullYear();
+            const mm = String(today.getMonth() + 1).padStart(2, '0');
+            const dd = String(today.getDate()).padStart(2, '0');
+            const todayStr = `${yyyy}-${mm}-${dd}`;
+
+            const tomorrow = new Date(today);
+            tomorrow.setDate(today.getDate() + 1);
+            const tyyyy = tomorrow.getFullYear();
+            const tmm = String(tomorrow.getMonth() + 1).padStart(2, '0');
+            const tdd = String(tomorrow.getDate()).padStart(2, '0');
+            const tomorrowStr = `${tyyyy}-${tmm}-${tdd}`;
+
+            import('../utils/supabase').then(({ supabase }) => {
+                supabase
+                    .from('games')
+                    .select('*')
+                    .in('game_date', [todayStr, tomorrowStr])
+                    .then(({ data, error }) => {
+                        if (error) { console.error('[supabase] games error:', error); return; }
+                        const sorted = (data ?? []).sort((a: Game, b: Game) =>
+                            new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+                        );
+                        setScheduleData(sorted);
+                    });
+            });
+        } else {
+            const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+            fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
+                .then(res => res.json())
+                .then(data => {
+                    const sortedGames = data.sort((a: Game, b: Game) => {
+                        return new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime();
+                    });
+                    setScheduleData(sortedGames);
+                })
+                .catch(err => console.error("Error loading schedule:", err));
+        }
     }, []);
 
     // Dynamically generate prop options and game options

@@ -79,13 +79,21 @@ def run_logs():
 
 def run_schedule():
     print("   Starting Game Schedule...")
-    # This scraper saves its own file, so we just run it
-    df, _ = schedule.get_dashboard_data()
-    # Ensure it saves to the right place via the imported module if needed, 
-    # but based on previous edit it saves to ../data/current/nba_dashboard_games.json relative to itself.
-    # To be safe, we can rely on its internal saving or explicit save here if it returned raw data.
-    # The previous edit to fetch_todays_games.py handles the saving.
+    df, raw_data = schedule.get_dashboard_data()
+
+    # Save local JSON (for local dev fallback)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(GAMES_PATH, "w") as f:
+        json.dump(raw_data, f, indent=2, default=str)
+
+    # Upsert to Supabase (non-fatal)
+    try:
+        schedule.upsert_games_to_db(raw_data)
+    except Exception as e:
+        print(f"   Warning: games DB upsert failed (non-fatal): {e}")
+
     return f"Schedule: {len(df)} games"
+
 
 def run_shooting_zones():
     print("   Starting Shooting Zones...")
