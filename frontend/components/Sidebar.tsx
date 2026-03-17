@@ -271,7 +271,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     const [expandedGames, setExpandedGames] = useState<Record<string, boolean>>({});
     const [searchTerm, setSearchTerm] = useState('');
 
-    // Fetch live game schedule
+    // Fetch live game data
     useEffect(() => {
         if (USE_DB) {
             // Fetch from Supabase games table (today + tomorrow)
