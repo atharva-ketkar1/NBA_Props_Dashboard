@@ -22,7 +22,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({ similarGames }) 
             </div>
 
             <div className="flex bg-bgElevation1 rounded-lg p-1 border border-border shrink-0 ml-2">
-               <button className="text-xs font-bold px-3 py-1.5 rounded-md text-white bg-borderMedium shadow-sm border border-border/50 whitespace-nowrap">By PropsMadness</button>
+               <button className="text-xs font-bold px-3 py-1.5 rounded-md text-white bg-borderMedium shadow-sm border border-border/50 whitespace-nowrap uppercase tracking-wider">By PropX</button>
                <button className="text-xs font-bold px-3 py-1.5 rounded-md text-gray-400 hover:text-white transition-colors whitespace-nowrap">By Position</button>
             </div>
          </div>

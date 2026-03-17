@@ -750,7 +750,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
             {/* Footer / Watermark */}
             <div className="absolute bottom-3 left-3 pointer-events-none opacity-40 z-20">
-                <span className="text-neutral600 font-medium text-[10px]">PropsMadness</span>
+                <span className="text-neutral600 font-medium text-[10px] tracking-widest uppercase">PropX</span>
             </div>
 
             {/* Hover Tooltip Overlay */}

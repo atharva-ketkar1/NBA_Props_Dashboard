@@ -70,11 +70,17 @@ export const TopNav: React.FC<{ onMenuClick: () => void }> = ({ onMenuClick }) =
                 <Menu className="w-6 h-6" />
             </button>
 
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2 select-none cursor-pointer">
-                <div className="w-6 h-6 bg-white flex items-center justify-center mask-logo clip-path-polygon transform -skew-x-12 rounded-[2px]">
-                    <div className="w-2.5 h-4 bg-neutral950 transform skew-x-12"></div>
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2 select-none cursor-pointer group">
+                <div className="relative w-7 h-7 flex items-center justify-center transform group-hover:scale-105 transition-transform">
+                    {/* Abstract P X intersection logo */}
+                    <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-lg" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M 25 20 L 25 80" stroke="#3B82F6" strokeWidth="14" strokeLinecap="round" />
+                        <path d="M 25 25 C 60 25 60 55 25 55" stroke="#3B82F6" strokeWidth="14" strokeLinecap="round" />
+                        <path d="M 45 45 L 80 80" stroke="#10B981" strokeWidth="14" strokeLinecap="round" />
+                        <path d="M 80 45 L 55 70" stroke="#10B981" strokeWidth="14" strokeLinecap="round" />
+                    </svg>
                 </div>
-                <span className="text-[19px] font-bold text-white tracking-tight">PropsMadness</span>
+                <span className="text-[20px] font-black text-white tracking-widest uppercase">Prop<span className="text-blue500">X</span></span>
             </div>
 
             <div className="flex items-center gap-3">
