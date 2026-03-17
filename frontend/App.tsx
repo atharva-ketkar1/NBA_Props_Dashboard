@@ -204,53 +204,38 @@ function App() {
 
   // 2. Archive fetching when season filter changes
   useEffect(() => {
-    if (activeSeason === '24/25' && Object.keys(archiveGameLogs).length === 0 && !isLoadingArchive) {
+    // Only fetch if 24/25 is active, and the current player exists, and we haven't fetched their logs yet
+    if (activeSeason === '24/25' && currentPlayer && !archiveGameLogs[currentPlayer.id]) {
       setIsLoadingArchive(true);
-      const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-      fetch(`${apiUrl}/data/archive/gamelogs_2024-25.csv`)
-        .then(res => {
-          if (!res.ok) throw new Error("Network response was not ok");
-          return res.text();
-        })
-        .then(csvText => {
-          const lines = csvText.trim().split('\n');
-          const headers = lines[0].split(',');
-          const logsByPlayer: Record<string, any[]> = {};
-
-          for (let i = 1; i < lines.length; i++) {
-            if (!lines[i]) continue;
-            const values = lines[i].split(',');
-            const row: any = {};
-            for (let j = 0; j < headers.length; j++) {
-                const head = headers[j]?.trim();
-                const val = values[j] ? values[j].trim() : '';
-                const numVal = Number(val);
-                if (val !== '' && !isNaN(numVal) && !['GAME_ID', 'PLAYER_ID', 'DATE_STR', 'GAME_DATE', 'TEAM_ABBREVIATION', 'MATCHUP', 'WL'].includes(head)) {
-                    row[head] = numVal;
-                } else {
-                    row[head] = val;
-                }
-            }
-            const pid = row['PLAYER_ID'];
-            if (!logsByPlayer[pid]) {
-                logsByPlayer[pid] = [];
-            }
-            logsByPlayer[pid].push(row);
-          }
-          
-          Object.keys(logsByPlayer).forEach(pid => {
-             logsByPlayer[pid].sort((a: any, b: any) => new Date(b.GAME_DATE).getTime() - new Date(a.GAME_DATE).getTime());
-          });
-
-          setArchiveGameLogs(logsByPlayer);
-          setIsLoadingArchive(false);
-        })
-        .catch(err => {
-          console.error("Failed to load archive logs", err);
-          setIsLoadingArchive(false);
+      
+      const playerId = currentPlayer.id;
+      
+      if (USE_DB) {
+        import('./utils/supabase').then(({ supabase }) => {
+          supabase.from('archive_gamelogs')
+            .select('game_log')
+            .eq('player_id', playerId)
+            .eq('season', '2024-25')
+            .maybeSingle()
+            .then(({ data, error }) => {
+              setIsLoadingArchive(false);
+              if (error) {
+                console.error('[supabase] archive error:', error);
+                return;
+              }
+              setArchiveGameLogs(prev => ({
+                ...prev,
+                [playerId]: data?.game_log || []
+              }));
+            });
         });
+      } else {
+         // Fallback logic could go here if `USE_DB` goes false, 
+         // but since we are exclusively doing DB limits, we'll keep it empty.
+         setIsLoadingArchive(false);
+      }
     }
-  }, [activeSeason, archiveGameLogs, isLoadingArchive]);
+  }, [activeSeason, currentPlayer, archiveGameLogs, USE_DB]);
 
   useEffect(() => {
     if (!isFiltersOpen) {
