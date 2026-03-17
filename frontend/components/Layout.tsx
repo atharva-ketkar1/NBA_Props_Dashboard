@@ -33,7 +33,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, sidebarProps }) => {
 
         {/* Main Content */}
         <main className="flex-1 relative w-full min-w-0 rounded-xl">
-          <div className="w-full mx-auto pb-6">
+          <div className="w-full max-w-[1600px] mx-auto pb-6">
             {children}
           </div>
         </main>

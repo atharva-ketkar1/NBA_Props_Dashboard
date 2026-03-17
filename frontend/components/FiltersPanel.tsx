@@ -105,13 +105,13 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                 const isActive = s === (activeSeason || '25/26');
                                 const isClickable = s === '24/25' || s === '25/26';
                                 return (
-                                <button
-                                    key={s}
-                                    onClick={() => isClickable && onSeasonChange && onSeasonChange(s)}
-                                    className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : isClickable ? 'text-fgSubtle hover:text-white cursor-pointer' : 'text-fgSubtle/30 cursor-not-allowed'}`}
-                                >
-                                    {s}
-                                </button>
+                                    <button
+                                        key={s}
+                                        onClick={() => isClickable && onSeasonChange && onSeasonChange(s)}
+                                        className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : isClickable ? 'text-fgSubtle hover:text-white cursor-pointer' : 'text-fgSubtle/30 cursor-not-allowed'}`}
+                                    >
+                                        {s}
+                                    </button>
                                 );
                             })}
                         </div>
@@ -129,9 +129,9 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                         else if (g === '20') onGameCountChange(20);
                                         else if (isMax) onGameCountChange(maxGames);
                                     };
-                                    const isActive = (g === '10' && gameCount === 10) || 
-                                                     (g === '20' && gameCount === 20) || 
-                                                     (isMax && gameCount === maxGames);
+                                    const isActive = (g === '10' && gameCount === 10) ||
+                                        (g === '20' && gameCount === 20) ||
+                                        (isMax && gameCount === maxGames);
                                     return (
                                         <button
                                             key={g}
@@ -170,16 +170,16 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                         {/* Suggested Tab Content - Pills */}
                         <div className="flex flex-wrap gap-1 mt-1">
                             {['Minutes', 'Def vs Position (PTS)', 'H2H', `Def vs ${dpt || 'DPT'} (DPT)`, `Def vs ${dsz || 'DSZ'} (DSZ)`].map(stat => {
-                                const realLabel = stat.startsWith('Def vs') && stat.includes('(DPT)') ? 'Def vs DPT' : 
-                                                  stat.startsWith('Def vs') && stat.includes('(DSZ)') ? 'Def vs DSZ' : stat;
+                                const realLabel = stat.startsWith('Def vs') && stat.includes('(DPT)') ? 'Def vs DPT' :
+                                    stat.startsWith('Def vs') && stat.includes('(DSZ)') ? 'Def vs DSZ' : stat;
                                 const rankHtml = realLabel === 'Def vs DPT' && dptRank ? <span className={getRankColor(dptRank)}>#{dptRank}</span> :
-                                                 realLabel === 'Def vs DSZ' && dszRank ? <span className={getRankColor(dszRank)}>#{dszRank}</span> : null;
+                                    realLabel === 'Def vs DSZ' && dszRank ? <span className={getRankColor(dszRank)}>#{dszRank}</span> : null;
                                 const displayStat = !isSuggestedExpanded && realLabel.startsWith('Def vs') ? stat : realLabel;
                                 return (
                                     <button
                                         key={realLabel}
                                         onClick={() => onFilterChange(activeFilter === realLabel ? null : realLabel)}
-                                        className={`px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === realLabel ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
+                                        className={`px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === realLabel ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
                                     >
                                         {displayStat} {rankHtml}
                                     </button>
@@ -188,7 +188,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                             {!isSuggestedExpanded ? (
                                 <button
                                     onClick={() => setIsSuggestedExpanded(true)}
-                                    className="px-2 py-1 rounded-full text-[11px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3">
+                                    className="px-2 py-1.5 lg:py-1 rounded-full text-[12px] lg:text-[11px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3">
                                     +7 more
                                 </button>
                             ) : (
@@ -205,7 +205,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                         <button
                                             key={stat.label}
                                             onClick={() => onFilterChange(activeFilter === stat.label ? null : stat.label)}
-                                            className={`px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === stat.label ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
+                                            className={`px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === stat.label ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
                                         >
                                             {stat.label} {stat.rank && <span className={getRankColor(stat.rank)}>#{stat.rank}</span>} {stat.customRank}
                                         </button>
@@ -377,7 +377,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                         </div>
                         <div className="flex flex-wrap gap-2">
                             {['Minutes', 'Points', 'Assists', 'Rebounds', 'USG%', 'FG%', 'FGA', '3PA', '3P', 'FTA', 'Fouls'].map(stat => (
-                                <button key={stat} className="px-2 py-1 rounded-[6px] text-[11px] font-medium flex items-center transition-colors border bg-bgElevation2 text-[#D4D4D4] border-borderMedium/40 hover:border-borderMedium/50 hover:text-white">
+                                <button key={stat} className="px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px] font-medium flex items-center transition-colors border bg-bgElevation2 text-[#D4D4D4] border-borderMedium/40 hover:border-borderMedium/50 hover:text-white">
                                     {stat}
                                 </button>
                             ))}

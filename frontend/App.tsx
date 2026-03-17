@@ -351,7 +351,7 @@ function App() {
         <div className="flex w-full relative z-20">
 
           {/* Merged Top Section (Header + Chart) */}
-          <div className="flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0">
+          <div className="flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0 flex flex-col relative z-20">
             <Header
               player={displayPlayer}
               activeTab={activeTab}
@@ -384,9 +384,9 @@ function App() {
             </div>
           </div>
 
-          {/* The Split Screen Filter Panel (Absolute inside relative to maintain left-column height) */}
-          <div className={`transition-all duration-300 ease-in-out shrink-0 relative ${isFiltersOpen ? 'w-[320px] ml-4' : 'w-0 ml-0'}`}>
-            <div className={`absolute inset-0 bg-bgElevation0 rounded-xl shadow-lg border border-borderMedium/40 overflow-hidden transition-opacity duration-300 ${isFiltersOpen ? 'opacity-100' : 'opacity-0 border-none'}`}>
+          {/* The Split Screen Filter Panel (Responsive logic applied) */}
+          <div className={`transition-all duration-300 ease-in-out shrink-0 absolute lg:relative right-0 top-0 bottom-0 z-50 lg:z-auto ${isFiltersOpen ? 'w-[320px] ml-4 opacity-100 pointer-events-auto' : 'w-0 ml-0 opacity-0 pointer-events-none'}`}>
+            <div className={`absolute inset-0 bg-bgElevation0 rounded-xl shadow-2xl lg:shadow-lg border border-borderMedium/40 overflow-hidden transition-opacity duration-300 ${isFiltersOpen ? 'opacity-100' : 'opacity-0 border-none'}`}>
               <FiltersPanel
                 isOpen={isFiltersOpen}
                 onClose={() => setIsFiltersOpen(false)}
@@ -405,6 +405,14 @@ function App() {
             </div>
           </div>
         </div>
+
+        {/* Backdrop for mobile filters */}
+        {isFiltersOpen && (
+          <div 
+             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[45] lg:hidden"
+             onClick={() => setIsFiltersOpen(false)}
+          />
+        )}
 
         {/* Bottom Grid Section */}
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-4">

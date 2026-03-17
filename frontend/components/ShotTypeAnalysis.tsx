@@ -47,7 +47,7 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes })
    const data = shotTypes || DEFAULT_SHOT_TYPES;
 
    return (
-      <div className="bg-bgElevation0 rounded-lg p-5 w-full">
+      <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0">
          <div className="flex items-center gap-2 mb-1 relative z-50">
             <h3 className="text-sm font-bold text-white">Shot Type Analysis</h3>
             <div className="relative group flex items-center">

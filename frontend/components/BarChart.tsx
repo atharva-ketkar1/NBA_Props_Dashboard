@@ -41,6 +41,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     // Hover State
     const [hoverData, setHoverData] = useState<HoveredGameData | null>(null);
 
+    // Mobile specific chart adaptations
+    const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth < 1024);
+    useEffect(() => {
+        const handleResize = () => setIsMobile(window.innerWidth < 1024);
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
     // Dragging Line State
     const [isDragging, setIsDragging] = useState(false);
     const [dragY, setDragY] = useState<number | null>(null);
@@ -93,7 +101,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         const line = prop?.line || 0;
 
         // 2. Prepare Data (Use historicalGameCount passed from App)
-        const numGames = historicalGameCount || (isFiltersOpen ? 19 : 29);
+        const numGames = (isMobile && !isFiltersOpen) ? 14 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
         const log = player.game_log.slice(0, numGames).reverse();
 
         const data: any[] = log.map(game => {
@@ -223,20 +231,20 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         }
 
         return { chartData: data, lineValue: line, graphAvgSecondary, seasonAvgSecondary, isRankOverlay: !!isRankOverlay };
-    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason]);
+    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
 
     if (!player) return null;
 
     // --- Responsive SVG Layout Constants ---
-    const VIEWBOX_WIDTH = isFiltersOpen ? 700 : 1000; // Internal coordinate system width dynamcially adjusts to prevent shrinking
+    const VIEWBOX_WIDTH = isMobile ? 650 : (isFiltersOpen ? 700 : 1000); // Internal coordinate system width dynamcially adjusts to prevent shrinking
     const VIEWBOX_HEIGHT = 400; // Internal coordinate system height
     const X_START = 80;         // Left margin to leave room for Y-axis labels
     const X_END = VIEWBOX_WIDTH - 20; // Right margin
     const AVAILABLE_WIDTH = X_END - X_START;
 
-    const currentVisibleCount = historicalGameCount || (isFiltersOpen ? 19 : 29);
+    const currentVisibleCount = (isMobile && !isFiltersOpen) ? 14 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
     // 1. Dynamic Spacing: For <= 19 games, map length based on 20 slots. For > 19, use full count.
-    const layoutSlots = currentVisibleCount <= 19 ? 20 : chartData.length;
+    const layoutSlots = currentVisibleCount <= 19 ? (isMobile ? 15 : 20) : chartData.length;
     const spacing = AVAILABLE_WIDTH / layoutSlots;
 
     // Calculate total layout width and padding for centering
@@ -334,7 +342,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     return (
         <div
-            className={`bg-bgElevation0 w-full h-full min-h-[400px] select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col ${isDragging ? 'cursor-grabbing' : ''}`}
+            className={`bg-bgElevation0 w-full h-full min-h-[380px] sm:min-h-[450px] aspect-[4/3] lg:aspect-auto select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col ${isDragging ? 'cursor-grabbing' : ''}`}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
             onTouchEnd={handleMouseUp}

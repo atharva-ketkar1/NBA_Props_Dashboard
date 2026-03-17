@@ -175,8 +175,8 @@ export const AssistZones = ({ player }: { player: Player }) => {
   const vsView = processVsZoneData((player as any)?.assist_zones, (player as any)?.opp_assist_zones);
 
   return (
-    <div className={`bg-bgElevation0 rounded-xl p-5 w-full ${isMissing ? 'opacity-50' : ''}`}>
-      <div className="flex justify-between items-start mb-4">
+    <div className={`bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0 ${isMissing ? 'opacity-50' : ''}`}>
+      <div className="flex flex-col sm:flex-row gap-3 justify-between items-start mb-4">
         <div>
           <div className="flex items-center gap-2 mb-1 relative z-50">
             <h3 className="text-[15px] font-semibold text-white tracking-wide">Assist Zones</h3>

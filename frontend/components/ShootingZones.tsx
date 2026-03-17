@@ -124,24 +124,24 @@ function processVsZoneData(pZoneData: any, oZoneData: any, playerFgPct: number) 
 const ZoneLabel = ({ top, left, pStat, oStat, activeTab }: { top: string, left: string, pStat: any, oStat: any, activeTab: string }) => {
   if (activeTab === 'player') {
     return (
-      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold font-chakra border border-white z-10" style={{ top, left }}>
-        <div className="px-1 py-0.5 text-black text-center min-w-[40px] tracking-tight">{pStat.percentage}</div>
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[13px] lg:text-[11px] font-bold font-chakra border border-white z-10" style={{ top, left }}>
+        <div className="px-1.5 lg:px-1 py-1 lg:py-0.5 text-black text-center min-w-[44px] lg:min-w-[40px] tracking-tight">{pStat.percentage}</div>
       </div>
     );
   } else if (activeTab === 'opp') {
     return (
-      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold font-chakra border border-white z-10" style={{ top, left }}>
-        <div className="px-1 py-0.5 text-black text-center min-w-[40px] tracking-tight">{oStat.rank}</div>
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[13px] lg:text-[11px] font-bold font-chakra border border-white z-10" style={{ top, left }}>
+        <div className="px-1.5 lg:px-1 py-1 lg:py-0.5 text-black text-center min-w-[44px] lg:min-w-[40px] tracking-tight">{oStat.rank}</div>
       </div>
     );
   } else {
     // VS Tab
     return (
-      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold font-chakra border border-white z-10 bg-white" style={{ top, left }}>
-        <div className="px-1 py-0.5 text-black text-center min-w-[32px] tracking-tight">
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[13px] lg:text-[11px] font-bold font-chakra border border-white z-10 bg-white" style={{ top, left }}>
+        <div className="px-1.5 lg:px-1 py-1 lg:py-0.5 text-black text-center min-w-[34px] lg:min-w-[32px] tracking-tight">
           {pStat.percentage}
         </div>
-        <div className="px-[5px] py-0.5 text-black border-l border-gray-400 min-w-[22px] text-center tracking-tight">
+        <div className="px-1.5 lg:px-[5px] py-1 lg:py-0.5 text-black border-l border-gray-400 min-w-[24px] lg:min-w-[22px] text-center tracking-tight">
           {oStat.rank}
         </div>
       </div>
@@ -172,8 +172,8 @@ export const ShootingZones = ({ player }: { player: Player | any }) => {
   const vsView = processVsZoneData((player as any)?.shooting_zones, (player as any)?.opp_def_zones, playerFgPct);
 
   return (
-    <div className="bg-bgElevation0 rounded-xl p-5 w-full">
-      <div className="flex justify-between items-start mb-4">
+    <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0">
+      <div className="flex flex-col sm:flex-row gap-3 justify-between items-start mb-4">
         <div>
           <div className="flex items-center gap-2 mb-1 relative z-50">
             <h3 className="text-[15px] font-semibold text-white tracking-wide">Shooting Zones</h3>
