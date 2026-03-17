@@ -427,10 +427,10 @@ function App() {
             </div>
           ) : (
             <>
-              {/* Left Column: Shooting or Assist Zones + Play Types */}
+              {/* Left Column: Shooting/Assist Zones + Play Types */}
               <div className={`xl:col-span-4 flex flex-col gap-4 h-full ${['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab)
-                ? mobileView !== 'assists' ? 'hidden md:flex' : ''
-                : mobileView !== 'shooting' ? 'hidden md:flex' : ''
+                  ? mobileView !== 'assists' ? 'hidden md:flex' : ''
+                  : mobileView !== 'shooting' ? 'hidden md:flex' : ''
                 }`}>
                 {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
                   <AssistZones player={displayPlayer} />
@@ -438,19 +438,14 @@ function App() {
                   <ShootingZones player={displayPlayer} />
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
-                  <div className={`flex-1 min-h-0 ${mobileView !== 'types' ? 'hidden md:block' : ''}`}>
+                  <div className="flex-1 min-h-0 hidden md:block">
                     <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
                   </div>
                 )}
               </div>
 
-              {/* Right Column: Shot Types + Similar */}
+              {/* Right Column: Shot Types + Play Types (types tab) + Similar */}
               <div className="xl:col-span-6 flex flex-col gap-4 h-full">
-                {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
-                  <div className={`${mobileView !== 'types' ? 'hidden md:block' : ''}`}>
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
-                  </div>
-                )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`${mobileView !== 'shooting' ? 'hidden md:block' : ''}`}>
                     <ShotTypeAnalysis shotTypes={(() => {
@@ -489,6 +484,11 @@ function App() {
                         }
                       ];
                     })()} />
+                  </div>
+                )}
+                {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
+                  <div className={`md:hidden ${mobileView !== 'types' ? 'hidden' : ''}`}>
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
                   </div>
                 )}
                 <div className={`flex-1 min-h-0 xl:col-span-12 w-full h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>

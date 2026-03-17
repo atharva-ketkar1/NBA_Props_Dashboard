@@ -123,7 +123,16 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
   const statKey = STAT_LABELS[activeTab] || 'PTS';
 
-  const { line, odds, hitRateInfo, statsData, activeStatAverages, hasLine, mobileHitRateInfo } = useMemo(() => {
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth < 1024);
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 1024);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const mobileGameCount = isMobile && !isFiltersOpen ? 12 : (historicalGameCount || 29);
+
+  const { line, odds, hitRateInfo, statsData, activeStatAverages, hasLine, mobileHitRateInfo, mobileGraphAvg } = useMemo(() => {
     if (!player) return { line: 0, odds: { over: 0, under: 0 }, hitRateInfo: null, statsData: [], activeStatAverages: { graphAvg: 0, seasonAvg: 0, diff: 0 }, hasLine: false };
 
     let prop = player.props?.[statKey]?.[activeSportsbook];
@@ -209,9 +218,11 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
       return { label: item.label, value: avg, diff: itemDiff };
     });
 
-    const mobileGameCount = 12;
     const mobileLogs = logs.slice(0, mobileGameCount);
     let mobileHits = 0;
+
+    let mobileSum = 0;
+    let mobileValidCount = 0;
     mobileLogs.forEach((game: any) => {
       let val = game[statKey];
       if (val === undefined) {
@@ -220,9 +231,17 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         else if (statKey === 'PTS+AST') val = (game.PTS || 0) + (game.AST || 0);
         else if (statKey === 'REB+AST') val = (game.REB || 0) + (game.AST || 0);
       }
-      if (val !== undefined && hasLine && val >= activeLine) mobileHits++;
+      if (val !== undefined) {
+        mobileSum += val;
+        mobileValidCount++;
+        if (hasLine && val >= activeLine) {
+          mobileHits++;
+        }
+      }
     });
+
     const mobileRate = hasLine ? ((mobileHits / mobileGameCount) * 100).toFixed(1) : '0.0';
+    const mobileGraphAvg = mobileValidCount > 0 ? mobileSum / mobileValidCount : 0;
 
     return {
       line: lineVal,
@@ -231,9 +250,11 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
       statsData: tickerItems,
       activeStatAverages: { graphAvg, seasonAvg, diff },
       hasLine,
-      mobileHitRateInfo: { rate: mobileRate, hits: mobileHits, gamesShown: mobileGameCount }
+      mobileHitRateInfo: { rate: mobileRate, hits: mobileHits, gamesShown: mobileGameCount },
+      mobileGraphAvg
     };
-  }, [player, statKey, activeSportsbook, customLine, historicalGameCount]);
+  }, [player, statKey, activeSportsbook, customLine, historicalGameCount, mobileGameCount]);
+
 
   useEffect(() => {
     if (!player || !player.props || !player.props[statKey]) return;
@@ -338,11 +359,11 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         />
 
         {/* Main Stats Row */}
-        <div className="flex flex-col md:flex-row items-start md:items-center w-full bg-bgElevation0 relative z-30 rounded-t-xl h-auto md:h-[76px] pt-1 pb-0 md:py-0 mb-0">
+        <div className="flex flex-col md:flex-row items-start md:items-center w-full bg-bgElevation0 relative z-30 rounded-t-xl h-auto md:h-[76px] pt-1 pb-3 md:pt-0 md:pb-0 mb-0">
 
           {/* Section 1: Player Info — sizes to content, never wraps */}
           <div className="flex items-center gap-3 px-4 h-full w-full md:w-auto md:min-w-max justify-start shrink-0">
-            <div className="relative shrink-0 w-[68px] h-[68px] md:w-[64px] md:h-[64px]">
+            <div className="relative shrink-0 w-[68px] h-[68px] md:w-[70px] md:h-[70px]">
               <div
                 className="w-full h-full rounded-full overflow-hidden"
                 style={gradientStyle}
@@ -500,42 +521,45 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           )}
 
           {/* --- NEW: Mobile Stats Row (Mobile Only) --- */}
-          <div className="flex md:hidden w-full items-center justify-between px-4 py-2 mt-1 mb-1 border-t border-white/5">
+          {mobileView === 'graph' && (
+            <div className="flex md:hidden w-full items-center justify-between px-4 py-2 mt-1 mb-1 border-t border-white/5">
 
-            {/* Season Avg */}
-            <div className="flex flex-col items-center flex-1">
-              <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">SEASON AVG</span>
-              <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (activeStatAverages.seasonAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
-                {typeof activeStatAverages.seasonAvg === 'number' ? activeStatAverages.seasonAvg.toFixed(1) : activeStatAverages.seasonAvg}
-              </span>
+
+              {/* Season Avg */}
+              <div className="flex flex-col items-center flex-1">
+                <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">SEASON AVG</span>
+                <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (activeStatAverages.seasonAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
+                  {typeof activeStatAverages.seasonAvg === 'number' ? activeStatAverages.seasonAvg.toFixed(1) : activeStatAverages.seasonAvg}
+                </span>
+              </div>
+
+              {/* Graph Avg */}
+              <div className="flex flex-col items-center flex-1 border-l border-r border-white/5">
+                <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">GRAPH AVG</span>
+                <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (mobileGraphAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
+                  {mobileGraphAvg.toFixed(1)}
+                </span>
+              </div>
+
+              {/* Hit Rate */}
+              <div className="flex flex-col items-center flex-1 min-w-0 px-2">
+                <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
+                {hasLine ? (
+                  <div className={`font-bold text-[15px] tracking-tight leading-none flex items-baseline gap-0.5 ${parseFloat(mobileHitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'}`}>
+                    {mobileHitRateInfo?.rate}%<span className="text-[12px] opacity-90 font-semibold">({mobileHitRateInfo?.hits}/{mobileHitRateInfo?.gamesShown})</span>
+                  </div>
+                ) : (
+                  <span className="font-bold text-borderMedium leading-none text-[16px]">--.--%</span>
+                )}
+              </div>
+
             </div>
-
-            {/* Graph Avg */}
-            <div className="flex flex-col items-center flex-1 border-l border-r border-white/5">
-              <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">L{hitRateInfo?.gamesShown || 0} AVG</span>
-              <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (activeStatAverages.graphAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
-                {typeof activeStatAverages.graphAvg === 'number' ? activeStatAverages.graphAvg.toFixed(1) : activeStatAverages.graphAvg}
-              </span>
-            </div>
-
-            {/* Hit Rate */}
-            <div className="flex flex-col items-center flex-1 min-w-0 px-2">
-              <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
-              {hasLine ? (
-                <div className={`font-bold text-[15px] tracking-tight leading-none flex items-baseline gap-0.5 ${parseFloat(mobileHitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'}`}>
-                  {mobileHitRateInfo?.rate}%<span className="text-[12px] opacity-90 font-semibold">({mobileHitRateInfo?.hits}/{mobileHitRateInfo?.gamesShown})</span>
-                </div>
-              ) : (
-                <span className="font-bold text-borderMedium leading-none text-[16px]">--.--%</span>
-              )}
-            </div>
-
-          </div>
+          )}
         </div>
 
         {/* Line Movement Strip — below stats row, full-width */}
         {player?.intraday_movements && player.intraday_movements.length >= 2 && hasLine && (
-          <div className="hidden md:flex items-center gap-4 px-4 py-1.5 border-t border-white/5 bg-bgElevation0/60">
+          <div className="hidden md:flex items-center gap-4 px-4 py-1.5 bg-bgElevation0/60">
             <span className="text-[9px] font-bold uppercase tracking-widest text-fgSubtle shrink-0 opacity-70">Line Movement</span>
             <div className="flex-1 min-w-0">
               <LineMovementSparkline
