@@ -155,7 +155,7 @@ function App() {
         Promise.all([
           // Lightweight: skip heavy JSONB on initial load
           supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
-          supabase.from('player_props').select('*').eq('game_date', today),
+          supabase.from('player_props').select('*').eq('game_date', today).limit(5000),
           supabase.from('line_movements').select('snapshots').eq('game_date', today).maybeSingle(),
         ])
           .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }, { data: lmRow, error: e3 }]) => {
