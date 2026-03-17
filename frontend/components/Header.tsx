@@ -7,6 +7,8 @@ import { LineMovementSparkline } from './LineMovementSparkline';
 import { HelpModal } from './HelpModal';
 import { createPortal } from 'react-dom';
 import { ASSETS_BASE } from '../utils/config';
+import { MobileViewSwitcher, MobileView } from './MobileViewSwitcher';
+
 
 interface HeaderProps {
   player?: Player;
@@ -18,6 +20,8 @@ interface HeaderProps {
   onToggleFilters?: () => void;
   isFiltersOpen?: boolean;
   historicalGameCount?: number;
+  mobileView: MobileView;
+  onMobileViewChange: (view: MobileView) => void;
 }
 
 const STAT_LABELS: Record<string, string> = {
@@ -76,7 +80,7 @@ const StatItem = ({ label, value, diff, isCompact }: { label: string, value: str
   );
 };
 
-export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine, onToggleFilters, isFiltersOpen, historicalGameCount }) => {
+export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine, onToggleFilters, isFiltersOpen, historicalGameCount, mobileView, onMobileViewChange }) => {
   const [sparklineMode, setSparklineMode] = useState<'line' | 'juice'>('line');
   const [showHelp, setShowHelp] = useState(false);
 
@@ -119,8 +123,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
 
   const statKey = STAT_LABELS[activeTab] || 'PTS';
 
-  const { line, odds, hitRateInfo, statsData, hasLine } = useMemo(() => {
-    if (!player) return { line: 0, odds: { over: 0, under: 0 }, hitRateInfo: null, statsData: [], hasLine: false };
+  const { line, odds, hitRateInfo, statsData, activeStatAverages, hasLine, mobileHitRateInfo } = useMemo(() => {
+    if (!player) return { line: 0, odds: { over: 0, under: 0 }, hitRateInfo: null, statsData: [], activeStatAverages: { graphAvg: 0, seasonAvg: 0, diff: 0 }, hasLine: false };
 
     let prop = player.props?.[statKey]?.[activeSportsbook];
     const hasLine = !!prop;
@@ -137,70 +141,97 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
     const visibleLogs = historicalGameCount ? logs.slice(0, historicalGameCount) : logs;
     const gamesShown = visibleLogs.length;
     const totalGames = logs.length;
-    let hits = 0;
 
-    if (hasLine) {
-      const activeLine = customLine !== null && customLine !== undefined ? customLine : lineVal;
-      visibleLogs.forEach(game => {
-        let val = game[statKey];
-        if (val === undefined) {
-          if (statKey === 'PTS+REB+AST') val = (game.PTS || 0) + (game.REB || 0) + (game.AST || 0);
-          else if (statKey === 'PTS+REB') val = (game.PTS || 0) + (game.REB || 0);
-          else if (statKey === 'PTS+AST') val = (game.PTS || 0) + (game.AST || 0);
-          else if (statKey === 'REB+AST') val = (game.REB || 0) + (game.AST || 0);
+    let hits = 0;
+    let sum = 0;
+    let validGamesCount = 0;
+
+    const activeLine = customLine !== null && customLine !== undefined ? customLine : lineVal;
+
+    // Calculate Mobile Averages & Hit Rate
+    visibleLogs.forEach((game: any) => {
+      let val = game[statKey];
+      if (val === undefined) {
+        if (statKey === 'PTS+REB+AST') val = (game.PTS || 0) + (game.REB || 0) + (game.AST || 0);
+        else if (statKey === 'PTS+REB') val = (game.PTS || 0) + (game.REB || 0);
+        else if (statKey === 'PTS+AST') val = (game.PTS || 0) + (game.AST || 0);
+        else if (statKey === 'REB+AST') val = (game.REB || 0) + (game.AST || 0);
+      }
+      if (val !== undefined) {
+        sum += val;
+        validGamesCount++;
+        if (hasLine && val >= activeLine) {
+          hits++;
         }
-        if (val !== undefined && val >= activeLine) hits++;
-      });
-    }
+      }
+    });
 
     const rate = (hasLine && gamesShown > 0) ? ((hits / gamesShown) * 100).toFixed(1) : '0.0';
+    const graphAvg = validGamesCount > 0 ? (sum / validGamesCount) : 0;
 
-    const seasonStats = player.stats || {};
+    const seasonStats: Record<string, any> = player.stats || {};
+    let seasonAvg = seasonStats[statKey];
 
+    if (seasonAvg === undefined) {
+      if (statKey === 'PTS+REB+AST') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.REB || 0) + (seasonStats.AST || 0);
+      else if (statKey === 'PTS+REB') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.REB || 0);
+      else if (statKey === 'PTS+AST') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.AST || 0);
+      else if (statKey === 'REB+AST') seasonAvg = (seasonStats.REB || 0) + (seasonStats.AST || 0);
+      else seasonAvg = 0;
+    }
+
+    const diff = (historicalGameCount === 82 || historicalGameCount === totalGames) ? 0 : (graphAvg - seasonAvg);
+
+    // Desktop Stats Array Calculation
     const tickerItems = [
       { label: 'PTS', key: 'PTS' },
       { label: 'AST', key: 'AST' },
       { label: 'REB', key: 'REB' },
       { label: '3PM', key: 'FG3M' },
       { label: 'MINS', key: 'MIN' },
-      { label: 'USAGE', key: 'USG_PCT', fallback: '0.0%' }, // Fallback if no usage
+      { label: 'USAGE', key: 'USG_PCT', fallback: '0.0%' },
       { label: 'FGA', key: 'FGA' },
     ].map(item => {
       const seasonVal = seasonStats[item.key] || 0;
-
       let avg = 0;
       if (visibleLogs.length > 0) {
-        const sum = visibleLogs.reduce((acc, g) => acc + (g[item.key] || 0), 0);
-        avg = sum / visibleLogs.length;
+        const itemSum = visibleLogs.reduce((acc, g) => acc + (g[item.key] || 0), 0);
+        avg = itemSum / visibleLogs.length;
       }
-
       if (historicalGameCount === 82 || historicalGameCount === totalGames) {
         avg = item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal;
       }
-
-      const diff = (historicalGameCount === 82 || historicalGameCount === totalGames) ? 0 : avg - (item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal);
+      const itemDiff = (historicalGameCount === 82 || historicalGameCount === totalGames) ? 0 : avg - (item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal);
 
       if (item.key === 'USG_PCT') {
-        return {
-          label: item.label,
-          value: avg > 0 ? `${avg.toFixed(1)}%` : item.fallback,
-          diff: diff
-        };
+        return { label: item.label, value: avg > 0 ? `${avg.toFixed(1)}%` : item.fallback, diff: itemDiff };
       }
-
-      return {
-        label: item.label,
-        value: avg,
-        diff: diff
-      };
+      return { label: item.label, value: avg, diff: itemDiff };
     });
+
+    const mobileGameCount = 12;
+    const mobileLogs = logs.slice(0, mobileGameCount);
+    let mobileHits = 0;
+    mobileLogs.forEach((game: any) => {
+      let val = game[statKey];
+      if (val === undefined) {
+        if (statKey === 'PTS+REB+AST') val = (game.PTS || 0) + (game.REB || 0) + (game.AST || 0);
+        else if (statKey === 'PTS+REB') val = (game.PTS || 0) + (game.REB || 0);
+        else if (statKey === 'PTS+AST') val = (game.PTS || 0) + (game.AST || 0);
+        else if (statKey === 'REB+AST') val = (game.REB || 0) + (game.AST || 0);
+      }
+      if (val !== undefined && hasLine && val >= activeLine) mobileHits++;
+    });
+    const mobileRate = hasLine ? ((mobileHits / mobileGameCount) * 100).toFixed(1) : '0.0';
 
     return {
       line: lineVal,
       odds: oddsVal,
       hitRateInfo: { rate, hits, gamesShown, total: totalGames },
       statsData: tickerItems,
-      hasLine
+      activeStatAverages: { graphAvg, seasonAvg, diff },
+      hasLine,
+      mobileHitRateInfo: { rate: mobileRate, hits: mobileHits, gamesShown: mobileGameCount }
     };
   }, [player, statKey, activeSportsbook, customLine, historicalGameCount]);
 
@@ -230,6 +261,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
   };
 
   if (!player) return <div className="p-4 text-white">Select a player</div>;
+
+
 
   return (
     <>
@@ -262,7 +295,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           <div
             ref={scrollContainerRef}
             onScroll={checkScroll}
-            className="flex items-center gap-4 text-[13px] font-bold text-fgSubtle w-full z-10 relative overflow-x-auto no-scrollbar pt-3 scroll-smooth"
+            className="flex items-center gap-1 lg:gap-4 text-[13px] font-bold text-fgSubtle w-full z-10 relative overflow-x-auto no-scrollbar pt-3 scroll-smooth"
           >
             {/* Spacer so first item doesn't touch the edge fully when scrolling */}
             <div className="w-4 shrink-0" />
@@ -280,9 +313,9 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                       if (hasTabLine) onTabChange(tab)
                     }}
                     className={`
-                        whitespace-nowrap transition-colors flex items-center px-3 pb-3 pt-3 lg:px-2 border-b-[3px] -mb-[1px]
-                        text-[14px] lg:text-[13px]
-                        ${isActive ? 'text-gray-300 border-gray-400' : 'border-transparent'}
+                        whitespace-nowrap transition-colors flex items-center px-2.5 pb-2 pt-2 lg:px-3 lg:pb-3 lg:pt-3 border-b-[2px] lg:border-b-[3px] -mb-[1px]
+                        text-[12px] lg:text-[13px]
+                        ${isActive ? 'text-white border-white' : 'border-transparent'}
                         ${hasTabLine ? 'cursor-pointer hover:text-gray-300 hover:border-borderMedium/50' : 'cursor-not-allowed opacity-40 hover:text-fgSubtle'}
                     `}
                   >
@@ -297,12 +330,19 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
           </div>
         </div>
 
+        {/* Mobile View Switcher */}
+        <MobileViewSwitcher
+          activeView={mobileView}
+          activeTab={activeTab}
+          onViewChange={onMobileViewChange}
+        />
+
         {/* Main Stats Row */}
-        <div className="flex flex-col xl:flex-row items-center w-full bg-bgElevation0 relative z-30 rounded-t-xl min-h-[76px] py-3 xl:py-0 mb-1 gap-3 xl:gap-0">
+        <div className="flex flex-col md:flex-row items-start md:items-center w-full bg-bgElevation0 relative z-30 rounded-t-xl h-auto md:h-[76px] pt-1 pb-0 md:py-0 mb-0">
 
           {/* Section 1: Player Info — sizes to content, never wraps */}
-          <div className="flex items-center gap-3 px-4 h-full w-auto min-w-max justify-start shrink-0">
-            <div className="relative shrink-0 w-[64px] h-[64px]">
+          <div className="flex items-center gap-3 px-4 h-full w-full md:w-auto md:min-w-max justify-start shrink-0">
+            <div className="relative shrink-0 w-[68px] h-[68px] md:w-[64px] md:h-[64px]">
               <div
                 className="w-full h-full rounded-full overflow-hidden"
                 style={gradientStyle}
@@ -422,8 +462,8 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
             </div>
           </div>
 
-          {/* Section 2: Hit Rate */}
-          <div className={`flex flex-col items-center justify-center h-full border-l border-r border-white/5 w-[175px] shrink-0 transition-all duration-300 ${isFiltersOpen ? 'px-2' : 'px-3'}`}>
+          {/* Section 2: Hit Rate (Desktop Only) */}
+          <div className={`hidden md:flex flex-col items-center justify-center h-full border-l border-r border-white/5 w-[175px] shrink-0 transition-all duration-300 ${isFiltersOpen ? 'px-2' : 'px-3'}`}>
             <span className={`text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase transition-all duration-300 ${isFiltersOpen ? 'text-[9px]' : 'text-[10px]'}`}>HIT RATE</span>
             {hasLine ? (
               <span className={`font-bold tracking-tight leading-none mb-1 transition-all duration-300 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'} ${isFiltersOpen ? 'text-[14px]' : 'text-[18px]'}`}>
@@ -437,30 +477,21 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
             </span>
           </div>
 
-          {/* Section 3: Stats Grid (Fills remaining space evenly, horizontally scrollable on mobile) */}
-          <div className={`flex-1 h-full flex items-center w-full min-w-0 transition-all duration-300 overflow-x-auto no-scrollbar whitespace-nowrap ${isFiltersOpen ? 'px-2' : 'px-4'}`}>
-            <div className={`flex items-center justify-start min-w-max xl:min-w-0 xl:justify-between w-full transition-all duration-300 gap-4 lg:gap-2`}>
+          {/* Section 3: Stats Grid (Desktop Only) */}
+          <div className={`hidden md:flex flex-1 h-full items-center w-full min-w-0 transition-all duration-300 ${isFiltersOpen ? 'px-2' : 'px-4'}`}>
+            <div className={`flex items-center justify-between w-full transition-all duration-300 gap-1 lg:gap-2`}>
               {(isFiltersOpen ? statsData.slice(0, 6) : statsData).map((stat, i) => (
                 <StatItem key={stat.label} label={stat.label} value={stat.value} diff={stat.diff} isCompact={isFiltersOpen} />
               ))}
             </div>
           </div>
 
-          {/* Section 4: Actions */}
+          {/* Section 4: Actions (Desktop Only) */}
           {!isFiltersOpen && (
-            <div className="flex items-center gap-4 px-4 h-full w-full xl:w-auto justify-end shrink-0 bg-bgElevation0 relative transition-all duration-300">
-              <HelpCircle
-                className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0"
-                onClick={() => setShowHelp(true)}
-              />
+            <div className="hidden md:flex items-center gap-4 px-4 h-full w-full xl:w-auto justify-end shrink-0 bg-bgElevation0 relative transition-all duration-300">
+              <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" onClick={() => setShowHelp(true)} />
               <div className="relative">
-                <button
-                  onClick={() => {
-                    if (onToggleFilters) {
-                      onToggleFilters();
-                    }
-                  }}
-                  className="flex items-center gap-1.5 bg-bgElevation0 hover:bg-bgElevation1 border border-borderMedium hover:border-borderMuted text-white text-sm font-medium px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                <button onClick={() => { if (onToggleFilters) onToggleFilters(); }} className="flex items-center gap-1.5 bg-bgElevation0 hover:bg-bgElevation1 border border-borderMedium hover:border-borderMuted text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-all whitespace-nowrap">
                   <SlidersHorizontal className="w-4 h-4" />
                   Filters
                 </button>
@@ -468,11 +499,43 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
             </div>
           )}
 
+          {/* --- NEW: Mobile Stats Row (Mobile Only) --- */}
+          <div className="flex md:hidden w-full items-center justify-between px-4 py-2 mt-1 mb-1 border-t border-white/5">
+
+            {/* Season Avg */}
+            <div className="flex flex-col items-center flex-1">
+              <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">SEASON AVG</span>
+              <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (activeStatAverages.seasonAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
+                {typeof activeStatAverages.seasonAvg === 'number' ? activeStatAverages.seasonAvg.toFixed(1) : activeStatAverages.seasonAvg}
+              </span>
+            </div>
+
+            {/* Graph Avg */}
+            <div className="flex flex-col items-center flex-1 border-l border-r border-white/5">
+              <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">L{hitRateInfo?.gamesShown || 0} AVG</span>
+              <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (activeStatAverages.graphAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
+                {typeof activeStatAverages.graphAvg === 'number' ? activeStatAverages.graphAvg.toFixed(1) : activeStatAverages.graphAvg}
+              </span>
+            </div>
+
+            {/* Hit Rate */}
+            <div className="flex flex-col items-center flex-1 min-w-0 px-2">
+              <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
+              {hasLine ? (
+                <div className={`font-bold text-[15px] tracking-tight leading-none flex items-baseline gap-0.5 ${parseFloat(mobileHitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'}`}>
+                  {mobileHitRateInfo?.rate}%<span className="text-[12px] opacity-90 font-semibold">({mobileHitRateInfo?.hits}/{mobileHitRateInfo?.gamesShown})</span>
+                </div>
+              ) : (
+                <span className="font-bold text-borderMedium leading-none text-[16px]">--.--%</span>
+              )}
+            </div>
+
+          </div>
         </div>
 
         {/* Line Movement Strip — below stats row, full-width */}
         {player?.intraday_movements && player.intraday_movements.length >= 2 && hasLine && (
-          <div className="flex items-center gap-4 px-4 py-1.5 border-t border-white/5 bg-bgElevation0/60">
+          <div className="hidden md:flex items-center gap-4 px-4 py-1.5 border-t border-white/5 bg-bgElevation0/60">
             <span className="text-[9px] font-bold uppercase tracking-widest text-fgSubtle shrink-0 opacity-70">Line Movement</span>
             <div className="flex-1 min-w-0">
               <LineMovementSparkline
@@ -488,7 +551,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                 <button
                   key={m}
                   onClick={() => setSparklineMode(m)}
-                  className={`px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider rounded transition-colors min-w-[44px] flex justify-center items-center ${sparklineMode === m ? 'bg-blue500 text-white' : 'text-fgSubtle hover:text-white'}`}
+                  className={`px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded transition-colors ${sparklineMode === m ? 'bg-blue500 text-white' : 'text-fgSubtle hover:text-white'}`}
                 >
                   {m}
                 </button>

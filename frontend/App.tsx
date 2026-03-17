@@ -10,6 +10,8 @@ import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
 import { Player } from './types';
+import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
+
 
 const STAT_LABELS: Record<string, string> = {
   'Points': 'PTS',
@@ -41,6 +43,7 @@ function App() {
   const [activeSeason, setActiveSeason] = useState<'25/26' | '24/25'>('25/26');
   const [archiveGameLogs, setArchiveGameLogs] = useState<Record<string, any[]>>({});
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
+  const [mobileView, setMobileView] = useState<MobileView>('graph');
 
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
@@ -107,32 +110,32 @@ function App() {
       if (!propsMap[row.player_id]) propsMap[row.player_id] = {};
       if (!propsMap[row.player_id][row.stat_type]) propsMap[row.player_id][row.stat_type] = {};
       propsMap[row.player_id][row.stat_type][row.sportsbook] = {
-        line:    row.line,
-        over:    row.over_odds,
-        under:   row.under_odds,
+        line: row.line,
+        over: row.over_odds,
+        under: row.under_odds,
         implied: row.implied,
       };
     }
 
     return (players ?? []).map((p: any) => ({
-      id:              p.id,
-      name:            p.name,
-      team:            p.team,
-      position:        p.position,
-      stats:           p.stats         ?? {},
-      game_log:        p.game_log      ?? [],   // null until lazy-loaded
-      props:           propsMap[p.id]  ?? {},
+      id: p.id,
+      name: p.name,
+      team: p.team,
+      position: p.position,
+      stats: p.stats ?? {},
+      game_log: p.game_log ?? [],   // null until lazy-loaded
+      props: propsMap[p.id] ?? {},
       historical_odds: {},                       // null until lazy-loaded on player select
       intraday_movements: [],
       // Zone fields — null until lazy-loaded
-      shooting_zones:              null,
-      assist_zones:                null,
-      opp_def_zones:               null,
-      opp_def_zones_positional:    null,
-      opp_assist_zones:            null,
+      shooting_zones: null,
+      assist_zones: null,
+      opp_def_zones: null,
+      opp_def_zones_positional: null,
+      opp_assist_zones: null,
       opp_assist_zones_positional: null,
-      shot_type_analysis:          null,
-      play_type_analysis:          p.play_type_analysis ?? [],
+      shot_type_analysis: null,
+      play_type_analysis: p.play_type_analysis ?? [],
     }));
   }
 
@@ -162,11 +165,11 @@ function App() {
             if (e1) console.error('[supabase] players error:', e1);
             if (e2) console.error('[supabase] player_props error:', e2);
             if (e3 && e3.code !== 'PGRST116') console.error('[supabase] line_movements error:', e3);
-            
+
             const intraday_movements = lmRow?.snapshots || [];
             const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
             const enhancedFeed = mergedFeed.map(p => ({ ...p, intraday_movements }));
-            
+
             setRawData(enhancedFeed);
             setLoading(false);
           })
@@ -207,9 +210,9 @@ function App() {
     // Only fetch if 24/25 is active, and the current player exists, and we haven't fetched their logs yet
     if (activeSeason === '24/25' && currentPlayer && !archiveGameLogs[currentPlayer.id]) {
       setIsLoadingArchive(true);
-      
+
       const playerId = currentPlayer.id;
-      
+
       if (USE_DB) {
         import('./utils/supabase').then(({ supabase }) => {
           supabase.from('archive_gamelogs')
@@ -230,9 +233,9 @@ function App() {
             });
         });
       } else {
-         // Fallback logic could go here if `USE_DB` goes false, 
-         // but since we are exclusively doing DB limits, we'll keep it empty.
-         setIsLoadingArchive(false);
+        // Fallback logic could go here if `USE_DB` goes false, 
+        // but since we are exclusively doing DB limits, we'll keep it empty.
+        setIsLoadingArchive(false);
       }
     }
   }, [activeSeason, currentPlayer, archiveGameLogs, USE_DB]);
@@ -365,11 +368,12 @@ function App() {
               onToggleFilters={() => setIsFiltersOpen(!isFiltersOpen)}
               isFiltersOpen={isFiltersOpen}
               historicalGameCount={isFiltersOpen ? filterGameCount : 29}
+              mobileView={mobileView}
+              onMobileViewChange={setMobileView}
             />
 
             {/* Subtle separator removed */}
-
-            <div className="p-0">
+            <div className={`p-0 ${mobileView !== 'graph' ? 'hidden md:block' : ''}`}>
               <BarChart
                 player={displayPlayer}
                 activeTab={activeTab}
@@ -408,9 +412,9 @@ function App() {
 
         {/* Backdrop for mobile filters */}
         {isFiltersOpen && (
-          <div 
-             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[45] lg:hidden"
-             onClick={() => setIsFiltersOpen(false)}
+          <div
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[45] lg:hidden"
+            onClick={() => setIsFiltersOpen(false)}
           />
         )}
 
@@ -418,41 +422,46 @@ function App() {
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-10 gap-4">
 
           {['Rebounds', '1Q Rebounds', 'Double Double', 'Triple Double', 'Blocks', 'Steals', 'Turnovers', 'Fantasy'].includes(activeTab) ? (
-            <div className="xl:col-span-6 flex flex-col gap-4 h-full">
+            <div className={`xl:col-span-6 flex flex-col gap-4 h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>
               <SimilarPlayers similarGames={undefined} />
             </div>
           ) : (
             <>
-              {/* Left Column in Grid */}
-              <div className="xl:col-span-4 flex flex-col gap-4 h-full">
+              {/* Left Column: Shooting or Assist Zones + Play Types */}
+              <div className={`xl:col-span-4 flex flex-col gap-4 h-full ${['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab)
+                ? mobileView !== 'assists' ? 'hidden md:flex' : ''
+                : mobileView !== 'shooting' ? 'hidden md:flex' : ''
+                }`}>
                 {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
                   <AssistZones player={displayPlayer} />
                 ) : (
                   <ShootingZones player={displayPlayer} />
                 )}
-                
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
-                  <div className="flex-1 min-h-0">
+                  <div className={`flex-1 min-h-0 ${mobileView !== 'types' ? 'hidden md:block' : ''}`}>
                     <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
                   </div>
                 )}
               </div>
 
-              {/* Right Column in Grid */}
+              {/* Right Column: Shot Types + Similar */}
               <div className="xl:col-span-6 flex flex-col gap-4 h-full">
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
+                  <div className={`${mobileView !== 'types' ? 'hidden md:block' : ''}`}>
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
+                  </div>
+                )}
+                {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
+                  <div className={`${mobileView !== 'shooting' ? 'hidden md:block' : ''}`}>
                     <ShotTypeAnalysis shotTypes={(() => {
                       if (!displayPlayer?.shot_type_analysis) return undefined;
                       const sta = displayPlayer.shot_type_analysis;
                       const p = sta.player || {};
                       const d = sta.opp_def || {};
-
                       const cs = p.catch_and_shoot;
                       const pu = p.pull_up;
                       const lt10 = p.less_than_10_ft;
-
                       if (!cs && !pu && !lt10) return undefined;
-
                       return [
                         {
                           type: 'C&S',
@@ -480,9 +489,9 @@ function App() {
                         }
                       ];
                     })()} />
+                  </div>
                 )}
-                
-                <div className="flex-1 min-h-0 xl:col-span-12 w-full h-full">
+                <div className={`flex-1 min-h-0 xl:col-span-12 w-full h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>
                   <SimilarPlayers similarGames={undefined} />
                 </div>
               </div>

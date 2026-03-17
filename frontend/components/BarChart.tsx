@@ -101,7 +101,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         const line = prop?.line || 0;
 
         // 2. Prepare Data (Use historicalGameCount passed from App)
-        const numGames = (isMobile && !isFiltersOpen) ? 14 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
+        const numGames = (isMobile && !isFiltersOpen) ? 12 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
         const log = player.game_log.slice(0, numGames).reverse();
 
         const data: any[] = log.map(game => {
@@ -244,7 +244,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     const currentVisibleCount = (isMobile && !isFiltersOpen) ? 14 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
     // 1. Dynamic Spacing: For <= 19 games, map length based on 20 slots. For > 19, use full count.
-    const layoutSlots = currentVisibleCount <= 19 ? (isMobile ? 15 : 20) : chartData.length;
+    const layoutSlots = currentVisibleCount <= 19 ? (isMobile ? 13 : 20) : chartData.length;
     const spacing = AVAILABLE_WIDTH / layoutSlots;
 
     // Calculate total layout width and padding for centering
@@ -261,7 +261,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     }
 
     // Dynamic Bar Width
-    const barWidth = Math.min(spacing * 0.85, 32);
+    const barWidth = Math.min(spacing * (isMobile ? 1.0 : 0.85), isMobile ? 40 : 32);
 
     // Dynamic Scale: Calculate max value to ensure bars don't clip the top
     const maxScore = Math.max(...chartData.map(d => Number(d.score || 0)), lineValue + 5, 10);
