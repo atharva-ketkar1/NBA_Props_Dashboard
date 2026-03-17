@@ -276,6 +276,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         if (USE_DB) {
             // Fetch from Supabase games table (today + tomorrow)
             const today = new Date();
+            if (today.getHours() < 9) today.setDate(today.getDate() - 1);
             const yyyy = today.getFullYear();
             const mm = String(today.getMonth() + 1).padStart(2, '0');
             const dd = String(today.getDate()).padStart(2, '0');

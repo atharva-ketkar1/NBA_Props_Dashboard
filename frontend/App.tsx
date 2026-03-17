@@ -142,6 +142,11 @@ function App() {
       // ── Supabase path ──
       import('./utils/supabase').then(({ supabase }) => {
         const date = new Date();
+        // NBA day rollover: Keep showing yesterday's data until 9 AM local time
+        // to allow the 6 AM cron jobs to fully populate Supabase for the new day.
+        if (date.getHours() < 9) {
+          date.setDate(date.getDate() - 1);
+        }
         const yyyy = date.getFullYear();
         const mm = String(date.getMonth() + 1).padStart(2, '0');
         const dd = String(date.getDate()).padStart(2, '0');

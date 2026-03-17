@@ -53,6 +53,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     useEffect(() => {
         if (USE_DB) {
             const today = new Date();
+            if (today.getHours() < 9) today.setDate(today.getDate() - 1);
             const yyyy = today.getFullYear();
             const mm = String(today.getMonth() + 1).padStart(2, '0');
             const dd = String(today.getDate()).padStart(2, '0');
@@ -163,6 +164,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         if (activeSeason !== '24/25') {
             let upcomingOpponent = 'TBD';
             const today = new Date();
+            if (today.getHours() < 9) today.setDate(today.getDate() - 1);
             const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
             let upcomingMonth = fallbackMonths[today.getMonth()];
             let upcomingDay = String(today.getDate()).padStart(2, '0');
