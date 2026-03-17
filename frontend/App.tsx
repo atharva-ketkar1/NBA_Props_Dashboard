@@ -151,11 +151,18 @@ function App() {
           // Lightweight: skip heavy JSONB on initial load
           supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
           supabase.from('player_props').select('*').eq('game_date', today),
+          supabase.from('line_movements').select('snapshots').eq('game_date', today).maybeSingle(),
         ])
-          .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }]) => {
+          .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }, { data: lmRow, error: e3 }]) => {
             if (e1) console.error('[supabase] players error:', e1);
             if (e2) console.error('[supabase] player_props error:', e2);
-            setRawData(mergeFeedFromDB(playersRows ?? [], propsRows ?? []));
+            if (e3 && e3.code !== 'PGRST116') console.error('[supabase] line_movements error:', e3);
+            
+            const intraday_movements = lmRow?.snapshots || [];
+            const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
+            const enhancedFeed = mergedFeed.map(p => ({ ...p, intraday_movements }));
+            
+            setRawData(enhancedFeed);
             setLoading(false);
           })
           .catch(err => {
