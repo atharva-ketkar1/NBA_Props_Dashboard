@@ -15,7 +15,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({ similarGames }) 
          <div className="flex justify-between items-start mb-4">
             <div>
                <div className="flex items-center gap-2 mb-1">
-                  <h3 className="text-sm font-bold text-white">Similar Players Pts vs 76ers</h3>
+                  <h3 className="text-sm font-bold text-white">NOT INTEGRATED YET</h3>
                   <Info className="w-3.5 h-3.5 text-gray-400" />
                </div>
                <p className="text-xs text-gray-500">25/26 Season</p>
