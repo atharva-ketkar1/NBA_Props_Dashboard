@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import argparse
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import sys
@@ -36,6 +36,12 @@ PROP_MAP = {
     'pra': 'PTS+REB+AST', 'pr': 'PTS+REB', 'pa': 'PTS+AST', 'ra': 'REB+AST', 'stocks': 'STL+BLK'
 }
 
+
+def normalize_lookup_name(name):
+    if not isinstance(name, str):
+        return ""
+    return name.lower().strip().replace(".", "").replace("'", "")
+
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
@@ -47,7 +53,7 @@ def load_name_to_id_map():
             with open(MASTER_PATH, 'r') as f:
                 master_feed = json.load(f)
                 for p in master_feed:
-                    name = p.get("name", "").lower().strip()
+                    name = normalize_lookup_name(p.get("name", ""))
                     pid = str(p.get("id", ""))
                     if name and pid:
                         mapping[name] = pid
@@ -90,7 +96,7 @@ def scrape_and_shape_odds(is_closing=False):
     
     # Process FanDuel first
     for row in fd_data:
-        name = row.get("player", "").lower().strip()
+        name = normalize_lookup_name(row.get("player", ""))
         pid = name_to_id.get(name, name)
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
@@ -116,7 +122,7 @@ def scrape_and_shape_odds(is_closing=False):
 
     # Process DraftKings
     for row in dk_data:
-        name = row.get("player", "").lower().strip()
+        name = normalize_lookup_name(row.get("player", ""))
         pid = name_to_id.get(name, name)
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
@@ -223,13 +229,13 @@ def main(dry_run=False):
 
     if not games_to_scrape:
         logger.info("No games within the 10-minute closing window.")
-        return
+        return False
         
     logger.info(f"Triggering closing lines scrape for games: {[g['matchup'] for g in games_to_scrape]}")
     
     if dry_run:
         logger.info("DRY RUN: Exiting before actual scrape.")
-        return
+        return True
         
     # Run the expensive logic
     try:
@@ -254,15 +260,6 @@ def main(dry_run=False):
         # SnapshotManager ALSO writes a final intraday snapshot for "pre_game"
         sm.write_snapshot("pre_game", players_data, bypass_dedupe=True)
         
-        # Mark games as scraped in state
-        for g in games_to_scrape:
-            # We add it to scraped games regardless of success inside SnapshotManager
-            # to prevent a failing API from constantly looping every 5 mins.
-            state["scraped_games"].append(g["game_id"])
-            
-        save_cron_state(state)
-        logger.info("Closing sweeps complete!")
-
         # Upsert fresh props to Supabase (non-fatal)
         # DATA_DIR is defined at module level in this file
         try:
@@ -279,9 +276,19 @@ def main(dry_run=False):
             )
         except Exception as e:
             logger.warning(f"Supabase market upsert failed (non-fatal): {e}")
+            return False
+
+        for g in games_to_scrape:
+            if g["game_id"] not in state["scraped_games"]:
+                state["scraped_games"].append(g["game_id"])
+
+        save_cron_state(state)
+        logger.info("Closing sweeps complete!")
+        return True
 
     except Exception as e:
         logger.error(f"Failed to execute scrape: {e}")
+        return False
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cron script for closing lines")

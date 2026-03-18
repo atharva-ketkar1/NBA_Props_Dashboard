@@ -46,6 +46,7 @@ def run_pipeline_if_needed(now, state, dry_run=False):
     if now.hour >= 6:
         if state.get("last_pipeline_date") != today_str:
             logger.info("Priority 1 Match: Running 6:00 AM Full Pipeline.")
+            pipeline_ok = True
             if not dry_run:
                 try:
                     sys.path.append(BASE_DIR)
@@ -53,21 +54,24 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                     run_pipeline.main()
                 except Exception as e:
                     logger.error(f"Pipeline failed: {e}")
+                    pipeline_ok = False
 
                 # Purge stale player_props and line_movements rows (rolling 3-day window)
                 # historical_odds is intentionally NOT purged — it's our full-season archive
-                try:
-                    from datetime import date, timedelta
-                    from utils.supabase_client import get_supabase_client
-                    cutoff = (date.today() - timedelta(days=3)).isoformat()
-                    sb = get_supabase_client()
-                    sb.table("player_props").delete().lt("game_date", cutoff).execute()
-                    sb.table("line_movements").delete().lt("game_date", cutoff).execute()
-                    logger.info(f"Pruned player_props and line_movements rows older than {cutoff}")
-                except Exception as e:
-                    logger.warning(f"stale DB cleanup failed (non-fatal): {e}")
+                if pipeline_ok:
+                    try:
+                        from utils.supabase_client import get_supabase_client
+                        cutoff = (datetime.today().date() - timedelta(days=3)).isoformat()
+                        sb = get_supabase_client()
+                        sb.table("player_props").delete().lt("game_date", cutoff).execute()
+                        sb.table("line_movements").delete().lt("game_date", cutoff).execute()
+                        logger.info(f"Pruned player_props and line_movements rows older than {cutoff}")
+                    except Exception as e:
+                        logger.warning(f"stale DB cleanup failed (non-fatal): {e}")
 
-            # Update state regardless of internal failure to prevent endless looping
+            if not pipeline_ok:
+                return False
+
             state["last_pipeline_date"] = today_str
             # Reset scraped games for the new day
             state["scraped_closing_games"] = []
@@ -122,6 +126,7 @@ def check_closing_lines(now, state, dry_run=False):
             
     if games_to_scrape:
         logger.info(f"Priority 2 Match: Running Closing Lines for {[g['matchup'] for g in games_to_scrape]}")
+        closing_ok = True
         if not dry_run:
             try:
                 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -129,11 +134,14 @@ def check_closing_lines(now, state, dry_run=False):
                 # Modify the state of the cron_closing_lines strictly locally if needed,
                 # but we will just call scrape_and_shape_odds directly via a wrapper to ensure single run.
                 # Since cron_closing_lines.main() manages its own state, it's safer to just call it.
-                cron_closing_lines.main(dry_run=False)
+                closing_ok = bool(cron_closing_lines.main(dry_run=False))
             except Exception as e:
                 logger.error(f"Closing lines failed: {e}")
+                closing_ok = False
                 
-        # Register them as scraped in our master state
+        if not closing_ok:
+            return False
+
         for g in games_to_scrape:
             if g["game_id"] not in state["scraped_closing_games"]:
                 state["scraped_closing_games"].append(g["game_id"])
