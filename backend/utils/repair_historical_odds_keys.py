@@ -1,36 +1,28 @@
 import argparse
 import json
 import os
-import re
-import unicodedata
+import sys
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MASTER_PATH = os.path.join(BASE_DIR, "data", "current", "master_feed.json")
 HISTORICAL_ODDS_PATH = os.path.join(BASE_DIR, "data", "archive", "historical_odds.json")
 
+sys.path.append(BASE_DIR)
+from utils.player_matcher import PlayerMatcher
 
-def normalize_lookup_name(name):
-    if not isinstance(name, str):
-        return ""
-    name = name.lower().strip()
-    name = unicodedata.normalize("NFKD", name).encode("ASCII", "ignore").decode("utf-8")
-    name = name.replace(".", "").replace("'", "")
-    name = re.sub(r'\b(jr|sr|ii|iii|iv|v)\b', '', name).strip()
-    return " ".join(name.split())
-
-
-def load_name_to_id_map():
+def load_matcher():
     with open(MASTER_PATH, "r") as f:
         master_feed = json.load(f)
 
-    mapping = {}
+    players_metadata = []
     for player in master_feed:
-        name = normalize_lookup_name(player.get("name", ""))
-        player_id = str(player.get("id", ""))
-        if name and player_id:
-            mapping[name] = player_id
-    return mapping
+        players_metadata.append({
+            "PLAYER_ID": str(player.get("id", "")),
+            "PLAYER_NAME": player.get("name", ""),
+            "TEAM_ABBREVIATION": player.get("team", ""),
+        })
+    return PlayerMatcher(players_metadata)
 
 
 def merge_records(existing, incoming):
@@ -49,7 +41,7 @@ def repair_historical_odds_keys():
     with open(HISTORICAL_ODDS_PATH, "r") as f:
         historical = json.load(f)
 
-    name_to_id = load_name_to_id_map()
+    matcher = load_matcher()
     repaired = 0
 
     for game_date, players in historical.items():
@@ -58,8 +50,11 @@ def repair_historical_odds_keys():
 
         rewritten = {}
         for raw_key, record in players.items():
-            normalized_key = normalize_lookup_name(raw_key)
-            player_id = name_to_id.get(normalized_key, str(raw_key))
+            player_id = matcher.match_player(
+                record.get("name") or str(raw_key),
+                record.get("team", "UNK"),
+            )
+            player_id = str(player_id) if player_id else str(raw_key)
 
             if player_id in rewritten:
                 rewritten[player_id] = merge_records(rewritten[player_id], record)

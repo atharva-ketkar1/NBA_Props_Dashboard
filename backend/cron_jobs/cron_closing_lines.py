@@ -14,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scrapers'))
 from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
+from utils.player_matcher import PlayerMatcher
 from utils.snapshot_manager import SnapshotManager
 from utils.upsert_market_history import (
     upsert_historical_odds_from_file,
@@ -52,24 +53,28 @@ def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
 def load_master_feed_maps():
-    """Load player name/id/team mappings from master_feed.json."""
-    name_to_id = {}
+    """Load player/team lookups and a robust matcher from master_feed.json."""
+    players_metadata = []
     id_to_team = {}
     if os.path.exists(MASTER_PATH):
         try:
             with open(MASTER_PATH, 'r') as f:
                 master_feed = json.load(f)
                 for p in master_feed:
-                    name = normalize_lookup_name(p.get("name", ""))
                     pid = str(p.get("id", ""))
                     team = p.get("team", "")
-                    if name and pid:
-                        name_to_id[name] = pid
-                        if team:
-                            id_to_team[pid] = team
+                    name = p.get("name", "")
+                    if pid and name:
+                        players_metadata.append({
+                            "PLAYER_ID": pid,
+                            "PLAYER_NAME": name,
+                            "TEAM_ABBREVIATION": team,
+                        })
+                    if pid and team:
+                        id_to_team[pid] = team
         except Exception as e:
             logger.error(f"Error loading master feed for IDs: {e}")
-    return name_to_id, id_to_team
+    return PlayerMatcher(players_metadata), id_to_team
 
 def scrape_and_shape_odds(is_closing=False):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
@@ -101,13 +106,16 @@ def scrape_and_shape_odds(is_closing=False):
     if not dk_data: dk_data = []
     if not fd_data: fd_data = []
         
-    name_to_id, id_to_team = load_master_feed_maps()
+    matcher, id_to_team = load_master_feed_maps()
     players_dict = {}
     
     # Process FanDuel first
     for row in fd_data:
-        name = normalize_lookup_name(row.get("player", ""))
-        pid = name_to_id.get(name, name)
+        pid = matcher.match_player(
+            row.get("player", ""),
+            row.get("team", "UNK"),
+        )
+        pid = str(pid) if pid else normalize_lookup_name(row.get("player", ""))
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
         if not prop: continue
@@ -134,8 +142,12 @@ def scrape_and_shape_odds(is_closing=False):
 
     # Process DraftKings
     for row in dk_data:
-        name = normalize_lookup_name(row.get("player", ""))
-        pid = name_to_id.get(name, name)
+        pid = matcher.match_player(
+            row.get("player", ""),
+            row.get("team", "UNK"),
+            row.get("team_options"),
+        )
+        pid = str(pid) if pid else normalize_lookup_name(row.get("player", ""))
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
         if not prop: continue
