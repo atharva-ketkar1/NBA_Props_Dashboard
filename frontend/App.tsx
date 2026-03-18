@@ -44,6 +44,7 @@ function App() {
   const [archiveGameLogs, setArchiveGameLogs] = useState<Record<string, any[]>>({});
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>('graph');
+  const [currentSlateTeams, setCurrentSlateTeams] = useState<string[]>([]);
 
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
@@ -167,15 +168,19 @@ function App() {
             supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
             supabase.from('player_props').select('*').eq('game_date', today).limit(5000),
             supabase.from('line_movements').select('snapshots').eq('game_date', today).maybeSingle(),
+            supabase.from('games').select('home_team_tricode, away_team_tricode').eq('game_date', today),
           ])
-            .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }, { data: lmRow, error: e3 }]) => {
+            .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }, { data: lmRow, error: e3 }, { data: gamesRows, error: e4 }]) => {
               if (cancelled) return;
               if (e1) console.error('[supabase] players error:', e1);
               if (e2) console.error('[supabase] player_props error:', e2);
               if (e3 && e3.code !== 'PGRST116') console.error('[supabase] line_movements error:', e3);
+              if (e4) console.error('[supabase] games error:', e4);
 
               const intraday_movements = lmRow?.snapshots || [];
               const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
+              const slateTeams = Array.from(new Set((gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
+              setCurrentSlateTeams(slateTeams);
 
               setRawData(prev => {
                 const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
@@ -222,9 +227,16 @@ function App() {
       Promise.all([
         fetch(`${apiUrl}/data/current/master_feed.json`).then(res => res.json()),
         fetch(`${apiUrl}/data/archive/historical_odds.json`).then(res => res.json()).catch(() => ({})),
-        fetch(`${apiUrl}/data/current/line_movements_today.json`).then(res => res.json()).catch(() => ({ snapshots: [] }))
+        fetch(`${apiUrl}/data/current/line_movements_today.json`).then(res => res.json()).catch(() => ({ snapshots: [] })),
+        fetch(`${apiUrl}/data/current/nba_dashboard_games.json`).then(res => res.json()).catch(() => ([]))
       ])
-        .then(([masterFeed, historicalOdds, lineMovements]) => {
+        .then(([masterFeed, historicalOdds, lineMovements, games]) => {
+          const today = getDashboardDate();
+          const slateTeams = Array.from(new Set((Array.isArray(games) ? games : [])
+            .filter((g: any) => g?.game_date === today)
+            .flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode])
+            .filter(Boolean)));
+          setCurrentSlateTeams(slateTeams);
           const enhancedFeed = (Array.isArray(masterFeed) ? masterFeed : []).map((player: Player) => ({
             ...player,
             historical_odds: historicalOdds,
@@ -298,30 +310,26 @@ function App() {
   // 3. Smart Default Selection (Run once on data load)
   useEffect(() => {
     if (playersWithProps.length > 0 && !isInitialized) {
-      // Find the earliest date any player plays
-      let earliestDateStr = "9999-99-99";
-      playersWithProps.forEach(p => {
-        const gameDate = p.game_log?.[0]?.GAME_DATE; // Logs are usually sorted descending, so [0] might be last game, but wait, we need the *next* game. 
-        // Typically in master_feed, 'props' implies they play soon. 
-        // We can just sort all players with props by Season PTS to find a "Star Player"
-      });
+      const eligiblePlayers = currentSlateTeams.length > 0
+        ? playersWithProps.filter(p => currentSlateTeams.includes(p.team))
+        : playersWithProps;
 
-      // Simple robust approach: Out of all players with props today/tomorrow, find the one with highest season PTS
+      const pool = eligiblePlayers.length > 0 ? eligiblePlayers : playersWithProps;
       let bestIndex = 0;
       let maxPts = -1;
 
-      playersWithProps.forEach((p, idx) => {
+      pool.forEach((p) => {
         const pts = (p.stats && p.stats.PTS) ? Number(p.stats.PTS) : 0;
         if (pts > maxPts) {
           maxPts = pts;
-          bestIndex = idx;
+          bestIndex = playersWithProps.findIndex(candidate => candidate.id === p.id);
         }
       });
 
       setSelectedIndex(bestIndex);
       setIsInitialized(true);
     }
-  }, [playersWithProps, isInitialized]);
+  }, [playersWithProps, currentSlateTeams, isInitialized]);
 
   // 4. Lazy-load heavy JSONB + historical odds when player changes (DB mode only)
   useEffect(() => {
