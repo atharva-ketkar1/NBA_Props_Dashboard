@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import unicodedata
 
 
@@ -14,7 +15,9 @@ def normalize_lookup_name(name):
         return ""
     name = name.lower().strip()
     name = unicodedata.normalize("NFKD", name).encode("ASCII", "ignore").decode("utf-8")
-    return name.replace(".", "").replace("'", "")
+    name = name.replace(".", "").replace("'", "")
+    name = re.sub(r'\b(jr|sr|ii|iii|iv|v)\b', '', name).strip()
+    return " ".join(name.split())
 
 
 def load_name_to_id_map():

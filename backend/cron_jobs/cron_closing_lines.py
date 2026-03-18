@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import argparse
+import re
 import unicodedata
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -43,7 +44,9 @@ def normalize_lookup_name(name):
         return ""
     name = name.lower().strip()
     name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8')
-    return name.replace(".", "").replace("'", "")
+    name = name.replace(".", "").replace("'", "")
+    name = re.sub(r'\b(jr|sr|ii|iii|iv|v)\b', '', name).strip()
+    return " ".join(name.split())
 
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
