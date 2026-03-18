@@ -305,11 +305,19 @@ function App() {
       // Fetch historical odds for this player
       supabase
         .from('historical_odds')
-        .select('game_date, props')
+        .select('game_date, props, source')
         .eq('player_id', playerId)
         .then(({ data, error }) => {
           if (error) { console.error('[supabase] historical_odds error:', error); return; }
-          const map = Object.fromEntries((data ?? []).map(r => [r.game_date, r.props]));
+          const map = Object.fromEntries((data ?? []).map(r => [
+            r.game_date,
+            {
+              [String(playerId)]: {
+                props: r.props,
+                source: r.source,
+              }
+            }
+          ]));
           setRawData(prev => prev.map(p => p.id === playerId ? { ...p, historical_odds: map } : p));
         });
     });

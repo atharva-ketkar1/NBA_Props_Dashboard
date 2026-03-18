@@ -36,17 +36,9 @@ def run_intraday_snapshot(label="intraday"):
                 )
                 
                 # Also upsert line movements blob to Supabase
-                import json
-                from utils.supabase_client import get_supabase_client
+                from utils.upsert_market_history import upsert_line_movements_from_file
                 lm_path = os.path.join(_data_dir, "line_movements_today.json")
-                if os.path.exists(lm_path):
-                    with open(lm_path, 'r') as f:
-                        lm_data = json.load(f)
-                    date_str = lm_data.get("date", datetime.now().strftime("%Y-%m-%d"))
-                    get_supabase_client().table("line_movements").upsert({
-                        "game_date": date_str,
-                        "snapshots": lm_data.get("snapshots", [])
-                    }).execute()
+                upsert_line_movements_from_file(lm_path)
                     
             except Exception as e:
                 logger.warning(f"Supabase upsert failed (non-fatal): {e}")

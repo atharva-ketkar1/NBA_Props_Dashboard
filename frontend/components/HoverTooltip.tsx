@@ -54,9 +54,11 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
             // Find the player in that date record (by numeric or stringified ID)
             const playerRecord = dateRecord[String(player.id)] || dateRecord[player.id];
             
-            if (playerRecord && playerRecord.props && playerRecord.props.props) {
-                // The props tree is nested: playerRecord.props.props[statKey]
-                const statProps = playerRecord.props.props[statKey];
+            if (playerRecord && playerRecord.props) {
+                // Support both the legacy JSON shape (props.props[statKey])
+                // and the normalized DB shape (props[statKey]).
+                const propsTree = playerRecord.props.props || playerRecord.props;
+                const statProps = propsTree?.[statKey];
 
                 if (statProps) {
                     // Mappings from frontend abbreviation to backend database keys

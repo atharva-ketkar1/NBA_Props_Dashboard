@@ -13,6 +13,10 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__f
 from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
 from utils.snapshot_manager import SnapshotManager
+from utils.upsert_market_history import (
+    upsert_historical_odds_from_file,
+    upsert_line_movements_from_file,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("CronClosingLines")
@@ -268,8 +272,13 @@ def main(dry_run=False):
                 fd_path=os.path.join(DATA_DIR, "fanduel.csv"),
                 stats_path=os.path.join(DATA_DIR, "season_stats.csv"),
             )
+            upsert_line_movements_from_file(os.path.join(DATA_DIR, "line_movements_today.json"))
+            upsert_historical_odds_from_file(
+                os.path.join(BASE_DIR, "data", "archive", "historical_odds.json"),
+                get_et_now().strftime("%Y-%m-%d"),
+            )
         except Exception as e:
-            logger.warning(f"Supabase props upsert failed (non-fatal): {e}")
+            logger.warning(f"Supabase market upsert failed (non-fatal): {e}")
 
     except Exception as e:
         logger.error(f"Failed to execute scrape: {e}")
