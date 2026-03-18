@@ -45,9 +45,10 @@ def normalize_lookup_name(name):
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
-def load_name_to_id_map():
-    """Load player name to ID mapping from master_feed.json"""
-    mapping = {}
+def load_master_feed_maps():
+    """Load player name/id/team mappings from master_feed.json."""
+    name_to_id = {}
+    id_to_team = {}
     if os.path.exists(MASTER_PATH):
         try:
             with open(MASTER_PATH, 'r') as f:
@@ -55,11 +56,14 @@ def load_name_to_id_map():
                 for p in master_feed:
                     name = normalize_lookup_name(p.get("name", ""))
                     pid = str(p.get("id", ""))
+                    team = p.get("team", "")
                     if name and pid:
-                        mapping[name] = pid
+                        name_to_id[name] = pid
+                        if team:
+                            id_to_team[pid] = team
         except Exception as e:
             logger.error(f"Error loading master feed for IDs: {e}")
-    return mapping
+    return name_to_id, id_to_team
 
 def scrape_and_shape_odds(is_closing=False):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
@@ -91,7 +95,7 @@ def scrape_and_shape_odds(is_closing=False):
     if not dk_data: dk_data = []
     if not fd_data: fd_data = []
         
-    name_to_id = load_name_to_id_map()
+    name_to_id, id_to_team = load_master_feed_maps()
     players_dict = {}
     
     # Process FanDuel first
@@ -102,10 +106,12 @@ def scrape_and_shape_odds(is_closing=False):
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
         if not prop: continue
         
+        canonical_team = id_to_team.get(str(pid), row.get("team", ""))
+
         if pid not in players_dict:
             players_dict[pid] = {
                 "name": row.get("player", ""),
-                "team": row.get("team", ""),
+                "team": canonical_team,
                 "props": {},
                 "fanduel_inPlay": row.get("inPlay", False),
                 "fanduel_available": True
@@ -128,17 +134,19 @@ def scrape_and_shape_odds(is_closing=False):
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
         if not prop: continue
         
+        canonical_team = id_to_team.get(str(pid), row.get("team", ""))
+
         if pid not in players_dict:
             players_dict[pid] = {
                 "name": row.get("player", ""),
-                "team": row.get("team", ""),
+                "team": canonical_team,
                 "props": {},
                 "draftkings_available": True
             }
         else:
             players_dict[pid]["draftkings_available"] = True
             if players_dict[pid]["team"] == "":
-                players_dict[pid]["team"] = row.get("team", "")
+                players_dict[pid]["team"] = canonical_team
                 
         if prop not in players_dict[pid]["props"]:
             players_dict[pid]["props"][prop] = {}

@@ -120,18 +120,18 @@ def extract_team_name(logo_url):
         # Example URL: .../teams/cleveland_cavaliers.png or .../teams/cavaliers.png
         # We try to grab the last part
         slug = logo_url.split('/')[-1].replace('.png', '').replace('_jersey', '').lower()
-        
-        # Check for direct map keys in the slug
-        for key, tricode in TEAM_MAP.items():
-            if key in slug:
-                return tricode
-                
-        # Parse slug parts (e.g., "cleveland_cavaliers" -> ["cleveland", "cavaliers"])
+
+        # Parse slug parts first so "hornets" does not get misread as "nets".
         parts = slug.split('_')
         for part in parts:
             if part in TEAM_MAP:
                 return TEAM_MAP[part]
-                
+
+        # Fall back to full-slug substring matching for non-standard formats.
+        for key, tricode in TEAM_MAP.items():
+            if key in slug:
+                return tricode
+
         return "UNK"
     except: 
         return "UNK"

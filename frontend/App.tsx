@@ -98,6 +98,20 @@ function App() {
   // Set VITE_USE_DB=false (or omit) to fall back to master_feed.json.
   // ──────────────────────────────────────────────────────────────
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
+  const DB_POLL_MS = 10 * 60 * 1000;
+
+  function getDashboardDate() {
+    const date = new Date();
+    // NBA day rollover: Keep showing yesterday's data until 9 AM local time
+    // to allow the 6 AM cron jobs to fully populate Supabase for the new day.
+    if (date.getHours() < 7) {
+      date.setDate(date.getDate() - 1);
+    }
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
 
   /** Reconstruct the Player[] shape from Supabase rows. */
   function mergeFeedFromDB(
@@ -142,42 +156,66 @@ function App() {
   // 1. Initial data fetch
   useEffect(() => {
     if (USE_DB) {
-      // ── Supabase path ──
-      import('./utils/supabase').then(({ supabase }) => {
-        const date = new Date();
-        // NBA day rollover: Keep showing yesterday's data until 9 AM local time
-        // to allow the 6 AM cron jobs to fully populate Supabase for the new day.
-        if (date.getHours() < 9) {
-          date.setDate(date.getDate() - 1);
-        }
-        const yyyy = date.getFullYear();
-        const mm = String(date.getMonth() + 1).padStart(2, '0');
-        const dd = String(date.getDate()).padStart(2, '0');
-        const today = `${yyyy}-${mm}-${dd}`;
+      let cancelled = false;
 
-        Promise.all([
-          // Lightweight: skip heavy JSONB on initial load
-          supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
-          supabase.from('player_props').select('*').eq('game_date', today).limit(5000),
-          supabase.from('line_movements').select('snapshots').eq('game_date', today).maybeSingle(),
-        ])
-          .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }, { data: lmRow, error: e3 }]) => {
-            if (e1) console.error('[supabase] players error:', e1);
-            if (e2) console.error('[supabase] player_props error:', e2);
-            if (e3 && e3.code !== 'PGRST116') console.error('[supabase] line_movements error:', e3);
+      const fetchDbSnapshot = (isInitial = false) => {
+        import('./utils/supabase').then(({ supabase }) => {
+          const today = getDashboardDate();
 
-            const intraday_movements = lmRow?.snapshots || [];
-            const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
-            const enhancedFeed = mergedFeed.map(p => ({ ...p, intraday_movements }));
+          Promise.all([
+            // Lightweight: skip heavy JSONB on initial load
+            supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
+            supabase.from('player_props').select('*').eq('game_date', today).limit(5000),
+            supabase.from('line_movements').select('snapshots').eq('game_date', today).maybeSingle(),
+          ])
+            .then(([{ data: playersRows, error: e1 }, { data: propsRows, error: e2 }, { data: lmRow, error: e3 }]) => {
+              if (cancelled) return;
+              if (e1) console.error('[supabase] players error:', e1);
+              if (e2) console.error('[supabase] player_props error:', e2);
+              if (e3 && e3.code !== 'PGRST116') console.error('[supabase] line_movements error:', e3);
 
-            setRawData(enhancedFeed);
-            setLoading(false);
-          })
-          .catch(err => {
-            console.error('Supabase fetch failed:', err);
-            setLoading(false);
-          });
-      });
+              const intraday_movements = lmRow?.snapshots || [];
+              const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
+
+              setRawData(prev => {
+                const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
+                return mergedFeed.map(p => {
+                  const existing = prevMap.get(String(p.id));
+                  return {
+                    ...p,
+                    ...existing,
+                    id: p.id,
+                    name: p.name,
+                    team: p.team,
+                    position: p.position,
+                    stats: p.stats,
+                    props: p.props,
+                    play_type_analysis: p.play_type_analysis,
+                    intraday_movements,
+                  };
+                });
+              });
+
+              if (isInitial) {
+                setLoading(false);
+              }
+            })
+            .catch(err => {
+              if (cancelled) return;
+              console.error('Supabase fetch failed:', err);
+              if (isInitial) {
+                setLoading(false);
+              }
+            });
+        });
+      };
+
+      fetchDbSnapshot(true);
+      const intervalId = window.setInterval(() => fetchDbSnapshot(false), DB_POLL_MS);
+      return () => {
+        cancelled = true;
+        window.clearInterval(intervalId);
+      };
     } else {
       // ── JSON fallback (original behavior, unchanged) ──
       const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';

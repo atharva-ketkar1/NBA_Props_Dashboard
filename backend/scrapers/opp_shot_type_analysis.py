@@ -10,6 +10,7 @@ HEADERS = {
     "accept-encoding": "gzip, deflate, br, zstd",
     "accept-language": "en-US,en;q=0.9",
     "connection": "keep-alive",
+    "host": "stats.nba.com",
     "origin": "https://www.nba.com",
     "referer": "https://www.nba.com/",
     "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
@@ -30,19 +31,7 @@ def create_session():
 SESSION = create_session()
 
 def fetch_dataframe(url, params):
-    import os
-    from dotenv import load_dotenv
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
-    load_dotenv(dotenv_path=env_path)
-
-    full_url = requests.Request('GET', url, params=params).prepare().url
-
-    proxy_url = os.getenv("PBPSTATS_PROXY_URL")
-    if proxy_url:
-        r = SESSION.get(proxy_url, params={"url": full_url}, headers=HEADERS, timeout=20)
-    else:
-        r = SESSION.get(full_url, headers=HEADERS, timeout=20)
-
+    r = SESSION.get(url, headers=HEADERS, params=params, timeout=20)
     r.raise_for_status()
     data = r.json()["resultSets"][0]
     return pd.DataFrame(data["rowSet"], columns=data["headers"])

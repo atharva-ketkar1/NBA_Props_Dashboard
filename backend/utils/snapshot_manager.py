@@ -52,6 +52,61 @@ class SnapshotManager:
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
 
+    def _load_schedule(self):
+        return self._read_json(self.schedule_path, default={})
+
+    def _get_active_schedule_context(self):
+        schedule = self._load_schedule()
+        games = schedule.get("games", []) if isinstance(schedule.get("games", []), list) else []
+
+        active_games = [g for g in games if not g.get("is_final", False)]
+        active_teams = set()
+        active_dates = set()
+
+        for game in active_games:
+            home = game.get("home_team_tricode")
+            away = game.get("away_team_tricode")
+            game_date = game.get("game_date")
+            if home:
+                active_teams.add(home)
+            if away:
+                active_teams.add(away)
+            if game_date:
+                active_dates.add(game_date)
+
+        return {
+            "schedule": schedule,
+            "games": games,
+            "active_games": active_games,
+            "active_teams": active_teams,
+            "active_dates": active_dates,
+        }
+
+    def _filter_players_to_active_schedule(self, players_data, active_teams):
+        if not isinstance(players_data, dict):
+            return {}
+        if not active_teams:
+            return players_data
+
+        filtered = {}
+        for player_id, pdata in players_data.items():
+            team = pdata.get("team", "")
+            if team in active_teams:
+                filtered[player_id] = pdata
+        return filtered
+
+    def _carry_forward_snapshots(self, existing_data, active_teams):
+        carried = []
+        for snapshot in existing_data.get("snapshots", []):
+            filtered_players = self._filter_players_to_active_schedule(snapshot.get("players", {}), active_teams)
+            if filtered_players:
+                carried.append({
+                    "timestamp": snapshot.get("timestamp"),
+                    "label": snapshot.get("label"),
+                    "players": filtered_players,
+                })
+        return carried
+
     def write_snapshot(self, label, players_data, bypass_dedupe=False):
         """Append an intraday snapshot with optional deduplication bypass."""
         now = get_et_now()
@@ -61,13 +116,17 @@ class SnapshotManager:
         # This prevents a reset at midnight when opening lines for tomorrow's
         # games are scraped tonight — the snapshot is filed under tomorrow's
         # game date and survives until the 6 AM pipeline flips the schedule.
-        schedule = self._read_json(self.schedule_path, default={})
-        today_date = schedule.get("date") or now.strftime("%Y-%m-%d")
+        schedule_ctx = self._get_active_schedule_context()
+        today_date = now.strftime("%Y-%m-%d")
+        active_teams = schedule_ctx["active_teams"]
 
         data = self._read_json(self.line_movements_path, default={"date": today_date, "snapshots": []})
 
         if data.get("date") != today_date:
-            data = {"date": today_date, "snapshots": []}
+            data = {
+                "date": today_date,
+                "snapshots": self._carry_forward_snapshots(data, active_teams),
+            }
 
         # Deduplication Guardrail - skipped if bypass_dedupe is True
         if not bypass_dedupe and data.get("snapshots"):
@@ -81,10 +140,14 @@ class SnapshotManager:
                 except ValueError:
                     pass
 
+        filtered_players = self._filter_players_to_active_schedule(players_data, active_teams)
+        if not filtered_players:
+            return False
+
         new_snapshot = {
             "timestamp": timestamp_str,
             "label": label,
-            "players": players_data
+            "players": filtered_players
         }
         data["snapshots"].append(new_snapshot)
         self._write_json(self.line_movements_path, data)
@@ -95,8 +158,8 @@ class SnapshotManager:
         now = get_et_now()
         today_date = now.strftime("%Y-%m-%d")
         data = self._read_json(self.line_movements_path, default={"date": today_date, "snapshots": []})
-        
-        if data.get("date") != today_date or not data.get("snapshots"):
+
+        if not data.get("snapshots"):
             return None
             
         # Iterate backwards through snapshots
@@ -124,7 +187,7 @@ class SnapshotManager:
         now = get_et_now()
         today_date = now.strftime("%Y-%m-%d")
         
-        schedule = self._read_json(self.schedule_path, default={})
+        schedule = self._load_schedule()
         schedule_games = {g["game_id"]: g for g in schedule.get("games", [])}
         
         historical_odds = self._read_json(self.historical_odds_path, default={})

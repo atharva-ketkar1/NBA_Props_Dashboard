@@ -8,16 +8,12 @@ from nba_api.stats.endpoints import leaguegamelog
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 # ==========================================
 # CONFIGURATION
 # ==========================================
-UPDATE_WINDOW_DAYS = 2
+UPDATE_WINDOW_DAYS = 5
 MAX_HISTORY_GAMES = 85
-MAX_WORKERS = 1
+MAX_WORKERS = 4
 
 # Default season to scrape. The output CSV will be named gamelogs_{SEASON}.csv automatically.
 SEASON = "2025-26"
@@ -64,15 +60,6 @@ def _safe_pct_convert(df, cols):
     return df
 
 
-def make_proxied_request(url, headers=None, timeout=60):
-    proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
-    if proxy_url:
-        params = {"url": url}
-        return requests.get(proxy_url, params=params, headers=headers, timeout=timeout)
-    else:
-        return requests.get(url, headers=headers, timeout=timeout)
-
-
 def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     """
     Fetches Drives, Passing, Rebounding, 1Q Stats, 1H Stats, and Advanced Stats
@@ -112,7 +99,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                     f"&PerMode=PerGame&PlayerOrTeam=Player&PtMeasureType={PT}"
                     f"&Season={season}&SeasonType=Regular%20Season&TeamID=0"
                 )
-                resp = make_proxied_request(url, headers=HEADERS, timeout=60)
+                resp = requests.get(url, headers=HEADERS, timeout=30)
 
                 if resp.status_code == 500:
                     if is_full_refresh:
@@ -170,7 +157,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
-            resp = make_proxied_request(q1_url, headers=HEADERS, timeout=60)
+            resp = requests.get(q1_url, headers=HEADERS, timeout=30)
 
             if resp.status_code == 500:
                 if is_full_refresh:
@@ -224,7 +211,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
-            resp = make_proxied_request(h1_url, headers=HEADERS, timeout=60)
+            resp = requests.get(h1_url, headers=HEADERS, timeout=30)
 
             if resp.status_code == 500:
                 if is_full_refresh:
@@ -278,7 +265,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
-            resp = make_proxied_request(adv_url, headers=HEADERS, timeout=60)
+            resp = requests.get(adv_url, headers=HEADERS, timeout=30)
 
             if resp.status_code == 500:
                 if is_full_refresh:
@@ -393,30 +380,23 @@ def run_scrape(output_path=None, season=None):
     df_logs = None
     for attempt in range(3):
         try:
-            log_url = (
-                f"https://stats.nba.com/stats/leaguegamelog"
-                f"?Counter=0&DateFrom=&DateTo=&Direction=DESC&LeagueID=00"
-                f"&PlayerOrTeam=P&Season={season}&SeasonType=Regular%20Season&Sorter=DATE"
+            game_log = leaguegamelog.LeagueGameLog(
+                season=season,
+                player_or_team_abbreviation='P',
+                season_type_all_star='Regular Season',
+                direction='DESC',
+                sorter='DATE',
+                headers=HEADERS,
+                timeout=15
             )
-            
-            resp = make_proxied_request(log_url, headers=HEADERS, timeout=60)
-            
-            if resp.status_code != 200:
-                raise ValueError(f"Bad status code: {resp.status_code}")
-                
-            r = resp.json()
-            api_headers = r['resultSets'][0].get('headers', [])
-            row_set = r['resultSets'][0].get('rowSet', [])
-            
-            df_logs = pd.DataFrame(row_set, columns=api_headers)
+            df_logs = game_log.get_data_frames()[0]
             df_logs['GAME_DATE'] = pd.to_datetime(df_logs['GAME_DATE'])
             df_logs['DATE_STR'] = df_logs['GAME_DATE'].dt.strftime('%m/%d/%Y')
             break
-            
         except Exception as e:
             print(f"   Base log attempt {attempt + 1} failed: {type(e).__name__} ({e})")
             if attempt < 2:
-                time.sleep(15)
+                time.sleep(3)
 
     if df_logs is None:
         print("   Fatal Error: Could not fetch base LeagueGameLog after 3 attempts.")
@@ -465,36 +445,33 @@ def run_scrape(output_path=None, season=None):
         print("      Data is up to date (No completed games to fetch).")
         return
 
-    print(f"      Launching 1 worker sequentially for {len(target_dates)} dates using memory-safe incremental appending...")
-    
-    import gc
-
+    print(f"      Launching {workers} workers for {len(target_dates)} dates...")
     advanced_data_list = []
     failed_dates = []
     none_dates = []
 
-    # THE MISSING LOOP: Process each date one by one
-    for i, date_str in enumerate(target_dates):
-        try:
-            daily_merged, missing_endpoints = fetch_tracking_data_for_date(date_str, is_full_refresh=full_refresh, season=season)
-            
-            if daily_merged is not None:
-                advanced_data_list.append(daily_merged)
-            
-            if not missing_endpoints and daily_merged is not None:
-                print(f"      [{i+1}/{len(target_dates)}] Completed {date_str}")
-            elif daily_merged is None:
-                print(f"      [{i+1}/{len(target_dates)}] NULL RESULT (all endpoints failed) {date_str}")
-                none_dates.append(date_str)
-            else:
-                print(f"      [{i+1}/{len(target_dates)}] Partial {date_str} (Missing: {missing_endpoints})")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(fetch_tracking_data_for_date, d, full_refresh, season): d for d in target_dates}
+
+        for i, future in enumerate(as_completed(future_map)):
+            date_str = future_map[future]
+            try:
+                daily_merged, missing_endpoints = future.result()
+                
+                if daily_merged is not None:
+                    advanced_data_list.append(daily_merged)
+                
+                if not missing_endpoints and daily_merged is not None:
+                    print(f"      [{i+1}/{len(target_dates)}] Completed {date_str}")
+                elif daily_merged is None:
+                    print(f"      [{i+1}/{len(target_dates)}] NULL RESULT (all endpoints failed) {date_str}")
+                    none_dates.append(date_str)
+                else:
+                    print(f"      [{i+1}/{len(target_dates)}] Partial {date_str} (Missing: {missing_endpoints})")
+                    failed_dates.append(date_str)
+            except Exception as e:
+                print(f"      Failed critically {date_str}: {e}")
                 failed_dates.append(date_str)
-        except Exception as e:
-            print(f"      Failed critically {date_str}: {e}")
-            failed_dates.append(date_str)
-            
-        # Clean up RAM immediately after each day
-        gc.collect()
 
     all_retry_dates = failed_dates + none_dates
     if none_dates:
@@ -540,9 +517,9 @@ def run_scrape(output_path=None, season=None):
                 os.remove(failed_manifest_path)
                 print("      Cleared the resolved failed manifest.")
 
-    # THE MISSING MERGE & SAVE LOGIC
     if advanced_data_list:
         df_advanced_new = pd.concat(advanced_data_list, ignore_index=True)
+        # Drop duplicates, keeping the most recent fetch (the retry pass)
         df_advanced_new = df_advanced_new.drop_duplicates(subset=['PLAYER_ID', 'DATE_STR'], keep='last')
         
         df_logs_filtered = df_logs[df_logs['DATE_STR'].isin(target_dates)]
@@ -577,6 +554,7 @@ def run_scrape(output_path=None, season=None):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         final_df.to_csv(output_path, index=False)
         print(f"   Updated logs saved! (Rows: {len(final_df)})")
+
 
 if __name__ == "__main__":
     import sys
