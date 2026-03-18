@@ -42,12 +42,18 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
         return
 
     rows = []
+    skipped_keys = []
     for player_id, record in date_blob.items():
         if not isinstance(record, dict):
             continue
+        try:
+            normalized_player_id = int(player_id)
+        except (TypeError, ValueError):
+            skipped_keys.append(str(player_id))
+            continue
         rows.append(
             {
-                "player_id": int(player_id),
+                "player_id": normalized_player_id,
                 "player_name": record.get("name"),
                 "team": record.get("team"),
                 "game_date": game_date,
@@ -60,6 +66,14 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
     if not rows:
         logger.info("No historical odds rows prepared for %s", game_date)
         return
+
+    if skipped_keys:
+        logger.warning(
+            "Skipping %d historical odds rows with unresolved player ids for %s: %s",
+            len(skipped_keys),
+            game_date,
+            ", ".join(skipped_keys[:10]),
+        )
 
     get_supabase_client().table("historical_odds").upsert(
         rows,
