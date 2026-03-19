@@ -15,6 +15,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__f
 from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
 from utils.player_matcher import PlayerMatcher
+from utils.prop_date_resolver import resolve_prop_game_date
 from utils.snapshot_manager import SnapshotManager
 from utils.upsert_market_history import (
     upsert_historical_odds_from_file,
@@ -198,7 +199,13 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         if not prop: continue
 
         canonical_team = id_to_team.get(str(pid), row.get("team", ""))
-        row_game_date = normalize_game_date(row.get("game_date"))
+        row_game_date, _ = resolve_prop_game_date(
+            row.get("game_date"),
+            canonical_team=canonical_team,
+            game_label=row.get("game", ""),
+            schedule_rows=schedule.get("games", []) if isinstance(schedule, dict) else [],
+            now_et=get_et_now(),
+        )
         schedule_game = schedule_maps["team_date_to_game"].get((canonical_team, row_game_date))
         active_team_game = schedule_maps["active_game_by_team"].get(canonical_team)
 
@@ -247,7 +254,13 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         if not prop: continue
 
         canonical_team = id_to_team.get(str(pid), row.get("team", ""))
-        row_game_date = normalize_game_date(row.get("game_date"))
+        row_game_date, _ = resolve_prop_game_date(
+            row.get("game_date"),
+            canonical_team=canonical_team,
+            game_label=row.get("game", ""),
+            schedule_rows=schedule.get("games", []) if isinstance(schedule, dict) else [],
+            now_et=get_et_now(),
+        )
         schedule_game = schedule_maps["team_date_to_game"].get((canonical_team, row_game_date))
         active_team_game = schedule_maps["active_game_by_team"].get(canonical_team)
 

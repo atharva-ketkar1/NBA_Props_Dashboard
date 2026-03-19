@@ -101,6 +101,14 @@ export interface PlayerProps {
   };
 }
 
+export interface PlayerPropsByDate {
+  [statType: string]: {
+    [sportsbook: string]: {
+      [gameDate: string]: PropLine;
+    };
+  };
+}
+
 export interface Player {
   id: number;
   name: string;
@@ -109,6 +117,8 @@ export interface Player {
   stats: PlayerStats;
   game_log: GameLog[];
   props: PlayerProps;
+  props_by_date?: PlayerPropsByDate;
+  active_game_date?: string | null;
   historical_odds?: Record<string, any>;
   intraday_movements?: any[];
   [key: string]: any; // Allow generic injection like shot_type_analysis

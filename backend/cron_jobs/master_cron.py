@@ -22,6 +22,21 @@ SCHEDULE_PATH = os.path.join(DATA_DIR, "today_schedule.json")
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
+
+def parse_mock_time(value):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "mock time must be ISO format like 2026-03-18T21:20:00 or 2026-03-18T21:20:00-04:00"
+        ) from exc
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ZoneInfo("America/New_York"))
+    return dt.astimezone(ZoneInfo("America/New_York"))
+
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -77,7 +92,8 @@ def run_pipeline_if_needed(now, state, dry_run=False):
             state["last_pipeline_date"] = today_str
             # Reset scraped games for the new day
             state["scraped_closing_games"] = []
-            save_state(state)
+            if not dry_run:
+                save_state(state)
             return True
             
     return False
@@ -147,8 +163,9 @@ def check_closing_lines(now, state, dry_run=False):
         for g in games_to_scrape:
             if g["game_id"] not in state["scraped_closing_games"]:
                 state["scraped_closing_games"].append(g["game_id"])
-        
-        save_state(state)
+
+        if not dry_run:
+            save_state(state)
         return [g['matchup'] for g in games_to_scrape]
         
     return False
@@ -175,7 +192,8 @@ def run_intraday_if_needed(now, state, dry_run=False):
             return False
                 
         state["last_intraday_time"] = current_timestamp
-        save_state(state)
+        if not dry_run:
+            save_state(state)
         return True
         
     return False
@@ -230,15 +248,23 @@ def main(dry_run=False, mock_time=None):
             return
             
         # Check Priority 3
-        run_intraday_if_needed(now, state, dry_run=dry_run)
+        ran_intraday = run_intraday_if_needed(now, state, dry_run=dry_run)
+        if ran_intraday:
+            return
+
+        logger.info("No priority matched at this time.")
         
     finally:
-        if not mock_time: # don't release lock iteratively if we're simulating fast
-            release_lock()
+        release_lock()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="Don't actually scrape, just log intent.")
+    parser.add_argument(
+        "--mock-time",
+        type=parse_mock_time,
+        help="Simulate an ET time in ISO format, e.g. 2026-03-18T21:20:00",
+    )
     args = parser.parse_args()
     
-    main(dry_run=args.dry_run)
+    main(dry_run=args.dry_run, mock_time=args.mock_time)

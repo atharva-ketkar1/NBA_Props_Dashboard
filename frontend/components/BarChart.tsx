@@ -5,6 +5,7 @@ import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ASSETS_BASE } from '../utils/config';
+import { getDashboardDate, getDashboardScheduleDates } from '../utils/dashboardDate';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -59,26 +60,21 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
 
     useEffect(() => {
+        const propDates = Array.from(new Set(
+            Object.values(player?.props_by_date ?? {}).flatMap((statEntry) =>
+                Object.values(statEntry ?? {}).flatMap((bookEntry) =>
+                    Object.keys(bookEntry ?? {}).filter((dateKey) => dateKey !== '__undated__')
+                )
+            )
+        )).sort();
+        const relevantDates = propDates.length > 0 ? propDates : getDashboardScheduleDates();
+
         if (USE_DB) {
-            const today = new Date();
-            if (today.getHours() < 9) today.setDate(today.getDate() - 1);
-            const yyyy = today.getFullYear();
-            const mm = String(today.getMonth() + 1).padStart(2, '0');
-            const dd = String(today.getDate()).padStart(2, '0');
-            const todayStr = `${yyyy}-${mm}-${dd}`;
-
-            const tomorrow = new Date(today);
-            tomorrow.setDate(today.getDate() + 1);
-            const tyyyy = tomorrow.getFullYear();
-            const tmm = String(tomorrow.getMonth() + 1).padStart(2, '0');
-            const tdd = String(tomorrow.getDate()).padStart(2, '0');
-            const tomorrowStr = `${tyyyy}-${tmm}-${tdd}`;
-
             import('../utils/supabase').then(({ supabase }) => {
                 supabase
                     .from('games')
                     .select('*')
-                    .in('game_date', [todayStr, tomorrowStr])
+                    .in('game_date', relevantDates)
                     .then(({ data, error }) => {
                         if (error) { console.error('[supabase] games error:', error); return; }
                         setScheduleData(data ?? []);
@@ -88,10 +84,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
             fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
                 .then(res => res.json())
-                .then(data => setScheduleData(data))
+                .then(data => setScheduleData((data as Game[]).filter(g => relevantDates.includes(g.game_date))))
                 .catch(err => console.error("Error loading schedule:", err));
         }
-    }, []);
+    }, [player]);
 
     const { chartData, lineValue, graphAvgSecondary, seasonAvgSecondary, isRankOverlay } = useMemo(() => {
         if (!player || !player.game_log) return { chartData: [], lineValue: 0, graphAvgSecondary: 0, seasonAvgSecondary: 0, isRankOverlay: false };
@@ -171,11 +167,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         // 3. Append upcoming game dynamically
         if (activeSeason !== '24/25') {
             let upcomingOpponent = 'TBD';
-            const today = new Date();
-            if (today.getHours() < 9) today.setDate(today.getDate() - 1);
+            const dashboardDate = getDashboardDate();
             const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            let upcomingMonth = fallbackMonths[today.getMonth()];
-            let upcomingDay = String(today.getDate()).padStart(2, '0');
+            let upcomingMonth = fallbackMonths[Number(dashboardDate.slice(5, 7)) - 1];
+            let upcomingDay = dashboardDate.slice(8, 10);
 
             let upcomingSecondaryRank = null;
             if (isRankOverlay) {

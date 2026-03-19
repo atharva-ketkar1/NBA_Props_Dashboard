@@ -5,6 +5,8 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import os
 
+DASHBOARD_LOOKAHEAD_DAYS = 14
+
 
 def upsert_games_to_db(raw_data: list) -> None:
     """Upsert today's/tomorrow's game schedule into Supabase games table.
@@ -187,30 +189,29 @@ def parse_game_data(game):
     
     return game_data
 
-def get_dashboard_data():
-    """Get today's games from the schedule"""
+def get_dashboard_data(days_ahead: int = DASHBOARD_LOOKAHEAD_DAYS):
+    """Get upcoming games from the schedule for the dashboard window."""
     print("Fetching NBA schedule data...")
     data = get_nba_schedule()
     
-    # 1. Determine "Today" and "Tomorrow" in US Eastern Time (ET)
+    # 1. Determine the dashboard schedule window in US Eastern Time (ET)
     et_tz = ZoneInfo("America/New_York")
     today_et = datetime.now(et_tz)
-    tomorrow_et = today_et + timedelta(days=1)
-    
-    # Format matches the 'gameDate' field: "MM/DD/YYYY 00:00:00"
-    target_date_str = today_et.strftime("%m/%d/%Y 00:00:00")
-    tomorrow_date_str = tomorrow_et.strftime("%m/%d/%Y 00:00:00")
-    print(f"Looking for games on: {target_date_str} and {tomorrow_date_str}")
+    target_date_strings = [
+        (today_et + timedelta(days=offset)).strftime("%m/%d/%Y 00:00:00")
+        for offset in range(days_ahead)
+    ]
+    print(f"Looking for games from {target_date_strings[0]} through {target_date_strings[-1]}")
     
     game_dates = data.get('leagueSchedule', {}).get('gameDates', [])
     todays_games_list = []
     
-    # 2. Find the object for today's and tomorrow's date
+    # 2. Find the objects within the dashboard window
     for date_obj in game_dates:
-        if date_obj.get('gameDate') in [target_date_str, tomorrow_date_str]:
+        if date_obj.get('gameDate') in target_date_strings:
             todays_games_list.extend(date_obj.get('games', []))
             
-    print(f"Found {len(todays_games_list)} games for today and tomorrow")
+    print(f"Found {len(todays_games_list)} games in the next {days_ahead} days")
     
     all_games_data = []
     

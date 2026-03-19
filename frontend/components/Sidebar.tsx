@@ -3,6 +3,7 @@ import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-reac
 import { Player, Game } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
+import { getPreferredSportsbookProp, playerHasPropForDate } from '../utils/propResolution';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -69,7 +70,8 @@ interface SidebarProps {
     onClose?: () => void;
     players: Player[];
     activePlayerId?: number;
-    onSelectPlayer: (id: number) => void;
+    activeGameDate?: string | null;
+    onSelectPlayer: (id: number, gameDate?: string | null) => void;
     activeTab?: string;
     onTabChange?: (tab: string) => void;
 }
@@ -89,15 +91,10 @@ const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-7 h-7" }: { teamId: numb
     );
 };
 
-const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, statFilter: string, isActive: boolean, onClick: () => void }) => {
-    const book =
-        player.props?.[statFilter]?.['dk']
-            ? 'dk'
-            : player.props?.[statFilter]?.['fd']
-                ? 'fd'
-                : null;
-
-    const prop = book ? player.props?.[statFilter]?.[book] : null;
+const PlayerRow = ({ player, statFilter, gameDate, isActive, onClick }: { player: Player, statFilter: string, gameDate?: string | null, isActive: boolean, onClick: () => void }) => {
+    const preferredProp = getPreferredSportsbookProp(player, statFilter, gameDate);
+    const book = preferredProp?.book ?? null;
+    const prop = preferredProp?.prop ?? null;
     const hasProp = !!prop;
     const line = prop?.line;
 
@@ -180,8 +177,8 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, onSelectPlayer: (id: number) => void, statFilter: string }> = ({
-    game, isExpanded, onToggle, activePlayerId, onSelectPlayer, statFilter
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, onSelectPlayer: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
+    game, isExpanded, onToggle, activePlayerId, activeGameDate, onSelectPlayer, statFilter
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
@@ -241,12 +238,13 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                         game.players.map(player => (
                             <div key={player.id} className="relative">
                                 {/* Selected Player Blue Line */}
-                                {player.id === activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
+                                {player.id === activePlayerId && game.game_date === activeGameDate && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
                                 <PlayerRow
                                     player={player}
                                     statFilter={statFilter}
-                                    isActive={player.id === activePlayerId}
-                                    onClick={() => onSelectPlayer(player.id)}
+                                    gameDate={game.game_date}
+                                    isActive={player.id === activePlayerId && game.game_date === activeGameDate}
+                                    onClick={() => onSelectPlayer(player.id, game.game_date)}
                                 />
                             </div>
                         ))
@@ -263,7 +261,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
 export const Sidebar: React.FC<SidebarProps> = ({
     isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
-    activeTab = 'Points', onTabChange = () => { }
+    activeGameDate, activeTab = 'Points', onTabChange = () => { }
 }) => {
     const statFilter = STAT_MAP[activeTab] || 'PTS';
     const [gameFilter, setGameFilter] = useState('All Games');
@@ -273,27 +271,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
     // Fetch live game data
     useEffect(() => {
+        if (!players.length) return;
+
+        const propDates = Array.from(new Set(
+            players.flatMap(p =>
+                Object.values(p.props_by_date ?? {}).flatMap(statEntry =>
+                    Object.values(statEntry as Record<string, Record<string, any>>).flatMap(bookEntry =>
+                        Object.keys(bookEntry).filter(k => k !== '__undated__')
+                    )
+                )
+            )
+        )).sort();
+
+        if (!propDates.length) return;
+
         if (USE_DB) {
-            // Fetch from Supabase games table (today + tomorrow)
-            const today = new Date();
-            if (today.getHours() < 9) today.setDate(today.getDate() - 1);
-            const yyyy = today.getFullYear();
-            const mm = String(today.getMonth() + 1).padStart(2, '0');
-            const dd = String(today.getDate()).padStart(2, '0');
-            const todayStr = `${yyyy}-${mm}-${dd}`;
-
-            const tomorrow = new Date(today);
-            tomorrow.setDate(today.getDate() + 1);
-            const tyyyy = tomorrow.getFullYear();
-            const tmm = String(tomorrow.getMonth() + 1).padStart(2, '0');
-            const tdd = String(tomorrow.getDate()).padStart(2, '0');
-            const tomorrowStr = `${tyyyy}-${tmm}-${tdd}`;
-
             import('../utils/supabase').then(({ supabase }) => {
                 supabase
                     .from('games')
                     .select('*')
-                    .in('game_date', [todayStr, tomorrowStr])
+                    .in('game_date', propDates)
                     .then(({ data, error }) => {
                         if (error) { console.error('[supabase] games error:', error); return; }
                         const sorted = (data ?? []).sort((a: Game, b: Game) =>
@@ -307,22 +304,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
             fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
                 .then(res => res.json())
                 .then(data => {
-                    const sortedGames = data.sort((a: Game, b: Game) => {
-                        return new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime();
-                    });
+                    const sortedGames = (data as Game[])
+                        .filter(g => propDates.includes(g.game_date))
+                        .sort((a, b) =>
+                            new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+                        );
                     setScheduleData(sortedGames);
                 })
                 .catch(err => console.error("Error loading schedule:", err));
         }
-    }, []);
+    }, [players]);
 
     // Dynamically generate prop options and game options
     const propOptions = useMemo(() => {
         const propSet = new Set<string>();
         players.forEach(p => {
-            if (p.props) {
-                Object.keys(p.props).forEach(key => propSet.add(key));
-            }
+            Object.keys(p.props ?? {}).forEach(key => propSet.add(key));
+            Object.keys(p.props_by_date ?? {}).forEach(key => propSet.add(key));
         });
 
         // Exact tabs from Header
@@ -381,10 +379,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 if (!isInGame) return false;
 
                 // Prop Match
-                const statProps = p.props?.[statFilter];
-                if (!statProps) return false;
-                const propGameDate = Object.values(statProps).find(Boolean)?.game_date;
-                if (propGameDate && game.game_date && propGameDate !== game.game_date) return false;
+                if (!playerHasPropForDate(p, statFilter, game.game_date)) return false;
 
                 // Search Match (Player Name)
                 if (searchTerm && !gameMatchesSearch) {
@@ -428,13 +423,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 - Visuals: Dark background, border right
             */}
             <div className={`
-                fixed inset-y-0 left-0 z-[60] w-[300px] bg-bgElevation0 
+                fixed inset-y-0 left-0 z-[60] w-[300px] bg-bgElevation0 overflow-hidden
                 transform transition-transform duration-300 ease-in-out
                 ${isOpen ? 'translate-x-0' : '-translate-x-full'}
 
                 lg:static lg:inset-auto lg:translate-x-0 
                 lg:flex lg:flex-col lg:z-0
-                lg:sticky lg:top-0 lg:max-h-screen lg:self-start
+                lg:sticky lg:top-4 lg:h-[calc(100vh-5rem)] lg:self-start
 
                 flex flex-col gap-3 p-4
             `}>
@@ -470,7 +465,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </div>
 
                 {/* Game List */}
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar -mr-2">
+                <div className="min-h-0 flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar -mr-2">
                     {processedGames.length === 0 && (
                         <div className="text-center py-8 text-gray-600 text-xs">
                             {searchTerm ? 'No matches found.' : 'Loading games...'}
@@ -487,6 +482,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 isExpanded={!!isExpanded}
                                 onToggle={() => toggleGame(game.game_id)}
                                 activePlayerId={activePlayerId}
+                                activeGameDate={activeGameDate}
                                 onSelectPlayer={onSelectPlayer}
                                 statFilter={statFilter}
                             />

@@ -7,8 +7,10 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from utils.player_matcher import PlayerMatcher
+from utils.prop_date_resolver import resolve_prop_game_date
 
 logger = logging.getLogger(__name__)
+UNDATED_PROP_KEY = '__undated__'
 
 # ==========================================
 # DB HELPERS
@@ -581,7 +583,8 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                 "opp_def": opp_shot_type_def
             },
             "play_type_analysis": play_type_array,
-            "props": {}
+            "props": {},
+            "props_by_date": {}
         }
 
     # Free df_stats and spatial/JSON objects now that master_data is fully built
@@ -605,7 +608,6 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             # Extract basic info
             player_name = row.get('player', '')
             team_context = row.get('team', 'UNK')
-            row_game_date = normalize_game_date(row.get('game_date'))
             
             # Extract team options if available (from DK scraper update)
             team_opts = []
@@ -621,26 +623,45 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             
             if not pid or pid not in master_data: continue
             canonical_team = master_data[pid]['team']
+            row_game_date, _ = resolve_prop_game_date(
+                row.get('game_date'),
+                canonical_team=canonical_team,
+                game_label=row.get('game', ''),
+                schedule_rows=sorted_games,
+                now_et=now_et,
+            )
             active_game_date = active_game_date_by_team.get(canonical_team)
-            if active_game_date and row_game_date and row_game_date != active_game_date:
-                continue
 
             # Map prop type (e.g. 'points' -> 'PTS')
             raw_prop = row.get('prop_type', '')
             clean_key = PROP_MAP.get(raw_prop, raw_prop).upper()
-            
-            # Initialize dict structure
-            if clean_key not in master_data[pid]['props']:
-                master_data[pid]['props'][clean_key] = {}
-            
-            # Add the line
-            master_data[pid]['props'][clean_key][book_name] = {
+            prop_date_key = row_game_date or UNDATED_PROP_KEY
+            prop_payload = {
                 "line": row.get('line'),
                 "over": row.get('over_odds'),
                 "under": row.get('under_odds'),
                 "implied": row.get('implied_prob', 0),
-                "game_date": row_game_date or active_game_date,
+                "game_date": row_game_date or None,
             }
+
+            # Preserve all available game dates for multi-game / future-game UI paths.
+            if clean_key not in master_data[pid]['props_by_date']:
+                master_data[pid]['props_by_date'][clean_key] = {}
+            if book_name not in master_data[pid]['props_by_date'][clean_key]:
+                master_data[pid]['props_by_date'][clean_key][book_name] = {}
+            master_data[pid]['props_by_date'][clean_key][book_name][prop_date_key] = prop_payload
+
+            # Keep a legacy flattened props view for the currently active game date.
+            should_materialize = False
+            if active_game_date:
+                should_materialize = row_game_date == active_game_date
+            elif clean_key not in master_data[pid]['props'] or book_name not in master_data[pid]['props'][clean_key]:
+                should_materialize = True
+
+            if should_materialize:
+                if clean_key not in master_data[pid]['props']:
+                    master_data[pid]['props'][clean_key] = {}
+                master_data[pid]['props'][clean_key][book_name] = prop_payload
 
     process_odds(df_dk, "dk")
     process_odds(df_fd, "fd")

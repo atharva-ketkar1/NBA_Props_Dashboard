@@ -20,6 +20,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from utils.player_matcher import PlayerMatcher
+from utils.prop_date_resolver import load_schedule_rows, resolve_prop_game_date
 from utils.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
@@ -105,9 +106,16 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
     # --- Build PlayerMatcher from season stats roster ---
     stats_records = df_stats[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].to_dict('records')
     matcher = PlayerMatcher(stats_records)
+    team_by_pid = {
+        int(row['PLAYER_ID']): str(row.get('TEAM_ABBREVIATION', '') or '').strip()
+        for _, row in df_stats.iterrows()
+    }
+    schedule_rows = load_schedule_rows(os.path.join(os.path.dirname(__file__), '..', 'data', 'current'))
 
     # --- Build upsert rows ---
     rows = []
+    resolved_from_schedule = 0
+    unresolved_missing_dates = 0
     for df, book in [(df_dk, 'dk'), (df_fd, 'fd')]:
         if df.empty:
             continue
@@ -130,6 +138,18 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
             if not pid:
                 continue
 
+            canonical_team = team_by_pid.get(int(pid), row.get('team', 'UNK'))
+            resolved_game_date, date_source = resolve_prop_game_date(
+                row.get('game_date'),
+                canonical_team=canonical_team,
+                game_label=row.get('game', ''),
+                schedule_rows=schedule_rows,
+            )
+            if date_source.startswith('schedule'):
+                resolved_from_schedule += 1
+            elif not resolved_game_date:
+                unresolved_missing_dates += 1
+
             raw_prop = row.get('prop_type', '')
             stat_key = PROP_MAP.get(raw_prop, raw_prop).upper()
 
@@ -141,12 +161,20 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
                 'over_odds':  row.get('over_odds'),
                 'under_odds': row.get('under_odds'),
                 'implied':    row.get('implied_prob', 0) or 0,
-                'game_date':  normalize_row_game_date(row.get('game_date')),
+                'game_date':  normalize_row_game_date(resolved_game_date),
             })
 
     if not rows:
         logger.warning("No rows resolved — check matcher and CSV column names.")
         return False
+
+    if resolved_from_schedule:
+        logger.info("Resolved %d prop rows to a game_date via schedule fallback.", resolved_from_schedule)
+    if unresolved_missing_dates:
+        logger.warning(
+            "%d prop rows were still missing a resolvable game_date and fell back to the run date.",
+            unresolved_missing_dates,
+        )
 
     logger.info("Upserting %d player_props rows for %s...", len(rows), game_date)
 

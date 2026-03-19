@@ -136,6 +136,19 @@ def extract_team_name(logo_url):
     except: 
         return "UNK"
 
+
+def extract_event_game_date(event):
+    for field in ('startDate', 'openDate', 'eventDate', 'startTime'):
+        raw = event.get(field, '')
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+            return dt.astimezone(tz.gettz('America/New_York')).strftime('%Y-%m-%d')
+        except Exception as e:
+            print(f"[WARN] Could not parse {field} '{raw}': {e}")
+    return ''
+
 def fetch_odds():
     print("Starting FanDuel Odds Fetch...")
     main_page = get_nba_main_page_data()
@@ -145,7 +158,11 @@ def fetch_odds():
     attachments = main_page.get('attachments', {})
     events_data = attachments.get('events', {})
     
-    upcoming_events = [event for event in events_data.values() if not event.get("inPlay", False)]
+    upcoming_events = [
+        event for event in events_data.values()
+        if not event.get("inPlay", False)
+        and ' @ ' in event.get('name', '')  # only real matchup games
+    ]
 
     all_props = []
 
@@ -196,7 +213,7 @@ def fetch_odds():
                     "over_odds": int(over_odds),
                     "under_odds": int(under_odds),
                     "game": game_name,
-                    "game_date": event.get("startDate"),
+                    "game_date": extract_event_game_date(event),
                     "sportsbook": "fanduel"
                 }
                 all_props.append(prop_entry)
