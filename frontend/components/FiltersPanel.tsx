@@ -2,6 +2,7 @@ import React from 'react';
 import { X, HelpCircle, Lock, ChevronRight, ChevronUp } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
+import { isOverlayFilterSupported } from '../utils/filterOverlays';
 
 interface FiltersPanelProps {
     isOpen: boolean;
@@ -81,6 +82,42 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
     // Stats
     const usgPct = player?.stats?.USG_PCT;
     const fga = player?.stats?.FGA;
+
+    const renderFilterButton = ({
+        filterId,
+        label,
+        rank,
+        customRank,
+        className = 'px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px]',
+    }: {
+        filterId: string;
+        label: string;
+        rank?: number | null;
+        customRank?: React.ReactNode;
+        className?: string;
+    }) => {
+        const isSupported = isOverlayFilterSupported(filterId, player);
+        const isActive = activeFilter === filterId;
+
+        return (
+            <button
+                key={`${filterId}-${label}`}
+                onClick={() => isSupported && onFilterChange(isActive ? null : filterId)}
+                disabled={!isSupported}
+                className={`${className} font-medium flex items-center gap-1 transition-colors border ${isActive
+                    ? 'bg-blue500 text-white border-transparent'
+                    : isSupported
+                        ? 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'
+                        : 'bg-bgElevation1/60 text-[#A3A3A3]/45 border-borderMedium/30 cursor-not-allowed'
+                    }`}
+            >
+                <span>{label}</span>
+                {rank ? <span className={isSupported ? getRankColor(rank) : 'text-[#A3A3A3]/45'}>#{rank}</span> : null}
+                {customRank ? <span className={isSupported ? '' : 'opacity-40'}>{customRank}</span> : null}
+                {!isSupported ? <Lock className="w-3 h-3 opacity-60" /> : null}
+            </button>
+        );
+    };
 
     return (
         <div className="w-[320px] bg-bgElevation0 border-l border-borderMedium/40 flex flex-col h-full overflow-y-auto shrink-0 shadow-[-10px_0_30px_rgba(0,0,0,0.5)] z-40">
@@ -169,22 +206,19 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                     <>
                         {/* Suggested Tab Content - Pills */}
                         <div className="flex flex-wrap gap-1 mt-1">
-                            {['Minutes', 'Def vs Position (PTS)', 'H2H', `Def vs ${dpt || 'DPT'} (DPT)`, `Def vs ${dsz || 'DSZ'} (DSZ)`].map(stat => {
-                                const realLabel = stat.startsWith('Def vs') && stat.includes('(DPT)') ? 'Def vs DPT' :
-                                    stat.startsWith('Def vs') && stat.includes('(DSZ)') ? 'Def vs DSZ' : stat;
-                                const rankHtml = realLabel === 'Def vs DPT' && dptRank ? <span className={getRankColor(dptRank)}>#{dptRank}</span> :
-                                    realLabel === 'Def vs DSZ' && dszRank ? <span className={getRankColor(dszRank)}>#{dszRank}</span> : null;
-                                const displayStat = !isSuggestedExpanded && realLabel.startsWith('Def vs') ? stat : realLabel;
-                                return (
-                                    <button
-                                        key={realLabel}
-                                        onClick={() => onFilterChange(activeFilter === realLabel ? null : realLabel)}
-                                        className={`px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === realLabel ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
-                                    >
-                                        {displayStat} {rankHtml}
-                                    </button>
-                                );
-                            })}
+                            {[
+                                { filterId: 'Minutes', label: 'Minutes' },
+                                { filterId: 'Def vs Position (PTS)', label: 'Def vs Position (PTS)' },
+                                { filterId: 'H2H', label: 'H2H' },
+                                { filterId: 'Def vs DPT', label: `Def vs ${dpt || 'DPT'} (DPT)`, rank: dptRank },
+                                { filterId: 'Def vs DSZ', label: `Def vs ${dsz || 'DSZ'} (DSZ)`, rank: dszRank },
+                            ].map((stat) =>
+                                renderFilterButton({
+                                    filterId: stat.filterId,
+                                    label: stat.label,
+                                    rank: stat.rank,
+                                }),
+                            )}
                             {!isSuggestedExpanded ? (
                                 <button
                                     onClick={() => setIsSuggestedExpanded(true)}
@@ -194,22 +228,21 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                             ) : (
                                 <>
                                     {[
-                                        { label: 'Opp Paint Pts Allowed', rank: paintPtsRank },
-                                        { label: 'Opp DefRtg', rank: null },
-                                        { label: 'Opp Pace', rank: null, customRank: <span className="text-green500">#5</span> },
-                                        { label: 'USG%', rank: null },
-                                        { label: 'FGA', rank: null },
-                                        { label: 'Def vs DSZ2', rank: dsz2Rank },
-                                        { label: 'Def vs Pull Up', rank: pullupRank }
-                                    ].map(stat => (
-                                        <button
-                                            key={stat.label}
-                                            onClick={() => onFilterChange(activeFilter === stat.label ? null : stat.label)}
-                                            className={`px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px] font-medium flex items-center gap-1 transition-colors border ${activeFilter === stat.label ? 'bg-blue500 text-white border-transparent' : 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'}`}
-                                        >
-                                            {stat.label} {stat.rank && <span className={getRankColor(stat.rank)}>#{stat.rank}</span>} {stat.customRank}
-                                        </button>
-                                    ))}
+                                        { filterId: 'Opp Paint Pts Allowed', label: 'Opp Paint Pts Allowed', rank: paintPtsRank },
+                                        { filterId: 'Opp DefRtg', label: 'Opp DefRtg' },
+                                        { filterId: 'Opp Pace', label: 'Opp Pace', customRank: <span className="text-green500">#5</span> },
+                                        { filterId: 'USG%', label: 'USG%' },
+                                        { filterId: 'FGA', label: 'FGA' },
+                                        { filterId: 'Def vs DSZ2', label: 'Def vs DSZ2', rank: dsz2Rank },
+                                        { filterId: 'Def vs Pull Up', label: 'Def vs Pull Up', rank: pullupRank }
+                                    ].map((stat) =>
+                                        renderFilterButton({
+                                            filterId: stat.filterId,
+                                            label: stat.label,
+                                            rank: stat.rank,
+                                            customRank: stat.customRank,
+                                        }),
+                                    )}
                                     <button
                                         onClick={() => setIsSuggestedExpanded(false)}
                                         className="p-1.5 rounded-full text-[13px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3 flex items-center justify-center w-[24px] h-[24px] mt-0.5 ml-1">
@@ -313,30 +346,24 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                         <div className="mt-4">
                             <span className="text-[10px] font-semibold text-borderMuted uppercase tracking-wider block mb-2">Team Defense</span>
                             <div className="flex flex-wrap gap-1">
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    Position
-                                </button>
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    DefRtg
-                                </button>
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    Pull Up {pullupRank && <span className={getRankColor(pullupRank)}>#{pullupRank}</span>}
-                                </button>
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    C&S {csRank && <span className={getRankColor(csRank)}>#{csRank}</span>}
-                                </button>
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    Paint Pts Allowed {paintPtsRank && <span className={getRankColor(paintPtsRank)}>#{paintPtsRank}</span>}
-                                </button>
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    Pace <span className="text-green500">#5</span>
-                                </button>
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    3PT Att Allowed
-                                </button>
-                                <button className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                    FT Att Allowed
-                                </button>
+                                {[
+                                    { filterId: 'Def vs Position (PTS)', label: 'Position' },
+                                    { filterId: 'Opp DefRtg', label: 'DefRtg' },
+                                    { filterId: 'Def vs Pull Up', label: 'Pull Up', rank: pullupRank },
+                                    { filterId: 'Catch & Shoot', label: 'C&S', rank: csRank },
+                                    { filterId: 'Opp Paint Pts Allowed', label: 'Paint Pts Allowed', rank: paintPtsRank },
+                                    { filterId: 'Opp Pace', label: 'Pace', customRank: <span className="text-green500">#5</span> },
+                                    { filterId: '3PT Att Allowed', label: '3PT Att Allowed' },
+                                    { filterId: 'FT Att Allowed', label: 'FT Att Allowed' },
+                                ].map((stat) =>
+                                    renderFilterButton({
+                                        filterId: stat.filterId,
+                                        label: stat.label,
+                                        rank: stat.rank,
+                                        customRank: stat.customRank,
+                                        className: 'px-2 py-1.5 rounded-[6px] text-[13px]',
+                                    }),
+                                )}
                             </div>
                         </div>
 
@@ -346,11 +373,12 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                                 {['Transition', 'PnR Ball Handler', 'Isolation', 'Spot Up', 'Off Scr', 'Post Up', 'Handoff', 'PnR RM', 'Putback'].map(pt => {
                                     const ptData = player?.play_type_analysis?.find((p: any) => p.type.toLowerCase().includes(pt.toLowerCase()) || pt.toLowerCase().includes(p.type.toLowerCase()));
                                     const rank = ptData?.rank;
-                                    return (
-                                        <button key={pt} className="px-2 py-1.5 rounded-[6px] text-[13px] font-medium flex items-center gap-1 transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white">
-                                            {pt} {rank && <span className={getRankColor(rank)}>#{rank}</span>}
-                                        </button>
-                                    );
+                                    return renderFilterButton({
+                                        filterId: pt,
+                                        label: pt,
+                                        rank,
+                                        className: 'px-2 py-1.5 rounded-[6px] text-[13px]',
+                                    });
                                 })}
                             </div>
                         </div>
@@ -359,11 +387,13 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                 ) : activeTab === 'Splits' ? (
                     <div className="flex flex-col mt-2">
                         <div className="flex flex-wrap gap-1">
-                            {['H2H', 'Home', 'Away', 'Regular', 'Playoffs', 'B2B', 'Win/Loss Margin', 'Game Total Pts', 'CL Spread', 'CL Total Pts', 'CL Pts'].map(pill => (
-                                <button key={pill} className="px-4 py-2 rounded-[6px] text-[13px] font-medium flex items-center transition-colors border bg-bgElevation1 text-[#D4D4D4] border-borderMedium/40 hover:bg-bgElevation2 hover:text-white tracking-wide">
-                                    {pill}
-                                </button>
-                            ))}
+                            {['H2H', 'Home', 'Away', 'Regular', 'Playoffs', 'B2B', 'Win/Loss Margin', 'Game Total Pts', 'CL Spread', 'CL Total Pts', 'CL Pts'].map((pill) =>
+                                renderFilterButton({
+                                    filterId: pill,
+                                    label: pill,
+                                    className: 'px-4 py-2 rounded-[6px] text-[13px] tracking-wide',
+                                }),
+                            )}
                         </div>
                     </div>
                 ) : (
@@ -376,11 +406,13 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                             </div>
                         </div>
                         <div className="flex flex-wrap gap-2">
-                            {['Minutes', 'Points', 'Assists', 'Rebounds', 'USG%', 'FG%', 'FGA', '3PA', '3P', 'FTA', 'Fouls'].map(stat => (
-                                <button key={stat} className="px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px] font-medium flex items-center transition-colors border bg-bgElevation2 text-[#D4D4D4] border-borderMedium/40 hover:border-borderMedium/50 hover:text-white">
-                                    {stat}
-                                </button>
-                            ))}
+                            {['Minutes', 'Points', 'Assists', 'Rebounds', 'USG%', 'FG%', 'FGA', '3PA', '3P', 'FTA', 'Fouls'].map((stat) =>
+                                renderFilterButton({
+                                    filterId: stat,
+                                    label: stat,
+                                    className: 'px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px]',
+                                }),
+                            )}
                         </div>
                     </div>
                 )}

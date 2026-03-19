@@ -4,16 +4,24 @@ import time
 import random
 import urllib.parse
 import os
-from nba_api.stats.endpoints import leaguegamelog
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-UPDATE_WINDOW_DAYS = 5
+UPDATE_WINDOW_DAYS = 2
 MAX_HISTORY_GAMES = 85
-MAX_WORKERS = 4
+MAX_WORKERS = 1
+REQUEST_TIMEOUT = 60
+BASE_LOG_MAX_RETRIES = 5
+ENDPOINT_MAX_RETRIES = 3
+RETRYABLE_STATUS_CODES = {
+    408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524, 525, 526, 530
+}
 
 # Default season to scrape. The output CSV will be named gamelogs_{SEASON}.csv automatically.
 SEASON = "2025-26"
@@ -46,6 +54,13 @@ CORE_FILL_ZERO_COLS = [
 _last_500_time = 0
 
 
+class NBAStatsRequestError(RuntimeError):
+    def __init__(self, message, status_code=None, route_label=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.route_label = route_label
+
+
 def _safe_pct_convert(df, cols):
     """
     Converts decimal percentage columns (e.g. 0.284) to whole-number form (28.4).
@@ -60,6 +75,130 @@ def _safe_pct_convert(df, cols):
     return df
 
 
+def _split_proxy_urls(raw_value):
+    if not raw_value:
+        return []
+    urls = []
+    for chunk in raw_value.replace("\n", ",").split(","):
+        clean = chunk.strip()
+        if clean:
+            urls.append(clean)
+    return urls
+
+
+def _build_request_targets():
+    targets = []
+    seen = set()
+
+    for proxy_url in _split_proxy_urls(os.environ.get("PBPSTATS_PROXY_URL")) + _split_proxy_urls(os.environ.get("PBPSTATS_PROXY_URLS")):
+        if proxy_url not in seen:
+            seen.add(proxy_url)
+            targets.append({
+                "url": proxy_url,
+                "label": urllib.parse.urlparse(proxy_url).netloc or proxy_url,
+            })
+
+    allow_direct_fallback = os.environ.get("GAMELOGS_ALLOW_DIRECT_FALLBACK", "").strip().lower() in {"1", "true", "yes"}
+    if not targets or allow_direct_fallback:
+        targets.append({"url": None, "label": "direct"})
+
+    return targets
+
+
+def _summarize_response_body(response, limit=180):
+    try:
+        body = response.text
+    except Exception:
+        return ""
+
+    if not body:
+        return ""
+
+    compact = " ".join(body.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "..."
+
+
+def _retry_wait_seconds(exc, attempt_number, is_full_refresh=False):
+    status_code = getattr(exc, "status_code", None)
+    message = str(exc).lower()
+
+    if status_code in RETRYABLE_STATUS_CODES:
+        base_wait = 12 if is_full_refresh else 6
+    elif isinstance(exc, requests.Timeout) or "timed out" in message:
+        base_wait = 10 if is_full_refresh else 5
+    else:
+        base_wait = 8 if is_full_refresh else 4
+
+    max_wait = 90 if is_full_refresh else 45
+    return min(base_wait * attempt_number, max_wait)
+
+
+def _result(status, message, **extra):
+    payload = {"status": status, "message": message}
+    payload.update(extra)
+    return payload
+
+
+def make_proxied_request(url, headers=None, timeout=REQUEST_TIMEOUT, attempt_index=0):
+    request_targets = _build_request_targets()
+    if not request_targets:
+        raise NBAStatsRequestError("No request targets are configured for NBA stats fetches.")
+
+    errors = []
+    last_error = None
+
+    for offset in range(len(request_targets)):
+        target = request_targets[(attempt_index + offset) % len(request_targets)]
+        route_label = target["label"]
+        try:
+            if target["url"]:
+                response = requests.get(target["url"], params={"url": url}, headers=headers, timeout=timeout)
+            else:
+                response = requests.get(url, headers=headers, timeout=timeout)
+        except requests.RequestException as exc:
+            last_error = exc
+            errors.append(f"{route_label}: {type(exc).__name__} ({exc})")
+            continue
+
+        if response.status_code == 200:
+            return response, route_label
+
+        body_summary = _summarize_response_body(response)
+        detail = f"{route_label} returned HTTP {response.status_code}"
+        if body_summary:
+            detail += f" | {body_summary}"
+        last_error = NBAStatsRequestError(detail, status_code=response.status_code, route_label=route_label)
+        errors.append(str(last_error))
+
+    if errors:
+        raise NBAStatsRequestError("All NBA stats request routes failed: " + "; ".join(errors))
+    if isinstance(last_error, NBAStatsRequestError):
+        raise last_error
+    if last_error is not None:
+        raise last_error
+    raise NBAStatsRequestError("All NBA stats request routes failed without an error payload.")
+
+
+def fetch_nba_json(url, headers=None, timeout=REQUEST_TIMEOUT, attempt_index=0, context="NBA stats request"):
+    response, route_label = make_proxied_request(url, headers=headers, timeout=timeout, attempt_index=attempt_index)
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        body_summary = _summarize_response_body(response)
+        detail = f"{context} returned non-JSON payload via {route_label}"
+        if body_summary:
+            detail += f" | {body_summary}"
+        raise NBAStatsRequestError(detail, route_label=route_label) from exc
+
+    if not isinstance(payload, dict) or "resultSets" not in payload or not payload["resultSets"]:
+        raise NBAStatsRequestError(f"{context} returned unexpected JSON payload via {route_label}", route_label=route_label)
+
+    return payload, route_label
+
+
 def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     """
     Fetches Drives, Passing, Rebounding, 1Q Stats, 1H Stats, and Advanced Stats
@@ -68,7 +207,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     Returns: (daily_merged, failed_endpoints)
     """
     global _last_500_time
-    max_retries = 3
+    max_retries = ENDPOINT_MAX_RETRIES
     if season is None:
         season = SEASON
 
@@ -99,20 +238,17 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                     f"&PerMode=PerGame&PlayerOrTeam=Player&PtMeasureType={PT}"
                     f"&Season={season}&SeasonType=Regular%20Season&TeamID=0"
                 )
-                resp = requests.get(url, headers=HEADERS, timeout=30)
+                r, route_label = fetch_nba_json(
+                    url,
+                    headers=HEADERS,
+                    timeout=REQUEST_TIMEOUT,
+                    attempt_index=attempt,
+                    context=f"{PT} on {date_str}",
+                )
 
-                if resp.status_code == 500:
-                    if is_full_refresh:
-                        _last_500_time = time.time()
-                        wait = 30 * (2 ** attempt)
-                        print(f"      Server overloaded (500) for {PT} on {date_str}. Cooling down {wait}s...")
-                        time.sleep(wait)
-                    raise ValueError("500 Internal Server Error")
+                if attempt > 0:
+                    print(f"      Recovered {PT} on attempt {attempt + 1} via {route_label}.")
 
-                if resp.status_code != 200:
-                    raise ValueError(f"Bad status code: {resp.status_code}")
-
-                r = resp.json()
                 row_set = r['resultSets'][0].get('rowSet', [])
                 api_headers = r['resultSets'][0].get('headers', [])
 
@@ -133,7 +269,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 break
 
             except Exception as e:
-                retry_wait = 3 * (attempt + 1) if not is_full_refresh else 10 * (attempt + 1)
+                if getattr(e, "status_code", None) == 500 and is_full_refresh:
+                    _last_500_time = time.time()
+                retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
                 print(f"      Attempt {attempt + 1} failed for {PT} on {date_str}: {type(e).__name__} ({e})")
                 if attempt < max_retries - 1:
                     time.sleep(retry_wait)
@@ -157,20 +295,17 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
-            resp = requests.get(q1_url, headers=HEADERS, timeout=30)
+            r, route_label = fetch_nba_json(
+                q1_url,
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+                attempt_index=attempt,
+                context=f"1Q Stats on {date_str}",
+            )
 
-            if resp.status_code == 500:
-                if is_full_refresh:
-                    _last_500_time = time.time()
-                    wait = 30 * (2 ** attempt)
-                    print(f"      Server overloaded (500) for 1Q on {date_str}. Cooling down {wait}s...")
-                    time.sleep(wait)
-                raise ValueError("500 Internal Server Error")
+            if attempt > 0:
+                print(f"      Recovered 1Q Stats on attempt {attempt + 1} via {route_label}.")
 
-            if resp.status_code != 200:
-                raise ValueError(f"Bad status code: {resp.status_code}")
-
-            r = resp.json()
             row_set = r['resultSets'][0].get('rowSet', [])
             api_headers = r['resultSets'][0].get('headers', [])
 
@@ -187,7 +322,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
             break
 
         except Exception as e:
-            retry_wait = 3 * (attempt + 1) if not is_full_refresh else 10 * (attempt + 1)
+            if getattr(e, "status_code", None) == 500 and is_full_refresh:
+                _last_500_time = time.time()
+            retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
             print(f"      Attempt {attempt + 1} failed for 1Q Stats on {date_str}: {type(e).__name__} ({e})")
             if attempt < max_retries - 1:
                 time.sleep(retry_wait)
@@ -211,20 +348,17 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
-            resp = requests.get(h1_url, headers=HEADERS, timeout=30)
+            r, route_label = fetch_nba_json(
+                h1_url,
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+                attempt_index=attempt,
+                context=f"1H Stats on {date_str}",
+            )
 
-            if resp.status_code == 500:
-                if is_full_refresh:
-                    _last_500_time = time.time()
-                    wait = 30 * (2 ** attempt)
-                    print(f"      Server overloaded (500) for 1H on {date_str}. Cooling down {wait}s...")
-                    time.sleep(wait)
-                raise ValueError("500 Internal Server Error")
+            if attempt > 0:
+                print(f"      Recovered 1H Stats on attempt {attempt + 1} via {route_label}.")
 
-            if resp.status_code != 200:
-                raise ValueError(f"Bad status code: {resp.status_code}")
-
-            r = resp.json()
             row_set = r['resultSets'][0].get('rowSet', [])
             api_headers = r['resultSets'][0].get('headers', [])
 
@@ -241,7 +375,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
             break
 
         except Exception as e:
-            retry_wait = 3 * (attempt + 1) if not is_full_refresh else 10 * (attempt + 1)
+            if getattr(e, "status_code", None) == 500 and is_full_refresh:
+                _last_500_time = time.time()
+            retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
             print(f"      Attempt {attempt + 1} failed for 1H Stats on {date_str}: {type(e).__name__} ({e})")
             if attempt < max_retries - 1:
                 time.sleep(retry_wait)
@@ -265,19 +401,17 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
-            resp = requests.get(adv_url, headers=HEADERS, timeout=30)
+            r, route_label = fetch_nba_json(
+                adv_url,
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+                attempt_index=attempt,
+                context=f"Advanced Stats on {date_str}",
+            )
 
-            if resp.status_code == 500:
-                if is_full_refresh:
-                    wait = 30 * (2 ** attempt)
-                    print(f"      Server overloaded (500) for Advanced on {date_str}. Cooling down {wait}s...")
-                    time.sleep(wait)
-                raise ValueError("500 Internal Server Error")
+            if attempt > 0:
+                print(f"      Recovered Advanced Stats on attempt {attempt + 1} via {route_label}.")
 
-            if resp.status_code != 200:
-                raise ValueError(f"Bad status code: {resp.status_code}")
-
-            r = resp.json()
             row_set = r['resultSets'][0].get('rowSet', [])
             api_headers = r['resultSets'][0].get('headers', [])
 
@@ -296,7 +430,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
             break
 
         except Exception as e:
-            retry_wait = 3 * (attempt + 1) if not is_full_refresh else 10 * (attempt + 1)
+            if getattr(e, "status_code", None) == 500 and is_full_refresh:
+                _last_500_time = time.time()
+            retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
             print(f"      Attempt {attempt + 1} failed for Advanced Stats on {date_str}: {type(e).__name__} ({e})")
             if attempt < max_retries - 1:
                 time.sleep(retry_wait)
@@ -334,7 +470,7 @@ def run_scrape(output_path=None, season=None):
         failed_manifest = output_path.replace(".csv", "_failed_dates.csv")
         if os.path.exists(output_path) and not os.path.exists(failed_manifest):
             print(f"   Season {season} is complete and data already exists. Nothing to do.")
-            return
+            return _result("noop", f"Season {season} is complete and game logs are already present.")
         elif os.path.exists(failed_manifest):
             print(f"   Season {season} has unresolved failed dates. Attempting recovery...")
         else:
@@ -378,29 +514,50 @@ def run_scrape(output_path=None, season=None):
                 print(f"      Could not read failed manifest ({e}). Falling back to full refresh.")
 
     df_logs = None
-    for attempt in range(3):
+    for attempt in range(BASE_LOG_MAX_RETRIES):
         try:
-            game_log = leaguegamelog.LeagueGameLog(
-                season=season,
-                player_or_team_abbreviation='P',
-                season_type_all_star='Regular Season',
-                direction='DESC',
-                sorter='DATE',
-                headers=HEADERS,
-                timeout=15
+            log_url = (
+                f"https://stats.nba.com/stats/leaguegamelog"
+                f"?Counter=0&DateFrom=&DateTo=&Direction=DESC&LeagueID=00"
+                f"&PlayerOrTeam=P&Season={season}&SeasonType=Regular%20Season&Sorter=DATE"
             )
-            df_logs = game_log.get_data_frames()[0]
+
+            r, route_label = fetch_nba_json(
+                log_url,
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+                attempt_index=attempt,
+                context=f"Base LeagueGameLog for {season}",
+            )
+
+            if attempt > 0:
+                print(f"   Base LeagueGameLog recovered on attempt {attempt + 1} via {route_label}.")
+
+            api_headers = r['resultSets'][0].get('headers', [])
+            row_set = r['resultSets'][0].get('rowSet', [])
+
+            df_logs = pd.DataFrame(row_set, columns=api_headers)
             df_logs['GAME_DATE'] = pd.to_datetime(df_logs['GAME_DATE'])
             df_logs['DATE_STR'] = df_logs['GAME_DATE'].dt.strftime('%m/%d/%Y')
             break
+
         except Exception as e:
             print(f"   Base log attempt {attempt + 1} failed: {type(e).__name__} ({e})")
-            if attempt < 2:
-                time.sleep(3)
+            if attempt < BASE_LOG_MAX_RETRIES - 1:
+                time.sleep(_retry_wait_seconds(e, attempt + 1, is_full_refresh=True))
 
     if df_logs is None:
-        print("   Fatal Error: Could not fetch base LeagueGameLog after 3 attempts.")
-        return
+        print(f"   Fatal Error: Could not fetch base LeagueGameLog after {BASE_LOG_MAX_RETRIES} attempts.")
+        last_saved_date = None
+        if not existing_df.empty and 'GAME_DATE' in existing_df.columns:
+            try:
+                last_saved_date = existing_df['GAME_DATE'].max().strftime("%Y-%m-%d")
+            except Exception:
+                last_saved_date = None
+        message = "Base LeagueGameLog could not be fetched after all retry attempts."
+        if last_saved_date:
+            message += f" Existing logs were preserved through {last_saved_date}."
+        return _result("failed", message, last_saved_date=last_saved_date)
 
     all_active_dates = sorted(
         df_logs['DATE_STR'].unique().tolist(),
@@ -443,35 +600,40 @@ def run_scrape(output_path=None, season=None):
 
     if not target_dates:
         print("      Data is up to date (No completed games to fetch).")
-        return
+        return _result("noop", "Game logs are already up to date.", target_dates=[])
 
-    print(f"      Launching {workers} workers for {len(target_dates)} dates...")
+    print(f"      Launching 1 worker sequentially for {len(target_dates)} dates using memory-safe incremental appending...")
+    
+    import gc
+
     advanced_data_list = []
     failed_dates = []
     none_dates = []
+    dates_with_any_data = set()
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {executor.submit(fetch_tracking_data_for_date, d, full_refresh, season): d for d in target_dates}
-
-        for i, future in enumerate(as_completed(future_map)):
-            date_str = future_map[future]
-            try:
-                daily_merged, missing_endpoints = future.result()
-                
-                if daily_merged is not None:
-                    advanced_data_list.append(daily_merged)
-                
-                if not missing_endpoints and daily_merged is not None:
-                    print(f"      [{i+1}/{len(target_dates)}] Completed {date_str}")
-                elif daily_merged is None:
-                    print(f"      [{i+1}/{len(target_dates)}] NULL RESULT (all endpoints failed) {date_str}")
-                    none_dates.append(date_str)
-                else:
-                    print(f"      [{i+1}/{len(target_dates)}] Partial {date_str} (Missing: {missing_endpoints})")
-                    failed_dates.append(date_str)
-            except Exception as e:
-                print(f"      Failed critically {date_str}: {e}")
+    # THE MISSING LOOP: Process each date one by one
+    for i, date_str in enumerate(target_dates):
+        try:
+            daily_merged, missing_endpoints = fetch_tracking_data_for_date(date_str, is_full_refresh=full_refresh, season=season)
+            
+            if daily_merged is not None:
+                advanced_data_list.append(daily_merged)
+                dates_with_any_data.add(date_str)
+            
+            if not missing_endpoints and daily_merged is not None:
+                print(f"      [{i+1}/{len(target_dates)}] Completed {date_str}")
+            elif daily_merged is None:
+                print(f"      [{i+1}/{len(target_dates)}] NULL RESULT (all endpoints failed) {date_str}")
+                none_dates.append(date_str)
+            else:
+                print(f"      [{i+1}/{len(target_dates)}] Partial {date_str} (Missing: {missing_endpoints})")
                 failed_dates.append(date_str)
+        except Exception as e:
+            print(f"      Failed critically {date_str}: {e}")
+            failed_dates.append(date_str)
+            
+        # Clean up RAM immediately after each day
+        gc.collect()
 
     all_retry_dates = failed_dates + none_dates
     if none_dates:
@@ -491,6 +653,7 @@ def run_scrape(output_path=None, season=None):
                 
                 if daily_merged is not None:
                     advanced_data_list.append(daily_merged)
+                    dates_with_any_data.add(date_str)
                 
                 if not missing_endpoints and daily_merged is not None:
                     print(f"      [RETRY SUCCESS] {date_str}")
@@ -516,10 +679,12 @@ def run_scrape(output_path=None, season=None):
             if os.path.exists(failed_manifest_path):
                 os.remove(failed_manifest_path)
                 print("      Cleared the resolved failed manifest.")
+    else:
+        permanently_failed = []
 
+    # THE MISSING MERGE & SAVE LOGIC
     if advanced_data_list:
         df_advanced_new = pd.concat(advanced_data_list, ignore_index=True)
-        # Drop duplicates, keeping the most recent fetch (the retry pass)
         df_advanced_new = df_advanced_new.drop_duplicates(subset=['PLAYER_ID', 'DATE_STR'], keep='last')
         
         df_logs_filtered = df_logs[df_logs['DATE_STR'].isin(target_dates)]
@@ -555,6 +720,25 @@ def run_scrape(output_path=None, season=None):
         final_df.to_csv(output_path, index=False)
         print(f"   Updated logs saved! (Rows: {len(final_df)})")
 
+    if permanently_failed:
+        if not dates_with_any_data:
+            return _result(
+                "failed",
+                f"Game logs could not be refreshed for any of {len(target_dates)} target dates.",
+                failed_dates=permanently_failed,
+            )
+        return _result(
+            "partial",
+            f"Game logs updated with partial coverage: {len(dates_with_any_data)}/{len(target_dates)} dates have data and {len(permanently_failed)} dates still have gaps.",
+            failed_dates=permanently_failed,
+            target_dates=target_dates,
+        )
+
+    return _result(
+        "success",
+        f"Game Logs Updated ({len(dates_with_any_data)}/{len(target_dates)} target dates).",
+        target_dates=target_dates,
+    )
 
 if __name__ == "__main__":
     import sys

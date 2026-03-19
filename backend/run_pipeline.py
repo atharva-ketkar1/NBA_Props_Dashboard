@@ -74,8 +74,18 @@ def run_stats():
 
 def run_logs():
     print("   Starting Game Logs (Incremental)...")
-    # This runs the fast update
-    gamelogs.run_scrape(LOGS_PATH)
+    result = gamelogs.run_scrape(LOGS_PATH)
+
+    if isinstance(result, dict):
+        status = result.get("status")
+        message = result.get("message", "Game Logs Updated")
+        if status == "failed":
+            raise RuntimeError(message)
+        return message
+
+    if result is False:
+        raise RuntimeError("Game logs failed.")
+
     return "Game Logs Updated"
 
 def run_schedule():
@@ -182,6 +192,8 @@ def main():
         ("Game Logs", run_logs),
         ("Boxscores", run_boxscores)
     ]
+    critical_scrapers = {"Schedule", "Season Stats", "Game Logs"}
+    critical_failures = []
     
     for name, func in scrapers:
         try:
@@ -189,6 +201,8 @@ def main():
             print(f"   {result}")
         except Exception as e:
             print(f"   Scraper Failed [{name}]: {e}")
+            if name in critical_scrapers:
+                critical_failures.append(f"{name}: {e}")
         finally:
             gc.collect()
             log_memory(f"After {name}")
@@ -231,7 +245,12 @@ def main():
         print(f"   Warning: props upsert failed (non-fatal): {e}")
         props_ok = False
 
-    return props_ok
+    if critical_failures:
+        print("\nCritical scraper failures detected:")
+        for failure in critical_failures:
+            print(f"   - {failure}")
+
+    return props_ok and not critical_failures
 
 if __name__ == "__main__":
     main()

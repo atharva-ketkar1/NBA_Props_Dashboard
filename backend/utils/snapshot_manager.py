@@ -7,6 +7,15 @@ from zoneinfo import ZoneInfo
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
+
+def get_intraday_interval_seconds():
+    raw_value = os.getenv("INTRADAY_INTERVAL_SECONDS", "900")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 900
+    return max(300, parsed)
+
 class SnapshotManager:
     def __init__(self, data_dir=None, logs_dir=None):
         if data_dir is None:
@@ -156,7 +165,7 @@ class SnapshotManager:
             if last_timestamp_str:
                 try:
                     last_dt = datetime.fromisoformat(last_timestamp_str)
-                    if (now - last_dt).total_seconds() < 1800:
+                    if (now - last_dt).total_seconds() < get_intraday_interval_seconds():
                         return False 
                 except ValueError:
                     pass

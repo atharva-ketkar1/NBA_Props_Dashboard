@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { Header } from './components/Header';
 import { BarChart } from './components/BarChart';
@@ -9,7 +9,7 @@ import { PlayTypeAnalysis } from './components/PlayTypeAnalysis';
 import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
-import { Player } from './types';
+import { Player, PlayerPropsByDate } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
 import { getDashboardDate, getDashboardScheduleDates } from './utils/dashboardDate';
 import {
@@ -37,14 +37,113 @@ const STAT_LABELS: Record<string, string> = {
 
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 
-async function fetchAllPlayerPropsForDates(supabase: any, gameDates: string[]) {
+const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
+
+function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) && parsed >= 60_000 ? parsed : fallbackMs;
+}
+
+function isDocumentVisible() {
+  return typeof document === 'undefined' || document.visibilityState === 'visible';
+}
+
+function buildFutureDates(startDate: string, days: number) {
+  return Array.from({ length: days }, (_, i) => {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + i);
+    return d.toISOString().split('T')[0];
+  });
+}
+
+function getFastRefreshDates(selectedDate?: string | null) {
+  const [today, tomorrow] = getDashboardScheduleDates();
+  const dates = new Set<string>([today, tomorrow].filter(Boolean));
+  if (selectedDate) {
+    dates.add(selectedDate);
+  }
+  return Array.from(dates);
+}
+
+function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
+  const propsByDateMap: Record<number, PlayerPropsByDate> = {};
+
+  for (const row of props ?? []) {
+    const gameDateKey = row.game_date || '__undated__';
+    if (!propsByDateMap[row.player_id]) propsByDateMap[row.player_id] = {};
+    if (!propsByDateMap[row.player_id][row.stat_type]) propsByDateMap[row.player_id][row.stat_type] = {};
+    if (!propsByDateMap[row.player_id][row.stat_type][row.sportsbook]) propsByDateMap[row.player_id][row.stat_type][row.sportsbook] = {};
+    propsByDateMap[row.player_id][row.stat_type][row.sportsbook][gameDateKey] = {
+      line: row.line,
+      over: row.over_odds,
+      under: row.under_odds,
+      implied: row.implied,
+      game_date: row.game_date,
+      game_id: row.game_id,
+      updated_at: row.updated_at,
+    };
+  }
+
+  return propsByDateMap;
+}
+
+function mergePropsByDateMaps(existing: PlayerPropsByDate = {}, incoming: PlayerPropsByDate = {}): PlayerPropsByDate {
+  const merged: PlayerPropsByDate = { ...existing };
+
+  Object.entries(incoming).forEach(([statType, sportsbookMap]) => {
+    merged[statType] ??= {};
+    Object.entries(sportsbookMap ?? {}).forEach(([sportsbook, datedProps]) => {
+      merged[statType][sportsbook] = {
+        ...(merged[statType][sportsbook] ?? {}),
+        ...(datedProps ?? {}),
+      };
+    });
+  });
+
+  return merged;
+}
+
+function flattenIntradayMovements(rows: any[]) {
+  return (rows ?? [])
+    .flatMap((row: any) => Array.isArray(row?.snapshots) ? row.snapshots : [])
+    .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+}
+
+function serializeLineMovementVersion(rows: any[]) {
+  return (rows ?? [])
+    .map((row: any) => `${row.game_date}:${row.updated_at ?? ''}`)
+    .sort()
+    .join('|');
+}
+
+function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
+  if (!players.length || !(propsRows ?? []).length) {
+    return players;
+  }
+
+  const incomingPropsByPlayer = buildPropsByDateMap(propsRows);
+
+  return players.map((player) => {
+    const incoming = incomingPropsByPlayer[player.id];
+    if (!incoming) {
+      return player;
+    }
+
+    return {
+      ...player,
+      props_by_date: mergePropsByDateMaps(player.props_by_date, incoming),
+    };
+  });
+}
+
+async function fetchAllPlayerPropsForDates(supabase: any, gameDates: string[], selectClause = PLAYER_PROP_SELECT) {
   const pageSize = 1000;
   const allRows: any[] = [];
 
   for (let start = 0; ; start += pageSize) {
     const { data, error } = await supabase
       .from('player_props')
-      .select('*')
+      .select(selectClause)
       .in('game_date', gameDates)
       .order('game_date', { ascending: true })
       .order('player_id', { ascending: true })
@@ -142,28 +241,17 @@ function App() {
   // Set VITE_USE_DB=false (or omit) to fall back to master_feed.json.
   // ──────────────────────────────────────────────────────────────
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
-  const DB_POLL_MS = 10 * 60 * 1000;
+  const FULL_DB_POLL_MS = parsePollMs(import.meta.env.VITE_FULL_DB_POLL_MS, 30 * 60 * 1000);
+  const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 5 * 60 * 1000);
+  const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
+  const lineMovementVersionRef = useRef('');
 
   /** Reconstruct the Player[] shape from Supabase rows. */
   function mergeFeedFromDB(
     players: any[],
     props: any[],
   ): Player[] {
-    const propsByDateMap: Record<number, Record<string, Record<string, Record<string, any>>>> = {};
-    for (const row of props ?? []) {
-      const gameDateKey = row.game_date || '__undated__';
-      if (!propsByDateMap[row.player_id]) propsByDateMap[row.player_id] = {};
-      if (!propsByDateMap[row.player_id][row.stat_type]) propsByDateMap[row.player_id][row.stat_type] = {};
-      if (!propsByDateMap[row.player_id][row.stat_type][row.sportsbook]) propsByDateMap[row.player_id][row.stat_type][row.sportsbook] = {};
-      propsByDateMap[row.player_id][row.stat_type][row.sportsbook][gameDateKey] = {
-        line: row.line,
-        over: row.over_odds,
-        under: row.under_odds,
-        implied: row.implied,
-        game_date: row.game_date,
-        game_id: row.game_id,
-      };
-    }
+    const propsByDateMap = buildPropsByDateMap(props ?? []);
 
     return (players ?? []).map((p: any) => materializePlayerForGameDate({
       id: p.id,
@@ -188,46 +276,67 @@ function App() {
     }, getDashboardDate()));
   }
 
-  // 1. Initial data fetch
+  useEffect(() => {
+    if (!USE_DB) return undefined;
+
+    const handleVisibilityChange = () => {
+      setIsPageVisible(isDocumentVisible());
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleVisibilityChange);
+    };
+  }, [USE_DB]);
+
+  // 1. Base feed fetch
   useEffect(() => {
     if (USE_DB) {
       let cancelled = false;
 
       const fetchDbSnapshot = async (isInitial = false) => {
         try {
-          const { supabase } = await import('./utils/supabase');
-          const [today, tomorrow] = getDashboardScheduleDates();
+          if (!isInitial && !isDocumentVisible()) {
+            return;
+          }
 
-          const futureDates = Array.from({ length: 14 }, (_, i) => {
-            const d = new Date(today);
-            d.setDate(d.getDate() + i);
-            return d.toISOString().split('T')[0];
-          });
+          const { supabase } = await import('./utils/supabase');
+          const [today] = getDashboardScheduleDates();
+          const futureDates = buildFutureDates(today, 14);
 
           const [
             { data: playersRows, error: e1 },
             { data: propsRows, error: e2 },
-            { data: lmRows, error: e3 },
+            lineMovementResult,
             { data: gamesRows, error: e4 },
           ] = await Promise.all([
             supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
             fetchAllPlayerPropsForDates(supabase, futureDates),
-            supabase.from('line_movements').select('game_date, snapshots').in('game_date', [today, tomorrow]),
+            isInitial
+              ? supabase.from('line_movements').select('game_date, snapshots, updated_at').in('game_date', getFastRefreshDates(null))
+              : Promise.resolve({ data: null, error: null }),
             supabase.from('games').select('home_team_tricode, away_team_tricode').eq('game_date', today),
           ]);
 
           if (cancelled) return;
           if (e1) console.error('[supabase] players error:', e1);
           if (e2) console.error('[supabase] player_props error:', e2);
-          if (e3 && e3.code !== 'PGRST116') console.error('[supabase] line_movements error:', e3);
+          if (lineMovementResult?.error && lineMovementResult.error.code !== 'PGRST116') {
+            console.error('[supabase] line_movements error:', lineMovementResult.error);
+          }
           if (e4) console.error('[supabase] games error:', e4);
 
-          const intraday_movements = (lmRows ?? [])
-            .flatMap((row: any) => Array.isArray(row?.snapshots) ? row.snapshots : [])
-            .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
           const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
           const slateTeams = Array.from(new Set((gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+
+          const intradayMovements = isInitial ? flattenIntradayMovements(lineMovementResult?.data ?? []) : null;
+          if (isInitial) {
+            lineMovementVersionRef.current = serializeLineMovementVersion(lineMovementResult?.data ?? []);
+          }
 
           setRawData(prev => {
             const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
@@ -244,7 +353,7 @@ function App() {
                 props: p.props,
                 props_by_date: p.props_by_date,
                 play_type_analysis: p.play_type_analysis,
-                intraday_movements,
+                intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
               };
             });
           });
@@ -262,7 +371,7 @@ function App() {
       };
 
       void fetchDbSnapshot(true);
-      const intervalId = window.setInterval(() => fetchDbSnapshot(false), DB_POLL_MS);
+      const intervalId = window.setInterval(() => fetchDbSnapshot(false), FULL_DB_POLL_MS);
       return () => {
         cancelled = true;
         window.clearInterval(intervalId);
@@ -296,7 +405,78 @@ function App() {
           setLoading(false);
         });
     }
-  }, []);
+  }, [USE_DB, FULL_DB_POLL_MS]);
+
+  // 1b. Hot refresh for live lines + history metadata
+  useEffect(() => {
+    if (!USE_DB || !isPageVisible || loading) return undefined;
+
+    let cancelled = false;
+
+    const fetchHotSnapshot = async () => {
+      try {
+        if (!isPageVisible) {
+          return;
+        }
+
+        const { supabase } = await import('./utils/supabase');
+        const activeDates = getFastRefreshDates(resolvedSelectedGameDate ?? selectedGameDate);
+
+        const [
+          { data: propsRows, error: propsError },
+          { data: lineMetaRows, error: lineMetaError },
+        ] = await Promise.all([
+          fetchAllPlayerPropsForDates(supabase, activeDates),
+          supabase.from('line_movements').select('game_date, updated_at').in('game_date', activeDates),
+        ]);
+
+        if (cancelled) return;
+        if (propsError) console.error('[supabase] hot player_props error:', propsError);
+        if (lineMetaError && lineMetaError.code !== 'PGRST116') {
+          console.error('[supabase] hot line_movements metadata error:', lineMetaError);
+        }
+
+        if ((propsRows ?? []).length > 0) {
+          setRawData(prev => mergePropsIntoPlayers(prev, propsRows ?? []));
+        }
+
+        const nextVersion = serializeLineMovementVersion(lineMetaRows ?? []);
+        if (!nextVersion || nextVersion === lineMovementVersionRef.current) {
+          return;
+        }
+
+        const { data: lineRows, error: lineRowsError } = await supabase
+          .from('line_movements')
+          .select('game_date, snapshots, updated_at')
+          .in('game_date', activeDates);
+
+        if (cancelled) return;
+        if (lineRowsError && lineRowsError.code !== 'PGRST116') {
+          console.error('[supabase] hot line_movements error:', lineRowsError);
+          return;
+        }
+
+        lineMovementVersionRef.current = serializeLineMovementVersion(lineRows ?? []);
+        const intradayMovements = flattenIntradayMovements(lineRows ?? []);
+        setRawData(prev => prev.map((player) => ({
+          ...player,
+          intraday_movements: intradayMovements,
+        })));
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Supabase hot refresh failed:', err);
+        }
+      }
+    };
+
+    void fetchHotSnapshot();
+    const intervalId = window.setInterval(() => fetchHotSnapshot(), HOT_DATA_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [USE_DB, HOT_DATA_POLL_MS, isPageVisible, loading, resolvedSelectedGameDate, selectedGameDate]);
 
 
   const [isInitialized, setIsInitialized] = useState(false);

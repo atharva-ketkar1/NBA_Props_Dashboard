@@ -91,8 +91,10 @@ export interface PropLine {
   line: number;
   over: number;
   under: number;
+  implied?: number;
   game_date?: string;
   game_id?: string;
+  updated_at?: string;
 }
 
 export interface PlayerProps {

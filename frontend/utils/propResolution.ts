@@ -2,6 +2,12 @@ import { Player, PlayerProps, PlayerPropsByDate, PropLine } from '../types';
 import { getDashboardDate } from './dashboardDate';
 
 const UNDATED_PROP_KEY = '__undated__';
+const INTRADAY_SPORTSBOOK_MAP: Record<string, string> = {
+  draftkings: 'dk',
+  fanduel: 'fd',
+  dk: 'dk',
+  fd: 'fd',
+};
 
 function getPropDateKey(gameDate?: string | null) {
   return gameDate || UNDATED_PROP_KEY;
@@ -54,6 +60,52 @@ function resolvePropBucket(
   }
 
   return propBucket[UNDATED_PROP_KEY] ?? (datedKeys[0] ? propBucket[datedKeys[0]] : undefined);
+}
+
+function applyIntradayOverrides(
+  player: Player,
+  flattenedProps: PlayerProps,
+  preferredDate?: string | null,
+): PlayerProps {
+  const movements = Array.isArray(player.intraday_movements) ? player.intraday_movements : [];
+  if (!movements.length) return flattenedProps;
+
+  const playerId = String(player.id);
+  const targetDate = preferredDate ?? player.active_game_date ?? getDashboardDate();
+  const nextProps: PlayerProps = { ...flattenedProps };
+  const seen = new Set<string>();
+
+  for (let idx = movements.length - 1; idx >= 0; idx -= 1) {
+    const snapshot = movements[idx];
+    const playerData = snapshot?.players?.[playerId];
+    if (!playerData?.props) continue;
+
+    const snapshotDate = playerData.game_date ?? targetDate ?? null;
+    if (preferredDate && playerData.game_date && playerData.game_date !== preferredDate) {
+      continue;
+    }
+
+    Object.entries(playerData.props).forEach(([statType, sportsbookMap]) => {
+      Object.entries(sportsbookMap ?? {}).forEach(([sportsbook, prop]) => {
+        if (!prop) return;
+
+        const mappedSportsbook = INTRADAY_SPORTSBOOK_MAP[sportsbook] || sportsbook;
+        const overrideKey = `${statType}:${mappedSportsbook}`;
+        if (seen.has(overrideKey)) return;
+        seen.add(overrideKey);
+
+        nextProps[statType] ??= {};
+        nextProps[statType][mappedSportsbook] = {
+          ...nextProps[statType][mappedSportsbook],
+          ...prop,
+          game_date: snapshotDate ?? nextProps[statType][mappedSportsbook]?.game_date,
+          game_id: playerData.game_id ?? nextProps[statType][mappedSportsbook]?.game_id,
+        };
+      });
+    });
+  }
+
+  return nextProps;
 }
 
 export function playerHasAnyProp(player: Player) {
@@ -133,9 +185,11 @@ export function materializePlayerForGameDate(player: Player, gameDate?: string |
     });
   });
 
+  const resolvedProps = applyIntradayOverrides(player, flattenedProps, gameDate);
+
   return {
     ...player,
-    props: flattenedProps,
+    props: resolvedProps,
     props_by_date: propsByDate,
     active_game_date: gameDate ?? null,
   };

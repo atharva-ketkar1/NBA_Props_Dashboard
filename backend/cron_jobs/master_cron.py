@@ -23,6 +23,15 @@ def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
 
+def get_intraday_interval_seconds():
+    raw_value = os.getenv("INTRADAY_INTERVAL_SECONDS", "900")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 900
+    return max(300, parsed)
+
+
 def parse_mock_time(value):
     if not value:
         return None
@@ -171,12 +180,12 @@ def check_closing_lines(now, state, dry_run=False):
     return False
 
 def run_intraday_if_needed(now, state, dry_run=False):
-    """Priority 3: Intraday tracking every 30 minutes."""
+    """Priority 3: Intraday tracking on a configurable interval."""
     last_run = state.get("last_intraday_time", 0)
     current_timestamp = now.timestamp()
-    
-    # 30 minutes = 1800 seconds
-    if current_timestamp - last_run >= 1800:
+    interval_seconds = get_intraday_interval_seconds()
+
+    if current_timestamp - last_run >= interval_seconds:
         logger.info("Priority 3 Match: Running Intraday Line Movement.")
         intraday_ok = True
         if not dry_run:
