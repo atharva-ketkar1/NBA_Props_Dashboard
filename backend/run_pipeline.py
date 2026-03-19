@@ -41,6 +41,7 @@ FD_PATH = os.path.join(DATA_DIR, "fanduel.csv")
 LOGS_PATH = os.path.join(DATA_DIR, "gamelogs_2025-26.csv")
 MASTER_PATH = os.path.join(DATA_DIR, "master_feed.json")
 GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json")
+SCHEDULE_PATH = os.path.join(DATA_DIR, "today_schedule.json")
 SHOOTING_PATH = os.path.join(DATA_DIR, "shooting_zones.json")
 ASSISTS_PATH = os.path.join(DATA_DIR, "assist_zones.json")
 OPP_ASSIST_PATH = os.path.join(DATA_DIR, "opp_assist_zones.json")
@@ -85,6 +86,8 @@ def run_schedule():
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(GAMES_PATH, "w") as f:
         json.dump(raw_data, f, indent=2, default=str)
+    with open(SCHEDULE_PATH, "w") as f:
+        json.dump({"games": raw_data}, f, indent=2, default=str)
 
     # Upsert to Supabase (non-fatal)
     try:
