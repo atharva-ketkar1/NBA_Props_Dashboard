@@ -129,6 +129,8 @@ function App() {
         over: row.over_odds,
         under: row.under_odds,
         implied: row.implied,
+        game_date: row.game_date,
+        game_id: row.game_id,
       };
     }
 

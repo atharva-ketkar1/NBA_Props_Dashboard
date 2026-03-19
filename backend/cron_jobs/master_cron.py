@@ -51,7 +51,9 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                 try:
                     sys.path.append(BASE_DIR)
                     import run_pipeline
-                    run_pipeline.main()
+                    pipeline_result = run_pipeline.main()
+                    if pipeline_result is False:
+                        pipeline_ok = False
                 except Exception as e:
                     logger.error(f"Pipeline failed: {e}")
                     pipeline_ok = False
@@ -159,13 +161,18 @@ def run_intraday_if_needed(now, state, dry_run=False):
     # 30 minutes = 1800 seconds
     if current_timestamp - last_run >= 1800:
         logger.info("Priority 3 Match: Running Intraday Line Movement.")
+        intraday_ok = True
         if not dry_run:
             try:
                 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
                 import cron_line_movement
-                cron_line_movement.run_intraday_snapshot()
+                intraday_ok = bool(cron_line_movement.run_intraday_snapshot())
             except Exception as e:
                 logger.error(f"Intraday scrape failed: {e}")
+                intraday_ok = False
+
+        if not intraday_ok:
+            return False
                 
         state["last_intraday_time"] = current_timestamp
         save_state(state)

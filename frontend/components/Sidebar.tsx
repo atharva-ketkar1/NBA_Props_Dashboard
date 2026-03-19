@@ -381,8 +381,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 if (!isInGame) return false;
 
                 // Prop Match
-                const hasProp = p.props && p.props[statFilter];
-                if (!hasProp) return false;
+                const statProps = p.props?.[statFilter];
+                if (!statProps) return false;
+                const propGameDate = Object.values(statProps).find(Boolean)?.game_date;
+                if (propGameDate && game.game_date && propGameDate !== game.game_date) return false;
 
                 // Search Match (Player Name)
                 if (searchTerm && !gameMatchesSearch) {

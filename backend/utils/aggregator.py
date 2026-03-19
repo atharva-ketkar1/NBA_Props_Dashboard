@@ -4,6 +4,8 @@ import os
 import numpy as np
 import gc
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from utils.player_matcher import PlayerMatcher
 
 logger = logging.getLogger(__name__)
@@ -142,6 +144,22 @@ def load_json(path):
         except:
             return {}
     return {}
+
+
+def normalize_game_date(raw_value):
+    if not raw_value:
+        return ""
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if len(stripped) >= 10 and stripped[4] == "-" and stripped[7] == "-":
+            if len(stripped) == 10:
+                return stripped
+            try:
+                dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+                return dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            except ValueError:
+                return stripped[:10]
+    return str(raw_value)
 
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
@@ -286,6 +304,36 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
     # D. Build Games Map
     team_games = {}
+    active_game_date_by_team = {}
+    fallback_game_date_by_team = {}
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    sorted_games = sorted(
+        games_data,
+        key=lambda g: (normalize_game_date(g.get('game_date')), g.get('game_time_utc') or ''),
+    )
+    for g in sorted_games:
+        game_date = normalize_game_date(g.get('game_date'))
+        if not game_date:
+            continue
+        deadline_dt = None
+        deadline_str = g.get('closing_scrape_deadline')
+        if deadline_str:
+            try:
+                deadline_dt = datetime.fromisoformat(deadline_str)
+            except ValueError:
+                deadline_dt = None
+        for team in filter(None, [g.get('home_team_tricode', ''), g.get('away_team_tricode', '')]):
+            fallback_game_date_by_team.setdefault(team, game_date)
+            if (
+                team not in active_game_date_by_team
+                and deadline_dt is not None
+                and deadline_dt >= (now_et - timedelta(minutes=15))
+            ):
+                active_game_date_by_team[team] = game_date
+
+    for team, game_date in fallback_game_date_by_team.items():
+        active_game_date_by_team.setdefault(team, game_date)
+
     for g in games_data:
         home_team = g.get('home_team_tricode', '')
         away_team = g.get('away_team_tricode', '')
@@ -557,6 +605,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             # Extract basic info
             player_name = row.get('player', '')
             team_context = row.get('team', 'UNK')
+            row_game_date = normalize_game_date(row.get('game_date'))
             
             # Extract team options if available (from DK scraper update)
             team_opts = []
@@ -571,6 +620,10 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             pid = matcher.match_player(player_name, team_context, team_opts)
             
             if not pid or pid not in master_data: continue
+            canonical_team = master_data[pid]['team']
+            active_game_date = active_game_date_by_team.get(canonical_team)
+            if active_game_date and row_game_date and row_game_date != active_game_date:
+                continue
 
             # Map prop type (e.g. 'points' -> 'PTS')
             raw_prop = row.get('prop_type', '')
@@ -585,7 +638,8 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                 "line": row.get('line'),
                 "over": row.get('over_odds'),
                 "under": row.get('under_odds'),
-                "implied": row.get('implied_prob', 0)
+                "implied": row.get('implied_prob', 0),
+                "game_date": row_game_date or active_game_date,
             }
 
     process_odds(df_dk, "dk")

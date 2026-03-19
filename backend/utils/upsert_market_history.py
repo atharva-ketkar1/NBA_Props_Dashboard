@@ -12,7 +12,7 @@ def upsert_line_movements_from_file(line_movements_path: str):
     """Mirror the current line movement snapshot blob into Supabase."""
     if not os.path.exists(line_movements_path):
         logger.warning("line movements file not found: %s", line_movements_path)
-        return
+        return False
 
     with open(line_movements_path, "r") as f:
         lm_data = json.load(f)
@@ -25,13 +25,14 @@ def upsert_line_movements_from_file(line_movements_path: str):
         },
         on_conflict="game_date",
     ).execute()
+    return True
 
 
 def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
     """Mirror one game date from the local historical archive into Supabase rows."""
     if not os.path.exists(historical_odds_path):
         logger.warning("historical odds file not found: %s", historical_odds_path)
-        return
+        return False
 
     with open(historical_odds_path, "r") as f:
         historical_odds = json.load(f)
@@ -39,7 +40,7 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
     date_blob = historical_odds.get(game_date, {})
     if not isinstance(date_blob, dict) or not date_blob:
         logger.info("No historical odds found for %s", game_date)
-        return
+        return False
 
     rows = []
     skipped_keys = []
@@ -65,7 +66,7 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
 
     if not rows:
         logger.info("No historical odds rows prepared for %s", game_date)
-        return
+        return False
 
     if skipped_keys:
         logger.warning(
@@ -79,3 +80,4 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
         rows,
         on_conflict="player_id,game_date",
     ).execute()
+    return True

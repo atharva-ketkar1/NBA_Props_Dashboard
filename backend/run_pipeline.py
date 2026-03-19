@@ -216,15 +216,19 @@ def main():
     # The players table was already upserted inside aggregator.run_aggregation().
     # This call pushes the resolved prop lines (DK + FD) into player_props.
     print("\nUpserting props to Supabase...")
+    props_ok = True
     try:
         from utils.upsert_props import run_odds_update
-        run_odds_update(
+        props_ok = bool(run_odds_update(
             dk_path=DK_PATH,
             fd_path=FD_PATH,
             stats_path=STATS_PATH,
-        )
+        ))
     except Exception as e:
         print(f"   Warning: props upsert failed (non-fatal): {e}")
+        props_ok = False
+
+    return props_ok
 
 if __name__ == "__main__":
     main()

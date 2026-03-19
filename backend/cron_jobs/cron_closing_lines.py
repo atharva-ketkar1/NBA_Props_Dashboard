@@ -4,7 +4,7 @@ import logging
 import argparse
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import sys
@@ -52,6 +52,71 @@ def normalize_lookup_name(name):
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
+
+def normalize_game_date(raw_value):
+    """Normalize scraper or schedule timestamps to an ET YYYY-MM-DD string."""
+    if not raw_value:
+        return ""
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", stripped):
+            return stripped
+        try:
+            dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+            return dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        except ValueError:
+            return stripped[:10]
+    return str(raw_value)
+
+
+def build_schedule_maps(schedule):
+    games = schedule.get("games", []) if isinstance(schedule, dict) else []
+    now = get_et_now()
+    sorted_games = sorted(
+        games,
+        key=lambda g: (
+            normalize_game_date(g.get("game_date")),
+            g.get("game_time_utc") or "",
+        ),
+    )
+
+    team_date_to_game = {}
+    active_game_by_team = {}
+    fallback_game_by_team = {}
+
+    for game in sorted_games:
+        game_date = normalize_game_date(game.get("game_date"))
+        game_id = game.get("game_id")
+        if not game_id or not game_date:
+            continue
+
+        teams = [game.get("home_team_tricode"), game.get("away_team_tricode")]
+        deadline_dt = None
+        deadline_str = game.get("closing_scrape_deadline")
+        if deadline_str:
+            try:
+                deadline_dt = datetime.fromisoformat(deadline_str)
+            except ValueError:
+                deadline_dt = None
+
+        for team in filter(None, teams):
+            team_date_to_game[(team, game_date)] = game
+            fallback_game_by_team.setdefault(team, game)
+            if (
+                team not in active_game_by_team
+                and deadline_dt is not None
+                and deadline_dt >= (now - timedelta(minutes=15))
+            ):
+                active_game_by_team[team] = game
+
+    for team, game in fallback_game_by_team.items():
+        active_game_by_team.setdefault(team, game)
+
+    return {
+        "team_date_to_game": team_date_to_game,
+        "active_game_by_team": active_game_by_team,
+    }
+
 def load_master_feed_maps():
     """Load player/team lookups and a robust matcher from master_feed.json."""
     players_metadata = []
@@ -76,7 +141,7 @@ def load_master_feed_maps():
             logger.error(f"Error loading master feed for IDs: {e}")
     return PlayerMatcher(players_metadata), id_to_team
 
-def scrape_and_shape_odds(is_closing=False):
+def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
     logger.info("Executing odds scrapers...")
     
@@ -107,7 +172,19 @@ def scrape_and_shape_odds(is_closing=False):
     if not fd_data: fd_data = []
         
     matcher, id_to_team = load_master_feed_maps()
+    schedule = {}
+    if os.path.exists(SCHEDULE_PATH):
+        try:
+            with open(SCHEDULE_PATH, "r") as f:
+                schedule = json.load(f)
+        except Exception as e:
+            logger.warning(f"Unable to load schedule context while shaping odds: {e}")
+
+    schedule_maps = build_schedule_maps(schedule)
+    allowed_game_ids = {str(gid) for gid in (allowed_game_ids or []) if gid}
     players_dict = {}
+    skipped_schedule_mismatch = 0
+    skipped_non_target_game = 0
     
     # Process FanDuel first
     for row in fd_data:
@@ -119,13 +196,30 @@ def scrape_and_shape_odds(is_closing=False):
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
         if not prop: continue
-        
+
         canonical_team = id_to_team.get(str(pid), row.get("team", ""))
+        row_game_date = normalize_game_date(row.get("game_date"))
+        schedule_game = schedule_maps["team_date_to_game"].get((canonical_team, row_game_date))
+        active_team_game = schedule_maps["active_game_by_team"].get(canonical_team)
+
+        if allowed_game_ids:
+            if not schedule_game or str(schedule_game.get("game_id")) not in allowed_game_ids:
+                skipped_non_target_game += 1
+                continue
+        elif active_team_game and schedule_game:
+            if str(schedule_game.get("game_id")) != str(active_team_game.get("game_id")):
+                skipped_schedule_mismatch += 1
+                continue
+        elif active_team_game and row_game_date:
+            skipped_schedule_mismatch += 1
+            continue
 
         if pid not in players_dict:
             players_dict[pid] = {
                 "name": row.get("player", ""),
                 "team": canonical_team,
+                "game_id": schedule_game.get("game_id") if schedule_game else None,
+                "game_date": row_game_date,
                 "props": {},
                 "fanduel_inPlay": row.get("inPlay", False),
                 "fanduel_available": True
@@ -151,13 +245,30 @@ def scrape_and_shape_odds(is_closing=False):
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
         if not prop: continue
-        
+
         canonical_team = id_to_team.get(str(pid), row.get("team", ""))
+        row_game_date = normalize_game_date(row.get("game_date"))
+        schedule_game = schedule_maps["team_date_to_game"].get((canonical_team, row_game_date))
+        active_team_game = schedule_maps["active_game_by_team"].get(canonical_team)
+
+        if allowed_game_ids:
+            if not schedule_game or str(schedule_game.get("game_id")) not in allowed_game_ids:
+                skipped_non_target_game += 1
+                continue
+        elif active_team_game and schedule_game:
+            if str(schedule_game.get("game_id")) != str(active_team_game.get("game_id")):
+                skipped_schedule_mismatch += 1
+                continue
+        elif active_team_game and row_game_date:
+            skipped_schedule_mismatch += 1
+            continue
 
         if pid not in players_dict:
             players_dict[pid] = {
                 "name": row.get("player", ""),
                 "team": canonical_team,
+                "game_id": schedule_game.get("game_id") if schedule_game else None,
+                "game_date": row_game_date,
                 "props": {},
                 "draftkings_available": True
             }
@@ -165,6 +276,10 @@ def scrape_and_shape_odds(is_closing=False):
             players_dict[pid]["draftkings_available"] = True
             if players_dict[pid]["team"] == "":
                 players_dict[pid]["team"] = canonical_team
+            if not players_dict[pid].get("game_id") and schedule_game:
+                players_dict[pid]["game_id"] = schedule_game.get("game_id")
+            if not players_dict[pid].get("game_date"):
+                players_dict[pid]["game_date"] = row_game_date
                 
         if prop not in players_dict[pid]["props"]:
             players_dict[pid]["props"][prop] = {}
@@ -175,13 +290,18 @@ def scrape_and_shape_odds(is_closing=False):
             "under": row.get("under_odds")
         }
         
-    return players_dict
-DATA_DIR = os.path.join(BASE_DIR, "data", "current")
-# so we don't double-scrape a game if the cron checks multiple times in a window.
-STATE_PATH = os.path.join(BASE_DIR, "logs", "cron_state_today.json")
+    if skipped_schedule_mismatch:
+        logger.info(
+            "Skipped %d odds rows because they matched a non-active scheduled game for that team.",
+            skipped_schedule_mismatch,
+        )
+    if skipped_non_target_game:
+        logger.info(
+            "Skipped %d odds rows because they were outside the targeted closing-line games.",
+            skipped_non_target_game,
+        )
 
-def get_et_now():
-    return datetime.now(ZoneInfo("America/New_York"))
+    return players_dict
 
 def load_cron_state():
     if os.path.exists(STATE_PATH):
@@ -265,21 +385,14 @@ def main(dry_run=False):
         
     # Run the expensive logic
     try:
-        players_data = scrape_and_shape_odds(is_closing=True)
+        players_data = scrape_and_shape_odds(
+            is_closing=True,
+            allowed_game_ids=[g["game_id"] for g in games_to_scrape],
+        )
+        if not players_data:
+            logger.warning("Closing lines scrape produced no mapped players for the targeted games.")
+            return False
         sm = SnapshotManager()
-        
-        # Attach game_ids logic (taken from scheduler.py)
-        team_to_game = {}
-        for g in sched.get("games", []):
-            home = g.get("home_team_tricode", "")
-            away = g.get("away_team_tricode", "")
-            if home: team_to_game[home] = g.get("game_id")
-            if away: team_to_game[away] = g.get("game_id")
-                
-        for pid, pdata in players_data.items():
-            team = pdata.get("team", "")
-            if team in team_to_game:
-                pdata["game_id"] = team_to_game[team]
                 
         # Send to SnapshotManager
         sm.process_closing_lines(players_data)
@@ -290,16 +403,23 @@ def main(dry_run=False):
         # DATA_DIR is defined at module level in this file
         try:
             from utils.upsert_props import run_odds_update
-            run_odds_update(
+            props_ok = run_odds_update(
                 dk_path=os.path.join(DATA_DIR, "draftkings.csv"),
                 fd_path=os.path.join(DATA_DIR, "fanduel.csv"),
                 stats_path=os.path.join(DATA_DIR, "season_stats.csv"),
             )
-            upsert_line_movements_from_file(os.path.join(DATA_DIR, "line_movements_today.json"))
-            upsert_historical_odds_from_file(
-                os.path.join(BASE_DIR, "data", "archive", "historical_odds.json"),
-                get_et_now().strftime("%Y-%m-%d"),
-            )
+            line_movements_ok = upsert_line_movements_from_file(os.path.join(DATA_DIR, "line_movements_today.json"))
+            historical_path = os.path.join(BASE_DIR, "data", "archive", "historical_odds.json")
+            archive_dates = sorted({pdata.get("game_date") or get_et_now().strftime("%Y-%m-%d") for pdata in players_data.values()})
+            historical_ok = True
+            for archive_date in archive_dates:
+                historical_ok = upsert_historical_odds_from_file(historical_path, archive_date) and historical_ok
+            if not props_ok or not line_movements_ok or not historical_ok:
+                logger.warning(
+                    "Closing lines DB sync was incomplete "
+                    f"(props_ok={props_ok}, line_movements_ok={line_movements_ok}, historical_ok={historical_ok})."
+                )
+                return False
         except Exception as e:
             logger.warning(f"Supabase market upsert failed (non-fatal): {e}")
             return False

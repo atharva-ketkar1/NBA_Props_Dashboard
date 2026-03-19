@@ -199,7 +199,13 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             }
 
             if (player.team && scheduleData.length > 0) {
-                const playerGame = scheduleData.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team);
+                const sortedSchedule = [...scheduleData].sort((a, b) =>
+                    new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+                );
+                const playerGame = sortedSchedule.find(g =>
+                    (g.home_team_tricode === player.team || g.away_team_tricode === player.team)
+                    && (!prop?.game_date || g.game_date === prop.game_date)
+                ) || sortedSchedule.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team);
                 if (playerGame) {
                     upcomingOpponent = playerGame.home_team_tricode === player.team ? playerGame.away_team_tricode : playerGame.home_team_tricode;
                     if (playerGame.game_date) {

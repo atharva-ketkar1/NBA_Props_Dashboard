@@ -13,6 +13,7 @@ interface SparklineProps {
     statKey: string;
     activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
     mode: 'line' | 'juice';
+    activeGameDate?: string | null;
 }
 
 const SB_MAP: Record<string, string> = { dk: 'draftkings', fd: 'fanduel' };
@@ -22,7 +23,7 @@ const impliedProb = (odds: number) => {
     return 100 / (odds + 100) * 100;
 };
 
-export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, playerId, statKey, activeSportsbook, mode }) => {
+export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, playerId, statKey, activeSportsbook, mode, activeGameDate }) => {
     // ── ALL HOOKS MUST BE ABOVE ANY EARLY RETURN ──────────────────────────────
     const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
@@ -35,6 +36,9 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
         movements.forEach(snap => {
             const pData = snap.players[String(playerId)];
             if (pData && pData.props) {
+                if (activeGameDate && pData.game_date && pData.game_date !== activeGameDate) {
+                    return;
+                }
                 const propObj = pData.props[statKey]?.[sbKey];
                 if (propObj) {
                     const val = mode === 'line' ? Number(propObj.line) : Number(propObj.over);
@@ -51,7 +55,7 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
         const delta = +(current - opening).toFixed(1);
         const direction: 'up' | 'down' | 'flat' = delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat';
         return { dataPoints: pts, opening, current, delta, direction };
-    }, [movements, playerId, statKey, activeSportsbook, mode]);
+    }, [movements, playerId, statKey, activeSportsbook, mode, activeGameDate]);
 
     // Must also be above any early return (Rules of Hooks)
     const displayDelta = useMemo(() => {

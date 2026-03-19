@@ -1,11 +1,11 @@
 import os
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-# Default to EST timezone (-5)
 def get_et_now():
-    return datetime.now(timezone(timedelta(hours=-5)))
+    return datetime.now(ZoneInfo("America/New_York"))
 
 class SnapshotManager:
     def __init__(self, data_dir=None, logs_dir=None):
@@ -58,8 +58,23 @@ class SnapshotManager:
     def _get_active_schedule_context(self):
         schedule = self._load_schedule()
         games = schedule.get("games", []) if isinstance(schedule.get("games", []), list) else []
+        now = get_et_now()
+        active_games = []
+        for game in games:
+            if game.get("is_final", False):
+                continue
 
-        active_games = [g for g in games if not g.get("is_final", False)]
+            deadline_str = game.get("closing_scrape_deadline")
+            if not deadline_str:
+                active_games.append(game)
+                continue
+
+            try:
+                deadline_dt = datetime.fromisoformat(deadline_str)
+                if deadline_dt >= (now - timedelta(minutes=15)):
+                    active_games.append(game)
+            except ValueError:
+                active_games.append(game)
         active_teams = set()
         active_dates = set()
 
@@ -88,10 +103,16 @@ class SnapshotManager:
         if not active_teams:
             return players_data
 
+        schedule_ctx = self._get_active_schedule_context()
+        active_dates = schedule_ctx["active_dates"]
         filtered = {}
         for player_id, pdata in players_data.items():
             team = pdata.get("team", "")
-            if team in active_teams:
+            game_date = pdata.get("game_date")
+            date_ok = True
+            if game_date and active_dates:
+                date_ok = game_date in active_dates
+            if team in active_teams and date_ok:
                 filtered[player_id] = pdata
         return filtered
 
@@ -153,7 +174,7 @@ class SnapshotManager:
         self._write_json(self.line_movements_path, data)
         return True
 
-    def _get_fallback_snapshot_data(self, player_id):
+    def _get_fallback_snapshot_data(self, player_id, game_id=None, game_date=None):
         """Find the most recent valid line for a player from today's snapshots"""
         now = get_et_now()
         today_date = now.strftime("%Y-%m-%d")
@@ -166,7 +187,12 @@ class SnapshotManager:
         for snapshot in reversed(data["snapshots"]):
             players = snapshot.get("players", {})
             if player_id in players:
-                return players[player_id]
+                candidate = players[player_id]
+                if game_id and candidate.get("game_id") and candidate.get("game_id") != game_id:
+                    continue
+                if game_date and candidate.get("game_date") and candidate.get("game_date") != game_date:
+                    continue
+                return candidate
         return None
 
     def process_closing_lines(self, players_data):
@@ -191,14 +217,16 @@ class SnapshotManager:
         schedule_games = {g["game_id"]: g for g in schedule.get("games", [])}
         
         historical_odds = self._read_json(self.historical_odds_path, default={})
-        if today_date not in historical_odds:
-            historical_odds[today_date] = {}
             
         updated = False
 
         for player_id, pdata in players_data.items():
+            archive_date = pdata.get("game_date") or today_date
+            if archive_date not in historical_odds:
+                historical_odds[archive_date] = {}
+
             # Immutability Guardrail
-            if player_id in historical_odds[today_date]:
+            if player_id in historical_odds[archive_date]:
                 continue
                 
             game_id = pdata.get("game_id")
@@ -241,7 +269,7 @@ class SnapshotManager:
                     
             if gate_1_passed and gate_2_passed:
                 # Clean capture
-                historical_odds[today_date][player_id] = {
+                historical_odds[archive_date][player_id] = {
                     "name": pdata.get("name"),
                     "team": pdata.get("team"),
                     "props": pdata.get("props", {}),
@@ -253,9 +281,13 @@ class SnapshotManager:
                 # Fallback capture
                 self.logger.info(f"Skipped {player_id} ({pdata.get('name')}): {skip_reason}")
                 
-                fallback_props = self._get_fallback_snapshot_data(player_id)
+                fallback_props = self._get_fallback_snapshot_data(
+                    player_id,
+                    game_id=game_id,
+                    game_date=archive_date,
+                )
                 if fallback_props:
-                    historical_odds[today_date][player_id] = {
+                    historical_odds[archive_date][player_id] = {
                         "name": pdata.get("name"),
                         "team": pdata.get("team"),
                         "props": fallback_props.get("props", {}),

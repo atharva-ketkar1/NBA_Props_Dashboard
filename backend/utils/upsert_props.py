@@ -16,12 +16,15 @@ import os
 import ast
 import logging
 import pandas as pd
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from utils.player_matcher import PlayerMatcher
 from utils.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
+
+ET_ZONE = ZoneInfo("America/New_York")
 
 # Mirrors PROP_MAP in aggregator.py — kept in sync manually.
 # Maps raw prop_type strings from scrapers → internal stat keys.
@@ -58,14 +61,29 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
         ISO date string 'YYYY-MM-DD'. Defaults to today.
     """
     if game_date is None:
-        game_date = date.today().isoformat()
+        game_date = datetime.now(ET_ZONE).date().isoformat()
+
+    def normalize_row_game_date(raw_value):
+        if not raw_value:
+            return game_date
+        if isinstance(raw_value, str):
+            stripped = raw_value.strip()
+            if len(stripped) >= 10 and stripped[4] == "-" and stripped[7] == "-":
+                if len(stripped) == 10:
+                    return stripped
+                try:
+                    dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+                    return dt.astimezone(ET_ZONE).strftime("%Y-%m-%d")
+                except ValueError:
+                    return stripped[:10]
+        return game_date
 
     # --- Load CSVs ---
     try:
         df_stats = pd.read_csv(stats_path)
     except Exception as e:
         logger.error("Failed to load season_stats: %s", e)
-        return
+        return False
 
     df_dk = pd.DataFrame()
     df_fd = pd.DataFrame()
@@ -82,7 +100,7 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
 
     if df_dk.empty and df_fd.empty:
         logger.warning("Both DK and FD CSVs are empty — nothing to upsert.")
-        return
+        return False
 
     # --- Build PlayerMatcher from season stats roster ---
     stats_records = df_stats[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].to_dict('records')
@@ -123,17 +141,18 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
                 'over_odds':  row.get('over_odds'),
                 'under_odds': row.get('under_odds'),
                 'implied':    row.get('implied_prob', 0) or 0,
-                'game_date':  game_date,
+                'game_date':  normalize_row_game_date(row.get('game_date')),
             })
 
     if not rows:
         logger.warning("No rows resolved — check matcher and CSV column names.")
-        return
+        return False
 
     logger.info("Upserting %d player_props rows for %s...", len(rows), game_date)
 
     # --- Batch upsert in chunks of 100 to avoid request size limits ---
     sb = get_supabase_client()
+    all_chunks_ok = True
     for i in range(0, len(rows), 100):
         chunk = rows[i:i + 100]
         try:
@@ -143,8 +162,11 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
             ).execute()
         except Exception as e:
             logger.error("Upsert failed for chunk %d-%d: %s", i, i + len(chunk), e)
+            all_chunks_ok = False
 
-    logger.info("player_props upsert complete.")
+    if all_chunks_ok:
+        logger.info("player_props upsert complete.")
+    return all_chunks_ok
 
 
 if __name__ == "__main__":

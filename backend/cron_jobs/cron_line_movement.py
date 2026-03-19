@@ -28,7 +28,7 @@ def run_intraday_snapshot(label="intraday"):
                 from utils.upsert_props import run_odds_update
                 # Derive paths relative to this file — never import from run_pipeline.py
                 _data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "current")
-                run_odds_update(
+                props_ok = run_odds_update(
                     dk_path=os.path.join(_data_dir, "draftkings.csv"),
                     fd_path=os.path.join(_data_dir, "fanduel.csv"),
                     stats_path=os.path.join(_data_dir, "season_stats.csv"),
@@ -37,14 +37,22 @@ def run_intraday_snapshot(label="intraday"):
                 # Also upsert line movements blob to Supabase
                 from utils.upsert_market_history import upsert_line_movements_from_file
                 lm_path = os.path.join(_data_dir, "line_movements_today.json")
-                upsert_line_movements_from_file(lm_path)
+                lm_ok = upsert_line_movements_from_file(lm_path)
+
+                if not props_ok or not lm_ok:
+                    logger.warning("Intraday snapshot completed locally but DB sync was incomplete.")
+                    return False
                     
             except Exception as e:
-                logger.warning(f"Supabase upsert failed (non-fatal): {e}")
+                logger.warning(f"Supabase upsert failed: {e}")
+                return False
+            return True
         else:
             logger.info("Intraday snapshot skipped (likely deduplication <30m).")
+            return False
     except Exception as e:
         logger.error(f"Failed intraday snapshot: {e}")
+        return False
 
 if __name__ == "__main__":
     run_intraday_snapshot()

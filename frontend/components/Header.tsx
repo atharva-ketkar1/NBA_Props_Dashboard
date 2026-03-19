@@ -268,6 +268,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
   }, [player, statKey, activeSportsbook, onSportsbookChange]);
 
   const currentSbLogo = SPORTSBOOKS.find(sb => sb.id === activeSportsbook)?.logo;
+  const activePropForSparkline = player?.props?.[statKey]?.[activeSportsbook];
 
   const teamId = player && TEAM_IDS[player.team] ? TEAM_IDS[player.team] : null;
   const teamLogoUrl = teamId
@@ -568,6 +569,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                 statKey={statKey}
                 activeSportsbook={activeSportsbook}
                 mode={sparklineMode}
+                activeGameDate={activePropForSparkline?.game_date ?? null}
               />
             </div>
             <div className="flex bg-bgElevation1 border border-borderMedium/40 rounded p-0.5 shrink-0">

@@ -20,8 +20,11 @@ class PlayerMatcher:
             "chuma okeke": "chukwuma okeke",
             "guillermo hernangomez": "willy hernangomez",
             "juancho hernangomez": "juan hernangomez",
-            "xnba": "unknown", # placeholder
+            "xnba": "unknown", 
             "alexandre sarr": "alex sarr",
+            "nicolas claxton": "nic claxton",
+            "cameron thomas": "cam thomas",
+            "carlton carrington": "bub carrington",
         }
 
         # Build Lookups
