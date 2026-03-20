@@ -620,6 +620,7 @@ function App() {
       players: playersWithProps,
       activePlayerId: displayPlayer?.id,
       activeGameDate: resolvedSelectedGameDate,
+      activeSportsbook: activeSportsbook,
       onSelectPlayer: (id: number, gameDate?: string | null) => {
         const index = playersWithProps.findIndex(p => p.id === id);
         if (index !== -1) {

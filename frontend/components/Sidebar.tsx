@@ -71,6 +71,7 @@ interface SidebarProps {
     players: Player[];
     activePlayerId?: number;
     activeGameDate?: string | null;
+    activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz';
     onSelectPlayer: (id: number, gameDate?: string | null) => void;
     activeTab?: string;
     onTabChange?: (tab: string) => void;
@@ -91,8 +92,23 @@ const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-7 h-7" }: { teamId: numb
     );
 };
 
-const PlayerRow = ({ player, statFilter, gameDate, isActive, onClick }: { player: Player, statFilter: string, gameDate?: string | null, isActive: boolean, onClick: () => void }) => {
-    const preferredProp = getPreferredSportsbookProp(player, statFilter, gameDate);
+const PlayerRow = ({
+    player,
+    statFilter,
+    gameDate,
+    activeSportsbook = 'dk',
+    isActive,
+    onClick,
+}: {
+    player: Player,
+    statFilter: string,
+    gameDate?: string | null,
+    activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz',
+    isActive: boolean,
+    onClick: () => void
+}) => {
+    const preferredSportsbooks = Array.from(new Set([activeSportsbook, 'dk', 'fd', 'mgm', 'cz']));
+    const preferredProp = getPreferredSportsbookProp(player, statFilter, gameDate, preferredSportsbooks);
     const book = preferredProp?.book ?? null;
     const prop = preferredProp?.prop ?? null;
     const hasProp = !!prop;
@@ -177,8 +193,8 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, onSelectPlayer: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
-    game, isExpanded, onToggle, activePlayerId, activeGameDate, onSelectPlayer, statFilter
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz', onSelectPlayer: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
+    game, isExpanded, onToggle, activePlayerId, activeGameDate, activeSportsbook, onSelectPlayer, statFilter
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
@@ -243,6 +259,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                                     player={player}
                                     statFilter={statFilter}
                                     gameDate={game.game_date}
+                                    activeSportsbook={activeSportsbook}
                                     isActive={player.id === activePlayerId && game.game_date === activeGameDate}
                                     onClick={() => onSelectPlayer(player.id, game.game_date)}
                                 />
@@ -261,7 +278,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
 export const Sidebar: React.FC<SidebarProps> = ({
     isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
-    activeGameDate, activeTab = 'Points', onTabChange = () => { }
+    activeGameDate, activeSportsbook = 'dk', activeTab = 'Points', onTabChange = () => { }
 }) => {
     const statFilter = STAT_MAP[activeTab] || 'PTS';
     const [gameFilter, setGameFilter] = useState('All Games');
@@ -483,6 +500,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 onToggle={() => toggleGame(game.game_id)}
                                 activePlayerId={activePlayerId}
                                 activeGameDate={activeGameDate}
+                                activeSportsbook={activeSportsbook}
                                 onSelectPlayer={onSelectPlayer}
                                 statFilter={statFilter}
                             />

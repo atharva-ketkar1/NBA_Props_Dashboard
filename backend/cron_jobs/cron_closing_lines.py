@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import sys
 import concurrent.futures
+import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scrapers'))
@@ -142,6 +143,15 @@ def load_master_feed_maps():
             logger.error(f"Error loading master feed for IDs: {e}")
     return PlayerMatcher(players_metadata), id_to_team
 
+
+def persist_raw_odds_csvs(dk_data, fd_data):
+    """Persist the latest raw scraper output so downstream upserts use fresh data."""
+    try:
+        pd.DataFrame(dk_data or []).to_csv(os.path.join(DATA_DIR, "draftkings.csv"), index=False)
+        pd.DataFrame(fd_data or []).to_csv(os.path.join(DATA_DIR, "fanduel.csv"), index=False)
+    except Exception as e:
+        logger.warning(f"Unable to persist raw odds CSVs: {e}")
+
 def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
     logger.info("Executing odds scrapers...")
@@ -171,6 +181,8 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             
     if not dk_data: dk_data = []
     if not fd_data: fd_data = []
+
+    persist_raw_odds_csvs(dk_data, fd_data)
         
     matcher, id_to_team = load_master_feed_maps()
     schedule = {}
@@ -213,11 +225,11 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             if not schedule_game or str(schedule_game.get("game_id")) not in allowed_game_ids:
                 skipped_non_target_game += 1
                 continue
-        elif active_team_game and schedule_game:
+        elif is_closing and active_team_game and schedule_game:
             if str(schedule_game.get("game_id")) != str(active_team_game.get("game_id")):
                 skipped_schedule_mismatch += 1
                 continue
-        elif active_team_game and row_game_date:
+        elif is_closing and active_team_game and row_game_date:
             skipped_schedule_mismatch += 1
             continue
 
@@ -268,11 +280,11 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             if not schedule_game or str(schedule_game.get("game_id")) not in allowed_game_ids:
                 skipped_non_target_game += 1
                 continue
-        elif active_team_game and schedule_game:
+        elif is_closing and active_team_game and schedule_game:
             if str(schedule_game.get("game_id")) != str(active_team_game.get("game_id")):
                 skipped_schedule_mismatch += 1
                 continue
-        elif active_team_game and row_game_date:
+        elif is_closing and active_team_game and row_game_date:
             skipped_schedule_mismatch += 1
             continue
 

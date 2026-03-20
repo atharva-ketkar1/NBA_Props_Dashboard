@@ -125,6 +125,11 @@ class SnapshotManager:
                 filtered[player_id] = pdata
         return filtered
 
+    def _normalize_players_data(self, players_data):
+        if not isinstance(players_data, dict):
+            return {}
+        return players_data
+
     def _carry_forward_snapshots(self, existing_data, active_teams):
         carried = []
         for snapshot in existing_data.get("snapshots", []):
@@ -137,8 +142,8 @@ class SnapshotManager:
                 })
         return carried
 
-    def write_snapshot(self, label, players_data, bypass_dedupe=False):
-        """Append an intraday snapshot with optional deduplication bypass."""
+    def write_snapshot(self, label, players_data, bypass_dedupe=False, filter_to_active_schedule=False):
+        """Append an intraday snapshot with optional deduplication and schedule filtering."""
         now = get_et_now()
         timestamp_str = now.isoformat()
 
@@ -153,9 +158,10 @@ class SnapshotManager:
         data = self._read_json(self.line_movements_path, default={"date": today_date, "snapshots": []})
 
         if data.get("date") != today_date:
+            carried_snapshots = self._carry_forward_snapshots(data, active_teams) if filter_to_active_schedule else data.get("snapshots", [])
             data = {
                 "date": today_date,
-                "snapshots": self._carry_forward_snapshots(data, active_teams),
+                "snapshots": carried_snapshots,
             }
 
         # Deduplication Guardrail - skipped if bypass_dedupe is True
@@ -170,7 +176,11 @@ class SnapshotManager:
                 except ValueError:
                     pass
 
-        filtered_players = self._filter_players_to_active_schedule(players_data, active_teams)
+        filtered_players = (
+            self._filter_players_to_active_schedule(players_data, active_teams)
+            if filter_to_active_schedule
+            else self._normalize_players_data(players_data)
+        )
         if not filtered_players:
             return False
 

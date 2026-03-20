@@ -17,12 +17,34 @@ def upsert_line_movements_from_file(line_movements_path: str):
     with open(line_movements_path, "r") as f:
         lm_data = json.load(f)
 
-    date_str = lm_data.get("date", datetime.now().strftime("%Y-%m-%d"))
+    default_date = lm_data.get("date", datetime.now().strftime("%Y-%m-%d"))
+    snapshots_by_date = {}
+
+    for snapshot in lm_data.get("snapshots", []):
+        players = snapshot.get("players", {}) if isinstance(snapshot, dict) else {}
+        dated_players = {}
+
+        for player_id, pdata in players.items():
+            game_date = (pdata or {}).get("game_date") or default_date
+            dated_players.setdefault(game_date, {})[player_id] = pdata
+
+        for game_date, players_blob in dated_players.items():
+            snapshots_by_date.setdefault(game_date, []).append({
+                "timestamp": snapshot.get("timestamp"),
+                "label": snapshot.get("label"),
+                "players": players_blob,
+            })
+
+    rows = [
+        {"game_date": game_date, "snapshots": snapshots}
+        for game_date, snapshots in snapshots_by_date.items()
+    ]
+
+    if not rows:
+        rows = [{"game_date": default_date, "snapshots": lm_data.get("snapshots", [])}]
+
     get_supabase_client().table("line_movements").upsert(
-        {
-            "game_date": date_str,
-            "snapshots": lm_data.get("snapshots", []),
-        },
+        rows,
         on_conflict="game_date",
     ).execute()
     return True
