@@ -2,6 +2,7 @@ import requests
 import time
 import random
 import re
+import logging
 from datetime import datetime
 from dateutil import tz
 import pandas as pd
@@ -10,6 +11,8 @@ import urllib.parse
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # CONSTANTS
 DK_API_BASE = "https://sportsbook-nash.draftkings.com/sites/US-IL-SB/api/sportscontent/controldata/league/leagueSubcategory/v1/markets"
@@ -87,7 +90,7 @@ def fetch_category(subcategory_id, prop_label):
     
     proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
     if not proxy_url:
-        print("WARNING: PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
+        logger.warning("PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
         proxy_url = url
         params = {}
     else:
@@ -99,7 +102,7 @@ def fetch_category(subcategory_id, prop_label):
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"Error fetching {prop_label}: {e}")
+        logger.error("Error fetching %s: %s", prop_label, e)
         return None
 
 def parse_dk_data(data, prop_type_key):
@@ -204,7 +207,7 @@ def parse_dk_data(data, prop_type_key):
     return parsed
 
 def fetch_dk_odds():
-    print("Starting DraftKings Odds Fetch...")
+    logger.info("Starting DraftKings Odds Fetch...")
     all_props = []
     
     for prop_key, cat_id in PLAYER_PROP_CATEGORIES.items():
@@ -215,20 +218,22 @@ def fetch_dk_odds():
         # print(f"  Found {len(props)} props for '{prop_key}'")
         all_props.extend(props)
     
-    print(f"Finished DK. Collected {len(all_props)} total props.")
+    logger.info("Finished DK. Collected %d total props.", len(all_props))
 
     # --- DEBUG: Show user the formatted output with PLUS SIGNS ---
     if len(all_props) > 10:
         sample = all_props[10]
-        print("\nSAMPLE OUTPUT (With Formatting):")
-        print(f"Player: {sample['player']}")
-        print(f"Line:   {sample['line']}")
+        logger.info("SAMPLE OUTPUT (With Formatting):")
+        logger.info("Player: %s", sample['player'])
+        logger.info("Line:   %s", sample['line'])
         # Use our helper to show the plus sign
-        print(f"Over:   {format_odds_for_display(sample['over_odds'])}") 
-        print(f"Under:  {format_odds_for_display(sample['under_odds'])}")
+        logger.info("Over:   %s", format_odds_for_display(sample['over_odds']))
+        logger.info("Under:  %s", format_odds_for_display(sample['under_odds']))
     
     return all_props
 
 if __name__ == "__main__":
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     df = pd.DataFrame(fetch_dk_odds())
     df.to_csv("draftkings_odds.csv", index=False)

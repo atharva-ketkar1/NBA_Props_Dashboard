@@ -2,12 +2,15 @@ import pandas as pd
 import requests
 import json
 import time
+import logging
 from datetime import datetime, timedelta, timezone
 from dateutil import tz
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # CONSTANTS
 FANDUEL_PUBLIC_ACCESS_KEY = os.getenv("FANDUEL_PUBLIC_ACCESS_KEY")
@@ -24,7 +27,7 @@ def _fetch_via_proxy(url):
     """Helper clearly route request via Cloudflare Worker if set."""
     proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
     if not proxy_url:
-        print("WARNING: PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
+        logger.warning("PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
         return requests.get(url, headers=HEADERS, timeout=15)
     return requests.get(proxy_url, params={"url": url}, headers=HEADERS, timeout=15)
 
@@ -37,7 +40,7 @@ def get_nba_main_page_data():
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Error fetching NBA main page: {e}")
+        logger.error("Error fetching NBA main page: %s", e)
         return None
 
 def get_player_props(event_id, prop_tab_name):
@@ -49,7 +52,7 @@ def get_player_props(event_id, prop_tab_name):
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Error fetching props for event {event_id}: {e}")
+        logger.error("Error fetching props for event %s: %s", event_id, e)
         return None
 
 def get_all_available_tabs(event_id):
@@ -75,7 +78,7 @@ def get_all_available_tabs(event_id):
             available_tabs.append({'name': tab_name, 'title': tab_title})
         return available_tabs
     except Exception as e:
-        print(f"Error fetching tabs for event {event_id}: {e}")
+        logger.error("Error fetching tabs for event %s: %s", event_id, e)
         return []
 
 def normalize_player_name(name):
@@ -146,11 +149,11 @@ def extract_event_game_date(event):
             dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
             return dt.astimezone(tz.gettz('America/New_York')).strftime('%Y-%m-%d')
         except Exception as e:
-            print(f"[WARN] Could not parse {field} '{raw}': {e}")
+            logger.warning("Could not parse %s '%s': %s", field, raw, e)
     return ''
 
 def fetch_odds():
-    print("Starting FanDuel Odds Fetch...")
+    logger.info("Starting FanDuel Odds Fetch...")
     main_page = get_nba_main_page_data()
     if not main_page: return []
 
@@ -169,7 +172,7 @@ def fetch_odds():
     for event in upcoming_events:
         event_id = event['eventId']
         game_name = event['name']
-        print(f"  Processing Game: {game_name}")
+        logger.info("Processing Game: %s", game_name)
         
         tabs = get_all_available_tabs(event_id)
         for tab in tabs:
@@ -218,11 +221,13 @@ def fetch_odds():
                 }
                 all_props.append(prop_entry)
     
-    print(f"Finished. Collected {len(all_props)} props.")
+    logger.info("Finished. Collected %d props.", len(all_props))
     return all_props
 
 if __name__ == "__main__":
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     props = fetch_odds()
     df = pd.DataFrame(props)
     df.to_csv("fanduel_props.csv", index=False)
-    print(json.dumps(props[:2], indent=2))
+    logger.info(json.dumps(props[:2], indent=2))
