@@ -4,6 +4,8 @@ import time
 import json
 import logging
 import argparse
+import atexit
+import signal
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -20,6 +22,8 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 LOCK_FILE = os.path.join(LOGS_DIR, "master_cron.lock")
 STATE_FILE = os.path.join(LOGS_DIR, "master_cron_state.json")
 SCHEDULE_PATH = os.path.join(DATA_DIR, "today_schedule.json")
+LOCK_STALE_SECONDS = 2700
+_LOCK_REGISTERED = False
 
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
@@ -63,6 +67,65 @@ def save_state(state):
             json.dump(state, f, indent=4)
     except Exception as e:
         logger.error(f"Error saving state: {e}")
+
+
+def _is_pid_running(pid):
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _load_lock_info():
+    if not os.path.exists(LOCK_FILE):
+        return {}
+
+    try:
+        with open(LOCK_FILE, "r") as f:
+            raw = f.read().strip()
+    except Exception:
+        return {}
+
+    if not raw:
+        return {}
+
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            return payload
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        return {"created_at": float(raw)}
+    except ValueError:
+        return {}
+
+
+def _write_lock_info():
+    payload = {
+        "pid": os.getpid(),
+        "created_at": time.time(),
+    }
+    with open(LOCK_FILE, "w") as f:
+        json.dump(payload, f)
+
+
+def _current_process_owns_lock():
+    lock_info = _load_lock_info()
+    return lock_info.get("pid") == os.getpid()
+
+
+def _handle_termination(signum, _frame):
+    signal_name = signal.Signals(signum).name
+    logger.warning("Received %s. Releasing cron lock before exit.", signal_name)
+    release_lock()
+    raise SystemExit(128 + signum)
 
 def run_pipeline_if_needed(now, state, dry_run=False):
     """Priority 1: Full Pipeline at or after 6:00 AM ET once a day."""
@@ -210,30 +273,45 @@ def run_intraday_if_needed(now, state, dry_run=False):
     return False
 
 def check_mutual_exclusion():
+    global _LOCK_REGISTERED
     if os.path.exists(LOCK_FILE):
-        # Check if lock file is stale (e.g. older than 45 minutes)
         try:
-            mtime = os.path.getmtime(LOCK_FILE)
-            if time.time() - mtime > 2700:
-                logger.warning("Found stale lock file. Removing it and proceeding.")
+            lock_info = _load_lock_info()
+            lock_pid = lock_info.get("pid")
+
+            if lock_pid and _is_pid_running(lock_pid):
+                logger.warning("Another instance of Master Cron is currently running (pid=%s). Exiting.", lock_pid)
+                return False
+
+            if lock_pid and not _is_pid_running(lock_pid):
+                logger.warning("Found orphaned lock file for dead pid=%s. Removing it and proceeding.", lock_pid)
                 os.remove(LOCK_FILE)
             else:
-                logger.warning("Another instance of Master Cron is currently running. Exiting.")
-                return False
+                mtime = os.path.getmtime(LOCK_FILE)
+                if time.time() - mtime > LOCK_STALE_SECONDS:
+                    logger.warning("Found stale lock file. Removing it and proceeding.")
+                    os.remove(LOCK_FILE)
+                else:
+                    logger.warning("Another instance of Master Cron is currently running. Exiting.")
+                    return False
         except Exception:
             return False
             
     # Create lock file
     try:
-        with open(LOCK_FILE, 'w') as f:
-            f.write(str(time.time()))
+        _write_lock_info()
+        if not _LOCK_REGISTERED:
+            atexit.register(release_lock)
+            signal.signal(signal.SIGTERM, _handle_termination)
+            signal.signal(signal.SIGINT, _handle_termination)
+            _LOCK_REGISTERED = True
         return True
     except Exception as e:
         logger.error(f"Could not create lock file: {e}")
         return False
 
 def release_lock():
-    if os.path.exists(LOCK_FILE):
+    if os.path.exists(LOCK_FILE) and _current_process_owns_lock():
         try:
             os.remove(LOCK_FILE)
         except Exception:
