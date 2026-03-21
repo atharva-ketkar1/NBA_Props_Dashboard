@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("MasterCron")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data", "current")
@@ -261,7 +263,7 @@ def main(dry_run=False, mock_time=None):
         if ran_intraday:
             return
 
-        logger.info("No priority matched at this time.")
+        logger.debug("No priority matched at this time.")
         
     finally:
         release_lock()

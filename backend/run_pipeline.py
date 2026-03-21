@@ -35,6 +35,8 @@ stdout_logger = logging.getLogger("PipelineStdout")
 def ensure_logging_configured():
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 class LoggerWriter:

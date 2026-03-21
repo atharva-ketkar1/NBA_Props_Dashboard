@@ -172,7 +172,7 @@ def fetch_odds():
     for event in upcoming_events:
         event_id = event['eventId']
         game_name = event['name']
-        logger.info("Processing Game: %s", game_name)
+        logger.debug("Processing Game: %s", game_name)
         
         tabs = get_all_available_tabs(event_id)
         for tab in tabs:

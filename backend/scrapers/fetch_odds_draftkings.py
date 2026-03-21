@@ -223,12 +223,12 @@ def fetch_dk_odds():
     # --- DEBUG: Show user the formatted output with PLUS SIGNS ---
     if len(all_props) > 10:
         sample = all_props[10]
-        logger.info("SAMPLE OUTPUT (With Formatting):")
-        logger.info("Player: %s", sample['player'])
-        logger.info("Line:   %s", sample['line'])
+        logger.debug("SAMPLE OUTPUT (With Formatting):")
+        logger.debug("Player: %s", sample['player'])
+        logger.debug("Line:   %s", sample['line'])
         # Use our helper to show the plus sign
-        logger.info("Over:   %s", format_odds_for_display(sample['over_odds']))
-        logger.info("Under:  %s", format_odds_for_display(sample['under_odds']))
+        logger.debug("Over:   %s", format_odds_for_display(sample['over_odds']))
+        logger.debug("Under:  %s", format_odds_for_display(sample['under_odds']))
     
     return all_props
 

@@ -326,6 +326,13 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             skipped_non_target_game,
         )
 
+    logger.info(
+        "Odds scrape complete: DK=%d rows, FD=%d rows, mapped_players=%d",
+        len(dk_data),
+        len(fd_data),
+        len(players_dict),
+    )
+
     return players_dict
 
 def load_cron_state():

@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,13 +17,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("CronLineMovement")
 
 def run_intraday_snapshot(label="intraday"):
+    start_time = time.time()
     logger.info(f"--- Running Intraday Snapshot: {label} ---")
     try:
         players_data = scrape_and_shape_odds(is_closing=False)
         sm = SnapshotManager()
         success = sm.write_snapshot(label, players_data)
+        duration_seconds = time.time() - start_time
         if success:
-            logger.info("Intraday snapshot written successfully.")
+            logger.info(
+                "Intraday snapshot written locally | label=%s players=%d duration=%.1fs",
+                label,
+                len(players_data),
+                duration_seconds,
+            )
             # Upsert fresh props to Supabase (non-fatal)
             try:
                 from utils.upsert_props import run_odds_update
@@ -40,16 +48,33 @@ def run_intraday_snapshot(label="intraday"):
                 lm_ok = upsert_line_movements_from_file(lm_path)
 
                 if not props_ok or not lm_ok:
-                    logger.warning("Intraday snapshot completed locally but DB sync was incomplete.")
-                    return False
+                    logger.warning(
+                        "Intraday DB sync incomplete | label=%s players=%d props_ok=%s line_movements_ok=%s",
+                        label,
+                        len(players_data),
+                        props_ok,
+                        lm_ok,
+                    )
+                    return True
+
+                logger.info(
+                    "Intraday DB sync complete | label=%s players=%d",
+                    label,
+                    len(players_data),
+                )
                     
             except Exception as e:
-                logger.warning(f"Supabase upsert failed: {e}")
-                return False
+                logger.warning(f"Supabase upsert failed after local snapshot success: {e}")
+                return True
             return True
         else:
-            logger.info("Intraday snapshot skipped (likely deduplication <30m).")
-            return False
+            logger.info(
+                "Intraday snapshot skipped by dedupe | label=%s players=%d duration=%.1fs",
+                label,
+                len(players_data),
+                duration_seconds,
+            )
+            return True
     except Exception as e:
         logger.error(f"Failed intraday snapshot: {e}")
         return False
