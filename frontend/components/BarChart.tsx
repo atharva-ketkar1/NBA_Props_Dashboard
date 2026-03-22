@@ -1,9 +1,9 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { Player, Game } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { ASSETS_BASE } from '../utils/config';
 import { getDashboardDate, getDashboardScheduleDates } from '../utils/dashboardDate';
 import {
@@ -77,6 +77,8 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     // Schedule State for Upcoming Game 
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
+    const scheduleCacheRef = useRef(new Map<string, Game[]>());
+    const scheduleKeyRef = useRef('');
 
     useEffect(() => {
         const propDates = Array.from(new Set(
@@ -87,20 +89,48 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             )
         )).sort();
         const relevantDates = propDates.length > 0 ? propDates : Array.from(getDashboardScheduleDates());
+        const scheduleKey = relevantDates.join('|');
+
+        if (scheduleKeyRef.current === scheduleKey) {
+            return;
+        }
+
+        const cachedSchedule = scheduleCacheRef.current.get(scheduleKey);
+        if (cachedSchedule) {
+            scheduleKeyRef.current = scheduleKey;
+            setScheduleData(cachedSchedule);
+            return;
+        }
+
+        let cancelled = false;
 
         if (USE_DB) {
             fetchDashboardGames(relevantDates)
                 .then(({ games }) => {
-                    setScheduleData(games ?? []);
+                    if (cancelled) return;
+                    const nextGames = games ?? [];
+                    scheduleCacheRef.current.set(scheduleKey, nextGames);
+                    scheduleKeyRef.current = scheduleKey;
+                    setScheduleData(nextGames);
                 })
                 .catch((error) => {
                     console.error('[api] games error:', error);
                 });
         } else {
             fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
-                .then(data => setScheduleData((data as Game[]).filter(g => relevantDates.includes(g.game_date))))
+                .then(data => {
+                    if (cancelled) return;
+                    const nextGames = (data as Game[]).filter(g => relevantDates.includes(g.game_date));
+                    scheduleCacheRef.current.set(scheduleKey, nextGames);
+                    scheduleKeyRef.current = scheduleKey;
+                    setScheduleData(nextGames);
+                })
                 .catch(err => console.error("Error loading schedule:", err));
         }
+
+        return () => {
+            cancelled = true;
+        };
     }, [player]);
 
     const { chartData, lineValue, graphAvgSecondary, comparisonAvgSecondary, isRankOverlay, isBinaryOverlay } = useMemo(() => {
@@ -502,8 +532,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 )}
 
                 {/* 2. Map through GameLogs for Bars, Text, and Logos */}
-                <AnimatePresence>
-                    {chartData.map((game, index) => {
+                {chartData.map((game, index) => {
                         // Center the bar within its allocated spacing column
                         const columnCenter = X_START + paddingLeft + (index * spacing) + (spacing / 2);
                         const yPos = getY(game.score);
@@ -514,16 +543,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         const logoSize = Math.min(barWidth * 1.2, 28);
                         const fontSize = Math.min(barWidth * 0.6, 14);
 
-                        const uniqueKey = game.isUpcoming ? 'upcoming' : `${game.GAME_DATE}-${game.MATCHUP}`;
                         const showLabel = !shouldCondense || condensedLabels.has(index);
 
                         return (
                             <motion.g
-                                key={uniqueKey}
-                                initial={{ opacity: 0, y: 30, x: columnCenter }}
-                                animate={{ opacity: 1, y: 0, x: columnCenter }}
-                                exit={{ opacity: 0, y: 50, transition: { duration: 0.2 } }}
-                                transition={{ duration: 0.3 }}
+                                key={`slot-${index}`}
+                                initial={false}
+                                animate={{ opacity: 1, x: columnCenter, y: 0 }}
+                                transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.8 }}
                                 className="group cursor-pointer"
                                 onMouseEnter={(e) => {
                                     setHoverData({
@@ -553,7 +580,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                             y: getY(lineValue),
                                             height: getBarHeight(lineValue)
                                         }}
-                                        transition={{ duration: 0.4, ease: "easeInOut" }}
+                                        transition={{ type: 'spring', stiffness: 220, damping: 24, mass: 0.8 }}
                                         x={-barWidth / 2}
                                         width={barWidth}
                                         rx="4"
@@ -574,7 +601,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                             height: barHeight,
                                             fill: isOver ? colors.graphBarOver : colors.graphBarUnder
                                         }}
-                                        transition={{ duration: 0.4, ease: "easeInOut" }}
+                                        transition={{ type: 'spring', stiffness: 220, damping: 24, mass: 0.8 }}
                                         x={-barWidth / 2}
                                         width={barWidth}
                                         rx="4"
@@ -655,7 +682,6 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                             </motion.g>
                         );
                     })}
-                </AnimatePresence>
 
                 {/* Secondary Line Chart Path Overlay */}
                 {hasSecondaryOverlay && (

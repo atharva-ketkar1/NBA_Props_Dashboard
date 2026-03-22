@@ -1,4 +1,4 @@
-import React, { startTransition, useState, useEffect, useMemo, useRef } from 'react';
+import React, { startTransition, useDeferredValue, useState, useEffect, useMemo, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { Header } from './components/Header';
 import { BarChart } from './components/BarChart';
@@ -580,6 +580,13 @@ function App() {
     }
     return materializedPlayer;
   }, [currentPlayer, resolvedSelectedGameDate, activeSeason, archiveGameLogs]);
+  const deferredDisplayPlayer = useDeferredValue(displayPlayer);
+  const renderedPlayer = deferredDisplayPlayer ?? displayPlayer;
+  const isPlayerViewPending = Boolean(
+    displayPlayer
+    && deferredDisplayPlayer
+    && displayPlayer.id !== deferredDisplayPlayer.id,
+  );
 
   // 3. Smart Default Selection (Run once on data load)
   useEffect(() => {
@@ -661,9 +668,9 @@ function App() {
         <div className="flex w-full relative z-20">
 
           {/* Merged Top Section (Header + Chart) */}
-          <div className="flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0 flex flex-col relative z-20">
+          <div className={`flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0 flex flex-col relative z-20 transition-opacity duration-200 ${isPlayerViewPending ? 'opacity-85' : 'opacity-100'}`}>
             <Header
-              player={displayPlayer}
+              player={renderedPlayer}
               activeTab={activeTab}
               onTabChange={handleTabChange}
               activeSportsbook={activeSportsbook}
@@ -682,7 +689,7 @@ function App() {
             {/* Subtle separator removed */}
             <div className={`p-0 ${mobileView !== 'graph' ? 'hidden md:block' : ''}`}>
               <BarChart
-                player={displayPlayer}
+                player={renderedPlayer}
                 activeTab={activeTab}
                 activeSportsbook={activeSportsbook}
                 customLine={customLineValue}
@@ -703,7 +710,7 @@ function App() {
                 onClose={() => setIsFiltersOpen(false)}
                 activeFilter={activeFilter}
                 onFilterChange={setActiveFilter}
-                player={displayPlayer}
+                player={renderedPlayer}
                 gameCount={filterGameCount}
                 onGameCountChange={setFilterGameCount}
                 activeSeason={activeSeason}
@@ -740,13 +747,13 @@ function App() {
                   : mobileView !== 'shooting' ? 'hidden md:flex' : ''
                 }`}>
                 {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
-                  <AssistZones player={displayPlayer} />
+                  <AssistZones player={renderedPlayer} />
                 ) : (
-                  <ShootingZones player={displayPlayer} />
+                  <ShootingZones player={renderedPlayer} />
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className="flex-1 min-h-0 hidden md:block">
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
+                    <PlayTypeAnalysis playTypes={renderedPlayer?.play_type_analysis} />
                   </div>
                 )}
               </div>
@@ -756,8 +763,8 @@ function App() {
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`${mobileView !== 'shooting' ? 'hidden md:block' : ''}`}>
                     <ShotTypeAnalysis shotTypes={(() => {
-                      if (!displayPlayer?.shot_type_analysis) return undefined;
-                      const sta = displayPlayer.shot_type_analysis;
+                      if (!renderedPlayer?.shot_type_analysis) return undefined;
+                      const sta = renderedPlayer.shot_type_analysis;
                       const p = sta.player || {};
                       const d = sta.opp_def || {};
                       const cs = p.catch_and_shoot;
@@ -795,7 +802,7 @@ function App() {
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`md:hidden ${mobileView !== 'types' ? 'hidden' : ''}`}>
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
+                    <PlayTypeAnalysis playTypes={renderedPlayer?.play_type_analysis} />
                   </div>
                 )}
                 <div className={`flex-1 min-h-0 xl:col-span-12 w-full h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>
