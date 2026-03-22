@@ -18,6 +18,7 @@ import {
   playerHasAnyProp,
   playerHasPropForDate,
 } from './utils/propResolution';
+import { fetchApiJson } from './utils/network';
 
 
 const STAT_LABELS: Record<string, string> = {
@@ -378,12 +379,11 @@ function App() {
       };
     } else {
       // ── JSON fallback (original behavior, unchanged) ──
-      const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
       Promise.all([
-        fetch(`${apiUrl}/data/current/master_feed.json`).then(res => res.json()),
-        fetch(`${apiUrl}/data/archive/historical_odds.json`).then(res => res.json()).catch(() => ({})),
-        fetch(`${apiUrl}/data/current/line_movements_today.json`).then(res => res.json()).catch(() => ({ snapshots: [] })),
-        fetch(`${apiUrl}/data/current/nba_dashboard_games.json`).then(res => res.json()).catch(() => ([]))
+        fetchApiJson<Player[]>('/data/current/master_feed.json'),
+        fetchApiJson<Record<string, any>>('/data/archive/historical_odds.json').catch(() => ({})),
+        fetchApiJson<{ snapshots?: any[] }>('/data/current/line_movements_today.json').catch(() => ({ snapshots: [] })),
+        fetchApiJson<any[]>('/data/current/nba_dashboard_games.json').catch(() => ([])),
       ])
         .then(([masterFeed, historicalOdds, lineMovements, games]) => {
           const today = getDashboardDate();

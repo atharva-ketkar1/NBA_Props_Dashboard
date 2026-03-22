@@ -4,6 +4,7 @@ import { Player, Game } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
 import { getPreferredSportsbookProp, playerHasPropForDate } from '../utils/propResolution';
+import { fetchApiJson } from '../utils/network';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -317,9 +318,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     });
             });
         } else {
-            const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-            fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
-                .then(res => res.json())
+            fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
                 .then(data => {
                     const sortedGames = (data as Game[])
                         .filter(g => propDates.includes(g.game_date))

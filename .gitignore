@@ -40,3 +40,7 @@ docs/progress/
 docs/deployment/
 
 backend/scrapers/archive/
+
+supabase/
+vercel.json
+docs/security/

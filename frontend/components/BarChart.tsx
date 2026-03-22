@@ -11,6 +11,7 @@ import {
     formatOverlayLegend,
     getOverlayFilterDefinition,
 } from '../utils/filterOverlays';
+import { fetchApiJson } from '../utils/network';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -98,9 +99,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     });
             });
         } else {
-            const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-            fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
-                .then(res => res.json())
+            fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
                 .then(data => setScheduleData((data as Game[]).filter(g => relevantDates.includes(g.game_date))))
                 .catch(err => console.error("Error loading schedule:", err));
         }
