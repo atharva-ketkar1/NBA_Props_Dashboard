@@ -209,19 +209,31 @@ async function performFetch(url: URL, init: RequestInit | undefined, timeoutMs: 
 }
 
 const API_BASE_URL = normalizeConfiguredUrl(import.meta.env.VITE_API_BASE_URL, 'VITE_API_BASE_URL') ?? DEFAULT_API_BASE_URL;
-const SUPABASE_URL = normalizeConfiguredUrl(import.meta.env.VITE_SUPABASE_URL, 'VITE_SUPABASE_URL');
 
 export function getApiBaseUrl() {
   return API_BASE_URL;
 }
 
-export function getSupabaseOrigin() {
-  return SUPABASE_URL ? new URL(SUPABASE_URL).origin : null;
-}
-
 export function buildApiUrl(path: string) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   return new URL(normalizedPath, `${API_BASE_URL}/`).toString();
+}
+
+export function buildAppUrl(path: string, params?: Record<string, string | number | boolean | null | undefined>) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const url = new URL(normalizedPath, `${getRuntimeOrigin()}/`);
+
+  Object.entries(params ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '') {
+        return;
+      }
+
+      url.searchParams.set(key, String(value));
+    });
+
+  return url.toString();
 }
 
 export async function guardedFetch(
@@ -272,6 +284,16 @@ export async function fetchJson<T>(
 export function fetchApiJson<T>(path: string, init?: RequestInit) {
   return fetchJson<T>(buildApiUrl(path), init, {
     allowedOrigins: [API_BASE_URL],
+    dedupe: true,
+  });
+}
+
+export function fetchAppJson<T>(
+  path: string,
+  params?: Record<string, string | number | boolean | null | undefined>,
+  init?: RequestInit,
+) {
+  return fetchJson<T>(buildAppUrl(path, params), init, {
     dedupe: true,
   });
 }

@@ -11,7 +11,7 @@ import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
 import { Player, PlayerPropsByDate } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
-import { getDashboardDate, getDashboardScheduleDates } from './utils/dashboardDate';
+import { getDashboardDate } from './utils/dashboardDate';
 import {
   getResolvedPlayerGameDate,
   materializePlayerForGameDate,
@@ -19,6 +19,12 @@ import {
   playerHasPropForDate,
 } from './utils/propResolution';
 import { fetchApiJson } from './utils/network';
+import {
+  fetchDashboardArchive,
+  fetchDashboardBootstrap,
+  fetchDashboardHot,
+  fetchDashboardPlayer,
+} from './utils/dashboardApi';
 
 
 const STAT_LABELS: Record<string, string> = {
@@ -38,8 +44,6 @@ const STAT_LABELS: Record<string, string> = {
 
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 
-const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
-
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   const parsed = Number(rawValue);
   return Number.isFinite(parsed) && parsed >= 60_000 ? parsed : fallbackMs;
@@ -47,23 +51,6 @@ function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
 
 function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState === 'visible';
-}
-
-function buildFutureDates(startDate: string, days: number) {
-  return Array.from({ length: days }, (_, i) => {
-    const d = new Date(startDate);
-    d.setDate(d.getDate() + i);
-    return d.toISOString().split('T')[0];
-  });
-}
-
-function getFastRefreshDates(selectedDate?: string | null) {
-  const [today, tomorrow] = getDashboardScheduleDates();
-  const dates = new Set<string>([today, tomorrow].filter(Boolean));
-  if (selectedDate) {
-    dates.add(selectedDate);
-  }
-  return Array.from(dates);
 }
 
 function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
@@ -110,13 +97,6 @@ function flattenIntradayMovements(rows: any[]) {
     .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 }
 
-function serializeLineMovementVersion(rows: any[]) {
-  return (rows ?? [])
-    .map((row: any) => `${row.game_date}:${row.updated_at ?? ''}`)
-    .sort()
-    .join('|');
-}
-
 function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
   if (!players.length || !(propsRows ?? []).length) {
     return players;
@@ -135,37 +115,6 @@ function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
       props_by_date: mergePropsByDateMaps(player.props_by_date, incoming),
     };
   });
-}
-
-async function fetchAllPlayerPropsForDates(supabase: any, gameDates: string[], selectClause = PLAYER_PROP_SELECT) {
-  const pageSize = 1000;
-  const allRows: any[] = [];
-
-  for (let start = 0; ; start += pageSize) {
-    const { data, error } = await supabase
-      .from('player_props')
-      .select(selectClause)
-      .in('game_date', gameDates)
-      .order('game_date', { ascending: true })
-      .order('player_id', { ascending: true })
-      .order('stat_type', { ascending: true })
-      .order('sportsbook', { ascending: true })
-      .range(start, start + pageSize - 1);
-
-    if (error) {
-      return { data: allRows, error };
-    }
-
-    if (!data?.length) {
-      return { data: allRows, error: null };
-    }
-
-    allRows.push(...data);
-
-    if (data.length < pageSize) {
-      return { data: allRows, error: null };
-    }
-  }
 }
 
 function App() {
@@ -238,7 +187,7 @@ function App() {
 
   // ──────────────────────────────────────────────────────────────
   // Data fetching
-  // Set VITE_USE_DB=true in Vercel to fetch from Supabase.
+  // Set VITE_USE_DB=true in Vercel to fetch from the server-side Vercel API.
   // Set VITE_USE_DB=false (or omit) to fall back to master_feed.json.
   // ──────────────────────────────────────────────────────────────
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
@@ -247,7 +196,7 @@ function App() {
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
   const lineMovementVersionRef = useRef('');
 
-  /** Reconstruct the Player[] shape from Supabase rows. */
+  /** Reconstruct the Player[] shape from API rows. */
   function mergeFeedFromDB(
     players: any[],
     props: any[],
@@ -304,39 +253,17 @@ function App() {
             return;
           }
 
-          const { supabase } = await import('./utils/supabase');
-          const [today] = getDashboardScheduleDates();
-          const futureDates = buildFutureDates(today, 14);
-
-          const [
-            { data: playersRows, error: e1 },
-            { data: propsRows, error: e2 },
-            lineMovementResult,
-            { data: gamesRows, error: e4 },
-          ] = await Promise.all([
-            supabase.from('players').select('id, name, team, position, stats, play_type_analysis'),
-            fetchAllPlayerPropsForDates(supabase, futureDates),
-            isInitial
-              ? supabase.from('line_movements').select('game_date, snapshots, updated_at').in('game_date', getFastRefreshDates(null))
-              : Promise.resolve({ data: null, error: null }),
-            supabase.from('games').select('home_team_tricode, away_team_tricode').eq('game_date', today),
-          ]);
+          const snapshot = await fetchDashboardBootstrap();
 
           if (cancelled) return;
-          if (e1) console.error('[supabase] players error:', e1);
-          if (e2) console.error('[supabase] player_props error:', e2);
-          if (lineMovementResult?.error && lineMovementResult.error.code !== 'PGRST116') {
-            console.error('[supabase] line_movements error:', lineMovementResult.error);
-          }
-          if (e4) console.error('[supabase] games error:', e4);
 
-          const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
-          const slateTeams = Array.from(new Set((gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
+          const mergedFeed = mergeFeedFromDB(snapshot.playersRows ?? [], snapshot.propsRows ?? []);
+          const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
 
-          const intradayMovements = isInitial ? flattenIntradayMovements(lineMovementResult?.data ?? []) : null;
+          const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
           if (isInitial) {
-            lineMovementVersionRef.current = serializeLineMovementVersion(lineMovementResult?.data ?? []);
+            lineMovementVersionRef.current = snapshot.lineVersion ?? '';
           }
 
           setRawData(prev => {
@@ -419,45 +346,23 @@ function App() {
           return;
         }
 
-        const { supabase } = await import('./utils/supabase');
-        const activeDates = getFastRefreshDates(resolvedSelectedGameDate ?? selectedGameDate);
-
-        const [
-          { data: propsRows, error: propsError },
-          { data: lineMetaRows, error: lineMetaError },
-        ] = await Promise.all([
-          fetchAllPlayerPropsForDates(supabase, activeDates),
-          supabase.from('line_movements').select('game_date, updated_at').in('game_date', activeDates),
-        ]);
+        const hotSnapshot = await fetchDashboardHot(
+          resolvedSelectedGameDate ?? selectedGameDate,
+          lineMovementVersionRef.current,
+        );
 
         if (cancelled) return;
-        if (propsError) console.error('[supabase] hot player_props error:', propsError);
-        if (lineMetaError && lineMetaError.code !== 'PGRST116') {
-          console.error('[supabase] hot line_movements metadata error:', lineMetaError);
+
+        if ((hotSnapshot.propsRows ?? []).length > 0) {
+          setRawData(prev => mergePropsIntoPlayers(prev, hotSnapshot.propsRows ?? []));
         }
 
-        if ((propsRows ?? []).length > 0) {
-          setRawData(prev => mergePropsIntoPlayers(prev, propsRows ?? []));
-        }
-
-        const nextVersion = serializeLineMovementVersion(lineMetaRows ?? []);
-        if (!nextVersion || nextVersion === lineMovementVersionRef.current) {
+        if (!Object.prototype.hasOwnProperty.call(hotSnapshot, 'lineRows')) {
           return;
         }
 
-        const { data: lineRows, error: lineRowsError } = await supabase
-          .from('line_movements')
-          .select('game_date, snapshots, updated_at')
-          .in('game_date', activeDates);
-
-        if (cancelled) return;
-        if (lineRowsError && lineRowsError.code !== 'PGRST116') {
-          console.error('[supabase] hot line_movements error:', lineRowsError);
-          return;
-        }
-
-        lineMovementVersionRef.current = serializeLineMovementVersion(lineRows ?? []);
-        const intradayMovements = flattenIntradayMovements(lineRows ?? []);
+        lineMovementVersionRef.current = hotSnapshot.lineVersion ?? '';
+        const intradayMovements = flattenIntradayMovements(hotSnapshot.lineRows ?? []);
         setRawData(prev => prev.map((player) => ({
           ...player,
           intraday_movements: intradayMovements,
@@ -490,24 +395,19 @@ function App() {
       const playerId = currentPlayer.id;
 
       if (USE_DB) {
-        import('./utils/supabase').then(({ supabase }) => {
-          supabase.from('archive_gamelogs')
-            .select('game_log')
-            .eq('player_id', playerId)
-            .eq('season', '2024-25')
-            .maybeSingle()
-            .then(({ data, error }) => {
-              setIsLoadingArchive(false);
-              if (error) {
-                console.error('[supabase] archive error:', error);
-                return;
-              }
-              setArchiveGameLogs(prev => ({
-                ...prev,
-                [playerId]: data?.game_log || []
-              }));
-            });
-        });
+        fetchDashboardArchive(playerId, '2024-25')
+          .then(({ gameLog }) => {
+            setArchiveGameLogs(prev => ({
+              ...prev,
+              [playerId]: gameLog || []
+            }));
+          })
+          .catch((error) => {
+            console.error('[api] archive error:', error);
+          })
+          .finally(() => {
+            setIsLoadingArchive(false);
+          });
       } else {
         // Fallback logic could go here if `USE_DB` goes false, 
         // but since we are exclusively doing DB limits, we'll keep it empty.
@@ -563,37 +463,27 @@ function App() {
     if (!USE_DB || !currentPlayer) return;
     const playerId = currentPlayer.id;
 
-    import('./utils/supabase').then(({ supabase }) => {
-      // Fetch zones + game_log in one query
-      supabase
-        .from('players')
-        .select('game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis')
-        .eq('id', playerId)
-        .single()
-        .then(({ data: detail, error }) => {
-          if (error) { console.error('[supabase] player detail error:', error); return; }
-          setRawData(prev => prev.map(p => p.id === playerId ? { ...p, ...detail } : p));
-        });
-
-      // Fetch historical odds for this player
-      supabase
-        .from('historical_odds')
-        .select('game_date, props, source')
-        .eq('player_id', playerId)
-        .then(({ data, error }) => {
-          if (error) { console.error('[supabase] historical_odds error:', error); return; }
-          const map = Object.fromEntries((data ?? []).map(r => [
-            r.game_date,
-            {
-              [String(playerId)]: {
-                props: r.props,
-                source: r.source,
-              }
+    fetchDashboardPlayer(playerId)
+      .then(({ detail, historicalOddsRows }) => {
+        const map = Object.fromEntries((historicalOddsRows ?? []).map((row: any) => [
+          row.game_date,
+          {
+            [String(playerId)]: {
+              props: row.props,
+              source: row.source,
             }
-          ]));
-          setRawData(prev => prev.map(p => p.id === playerId ? { ...p, historical_odds: map } : p));
-        });
-    });
+          }
+        ]));
+
+        setRawData(prev => prev.map((player) => (
+          player.id === playerId
+            ? { ...player, ...detail, historical_odds: map }
+            : player
+        )));
+      })
+      .catch((error) => {
+        console.error('[api] player detail error:', error);
+      });
   }, [selectedIndex, USE_DB]);
 
 

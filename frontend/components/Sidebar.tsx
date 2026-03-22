@@ -5,6 +5,7 @@ import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
 import { getPreferredSportsbookProp, playerHasPropForDate } from '../utils/propResolution';
 import { fetchApiJson } from '../utils/network';
+import { fetchDashboardGames } from '../utils/dashboardApi';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -304,19 +305,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
         if (!propDates.length) return;
 
         if (USE_DB) {
-            import('../utils/supabase').then(({ supabase }) => {
-                supabase
-                    .from('games')
-                    .select('*')
-                    .in('game_date', propDates)
-                    .then(({ data, error }) => {
-                        if (error) { console.error('[supabase] games error:', error); return; }
-                        const sorted = (data ?? []).sort((a: Game, b: Game) =>
-                            new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
-                        );
-                        setScheduleData(sorted);
-                    });
-            });
+            fetchDashboardGames(propDates)
+                .then(({ games }) => {
+                    const sorted = (games ?? []).sort((a: Game, b: Game) =>
+                        new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+                    );
+                    setScheduleData(sorted);
+                })
+                .catch((error) => {
+                    console.error('[api] games error:', error);
+                });
         } else {
             fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
                 .then(data => {

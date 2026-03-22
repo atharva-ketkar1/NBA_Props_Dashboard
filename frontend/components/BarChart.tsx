@@ -12,6 +12,7 @@ import {
     getOverlayFilterDefinition,
 } from '../utils/filterOverlays';
 import { fetchApiJson } from '../utils/network';
+import { fetchDashboardGames } from '../utils/dashboardApi';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -85,19 +86,16 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 )
             )
         )).sort();
-        const relevantDates = propDates.length > 0 ? propDates : getDashboardScheduleDates();
+        const relevantDates = propDates.length > 0 ? propDates : Array.from(getDashboardScheduleDates());
 
         if (USE_DB) {
-            import('../utils/supabase').then(({ supabase }) => {
-                supabase
-                    .from('games')
-                    .select('*')
-                    .in('game_date', relevantDates)
-                    .then(({ data, error }) => {
-                        if (error) { console.error('[supabase] games error:', error); return; }
-                        setScheduleData(data ?? []);
-                    });
-            });
+            fetchDashboardGames(relevantDates)
+                .then(({ games }) => {
+                    setScheduleData(games ?? []);
+                })
+                .catch((error) => {
+                    console.error('[api] games error:', error);
+                });
         } else {
             fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
                 .then(data => setScheduleData((data as Game[]).filter(g => relevantDates.includes(g.game_date))))
