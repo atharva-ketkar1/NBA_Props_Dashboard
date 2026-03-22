@@ -295,7 +295,13 @@ export function fetchAppJson<T>(
   params?: Record<string, string | number | boolean | null | undefined>,
   init?: RequestInit,
 ) {
-  return fetchJson<T>(buildAppUrl(path, params), init, {
+  const headers = new Headers(init?.headers);
+  headers.set('x-propx-client', 'web');
+
+  return fetchJson<T>(buildAppUrl(path, params), {
+    ...init,
+    headers,
+  }, {
     dedupe: true,
   });
 }

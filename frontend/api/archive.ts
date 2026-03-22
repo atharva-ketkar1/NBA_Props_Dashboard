@@ -1,11 +1,13 @@
+import { readArchiveToken } from './_lib/access.js';
 import { fetchArchivePayload } from './_lib/dashboardData.js';
 import {
   enforceRateLimit,
   errorResponse,
   jsonResponse,
   methodNotAllowed,
-  parseInteger,
+  rejectBrowserNavigation,
   rejectCrossSiteBrowserRequest,
+  rejectUnknownAppClient,
 } from './_lib/http.js';
 
 export const runtime = 'nodejs';
@@ -22,9 +24,19 @@ export default {
       return crossSiteResponse;
     }
 
+    const navigationResponse = rejectBrowserNavigation(request);
+    if (navigationResponse) {
+      return navigationResponse;
+    }
+
+    const clientResponse = rejectUnknownAppClient(request);
+    if (clientResponse) {
+      return clientResponse;
+    }
+
     const rateLimitResponse = enforceRateLimit(request, {
       bucket: 'archive',
-      limit: 60,
+      limit: 20,
       windowMs: 60_000,
     });
     if (rateLimitResponse) {
@@ -32,22 +44,16 @@ export default {
     }
 
     const requestUrl = new URL(request.url);
-    const playerId = parseInteger(requestUrl.searchParams.get('playerId'));
-    const season = requestUrl.searchParams.get('season') ?? '2024-25';
+    const token = requestUrl.searchParams.get('token') ?? '';
+    const archiveAccess = readArchiveToken(request, token);
 
-    if (!playerId) {
-      return errorResponse(400, 'A valid playerId is required.');
+    if (!archiveAccess) {
+      return errorResponse(403, 'A valid archive access token is required.');
     }
 
     try {
-      const payload = await fetchArchivePayload(playerId, season);
-      return jsonResponse(payload, {
-        cache: {
-          browserMaxAge: 0,
-          sMaxAge: 1800,
-          staleWhileRevalidate: 86_400,
-        },
-      });
+      const payload = await fetchArchivePayload(archiveAccess.playerId, archiveAccess.season);
+      return jsonResponse(payload);
     } catch (error) {
       console.error('[api/archive]', error);
       return errorResponse(500, 'Failed to load archived game logs.');

@@ -27,6 +27,12 @@ type ArchiveResponse = {
   gameLog: any[];
 };
 
+type AccessResponse = {
+  archiveToken: string | null;
+  expiresAt: number;
+  playerToken: string;
+};
+
 export function fetchDashboardBootstrap() {
   return fetchAppJson<BootstrapResponse>('/api/bootstrap');
 }
@@ -44,15 +50,21 @@ export function fetchDashboardGames(dates: string[]) {
   });
 }
 
-export function fetchDashboardPlayer(playerId: number) {
-  return fetchAppJson<PlayerResponse>('/api/player', {
+export function fetchDashboardAccess(playerId: number, archiveSeason?: string | null) {
+  return fetchAppJson<AccessResponse>('/api/access', {
+    archiveSeason,
     playerId,
   });
 }
 
-export function fetchDashboardArchive(playerId: number, season: string) {
+export function fetchDashboardPlayer(token: string) {
+  return fetchAppJson<PlayerResponse>('/api/player', {
+    token,
+  });
+}
+
+export function fetchDashboardArchive(token: string) {
   return fetchAppJson<ArchiveResponse>('/api/archive', {
-    playerId,
-    season,
+    token,
   });
 }

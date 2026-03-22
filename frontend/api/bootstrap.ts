@@ -4,7 +4,9 @@ import {
   errorResponse,
   jsonResponse,
   methodNotAllowed,
+  rejectBrowserNavigation,
   rejectCrossSiteBrowserRequest,
+  rejectUnknownAppClient,
 } from './_lib/http.js';
 
 export const runtime = 'nodejs';
@@ -21,9 +23,19 @@ export default {
       return crossSiteResponse;
     }
 
+    const navigationResponse = rejectBrowserNavigation(request);
+    if (navigationResponse) {
+      return navigationResponse;
+    }
+
+    const clientResponse = rejectUnknownAppClient(request);
+    if (clientResponse) {
+      return clientResponse;
+    }
+
     const rateLimitResponse = enforceRateLimit(request, {
       bucket: 'bootstrap',
-      limit: 30,
+      limit: 20,
       windowMs: 60_000,
     });
     if (rateLimitResponse) {

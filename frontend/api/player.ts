@@ -1,11 +1,13 @@
+import { readPlayerToken } from './_lib/access.js';
 import { fetchPlayerPayload } from './_lib/dashboardData.js';
 import {
   enforceRateLimit,
   errorResponse,
   jsonResponse,
   methodNotAllowed,
-  parseInteger,
+  rejectBrowserNavigation,
   rejectCrossSiteBrowserRequest,
+  rejectUnknownAppClient,
 } from './_lib/http.js';
 
 export const runtime = 'nodejs';
@@ -22,9 +24,19 @@ export default {
       return crossSiteResponse;
     }
 
+    const navigationResponse = rejectBrowserNavigation(request);
+    if (navigationResponse) {
+      return navigationResponse;
+    }
+
+    const clientResponse = rejectUnknownAppClient(request);
+    if (clientResponse) {
+      return clientResponse;
+    }
+
     const rateLimitResponse = enforceRateLimit(request, {
       bucket: 'player',
-      limit: 90,
+      limit: 30,
       windowMs: 60_000,
     });
     if (rateLimitResponse) {
@@ -32,21 +44,16 @@ export default {
     }
 
     const requestUrl = new URL(request.url);
-    const playerId = parseInteger(requestUrl.searchParams.get('playerId'));
+    const token = requestUrl.searchParams.get('token') ?? '';
+    const playerAccess = readPlayerToken(request, token);
 
-    if (!playerId) {
-      return errorResponse(400, 'A valid playerId is required.');
+    if (!playerAccess) {
+      return errorResponse(403, 'A valid player access token is required.');
     }
 
     try {
-      const payload = await fetchPlayerPayload(playerId);
-      return jsonResponse(payload, {
-        cache: {
-          browserMaxAge: 0,
-          sMaxAge: 300,
-          staleWhileRevalidate: 1800,
-        },
-      });
+      const payload = await fetchPlayerPayload(playerAccess.playerId);
+      return jsonResponse(payload);
     } catch (error) {
       console.error('[api/player]', error);
       return errorResponse(500, 'Failed to load player details.');

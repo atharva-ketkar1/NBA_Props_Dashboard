@@ -93,7 +93,7 @@ function loadLocalEnvFallback() {
   return globalThis.__propsmadnessLocalEnvCache;
 }
 
-function getOptionalEnv(name: string) {
+export function getOptionalEnv(name: string) {
   const runtimeValue = process.env[name]?.trim();
   if (runtimeValue) {
     return runtimeValue;

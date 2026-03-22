@@ -22,6 +22,8 @@ declare global {
 }
 
 const rateBuckets = globalThis.__propsmadnessRateBuckets ??= new Map<string, number[]>();
+const APP_CLIENT_HEADER_NAME = 'x-propx-client';
+const APP_CLIENT_HEADER_VALUE = 'web';
 
 function buildCacheControl(cache?: CacheProfile) {
   if (!cache) {
@@ -79,6 +81,25 @@ export function rejectCrossSiteBrowserRequest(request: Request) {
   }
 
   return errorResponse(403, 'Cross-site browser requests are not allowed.');
+}
+
+export function rejectBrowserNavigation(request: Request) {
+  const mode = request.headers.get('sec-fetch-mode');
+  const dest = request.headers.get('sec-fetch-dest');
+
+  if (mode === 'navigate' || dest === 'document') {
+    return errorResponse(404, 'Not found.');
+  }
+
+  return null;
+}
+
+export function rejectUnknownAppClient(request: Request) {
+  if (request.headers.get(APP_CLIENT_HEADER_NAME) === APP_CLIENT_HEADER_VALUE) {
+    return null;
+  }
+
+  return errorResponse(403, 'Unsupported client.');
 }
 
 function getClientIp(request: Request) {

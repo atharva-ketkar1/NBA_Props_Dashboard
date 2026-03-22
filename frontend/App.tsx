@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { startTransition, useState, useEffect, useMemo, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { Header } from './components/Header';
 import { BarChart } from './components/BarChart';
@@ -20,6 +20,7 @@ import {
 } from './utils/propResolution';
 import { fetchApiJson } from './utils/network';
 import {
+  fetchDashboardAccess,
   fetchDashboardArchive,
   fetchDashboardBootstrap,
   fetchDashboardHot,
@@ -117,6 +118,22 @@ function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
   });
 }
 
+function buildHistoricalOddsMap(playerId: number, historicalOddsRows: any[]) {
+  return Object.fromEntries((historicalOddsRows ?? []).map((row: any) => [
+    row.game_date,
+    {
+      [String(playerId)]: {
+        props: row.props,
+        source: row.source,
+      }
+    }
+  ]));
+}
+
+function hasLoadedPlayerDetail(player?: Player | null) {
+  return Boolean(player?.detail_loaded);
+}
+
 function App() {
   const [rawData, setRawData] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
@@ -168,10 +185,7 @@ function App() {
         });
 
         const bestPlayer = eligiblePlayers[0];
-        const newIndex = playersWithProps.findIndex(p => p.id === bestPlayer.id);
-        if (newIndex !== -1) {
-          setSelectedIndex(newIndex);
-        }
+        selectPlayerForView(bestPlayer.id, resolvedSelectedGameDate);
       } else {
         // If NO ONE on the team has the prop, fall back to the old logic of finding a valid tab for the current player
         const firstValidTab = TAB_ORDER.find(tab => {
@@ -195,6 +209,19 @@ function App() {
   const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 5 * 60 * 1000);
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
   const lineMovementVersionRef = useRef('');
+  const rawDataRef = useRef<Player[]>([]);
+  const playerDetailRequestsRef = useRef(new Map<number, Promise<void>>());
+  const archiveRequestsRef = useRef(new Map<string, Promise<void>>());
+  const selectionRequestRef = useRef(0);
+  const accessCacheRef = useRef(new Map<string, {
+    archiveToken: string | null;
+    expiresAt: number;
+    playerToken: string;
+  }>());
+
+  useEffect(() => {
+    rawDataRef.current = rawData;
+  }, [rawData]);
 
   /** Reconstruct the Player[] shape from API rows. */
   function mergeFeedFromDB(
@@ -214,6 +241,7 @@ function App() {
       props_by_date: propsByDateMap[p.id] ?? {},
       historical_odds: {},                       // null until lazy-loaded on player select
       intraday_movements: [],
+      detail_loaded: false,
       // Zone fields — null until lazy-loaded
       shooting_zones: null,
       assist_zones: null,
@@ -278,13 +306,14 @@ function App() {
                 team: p.team,
                 position: p.position,
                 stats: p.stats,
-                props: p.props,
-                props_by_date: p.props_by_date,
-                play_type_analysis: p.play_type_analysis,
-                intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
-              };
-            });
+              props: p.props,
+              props_by_date: p.props_by_date,
+              play_type_analysis: p.play_type_analysis,
+              intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
+              detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
+            };
           });
+        });
 
           if (isInitial) {
             setLoading(false);
@@ -323,6 +352,7 @@ function App() {
             ...materializePlayerForGameDate(player, getDashboardDate()),
             historical_odds: historicalOdds,
             intraday_movements: lineMovements?.snapshots || [],
+            detail_loaded: true,
           }));
           setRawData(enhancedFeed);
           setLoading(false);
@@ -386,6 +416,129 @@ function App() {
 
   const [isInitialized, setIsInitialized] = useState(false);
 
+  const ensurePlayerAccess = async (playerId: number, archiveSeason?: string | null) => {
+    const cacheKey = `${playerId}:${archiveSeason ?? ''}`;
+    const cached = accessCacheRef.current.get(cacheKey);
+
+    if (cached && cached.expiresAt > Date.now() + 15_000) {
+      return cached;
+    }
+
+    const access = await fetchDashboardAccess(playerId, archiveSeason);
+    accessCacheRef.current.set(cacheKey, access);
+    return access;
+  };
+
+  const ensurePlayerDetailLoaded = async (playerId: number) => {
+    const cachedPlayer = rawDataRef.current.find((player) => player.id === playerId);
+    if (hasLoadedPlayerDetail(cachedPlayer)) {
+      return;
+    }
+
+    const existingRequest = playerDetailRequestsRef.current.get(playerId);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = ensurePlayerAccess(playerId)
+      .then((access) => fetchDashboardPlayer(access.playerToken))
+      .then(({ detail, historicalOddsRows }) => {
+        const historicalOddsMap = buildHistoricalOddsMap(playerId, historicalOddsRows);
+
+        setRawData(prev => prev.map((player) => (
+          player.id === playerId
+            ? { ...player, ...detail, historical_odds: historicalOddsMap, detail_loaded: true }
+            : player
+        )));
+      })
+      .finally(() => {
+        playerDetailRequestsRef.current.delete(playerId);
+      });
+
+    playerDetailRequestsRef.current.set(playerId, request);
+    return request;
+  };
+
+  const ensureArchiveLoaded = async (playerId: number, season: string) => {
+    if (archiveGameLogs[String(playerId)]) {
+      return;
+    }
+
+    const cacheKey = `${playerId}:${season}`;
+    const existingRequest = archiveRequestsRef.current.get(cacheKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = ensurePlayerAccess(playerId, season)
+      .then((access) => {
+        if (!access.archiveToken) {
+          throw new Error('Missing archive access token.');
+        }
+
+        return fetchDashboardArchive(access.archiveToken);
+      })
+      .then(({ gameLog }) => {
+        setArchiveGameLogs(prev => ({
+          ...prev,
+          [playerId]: gameLog || []
+        }));
+      })
+      .finally(() => {
+        archiveRequestsRef.current.delete(cacheKey);
+      });
+
+    archiveRequestsRef.current.set(cacheKey, request);
+    return request;
+  };
+
+  const preparePlayerForSelection = async (playerId: number, season?: string | null) => {
+    await ensurePlayerDetailLoaded(playerId);
+    if (season) {
+      await ensureArchiveLoaded(playerId, season);
+    }
+  };
+
+  const selectPlayerForView = (id: number, gameDate?: string | null) => {
+    const index = playersWithProps.findIndex((player) => player.id === id);
+    if (index === -1) {
+      return;
+    }
+
+    const nextPlayer = playersWithProps[index];
+    const shouldPreloadArchive = USE_DB && activeSeason === '24/25';
+    const hasArchiveLoaded = !shouldPreloadArchive || Boolean(archiveGameLogs[String(id)]);
+    const canSwitchImmediately = !USE_DB || (hasLoadedPlayerDetail(nextPlayer) && hasArchiveLoaded);
+    const commitSelection = () => {
+      startTransition(() => {
+        setSelectedIndex(index);
+        setSelectedGameDate(gameDate ?? null);
+        setCustomLineValue(null);
+      });
+    };
+
+    if (canSwitchImmediately) {
+      commitSelection();
+      return;
+    }
+
+    const requestId = selectionRequestRef.current + 1;
+    selectionRequestRef.current = requestId;
+
+    void preparePlayerForSelection(id, shouldPreloadArchive ? '2024-25' : null)
+      .then(() => {
+        if (selectionRequestRef.current === requestId) {
+          commitSelection();
+        }
+      })
+      .catch((error) => {
+        console.error('[api] preselect player load error:', error);
+        if (selectionRequestRef.current === requestId) {
+          commitSelection();
+        }
+      });
+  };
+
   // 2. Archive fetching when season filter changes
   useEffect(() => {
     // Only fetch if 24/25 is active, and the current player exists, and we haven't fetched their logs yet
@@ -395,13 +548,7 @@ function App() {
       const playerId = currentPlayer.id;
 
       if (USE_DB) {
-        fetchDashboardArchive(playerId, '2024-25')
-          .then(({ gameLog }) => {
-            setArchiveGameLogs(prev => ({
-              ...prev,
-              [playerId]: gameLog || []
-            }));
-          })
+        ensureArchiveLoaded(playerId, '2024-25')
           .catch((error) => {
             console.error('[api] archive error:', error);
           })
@@ -462,29 +609,15 @@ function App() {
   useEffect(() => {
     if (!USE_DB || !currentPlayer) return;
     const playerId = currentPlayer.id;
+    if (hasLoadedPlayerDetail(currentPlayer)) {
+      return;
+    }
 
-    fetchDashboardPlayer(playerId)
-      .then(({ detail, historicalOddsRows }) => {
-        const map = Object.fromEntries((historicalOddsRows ?? []).map((row: any) => [
-          row.game_date,
-          {
-            [String(playerId)]: {
-              props: row.props,
-              source: row.source,
-            }
-          }
-        ]));
-
-        setRawData(prev => prev.map((player) => (
-          player.id === playerId
-            ? { ...player, ...detail, historical_odds: map }
-            : player
-        )));
-      })
+    ensurePlayerDetailLoaded(playerId)
       .catch((error) => {
         console.error('[api] player detail error:', error);
       });
-  }, [selectedIndex, USE_DB]);
+  }, [selectedIndex, USE_DB, currentPlayer]);
 
 
   if (loading) {
@@ -511,13 +644,13 @@ function App() {
       activePlayerId: displayPlayer?.id,
       activeGameDate: resolvedSelectedGameDate,
       activeSportsbook: activeSportsbook,
-      onSelectPlayer: (id: number, gameDate?: string | null) => {
-        const index = playersWithProps.findIndex(p => p.id === id);
-        if (index !== -1) {
-          setSelectedIndex(index);
-          setSelectedGameDate(gameDate ?? null);
-          setCustomLineValue(null);
+      onSelectPlayer: selectPlayerForView,
+      onPrefetchPlayer: (id: number) => {
+        if (!USE_DB) {
+          return;
         }
+
+        void ensurePlayerDetailLoaded(id).catch(() => {});
       },
       activeTab: activeTab,
       onTabChange: handleTabChange
