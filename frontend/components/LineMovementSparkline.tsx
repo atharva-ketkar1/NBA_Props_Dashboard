@@ -36,7 +36,7 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
         movements.forEach(snap => {
             const pData = snap.players[String(playerId)];
             if (pData && pData.props) {
-                if (activeGameDate && pData.game_date && pData.game_date !== activeGameDate) {
+                if (activeGameDate && pData.game_date !== activeGameDate) {
                     return;
                 }
                 const propObj = pData.props[statKey]?.[sbKey];
@@ -91,6 +91,17 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
         if (mode === 'juice') return v > 0 ? `+${v}` : String(v);
         return String(v);
     };
+
+    const now = new Date();
+    const dateKey = (date: Date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+    const todayKey = dateKey(now);
+    const distinctDayKeys = new Set(dataPoints.map((point) => dateKey(point.time)));
+    const showDateContext = distinctDayKeys.size > 1 || (dataPoints[0] && dateKey(dataPoints[0].time) !== todayKey);
+
+    const formatTimestamp = (date: Date) =>
+        date.toLocaleString([], showDateContext
+            ? { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+            : { hour: '2-digit', minute: '2-digit' });
 
     // SVG — full width via viewBox, rendered responsively
     const VW = 600;
@@ -212,16 +223,16 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
                         style={{ left: `clamp(0px, ${(hovered.x / VW * 100).toFixed(1)}%, calc(100% - 80px))`, bottom: '100%', marginBottom: '6px' }}
                     >
                         <div className="text-white font-bold">{formatVal(hovered.val)}</div>
-                        <div className="text-fgSubtle">{hovered.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                        <div className="text-fgSubtle">{formatTimestamp(hovered.time)}</div>
                     </div>
                 )}
             </div>
 
             {/* Time labels */}
             <div className="flex items-center gap-1 shrink-0 text-[9px] text-fgSubtle/50">
-                <span>{dataPoints[0].time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span>{formatTimestamp(dataPoints[0].time)}</span>
                 <span className="opacity-40">→</span>
-                <span>{dataPoints[dataPoints.length - 1].time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span>{formatTimestamp(dataPoints[dataPoints.length - 1].time)}</span>
             </div>
         </div>
     );

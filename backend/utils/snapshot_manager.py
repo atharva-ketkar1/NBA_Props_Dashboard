@@ -118,9 +118,7 @@ class SnapshotManager:
         for player_id, pdata in players_data.items():
             team = pdata.get("team", "")
             game_date = pdata.get("game_date")
-            date_ok = True
-            if game_date and active_dates:
-                date_ok = game_date in active_dates
+            date_ok = not active_dates or (bool(game_date) and game_date in active_dates)
             if team in active_teams and date_ok:
                 filtered[player_id] = pdata
         return filtered
@@ -157,8 +155,11 @@ class SnapshotManager:
 
         data = self._read_json(self.line_movements_path, default={"date": today_date, "snapshots": []})
 
+        if filter_to_active_schedule and data.get("snapshots"):
+            data["snapshots"] = self._carry_forward_snapshots(data, active_teams)
+
         if data.get("date") != today_date:
-            carried_snapshots = self._carry_forward_snapshots(data, active_teams) if filter_to_active_schedule else data.get("snapshots", [])
+            carried_snapshots = data.get("snapshots", [])
             data = {
                 "date": today_date,
                 "snapshots": carried_snapshots,

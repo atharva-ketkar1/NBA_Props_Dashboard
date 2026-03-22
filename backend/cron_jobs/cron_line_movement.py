@@ -22,7 +22,7 @@ def run_intraday_snapshot(label="intraday"):
     try:
         players_data = scrape_and_shape_odds(is_closing=False)
         sm = SnapshotManager()
-        success = sm.write_snapshot(label, players_data)
+        success = sm.write_snapshot(label, players_data, filter_to_active_schedule=True)
         duration_seconds = time.time() - start_time
         if success:
             logger.info(

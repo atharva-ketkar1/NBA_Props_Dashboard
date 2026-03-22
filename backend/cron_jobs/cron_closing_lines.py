@@ -429,7 +429,7 @@ def main(dry_run=False):
         # Send to SnapshotManager
         sm.process_closing_lines(players_data)
         # SnapshotManager ALSO writes a final intraday snapshot for "pre_game"
-        sm.write_snapshot("pre_game", players_data, bypass_dedupe=True)
+        sm.write_snapshot("pre_game", players_data, bypass_dedupe=True, filter_to_active_schedule=True)
         
         # Upsert fresh props to Supabase (non-fatal)
         # DATA_DIR is defined at module level in this file

@@ -81,7 +81,7 @@ function applyIntradayOverrides(
     if (!playerData?.props) continue;
 
     const snapshotDate = playerData.game_date ?? targetDate ?? null;
-    if (preferredDate && playerData.game_date && playerData.game_date !== preferredDate) {
+    if (targetDate && playerData.game_date !== targetDate) {
       continue;
     }
 
