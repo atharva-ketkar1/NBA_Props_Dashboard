@@ -191,13 +191,15 @@ async function performFetch(url: URL, init: RequestInit | undefined, timeoutMs: 
 
   try {
     await enforceRateLimit(url.origin);
+    const runtimeOrigin = getRuntimeOrigin();
+    const defaultCredentials = url.origin === runtimeOrigin ? 'same-origin' : 'omit';
 
     const { signal, cleanup } = createAbortSignal(timeoutMs, init?.signal ?? null);
     try {
       return await fetch(url.toString(), {
         ...init,
         signal,
-        credentials: init?.credentials ?? 'omit',
+        credentials: init?.credentials ?? defaultCredentials,
         referrerPolicy: init?.referrerPolicy ?? 'strict-origin-when-cross-origin',
       });
     } finally {
