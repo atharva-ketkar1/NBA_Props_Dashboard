@@ -75,6 +75,7 @@ interface SidebarProps {
     activeGameDate?: string | null;
     activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz';
     onSelectPlayer: (id: number, gameDate?: string | null) => void;
+    onPrefetchPlayer?: (id: number, gameDate?: string | null) => void;
     activeTab?: string;
     onTabChange?: (tab: string) => void;
 }
@@ -101,13 +102,15 @@ const PlayerRow = ({
     activeSportsbook = 'dk',
     isActive,
     onClick,
+    onPrefetch,
 }: {
     player: Player,
     statFilter: string,
     gameDate?: string | null,
     activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz',
     isActive: boolean,
-    onClick: () => void
+    onClick: () => void,
+    onPrefetch?: () => void
 }) => {
     const preferredSportsbooks = Array.from(new Set([activeSportsbook, 'dk', 'fd', 'mgm', 'cz']));
     const preferredProp = getPreferredSportsbookProp(player, statFilter, gameDate, preferredSportsbooks);
@@ -139,6 +142,9 @@ const PlayerRow = ({
     return (
         <div
             onClick={onClick}
+            onMouseEnter={onPrefetch}
+            onFocus={onPrefetch}
+            onTouchStart={onPrefetch}
             className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 hover:bg-bgElevation1 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-bgElevation1' : ''}`}
         >
             <div className="flex items-center gap-3">
@@ -195,8 +201,8 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz', onSelectPlayer: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
-    game, isExpanded, onToggle, activePlayerId, activeGameDate, activeSportsbook, onSelectPlayer, statFilter
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz', onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
+    game, isExpanded, onToggle, activePlayerId, activeGameDate, activeSportsbook, onSelectPlayer, onPrefetchPlayer, statFilter
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
@@ -264,6 +270,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                                     activeSportsbook={activeSportsbook}
                                     isActive={player.id === activePlayerId && game.game_date === activeGameDate}
                                     onClick={() => onSelectPlayer(player.id, game.game_date)}
+                                    onPrefetch={() => onPrefetchPlayer?.(player.id, game.game_date)}
                                 />
                             </div>
                         ))
@@ -280,7 +287,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
 export const Sidebar: React.FC<SidebarProps> = ({
     isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
-    activeGameDate, activeSportsbook = 'dk', activeTab = 'Points', onTabChange = () => { }
+    activeGameDate, activeSportsbook = 'dk', activeTab = 'Points', onTabChange = () => { }, onPrefetchPlayer
 }) => {
     const statFilter = STAT_MAP[activeTab] || 'PTS';
     const [gameFilter, setGameFilter] = useState('All Games');
@@ -499,6 +506,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 activeGameDate={activeGameDate}
                                 activeSportsbook={activeSportsbook}
                                 onSelectPlayer={onSelectPlayer}
+                                onPrefetchPlayer={onPrefetchPlayer}
                                 statFilter={statFilter}
                             />
                         );
