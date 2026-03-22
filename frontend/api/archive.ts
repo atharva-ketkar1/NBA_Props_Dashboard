@@ -1,4 +1,4 @@
-import { fetchArchivePayload } from './_lib/dashboardData';
+import { fetchArchivePayload } from './_lib/dashboardData.js';
 import {
   enforceRateLimit,
   errorResponse,
@@ -6,7 +6,7 @@ import {
   methodNotAllowed,
   parseInteger,
   rejectCrossSiteBrowserRequest,
-} from './_lib/http';
+} from './_lib/http.js';
 
 export const runtime = 'nodejs';
 export const maxDuration = 10;

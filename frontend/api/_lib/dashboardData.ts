@@ -1,9 +1,9 @@
-import { getSupabaseAdmin } from './supabaseAdmin';
+import { getSupabaseAdmin } from './supabaseAdmin.js';
 import {
   buildFutureDates,
   getDashboardDate,
   getFastRefreshDates,
-} from './dashboardDate';
+} from './dashboardDate.js';
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
 const PLAYER_BASE_SELECT = 'id, name, team, position, stats, play_type_analysis';

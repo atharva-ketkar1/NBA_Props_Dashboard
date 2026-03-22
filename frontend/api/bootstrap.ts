@@ -1,11 +1,11 @@
-import { fetchBootstrapPayload } from './_lib/dashboardData';
+import { fetchBootstrapPayload } from './_lib/dashboardData.js';
 import {
   enforceRateLimit,
   errorResponse,
   jsonResponse,
   methodNotAllowed,
   rejectCrossSiteBrowserRequest,
-} from './_lib/http';
+} from './_lib/http.js';
 
 export const runtime = 'nodejs';
 export const maxDuration = 10;
