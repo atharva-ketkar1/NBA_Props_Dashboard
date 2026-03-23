@@ -57,22 +57,9 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         () => (chartMode ? null : getOverlayFilterDefinition(activeFilterOverlay)),
         [activeFilterOverlay, chartMode],
     );
-    const isPlayerHistoryReady = Boolean(
-        player
-        && (
-            !USE_DB
-            || activeSeason !== '25/26'
-            || player.detail_loaded
-            || (player.game_log?.length ?? 0) > 0
-        ),
-    );
 
     // Hover State
     const [hoverData, setHoverData] = useState<HoveredGameData | null>(null);
-    const [stableChartPlayer, setStableChartPlayer] = useState<Player | undefined>(() => (
-        isPlayerHistoryReady && player ? player : undefined
-    ));
-    const [showDeferredLoading, setShowDeferredLoading] = useState(false);
 
     // Mobile specific chart adaptations
     const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth < 1024);
@@ -85,33 +72,6 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     useEffect(() => {
         setHoverData(null);
     }, [player?.id, activeTab, activeSportsbook, activeSeason, activeFilterOverlay]);
-
-    useEffect(() => {
-        if (!player) {
-            setStableChartPlayer(undefined);
-            setShowDeferredLoading(false);
-            return;
-        }
-
-        if (isPlayerHistoryReady) {
-            setStableChartPlayer(player);
-            setShowDeferredLoading(false);
-            return;
-        }
-
-        setShowDeferredLoading(false);
-        const timeoutId = window.setTimeout(() => {
-            setShowDeferredLoading(true);
-        }, 150);
-
-        return () => {
-            window.clearTimeout(timeoutId);
-        };
-    }, [player, isPlayerHistoryReady]);
-
-    const chartPlayer = isPlayerHistoryReady
-        ? player
-        : stableChartPlayer;
 
     // Dragging Line State
     const [isDragging, setIsDragging] = useState(false);
@@ -126,7 +86,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     useEffect(() => {
         const propDates = Array.from(new Set(
-            Object.values(chartPlayer?.props_by_date ?? {}).flatMap((statEntry) =>
+            Object.values(player?.props_by_date ?? {}).flatMap((statEntry) =>
                 Object.values(statEntry ?? {}).flatMap((bookEntry) =>
                     Object.keys(bookEntry ?? {}).filter((dateKey) => dateKey !== '__undated__')
                 )
@@ -175,10 +135,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         return () => {
             cancelled = true;
         };
-    }, [chartPlayer]);
+    }, [player]);
 
     const { chartData, lineValue, graphAvgSecondary, comparisonAvgSecondary, isRankOverlay, isBinaryOverlay, historicalSampleCount } = useMemo(() => {
-        if (!chartPlayer || !chartPlayer.game_log) {
+        if (!player || !player.game_log) {
             return {
                 chartData: [],
                 lineValue: 0,
@@ -190,10 +150,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             };
         }
 
-        const prop = chartPlayer.props?.[statKey]?.[activeSportsbook];
+        const prop = player.props?.[statKey]?.[activeSportsbook];
         const line = prop?.line || 0;
         const numGames = (isMobile && !isFiltersOpen) ? 12 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
-        const chronologicalSeasonGames = [...chartPlayer.game_log].sort(
+        const chronologicalSeasonGames = [...player.game_log].sort(
             (a: any, b: any) => new Date(a.GAME_DATE).getTime() - new Date(b.GAME_DATE).getTime(),
         );
         const b2bKeys = new Set<string>();
@@ -214,17 +174,17 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         let upcomingMonth = fallbackMonths[Number(dashboardDate.slice(5, 7)) - 1];
         let upcomingDay = dashboardDate.slice(8, 10);
 
-        if (chartPlayer.team && scheduleData.length > 0) {
+        if (player.team && scheduleData.length > 0) {
             const sortedSchedule = [...scheduleData].sort((a, b) =>
                 new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
             );
             upcomingGame = sortedSchedule.find(g =>
-                (g.home_team_tricode === chartPlayer.team || g.away_team_tricode === chartPlayer.team)
+                (g.home_team_tricode === player.team || g.away_team_tricode === player.team)
                 && (!prop?.game_date || g.game_date === prop.game_date)
-            ) || sortedSchedule.find(g => g.home_team_tricode === chartPlayer.team || g.away_team_tricode === chartPlayer.team) || null;
+            ) || sortedSchedule.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team) || null;
 
             if (upcomingGame) {
-                upcomingOpponent = upcomingGame.home_team_tricode === chartPlayer.team ? upcomingGame.away_team_tricode : upcomingGame.home_team_tricode;
+                upcomingOpponent = upcomingGame.home_team_tricode === player.team ? upcomingGame.away_team_tricode : upcomingGame.home_team_tricode;
                 if (upcomingGame.game_date) {
                     const [_, monthStr, dayStr] = upcomingGame.game_date.split('-');
                     if (monthStr && dayStr) {
@@ -250,8 +210,8 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         };
 
         const selectedGames = chartMode
-            ? chartPlayer.game_log.filter((game: any) => matchesChartMode(game)).slice(0, numGames)
-            : chartPlayer.game_log.slice(0, numGames);
+            ? player.game_log.filter((game: any) => matchesChartMode(game)).slice(0, numGames)
+            : player.game_log.slice(0, numGames);
 
         const log = [...selectedGames].reverse();
 
@@ -276,7 +236,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             const month = fallbackMonths[parseInt(monthStr, 10) - 1];
 
             const secondaryValue = overlayDefinition?.getGameValue({
-                player: chartPlayer,
+                player,
                 game,
                 gameIndex,
                 games: log,
@@ -305,7 +265,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             : 0;
 
         const comparisonAvgSecondary = overlayDefinition?.getComparisonValue?.({
-            player: chartPlayer,
+            player,
             games: log,
             upcomingGame,
             upcomingOpponent,
@@ -325,11 +285,11 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         const includeUpcomingGame = activeSeason !== '24/25' && (
             !chartMode
             || (chartMode === 'H2H' && upcomingOpponent !== 'TBD')
-            || (chartMode === 'Home' && Boolean(upcomingGame && upcomingGame.home_team_tricode === chartPlayer.team))
-            || (chartMode === 'Away' && Boolean(upcomingGame && upcomingGame.away_team_tricode === chartPlayer.team))
+            || (chartMode === 'Home' && Boolean(upcomingGame && upcomingGame.home_team_tricode === player.team))
+            || (chartMode === 'Away' && Boolean(upcomingGame && upcomingGame.away_team_tricode === player.team))
             || (chartMode === 'B2B' && isUpcomingB2B)
         );
-        const canRenderUpcomingPlaceholder = log.length > 0 || Boolean(chartPlayer.detail_loaded);
+        const canRenderUpcomingPlaceholder = log.length > 0 || Boolean(player.detail_loaded);
 
         if (includeUpcomingGame && canRenderUpcomingPlaceholder) {
             const upcomingOpponentId = TEAM_IDS[upcomingOpponent];
@@ -342,7 +302,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             let upcomingSecondaryValue = null;
             if (overlayDefinition?.getUpcomingValue) {
                 upcomingSecondaryValue = overlayDefinition.getUpcomingValue({
-                    player: chartPlayer,
+                    player,
                     games: log,
                     upcomingGame,
                     upcomingOpponent,
@@ -372,13 +332,9 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             isBinaryOverlay: overlayDefinition?.kind === 'binary',
             historicalSampleCount: log.length,
         };
-    }, [chartPlayer, statKey, activeSportsbook, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
+    }, [player, statKey, activeSportsbook, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
 
     if (!player) return null;
-    const showChartLoadingState = USE_DB
-        && activeSeason === '25/26'
-        && !isPlayerHistoryReady
-        && showDeferredLoading;
 
     // --- Responsive SVG Layout Constants ---
     const VIEWBOX_WIDTH = isMobile ? 650 : (isFiltersOpen ? 700 : 1000); // Internal coordinate system width dynamcially adjusts to prevent shrinking
@@ -541,48 +497,6 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         const x = X_START + paddingLeft + ((chartData.length - 1) * spacing) + (spacing / 2);
         return { x, y: getSecondaryY(Number(game.secondaryValue)) };
     })() : null;
-    const loadingBarHeights = [44, 68, 56, 82, 61, 73, 52, 78, 58, 66];
-
-    if (showChartLoadingState) {
-        return (
-            <div className="bg-bgElevation0 w-full h-full min-h-[380px] sm:min-h-[450px] aspect-[4/3] lg:aspect-auto select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col">
-                <div className="absolute inset-x-8 top-10 space-y-16 opacity-50">
-                    <div className="h-px bg-borderMedium/50" />
-                    <div className="h-px bg-borderMedium/40" />
-                    <div className="h-px bg-borderMedium/30" />
-                </div>
-
-                <div className="flex-1 flex items-end justify-center gap-3 px-8 pb-24 pt-12 animate-pulse">
-                    {loadingBarHeights.map((height, index) => (
-                        <div key={`chart-loading-bar-${index}`} className="flex flex-col items-center justify-end gap-3">
-                            <div
-                                className="w-7 sm:w-8 rounded-t-md rounded-b-[4px] bg-bgElevation1 border border-borderMedium/60"
-                                style={{ height: `${height}%` }}
-                            />
-                            <div className="w-7 h-7 rounded-full bg-bgElevation1 border border-borderMedium/50" />
-                            <div className="space-y-1">
-                                <div className="w-6 h-2 rounded bg-bgElevation1" />
-                                <div className="w-5 h-2 rounded bg-bgElevation1 mx-auto" />
-                            </div>
-                        </div>
-                    ))}
-                </div>
-
-                <div className="absolute bottom-10 inset-x-0 flex justify-center px-4">
-                    <div className="flex items-center gap-2 rounded-full border border-borderMedium bg-bgElevation1/95 px-3 py-1.5 shadow-lg">
-                        <div className="w-3.5 h-3.5 rounded-full border-2 border-borderMedium border-t-white animate-spin" aria-hidden="true" />
-                        <span className="text-xs font-medium text-white whitespace-nowrap">
-                            Loading chart history...
-                        </span>
-                    </div>
-                </div>
-
-                <div className="absolute bottom-3 left-3 pointer-events-none opacity-40 z-20">
-                    <span className="text-neutral600 font-medium text-[10px] tracking-widest uppercase">PropX</span>
-                </div>
-            </div>
-        );
-    }
 
     return (
         <div
@@ -980,7 +894,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             </div>
 
             {/* Hover Tooltip Overlay */}
-            <HoverTooltip data={hoverData} player={chartPlayer ?? player} />
+            <HoverTooltip data={hoverData} player={player} />
         </div>
     );
 };
