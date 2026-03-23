@@ -73,6 +73,8 @@ interface SidebarProps {
     players: Player[];
     activePlayerId?: number;
     activeGameDate?: string | null;
+    pendingPlayerId?: number;
+    pendingGameDate?: string | null;
     activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz';
     onSelectPlayer: (id: number, gameDate?: string | null) => void;
     onPrefetchPlayer?: (id: number, gameDate?: string | null) => void;
@@ -101,6 +103,7 @@ const PlayerRow = ({
     gameDate,
     activeSportsbook = 'dk',
     isActive,
+    isPending,
     onClick,
     onPrefetch,
 }: {
@@ -109,6 +112,7 @@ const PlayerRow = ({
     gameDate?: string | null,
     activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz',
     isActive: boolean,
+    isPending: boolean,
     onClick: () => void,
     onPrefetch?: () => void
 }) => {
@@ -142,10 +146,11 @@ const PlayerRow = ({
     return (
         <div
             onClick={onClick}
-            onMouseEnter={onPrefetch}
+            onMouseDown={onPrefetch}
             onFocus={onPrefetch}
             onTouchStart={onPrefetch}
-            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 hover:bg-bgElevation1 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-bgElevation1' : ''}`}
+            aria-busy={isPending}
+            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isPending ? 'bg-bgElevation2/80' : isActive ? 'bg-bgElevation1' : 'hover:bg-bgElevation1'}`}
         >
             <div className="flex items-center gap-3">
                 <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1 flex items-center justify-center">
@@ -157,7 +162,7 @@ const PlayerRow = ({
                     />
                 </div>
                 <div className="flex flex-col gap-1">
-                    <span className={`text-[13px] font-bold leading-none ${isActive ? 'text-white' : 'text-gray-300 group-hover:text-white'}`}>{player.name}</span>
+                    <span className={`text-[13px] font-bold leading-none ${isPending || isActive ? 'text-white' : 'text-gray-300 group-hover:text-white'}`}>{player.name}</span>
 
                     {hasProp ? (
                         <div className="flex items-center gap-2 mt-0.5">
@@ -190,8 +195,14 @@ const PlayerRow = ({
             </div>
 
             {/* Plus Button / Active Indicator */}
-            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
-                {isActive ? <LockOpen className="w-3 h-3" /> : <Plus className="w-3 h-3 font-bold" strokeWidth={4} />}
+            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isPending || isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
+                {isPending ? (
+                    <div className="w-2.5 h-2.5 rounded-full border-2 border-white/40 border-t-white animate-spin" aria-hidden="true" />
+                ) : isActive ? (
+                    <LockOpen className="w-3 h-3" />
+                ) : (
+                    <Plus className="w-3 h-3 font-bold" strokeWidth={4} />
+                )}
             </button>
         </div>
     )
@@ -201,8 +212,8 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz', onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
-    game, isExpanded, onToggle, activePlayerId, activeGameDate, activeSportsbook, onSelectPlayer, onPrefetchPlayer, statFilter
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz', onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
+    game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, onSelectPlayer, onPrefetchPlayer, statFilter
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
@@ -263,12 +274,14 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                             <div key={player.id} className="relative">
                                 {/* Selected Player Blue Line */}
                                 {player.id === activePlayerId && game.game_date === activeGameDate && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
+                                {player.id === pendingPlayerId && game.game_date === pendingGameDate && player.id !== activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500/70 z-20 animate-pulse"></div>}
                                 <PlayerRow
                                     player={player}
                                     statFilter={statFilter}
                                     gameDate={game.game_date}
                                     activeSportsbook={activeSportsbook}
                                     isActive={player.id === activePlayerId && game.game_date === activeGameDate}
+                                    isPending={player.id === pendingPlayerId && game.game_date === pendingGameDate && !(player.id === activePlayerId && game.game_date === activeGameDate)}
                                     onClick={() => onSelectPlayer(player.id, game.game_date)}
                                     onPrefetch={() => onPrefetchPlayer?.(player.id, game.game_date)}
                                 />
@@ -287,7 +300,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
 export const Sidebar: React.FC<SidebarProps> = ({
     isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
-    activeGameDate, activeSportsbook = 'dk', activeTab = 'Points', onTabChange = () => { }, onPrefetchPlayer
+    activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook = 'dk', activeTab = 'Points', onTabChange = () => { }, onPrefetchPlayer
 }) => {
     const statFilter = STAT_MAP[activeTab] || 'PTS';
     const [gameFilter, setGameFilter] = useState('All Games');
@@ -504,6 +517,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 onToggle={() => toggleGame(game.game_id)}
                                 activePlayerId={activePlayerId}
                                 activeGameDate={activeGameDate}
+                                pendingPlayerId={pendingPlayerId}
+                                pendingGameDate={pendingGameDate}
                                 activeSportsbook={activeSportsbook}
                                 onSelectPlayer={onSelectPlayer}
                                 onPrefetchPlayer={onPrefetchPlayer}

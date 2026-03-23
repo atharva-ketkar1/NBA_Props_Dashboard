@@ -190,10 +190,39 @@ export interface ShotTypeData {
 }
 
 export interface SimilarPlayerGame {
+  playerId?: number;
   date: string;
+  gameDate?: string;
   team: string;
   player: string;
-  line: number;
+  line: number | null;
   result: number;
-  diffPercent: number;
+  diff?: number | null;
+  diffPercent: number | null;
+  hit?: boolean | null;
+  similarityScore?: number;
+  lineGap?: number;
+  source?: string;
+  hasHistoricalLine?: boolean;
+}
+
+export type SimilarPlayersMode = 'prop' | 'position';
+
+export interface SimilarPlayerCandidate {
+  id: number;
+  name: string;
+  team: string;
+  position?: string;
+  currentLine: number | null;
+  currentAverage: number;
+  similarityScore: number;
+  detailLoaded: boolean;
+}
+
+export interface SimilarPlayersSummary {
+  avgDiff: number;
+  avgDiffPercent: number;
+  hitRate: number;
+  hits: number;
+  total: number;
 }

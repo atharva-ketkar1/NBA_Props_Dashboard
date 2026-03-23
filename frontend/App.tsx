@@ -1,4 +1,4 @@
-import React, { startTransition, useDeferredValue, useState, useEffect, useMemo, useRef } from 'react';
+import React, { startTransition, useState, useEffect, useMemo, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { Header } from './components/Header';
 import { BarChart } from './components/BarChart';
@@ -9,7 +9,7 @@ import { PlayTypeAnalysis } from './components/PlayTypeAnalysis';
 import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
-import { Player, PlayerPropsByDate } from './types';
+import { Player, PlayerPropsByDate, SimilarPlayerCandidate } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
 import { getDashboardDate } from './utils/dashboardDate';
 import {
@@ -19,6 +19,7 @@ import {
   playerHasPropForDate,
 } from './utils/propResolution';
 import { fetchApiJson } from './utils/network';
+import { rankSimilarPlayers } from './utils/similarPlayers';
 import {
   fetchDashboardAccess,
   fetchDashboardArchive,
@@ -150,6 +151,16 @@ function App() {
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>('graph');
   const [currentSlateTeams, setCurrentSlateTeams] = useState<string[]>([]);
+  const [similarCandidatesByProp, setSimilarCandidatesByProp] = useState<SimilarPlayerCandidate[]>([]);
+  const [similarCandidatesByPosition, setSimilarCandidatesByPosition] = useState<SimilarPlayerCandidate[]>([]);
+  const [isSimilarCandidatesLoading, setIsSimilarCandidatesLoading] = useState(false);
+  const [similarCandidatesKey, setSimilarCandidatesKey] = useState('');
+  const [pendingSelection, setPendingSelection] = useState<{
+    id: number;
+    gameDate: string | null;
+    name: string;
+    requestId: number;
+  } | null>(null);
 
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
@@ -505,36 +516,51 @@ function App() {
       return;
     }
 
-    const nextPlayer = playersWithProps[index];
-    const shouldPreloadArchive = USE_DB && activeSeason === '24/25';
-    const hasArchiveLoaded = !shouldPreloadArchive || Boolean(archiveGameLogs[String(id)]);
-    const canSwitchImmediately = !USE_DB || (hasLoadedPlayerDetail(nextPlayer) && hasArchiveLoaded);
-    const commitSelection = () => {
-      startTransition(() => {
-        setSelectedIndex(index);
-        setSelectedGameDate(gameDate ?? null);
-        setCustomLineValue(null);
-      });
-    };
-
-    if (canSwitchImmediately) {
-      commitSelection();
+    const nextGameDate = gameDate ?? null;
+    if (currentPlayer?.id === id && resolvedSelectedGameDate === nextGameDate) {
+      selectionRequestRef.current += 1;
+      setPendingSelection(null);
+      setCustomLineValue(null);
       return;
     }
 
+    const nextPlayer = playersWithProps[index];
+    const shouldPreloadArchive = USE_DB && activeSeason === '24/25';
+    const needsDetailLoad = USE_DB && !hasLoadedPlayerDetail(nextPlayer);
+    const needsArchiveLoad = shouldPreloadArchive && !archiveGameLogs[String(id)];
     const requestId = selectionRequestRef.current + 1;
     selectionRequestRef.current = requestId;
+
+    setSelectedIndex(index);
+    setSelectedGameDate(nextGameDate);
+    setCustomLineValue(null);
+
+    if (!needsDetailLoad && !needsArchiveLoad) {
+      setPendingSelection(null);
+      return;
+    }
+
+    setPendingSelection({
+      id,
+      gameDate: nextGameDate,
+      name: nextPlayer.name,
+      requestId,
+    });
 
     void preparePlayerForSelection(id, shouldPreloadArchive ? '2024-25' : null)
       .then(() => {
         if (selectionRequestRef.current === requestId) {
-          commitSelection();
+          setPendingSelection((current) => (
+            current?.requestId === requestId ? null : current
+          ));
         }
       })
       .catch((error) => {
         console.error('[api] preselect player load error:', error);
         if (selectionRequestRef.current === requestId) {
-          commitSelection();
+          setPendingSelection((current) => (
+            current?.requestId === requestId ? null : current
+          ));
         }
       });
   };
@@ -563,12 +589,6 @@ function App() {
     }
   }, [activeSeason, currentPlayer, archiveGameLogs, USE_DB]);
 
-  useEffect(() => {
-    if (!isFiltersOpen) {
-      setFilterGameCount(19);
-    }
-  }, [isFiltersOpen]);
-
   const displayPlayer = useMemo(() => {
     if (!currentPlayer) return null;
     const materializedPlayer = materializePlayerForGameDate(currentPlayer, resolvedSelectedGameDate);
@@ -580,13 +600,38 @@ function App() {
     }
     return materializedPlayer;
   }, [currentPlayer, resolvedSelectedGameDate, activeSeason, archiveGameLogs]);
-  const deferredDisplayPlayer = useDeferredValue(displayPlayer);
-  const renderedPlayer = deferredDisplayPlayer ?? displayPlayer;
-  const isPlayerViewPending = Boolean(
-    displayPlayer
-    && deferredDisplayPlayer
-    && displayPlayer.id !== deferredDisplayPlayer.id,
-  );
+  const maxAvailableHistoricalGames = displayPlayer?.game_log?.length ?? 0;
+  const defaultFilterGameCount = maxAvailableHistoricalGames > 0
+    ? Math.min(19, maxAvailableHistoricalGames)
+    : 19;
+  const defaultHistoricalGameCount = maxAvailableHistoricalGames > 0
+    ? Math.min(29, maxAvailableHistoricalGames)
+    : 29;
+  const effectiveFilterGameCount = maxAvailableHistoricalGames > 0
+    ? Math.min(filterGameCount, maxAvailableHistoricalGames)
+    : filterGameCount;
+  const appliedHistoricalGameCount = isFiltersOpen
+    ? effectiveFilterGameCount
+    : defaultHistoricalGameCount;
+  const isSelectionPending = Boolean(pendingSelection);
+  const similarRankingKey = `${displayPlayer?.id ?? 'none'}:${activeSeason}:${activeTab}:${activeSportsbook}:${resolvedSelectedGameDate ?? ''}`;
+  const areSimilarCandidatesCurrent = similarCandidatesKey === similarRankingKey;
+  const readySimilarCandidatesByProp = areSimilarCandidatesCurrent ? similarCandidatesByProp : [];
+  const readySimilarCandidatesByPosition = areSimilarCandidatesCurrent ? similarCandidatesByPosition : [];
+  const shouldShowSimilarLoading = activeSeason === '25/26'
+    && Boolean(displayPlayer)
+    && (!areSimilarCandidatesCurrent || isSimilarCandidatesLoading);
+
+  useEffect(() => {
+    if (!isFiltersOpen) {
+      setFilterGameCount(defaultFilterGameCount);
+      return;
+    }
+
+    if (maxAvailableHistoricalGames > 0 && filterGameCount > maxAvailableHistoricalGames) {
+      setFilterGameCount(maxAvailableHistoricalGames);
+    }
+  }, [isFiltersOpen, defaultFilterGameCount, filterGameCount, maxAvailableHistoricalGames]);
 
   // 3. Smart Default Selection (Run once on data load)
   useEffect(() => {
@@ -626,6 +671,109 @@ function App() {
       });
   }, [selectedIndex, USE_DB, currentPlayer]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    if (activeSeason !== '25/26' || !displayPlayer) {
+      setSimilarCandidatesByProp([]);
+      setSimilarCandidatesByPosition([]);
+      setSimilarCandidatesKey('');
+      setIsSimilarCandidatesLoading(false);
+      return undefined;
+    }
+
+    setIsSimilarCandidatesLoading(true);
+    setSimilarCandidatesByProp([]);
+    setSimilarCandidatesByPosition([]);
+
+    let timeoutId = 0;
+    const frameId = window.requestAnimationFrame(() => {
+      timeoutId = window.setTimeout(() => {
+      const propCandidates = rankSimilarPlayers({
+        player: displayPlayer,
+        players: playersWithProps,
+        activeTab,
+        activeSportsbook,
+        selectedGameDate: resolvedSelectedGameDate,
+        mode: 'prop',
+        limit: 12,
+      });
+      const positionCandidates = rankSimilarPlayers({
+        player: displayPlayer,
+        players: playersWithProps,
+        activeTab,
+        activeSportsbook,
+        selectedGameDate: resolvedSelectedGameDate,
+        mode: 'position',
+        limit: 14,
+      });
+
+      if (cancelled) {
+        return;
+      }
+
+      startTransition(() => {
+        setSimilarCandidatesByProp(propCandidates);
+        setSimilarCandidatesByPosition(positionCandidates);
+        setSimilarCandidatesKey(similarRankingKey);
+        setIsSimilarCandidatesLoading(false);
+      });
+      }, 0);
+    });
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(timeoutId);
+    };
+  }, [similarRankingKey]);
+
+  useEffect(() => {
+    const similarPrefetchIds = Array.from(new Set(
+      [...readySimilarCandidatesByProp.slice(0, 6), ...readySimilarCandidatesByPosition.slice(0, 8)]
+        .map((candidate) => candidate.id),
+    )).filter((id) => id !== displayPlayer?.id);
+
+    if (!USE_DB || activeSeason !== '25/26' || !displayPlayer || similarPrefetchIds.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    // Fetch these sequentially so the signed session cookie is established before
+    // we ask for more player-scoped tokens.
+    const prefetchSimilarDetails = async () => {
+      try {
+        await ensurePlayerDetailLoaded(displayPlayer.id);
+      } catch (error) {
+        console.error('[api] selected player detail error:', error);
+      }
+
+      for (const playerId of similarPrefetchIds) {
+        if (cancelled) {
+          return;
+        }
+
+        try {
+          await ensurePlayerDetailLoaded(playerId);
+        } catch (error) {
+          if (!cancelled) {
+            console.error('[api] similar player detail error:', error);
+          }
+        }
+      }
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      void prefetchSimilarDetails();
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [USE_DB, activeSeason, displayPlayer?.id, readySimilarCandidatesByProp, readySimilarCandidatesByPosition]);
+
 
   if (loading) {
     return (
@@ -650,6 +798,8 @@ function App() {
       players: playersWithProps,
       activePlayerId: displayPlayer?.id,
       activeGameDate: resolvedSelectedGameDate,
+      pendingPlayerId: pendingSelection?.id,
+      pendingGameDate: pendingSelection?.gameDate,
       activeSportsbook: activeSportsbook,
       onSelectPlayer: selectPlayerForView,
       onPrefetchPlayer: (id: number) => {
@@ -668,9 +818,17 @@ function App() {
         <div className="flex w-full relative z-20">
 
           {/* Merged Top Section (Header + Chart) */}
-          <div className={`flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0 flex flex-col relative z-20 transition-opacity duration-200 ${isPlayerViewPending ? 'opacity-85' : 'opacity-100'}`}>
+          <div className={`flex-1 bg-bgElevation0 rounded-xl shadow-lg animate-in fade-in duration-500 min-w-0 flex flex-col relative z-20 transition-opacity duration-200 ${isSelectionPending ? 'opacity-90' : 'opacity-100'}`}>
+            {isSelectionPending && pendingSelection && (
+              <div className="absolute top-4 right-4 z-30 flex items-center gap-2 rounded-full border border-borderMedium bg-bgElevation1/95 px-3 py-1.5 shadow-lg pointer-events-none">
+                <div className="w-3.5 h-3.5 rounded-full border-2 border-borderMedium border-t-white animate-spin" aria-hidden="true" />
+                <span className="text-xs font-medium text-white whitespace-nowrap">
+                  Loading {pendingSelection.name}...
+                </span>
+              </div>
+            )}
             <Header
-              player={renderedPlayer}
+              player={displayPlayer}
               activeTab={activeTab}
               onTabChange={handleTabChange}
               activeSportsbook={activeSportsbook}
@@ -681,7 +839,7 @@ function App() {
               customLine={customLineValue}
               onToggleFilters={() => setIsFiltersOpen(!isFiltersOpen)}
               isFiltersOpen={isFiltersOpen}
-              historicalGameCount={isFiltersOpen ? filterGameCount : 29}
+              historicalGameCount={appliedHistoricalGameCount}
               mobileView={mobileView}
               onMobileViewChange={setMobileView}
             />
@@ -689,14 +847,14 @@ function App() {
             {/* Subtle separator removed */}
             <div className={`p-0 ${mobileView !== 'graph' ? 'hidden md:block' : ''}`}>
               <BarChart
-                player={renderedPlayer}
+                player={displayPlayer}
                 activeTab={activeTab}
                 activeSportsbook={activeSportsbook}
                 customLine={customLineValue}
                 onCustomLineChange={setCustomLineValue}
                 activeFilterOverlay={activeFilter}
                 isFiltersOpen={isFiltersOpen}
-                historicalGameCount={isFiltersOpen ? filterGameCount : 29}
+                historicalGameCount={appliedHistoricalGameCount}
                 activeSeason={activeSeason}
               />
             </div>
@@ -710,9 +868,12 @@ function App() {
                 onClose={() => setIsFiltersOpen(false)}
                 activeFilter={activeFilter}
                 onFilterChange={setActiveFilter}
-                player={renderedPlayer}
-                gameCount={filterGameCount}
-                onGameCountChange={setFilterGameCount}
+                player={displayPlayer}
+                gameCount={effectiveFilterGameCount}
+                onGameCountChange={(count) => {
+                  const maxGameCount = maxAvailableHistoricalGames || count;
+                  setFilterGameCount(Math.max(1, Math.min(maxGameCount, count)));
+                }}
                 activeSeason={activeSeason}
                 onSeasonChange={(s) => {
                   if (s === '25/26' || s === '24/25') {
@@ -737,7 +898,16 @@ function App() {
 
           {['Rebounds', '1Q Rebounds', 'Double Double', 'Triple Double', 'Blocks', 'Steals', 'Turnovers', 'Fantasy'].includes(activeTab) ? (
             <div className={`xl:col-span-6 flex flex-col gap-4 h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>
-              <SimilarPlayers similarGames={undefined} />
+              <SimilarPlayers
+                player={displayPlayer}
+                players={playersWithProps}
+                activeTab={activeTab}
+                activeSportsbook={activeSportsbook}
+                activeSeason={activeSeason}
+                isLoadingCandidates={shouldShowSimilarLoading}
+                similarCandidatesByProp={readySimilarCandidatesByProp}
+                similarCandidatesByPosition={readySimilarCandidatesByPosition}
+              />
             </div>
           ) : (
             <>
@@ -747,13 +917,13 @@ function App() {
                   : mobileView !== 'shooting' ? 'hidden md:flex' : ''
                 }`}>
                 {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
-                  <AssistZones player={renderedPlayer} />
+                  <AssistZones player={displayPlayer} />
                 ) : (
-                  <ShootingZones player={renderedPlayer} />
+                  <ShootingZones player={displayPlayer} />
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className="flex-1 min-h-0 hidden md:block">
-                    <PlayTypeAnalysis playTypes={renderedPlayer?.play_type_analysis} />
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
                   </div>
                 )}
               </div>
@@ -763,8 +933,8 @@ function App() {
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`${mobileView !== 'shooting' ? 'hidden md:block' : ''}`}>
                     <ShotTypeAnalysis shotTypes={(() => {
-                      if (!renderedPlayer?.shot_type_analysis) return undefined;
-                      const sta = renderedPlayer.shot_type_analysis;
+                      if (!displayPlayer?.shot_type_analysis) return undefined;
+                      const sta = displayPlayer.shot_type_analysis;
                       const p = sta.player || {};
                       const d = sta.opp_def || {};
                       const cs = p.catch_and_shoot;
@@ -802,11 +972,20 @@ function App() {
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`md:hidden ${mobileView !== 'types' ? 'hidden' : ''}`}>
-                    <PlayTypeAnalysis playTypes={renderedPlayer?.play_type_analysis} />
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
                   </div>
                 )}
                 <div className={`flex-1 min-h-0 xl:col-span-12 w-full h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>
-                  <SimilarPlayers similarGames={undefined} />
+                  <SimilarPlayers
+                    player={displayPlayer}
+                    players={playersWithProps}
+                    activeTab={activeTab}
+                    activeSportsbook={activeSportsbook}
+                    activeSeason={activeSeason}
+                    isLoadingCandidates={shouldShowSimilarLoading}
+                    similarCandidatesByProp={readySimilarCandidatesByProp}
+                    similarCandidatesByPosition={readySimilarCandidatesByPosition}
+                  />
                 </div>
               </div>
             </>
