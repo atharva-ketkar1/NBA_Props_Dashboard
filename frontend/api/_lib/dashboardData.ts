@@ -4,10 +4,14 @@ import {
   getDashboardDate,
   getFastRefreshDates,
 } from './dashboardDate.js';
+import { rankSimilarPlayers } from '../../utils/similarPlayers.js';
+import { playerHasAnyProp } from '../../utils/propResolution.js';
+import type { Player, PlayerPropsByDate, SimilarPlayerCandidate } from '../../types.js';
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
-const PLAYER_BASE_SELECT = 'id, name, team, position, stats, play_type_analysis';
-const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis';
+const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
+const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis, play_type_analysis';
+const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analysis, shot_type_analysis';
 const HISTORICAL_ODDS_SELECT = 'game_date, props, source';
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
@@ -25,6 +29,49 @@ export function serializeLineMovementVersion(rows: Array<{ game_date?: string; u
     .map((row) => `${row.game_date ?? ''}:${row.updated_at ?? ''}`)
     .sort()
     .join('|');
+}
+
+function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
+  const propsByDateMap: Record<number, PlayerPropsByDate> = {};
+
+  for (const row of props ?? []) {
+    const gameDateKey = row.game_date || '__undated__';
+    if (!propsByDateMap[row.player_id]) propsByDateMap[row.player_id] = {};
+    if (!propsByDateMap[row.player_id][row.stat_type]) propsByDateMap[row.player_id][row.stat_type] = {};
+    if (!propsByDateMap[row.player_id][row.stat_type][row.sportsbook]) propsByDateMap[row.player_id][row.stat_type][row.sportsbook] = {};
+    propsByDateMap[row.player_id][row.stat_type][row.sportsbook][gameDateKey] = {
+      line: row.line,
+      over: row.over_odds,
+      under: row.under_odds,
+      implied: row.implied,
+      game_date: row.game_date,
+      game_id: row.game_id,
+      updated_at: row.updated_at,
+    };
+  }
+
+  return propsByDateMap;
+}
+
+function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?: string | null): Player[] {
+  const propsByDateMap = buildPropsByDateMap(props ?? []);
+
+  return (players ?? []).map((player: any) => ({
+    id: player.id,
+    name: player.name,
+    team: player.team,
+    position: player.position,
+    stats: player.stats ?? {},
+    game_log: [],
+    props: {},
+    props_by_date: propsByDateMap[player.id] ?? {},
+    active_game_date: selectedGameDate ?? null,
+    historical_odds: {},
+    intraday_movements: [],
+    detail_loaded: false,
+    play_type_analysis: player.play_type_analysis ?? [],
+    shot_type_analysis: player.shot_type_analysis ?? null,
+  }));
 }
 
 async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = PLAYER_PROP_SELECT) {
@@ -79,7 +126,10 @@ export async function fetchBootstrapPayload() {
   assertNoError(gamesError, 'games');
 
   return {
-    playersRows: playersRows ?? [],
+    playersRows: (playersRows ?? []).map((row: any) => ({
+      ...row,
+      play_type_analysis: undefined,
+    })),
     propsRows,
     gamesRows: gamesRows ?? [],
     lineRows: lineRows ?? [],
@@ -159,6 +209,61 @@ export async function fetchPlayerPayload(playerId: number) {
   return {
     detail,
     historicalOddsRows: historicalOddsRows ?? [],
+  };
+}
+
+export async function fetchSimilarCandidatesPayload({
+  activeSportsbook,
+  activeTab,
+  playerId,
+  selectedGameDate,
+}: {
+  activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
+  activeTab: string;
+  playerId: number;
+  selectedGameDate?: string | null;
+}) {
+  const supabase = getSupabaseAdmin();
+  const today = getDashboardDate();
+  const propDates = selectedGameDate ? [selectedGameDate] : buildFutureDates(today, 14);
+
+  const [
+    { data: playersRows, error: playersError },
+    propsRows,
+  ] = await Promise.all([
+    supabase.from('players').select(PLAYER_SIMILAR_SELECT),
+    fetchAllPlayerPropsForDates(propDates),
+  ]);
+
+  assertNoError(playersError, 'similar players');
+
+  const players = buildSimilarityPlayers(playersRows ?? [], propsRows ?? [], selectedGameDate ?? null)
+    .filter(playerHasAnyProp);
+  const player = players.find((entry) => entry.id === playerId);
+
+  if (!player) {
+    throw new Error('[supabase] similar players: Player not found in active prop pool.');
+  }
+
+  return {
+    similarCandidatesByPosition: rankSimilarPlayers({
+      player,
+      players,
+      activeTab,
+      activeSportsbook,
+      selectedGameDate: selectedGameDate ?? null,
+      mode: 'position',
+      limit: 14,
+    }) satisfies SimilarPlayerCandidate[],
+    similarCandidatesByProp: rankSimilarPlayers({
+      player,
+      players,
+      activeTab,
+      activeSportsbook,
+      selectedGameDate: selectedGameDate ?? null,
+      mode: 'prop',
+      limit: 12,
+    }) satisfies SimilarPlayerCandidate[],
   };
 }
 

@@ -1,4 +1,5 @@
 import { fetchAppJson } from './network';
+import { SimilarPlayerCandidate } from '../types';
 
 type BootstrapResponse = {
   playersRows: any[];
@@ -31,6 +32,11 @@ type AccessResponse = {
   archiveToken: string | null;
   expiresAt: number;
   playerToken: string;
+};
+
+type SimilarResponse = {
+  similarCandidatesByProp: SimilarPlayerCandidate[];
+  similarCandidatesByPosition: SimilarPlayerCandidate[];
 };
 
 export function fetchDashboardBootstrap() {
@@ -66,5 +72,19 @@ export function fetchDashboardPlayer(token: string) {
 export function fetchDashboardArchive(token: string) {
   return fetchAppJson<ArchiveResponse>('/api/archive', {
     token,
+  });
+}
+
+export function fetchDashboardSimilar(
+  playerId: number,
+  activeTab: string,
+  activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz',
+  selectedGameDate?: string | null,
+) {
+  return fetchAppJson<SimilarResponse>('/api/similar', {
+    activeSportsbook,
+    activeTab,
+    playerId,
+    selectedGameDate,
   });
 }

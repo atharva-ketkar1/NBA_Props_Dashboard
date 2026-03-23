@@ -54,7 +54,8 @@ const RankBadge = ({ rank, points }: { rank: number | string; points?: string | 
 };
 
 export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes }) => {
-  const data = playTypes || PLAY_TYPES;
+  const data = playTypes ?? PLAY_TYPES;
+  const hasData = data.length > 0;
 
   return (
     <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full h-full min-w-0">
@@ -69,25 +70,31 @@ export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes })
       </div>
       <p className="text-xs text-gray-500 mb-4">25/26 Season</p>
 
-      <div className="w-full">
-        <div className="grid grid-cols-[2fr_1fr_1fr] text-[10px] text-fgSubtle font-bold uppercase tracking-wider border-b border-borderMedium pb-2 mb-2">
-          <div>Play Type</div>
-          <div className="text-center">Player Points</div>
-          <div className="text-right">Opp Def Rank</div>
-        </div>
+      {hasData ? (
+        <div className="w-full">
+          <div className="grid grid-cols-[2fr_1fr_1fr] text-[10px] text-fgSubtle font-bold uppercase tracking-wider border-b border-borderMedium pb-2 mb-2">
+            <div>Play Type</div>
+            <div className="text-center">Player Points</div>
+            <div className="text-right">Opp Def Rank</div>
+          </div>
 
-        <div className="space-y-3">
-          {data.map((item, idx) => (
-            <div key={idx} className="grid grid-cols-[2fr_1fr_1fr] text-xs items-center border-b border-borderMedium/40 pb-2 last:border-0 hover:bg-borderMedium/20 rounded px-1 -mx-1 transition-colors">
-              <div className="text-white font-medium">{item.type}</div>
-              <div className="text-gray-300 text-center font-chakra">{item.points}</div>
-              <div className="text-right">
-                <RankBadge rank={item.rank} points={item.points} />
+          <div className="space-y-3">
+            {data.map((item, idx) => (
+              <div key={idx} className="grid grid-cols-[2fr_1fr_1fr] text-xs items-center border-b border-borderMedium/40 pb-2 last:border-0 hover:bg-borderMedium/20 rounded px-1 -mx-1 transition-colors">
+                <div className="text-white font-medium">{item.type}</div>
+                <div className="text-gray-300 text-center font-chakra">{item.points}</div>
+                <div className="text-right">
+                  <RankBadge rank={item.rank} points={item.points} />
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex items-center justify-center h-[180px] text-center text-xs text-gray-500">
+          Play type data loads after the player profile is ready.
+        </div>
+      )}
     </div>
   );
 };

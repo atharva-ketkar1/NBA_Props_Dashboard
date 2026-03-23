@@ -44,7 +44,8 @@ const DEFAULT_SHOT_TYPES: ShotTypeData[] = [
 ];
 
 export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes }) => {
-   const data = shotTypes || DEFAULT_SHOT_TYPES;
+   const data = shotTypes ?? DEFAULT_SHOT_TYPES;
+   const hasData = data.length > 0;
 
    return (
       <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0">
@@ -59,42 +60,48 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes })
          </div>
          <p className="text-xs text-gray-500 mb-6">25/26 Season</p>
 
-         {/* Labels */}
-         <div className="flex text-xs text-gray-400 font-medium mb-2 w-full">
-            {data.map((item, idx) => (
-               <div key={idx} className="flex justify-center min-w-0" style={{ width: `${item.width}%` }}>
-                  <span className="whitespace-nowrap text-center tracking-tight">{item.type}</span>
-               </div>
-            ))}
-         </div>
-
-         {/* Bar */}
-         <div className="flex w-full h-14 rounded-lg border border-black/40 text-xs">
-            {data.map((item, idx) => {
-               const dietPercentage = item.frequency !== undefined ? item.frequency : item.percentage;
-               const bgColor = getOppRankColor(item.rank, dietPercentage);
-
-               return (
-                  <div
-                     key={idx}
-                     className={`flex items-center justify-center relative min-w-0 ${idx === 0 ? 'rounded-l-[7px]' : ''
-                        } ${idx === data.length - 1 ? 'rounded-r-[7px]' : ''
-                        } ${idx < data.length - 1 ? 'border-r-2 border-black/60' : ''}`}
-                     style={{ width: `${item.width}%`, backgroundColor: bgColor }}
-                  >
-                     <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 bg-white px-1.5 py-0.5 rounded-[3px] text-[11px] font-bold font-chakra text-black shadow-sm flex gap-1 items-center whitespace-nowrap">
-                        <span>{item.frequency !== undefined ? item.frequency : item.percentage}%</span>
-                        {(item.rank !== undefined || item.attempts > 0) && (
-                           <>
-                              <span className="text-gray-300 text-[9px]">|</span>
-                              <span>{item.rank !== undefined ? item.rank : item.attempts}</span>
-                           </>
-                        )}
+         {hasData ? (
+            <>
+               <div className="flex text-xs text-gray-400 font-medium mb-2 w-full">
+                  {data.map((item, idx) => (
+                     <div key={idx} className="flex justify-center min-w-0" style={{ width: `${item.width}%` }}>
+                        <span className="whitespace-nowrap text-center tracking-tight">{item.type}</span>
                      </div>
-                  </div>
-               );
-            })}
-         </div>
+                  ))}
+               </div>
+
+               <div className="flex w-full h-14 rounded-lg border border-black/40 text-xs">
+                  {data.map((item, idx) => {
+                     const dietPercentage = item.frequency !== undefined ? item.frequency : item.percentage;
+                     const bgColor = getOppRankColor(item.rank, dietPercentage);
+
+                     return (
+                        <div
+                           key={idx}
+                           className={`flex items-center justify-center relative min-w-0 ${idx === 0 ? 'rounded-l-[7px]' : ''
+                              } ${idx === data.length - 1 ? 'rounded-r-[7px]' : ''
+                              } ${idx < data.length - 1 ? 'border-r-2 border-black/60' : ''}`}
+                           style={{ width: `${item.width}%`, backgroundColor: bgColor }}
+                        >
+                           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 bg-white px-1.5 py-0.5 rounded-[3px] text-[11px] font-bold font-chakra text-black shadow-sm flex gap-1 items-center whitespace-nowrap">
+                              <span>{item.frequency !== undefined ? item.frequency : item.percentage}%</span>
+                              {(item.rank !== undefined || item.attempts > 0) && (
+                                 <>
+                                    <span className="text-gray-300 text-[9px]">|</span>
+                                    <span>{item.rank !== undefined ? item.rank : item.attempts}</span>
+                                 </>
+                              )}
+                           </div>
+                        </div>
+                     );
+                  })}
+               </div>
+            </>
+         ) : (
+            <div className="flex items-center justify-center h-[88px] text-center text-xs text-gray-500">
+               Shot type data loads after the player profile is ready.
+            </div>
+         )}
       </div>
    );
 };

@@ -26,6 +26,7 @@ import {
   fetchDashboardBootstrap,
   fetchDashboardHot,
   fetchDashboardPlayer,
+  fetchDashboardSimilar,
 } from './utils/dashboardApi';
 
 
@@ -317,14 +318,14 @@ function App() {
                 team: p.team,
                 position: p.position,
                 stats: p.stats,
-              props: p.props,
-              props_by_date: p.props_by_date,
-              play_type_analysis: p.play_type_analysis,
-              intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
-              detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
-            };
+                props: p.props,
+                props_by_date: p.props_by_date,
+                play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
+                intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
+                detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
+              };
+            });
           });
-        });
 
           if (isInitial) {
             setLoading(false);
@@ -689,35 +690,60 @@ function App() {
     let timeoutId = 0;
     const frameId = window.requestAnimationFrame(() => {
       timeoutId = window.setTimeout(() => {
-      const propCandidates = rankSimilarPlayers({
-        player: displayPlayer,
-        players: playersWithProps,
-        activeTab,
-        activeSportsbook,
-        selectedGameDate: resolvedSelectedGameDate,
-        mode: 'prop',
-        limit: 12,
-      });
-      const positionCandidates = rankSimilarPlayers({
-        player: displayPlayer,
-        players: playersWithProps,
-        activeTab,
-        activeSportsbook,
-        selectedGameDate: resolvedSelectedGameDate,
-        mode: 'position',
-        limit: 14,
-      });
+        const loadSimilarCandidates = async () => {
+          try {
+            const payload = USE_DB
+              ? await fetchDashboardSimilar(
+                displayPlayer.id,
+                activeTab,
+                activeSportsbook,
+                resolvedSelectedGameDate,
+              )
+              : {
+                similarCandidatesByProp: rankSimilarPlayers({
+                  player: displayPlayer,
+                  players: playersWithProps,
+                  activeTab,
+                  activeSportsbook,
+                  selectedGameDate: resolvedSelectedGameDate,
+                  mode: 'prop',
+                  limit: 12,
+                }),
+                similarCandidatesByPosition: rankSimilarPlayers({
+                  player: displayPlayer,
+                  players: playersWithProps,
+                  activeTab,
+                  activeSportsbook,
+                  selectedGameDate: resolvedSelectedGameDate,
+                  mode: 'position',
+                  limit: 14,
+                }),
+              };
 
-      if (cancelled) {
-        return;
-      }
+            if (cancelled) {
+              return;
+            }
 
-      startTransition(() => {
-        setSimilarCandidatesByProp(propCandidates);
-        setSimilarCandidatesByPosition(positionCandidates);
-        setSimilarCandidatesKey(similarRankingKey);
-        setIsSimilarCandidatesLoading(false);
-      });
+            startTransition(() => {
+              setSimilarCandidatesByProp(payload.similarCandidatesByProp);
+              setSimilarCandidatesByPosition(payload.similarCandidatesByPosition);
+              setSimilarCandidatesKey(similarRankingKey);
+              setIsSimilarCandidatesLoading(false);
+            });
+          } catch (error) {
+            if (!cancelled) {
+              console.error('[api] similar players error:', error);
+              startTransition(() => {
+                setSimilarCandidatesByProp([]);
+                setSimilarCandidatesByPosition([]);
+                setSimilarCandidatesKey(similarRankingKey);
+                setIsSimilarCandidatesLoading(false);
+              });
+            }
+          }
+        };
+
+        void loadSimilarCandidates();
       }, 0);
     });
 
@@ -923,7 +949,7 @@ function App() {
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className="flex-1 min-h-0 hidden md:block">
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} />
                   </div>
                 )}
               </div>
@@ -933,7 +959,7 @@ function App() {
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`${mobileView !== 'shooting' ? 'hidden md:block' : ''}`}>
                     <ShotTypeAnalysis shotTypes={(() => {
-                      if (!displayPlayer?.shot_type_analysis) return undefined;
+                      if (!displayPlayer?.shot_type_analysis) return [];
                       const sta = displayPlayer.shot_type_analysis;
                       const p = sta.player || {};
                       const d = sta.opp_def || {};
@@ -972,7 +998,7 @@ function App() {
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`md:hidden ${mobileView !== 'types' ? 'hidden' : ''}`}>
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis} />
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} />
                   </div>
                 )}
                 <div className={`flex-1 min-h-0 xl:col-span-12 w-full h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>

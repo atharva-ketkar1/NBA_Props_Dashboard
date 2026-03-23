@@ -181,7 +181,7 @@ function getStyleFingerprint(player: Player) {
   const catchAndShoot = clamp(getShotTypePercent(player, 'catch_and_shoot') / 100);
   const pullUp = clamp(getShotTypePercent(player, 'pull_up') / 100);
   const closeRange = clamp(getShotTypePercent(player, 'less_than_10_ft') / 100);
-  const stats = player.stats ?? {};
+  const stats = (player.stats ?? {}) as Record<string, unknown>;
 
   return {
     creator: average([
@@ -226,7 +226,7 @@ function getStyleFingerprint(player: Player) {
 }
 
 function getStructureFingerprint(player: Player) {
-  const stats = player.stats ?? {};
+  const stats = (player.stats ?? {}) as Record<string, unknown>;
   const fga = toNumber(stats.FGA) ?? 0;
   const fg3a = toNumber(stats.FG3A) ?? 0;
   const min = Math.max(1, toNumber(stats.MIN) ?? 0);
@@ -498,7 +498,7 @@ export function rankSimilarPlayers({
         currentAverage: candidatePrimary ?? 0,
         similarityScore,
         detailLoaded: Boolean(candidate.detail_loaded),
-      } satisfies SimilarPlayerCandidate;
+      } as SimilarPlayerCandidate;
     })
     .filter((candidate): candidate is SimilarPlayerCandidate => candidate !== null)
     .sort((a, b) => (
@@ -589,7 +589,7 @@ export function buildSimilarPlayersDataset({
                 : Math.abs(candidate.currentAverage - currentLine),
           source: historicalLine?.source,
           hasHistoricalLine: line !== null,
-        } satisfies SimilarPlayerGame;
+        } as SimilarPlayerGame;
       })
       .filter((row): row is SimilarPlayerGame => row !== null)
       .sort((a, b) => {
