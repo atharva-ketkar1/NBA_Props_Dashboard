@@ -58,19 +58,10 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       setPage(0);
    }, [mode, player?.id, activeTab, activeSportsbook, dataset.rows.length]);
 
-   const pagedRows = useMemo(() => {
-      return [...dataset.rows]
-         .sort((a, b) => {
-            const dateDiff = new Date(b.gameDate ?? '').getTime() - new Date(a.gameDate ?? '').getTime();
-            if (dateDiff !== 0) return dateDiff;
-            const historyPriority = Number(Boolean(b.hasHistoricalLine)) - Number(Boolean(a.hasHistoricalLine));
-            if (historyPriority !== 0) return historyPriority;
-            const scoreDiff = (a.similarityScore ?? 0) - (b.similarityScore ?? 0);
-            if (scoreDiff !== 0) return scoreDiff;
-            return (a.lineGap ?? 0) - (b.lineGap ?? 0);
-         })
-         .slice(0, PAGE_SIZE * MAX_PAGES);
-   }, [dataset.rows]);
+   const pagedRows = useMemo(
+      () => dataset.rows.slice(0, PAGE_SIZE * MAX_PAGES),
+      [dataset.rows],
+   );
 
    const pageCount = Math.max(1, Math.min(MAX_PAGES, Math.ceil(pagedRows.length / PAGE_SIZE)));
    const currentPage = Math.min(page, pageCount - 1);
@@ -149,10 +140,12 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
             <div className="min-w-0">
                <div className="flex items-center gap-2 mb-1">
                   <h3 className="text-sm font-bold text-white">Similar Players</h3>
-                  <Info
-                     className="w-3.5 h-3.5 text-gray-400 shrink-0"
-                     title="Comps are ranked from the current slate, then historical rows are filtered to past lines that were close to the selected player&apos;s current number."
-                  />
+                  <span
+                     className="shrink-0"
+                     title="Comps are ranked from the current slate, then historical rows are filtered to past lines that were close to the selected player's current number."
+                  >
+                     <Info className="w-3.5 h-3.5 text-gray-400" />
+                  </span>
                </div>
                <p className="text-xs text-gray-500">
                   {activeSeason === '25/26' ? '25/26 live-slate comps' : 'Current-season comps only'}
