@@ -112,6 +112,82 @@ Sportsbooks + NBA data sources
 - Historical game logs are enriched with margin, DNP context, and opponent-rank overlays so the UI can compare performance against matchup texture rather than only raw box scores.
 - Supabase support is additive rather than replacing local artifacts, which keeps local development simple and the production path flexible.
 
+## Security Model
+
+This dashboard is a public, read-focused application. That means an important rule applies:
+
+- Any data required to render the anonymous browser experience should be treated as potentially scrapeable.
+
+The goal of the security model is therefore not "make all browser-visible stats secret." The goal is:
+
+- Keep privileged credentials off the client
+- Minimize bulk data exposure
+- Avoid turning the server into an unrestricted database proxy
+- Rate-limit and shape access patterns
+- Reserve stronger protection for truly proprietary or paid-only data
+
+### Current Security Boundaries
+
+- Supabase service-role credentials are server-side only and are never shipped to the browser.
+- The browser talks to app API routes under `frontend/api/` rather than directly querying privileged Supabase resources.
+- Player-detail and archive reads use short-lived, signed tokens tied to an HttpOnly session cookie.
+- API routes apply request-shaping checks such as custom app headers, browser request filtering, cache control, and per-route rate limits.
+- Security headers are configured in [`vercel.json`](/Users/atharvaketkar/Desktop/NBA_Dashboard/vercel.json).
+
+### Important Limitation
+
+This app is still anonymous/public. So while the database is not directly exposed, data returned by public endpoints can still be reverse engineered or scraped.
+
+Two practical implications:
+
+- Public bootstrap data should be kept as small as possible.
+- If a dataset is truly proprietary, it needs real authentication and entitlement checks, not just obscurity or header checks.
+
+## Hardening Work Completed
+
+Recent security-focused changes reduced unnecessary data exposure without changing the user-facing UI:
+
+- Moved similar-player ranking to a server-side endpoint so the browser no longer needs every player's play-style profile just to compute comps.
+- Added [`/api/similar`](/Users/atharvaketkar/Desktop/NBA_Dashboard/frontend/api/similar.ts) as a server-ranked similar-player route.
+- Reduced the public bootstrap payload by removing bulk `play_type_analysis` from the initial all-player response.
+- Moved `play_type_analysis` into the per-player detail fetch path so only the actively viewed player gets that heavier style data.
+- Updated the analysis cards to wait for real player detail instead of relying on public placeholder/demo data during DB-mode rendering.
+
+In practice, this means:
+
+- A scraper no longer gets every player's play-type profile from the first page load.
+- Similar-player logic can still work, but the underlying cross-player style input stays on the server.
+- The dashboard keeps the same UX while exposing less analytical structure up front.
+
+## Remaining Security Gaps
+
+The current hardening is a meaningful improvement, but it is not the same thing as private-data protection.
+
+Remaining gaps:
+
+- Public routes are still anonymous, so determined users can script against them.
+- Header checks such as `x-propx-client` are request-shaping measures, not real authentication.
+- Current rate limiting is in-memory and therefore weaker in a distributed/serverless environment than a shared Redis-backed limiter.
+- If all player detail/archive data should be private, the app will need authentication plus authorization rules.
+
+## Recommended Next Steps
+
+If the hosted version needs stronger protection, the next steps should be:
+
+1. Move public reads onto explicitly limited public views or RLS-safe tables instead of broad privileged reads.
+2. Replace in-memory per-instance rate limiting with a shared limiter such as Upstash Redis.
+3. Add real auth/entitlement checks for player detail, archives, or premium analytics if those should not be public.
+4. Log and monitor abusive request patterns so scraping behavior can be throttled or challenged.
+
+## Verification Before Deployment
+
+Before pushing the current frontend changes, the local verification run completed successfully with:
+
+- `npx tsc --noEmit`
+- `npm run build`
+
+Those checks confirm the frontend and API TypeScript compile cleanly and the Vite production bundle builds successfully. They do not replace a final runtime smoke test on the deployed VM with real environment variables.
+
 ## Tech Stack
 
 ### Frontend
