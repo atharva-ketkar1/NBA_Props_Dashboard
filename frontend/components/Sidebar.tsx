@@ -116,6 +116,7 @@ const PlayerRow = ({
     onClick: () => void,
     onPrefetch?: () => void
 }) => {
+    const prefetchTimeoutRef = useRef<number | null>(null);
     const preferredSportsbooks = Array.from(new Set([activeSportsbook, 'dk', 'fd', 'mgm', 'cz']));
     const preferredProp = getPreferredSportsbookProp(player, statFilter, gameDate, preferredSportsbooks);
     const book = preferredProp?.book ?? null;
@@ -143,12 +144,40 @@ const PlayerRow = ({
         return num > 0 ? `+${num}` : String(num);
     };
 
+    useEffect(() => {
+        return () => {
+            if (prefetchTimeoutRef.current !== null) {
+                window.clearTimeout(prefetchTimeoutRef.current);
+            }
+        };
+    }, []);
+
+    const cancelPrefetch = () => {
+        if (prefetchTimeoutRef.current !== null) {
+            window.clearTimeout(prefetchTimeoutRef.current);
+            prefetchTimeoutRef.current = null;
+        }
+    };
+
+    const schedulePrefetch = () => {
+        if (!onPrefetch) {
+            return;
+        }
+
+        cancelPrefetch();
+        prefetchTimeoutRef.current = window.setTimeout(() => {
+            prefetchTimeoutRef.current = null;
+            onPrefetch();
+        }, 140);
+    };
+
     return (
         <div
             onClick={onClick}
-            onMouseDown={onPrefetch}
-            onFocus={onPrefetch}
-            onTouchStart={onPrefetch}
+            onMouseEnter={schedulePrefetch}
+            onMouseLeave={cancelPrefetch}
+            onFocus={schedulePrefetch}
+            onBlur={cancelPrefetch}
             aria-busy={isPending}
             className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isPending ? 'bg-bgElevation2/80' : isActive ? 'bg-bgElevation1' : 'hover:bg-bgElevation1'}`}
         >

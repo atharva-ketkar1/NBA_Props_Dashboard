@@ -39,7 +39,7 @@ export default {
 
     const rateLimitResponse = enforceRateLimit(request, {
       bucket: 'similar',
-      limit: 20,
+      limit: 60,
       windowMs: 60_000,
     });
     if (rateLimitResponse) {

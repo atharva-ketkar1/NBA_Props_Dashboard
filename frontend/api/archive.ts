@@ -36,7 +36,7 @@ export default {
 
     const rateLimitResponse = enforceRateLimit(request, {
       bucket: 'archive',
-      limit: 20,
+      limit: 45,
       windowMs: 60_000,
     });
     if (rateLimitResponse) {

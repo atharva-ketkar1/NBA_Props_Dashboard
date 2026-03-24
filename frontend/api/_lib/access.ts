@@ -14,7 +14,7 @@ type AccessPayload = {
 
 const SESSION_COOKIE_NAME = 'propx_sid';
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 12;
-const TOKEN_TTL_MS = 2 * 60_000;
+const TOKEN_TTL_MS = 10 * 60_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const SEASON_PATTERN = /^\d{4}-\d{2}$/;
 

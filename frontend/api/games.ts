@@ -36,7 +36,7 @@ export default {
 
     const rateLimitResponse = enforceRateLimit(request, {
       bucket: 'games',
-      limit: 45,
+      limit: 120,
       windowMs: 60_000,
     });
     if (rateLimitResponse) {

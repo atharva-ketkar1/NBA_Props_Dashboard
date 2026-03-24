@@ -36,7 +36,7 @@ export default {
 
     const rateLimitResponse = enforceRateLimit(request, {
       bucket: 'access',
-      limit: 45,
+      limit: 160,
       windowMs: 60_000,
     });
     if (rateLimitResponse) {
