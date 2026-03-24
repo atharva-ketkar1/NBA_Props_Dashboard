@@ -1,5 +1,5 @@
-import { Player, PlayerProps, PlayerPropsByDate, PropLine } from '../types';
-import { getDashboardDate } from './dashboardDate';
+import type { Player, PlayerProps, PlayerPropsByDate, PropLine } from '../types.js';
+import { getDashboardDate } from './dashboardDate.js';
 
 const UNDATED_PROP_KEY = '__undated__';
 const INTRADAY_SPORTSBOOK_MAP: Record<string, string> = {

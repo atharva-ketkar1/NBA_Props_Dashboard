@@ -1,11 +1,11 @@
-import {
+import type {
   Player,
   SimilarPlayerCandidate,
   SimilarPlayerGame,
   SimilarPlayersMode,
   SimilarPlayersSummary,
-} from '../types';
-import { getPreferredSportsbookProp, playerHasPropForDate } from './propResolution';
+} from '../types.js';
+import { getPreferredSportsbookProp, playerHasPropForDate } from './propResolution.js';
 
 type SupportedSportsbook = 'dk' | 'fd' | 'mgm' | 'cz';
 type PositionBucket = 'guard' | 'wing' | 'big' | 'unknown';
