@@ -19,9 +19,16 @@ MAX_WORKERS = 1
 REQUEST_TIMEOUT = 60
 BASE_LOG_MAX_RETRIES = 5
 ENDPOINT_MAX_RETRIES = 3
+FRAGILE_ENDPOINT_MAX_RETRIES = int(os.environ.get("GAMELOGS_FRAGILE_ENDPOINT_MAX_RETRIES", "5"))
+INCREMENTAL_BASE_SLEEP_SECONDS = float(os.environ.get("GAMELOGS_INCREMENTAL_BASE_SLEEP_SECONDS", "2.5"))
+FULL_REFRESH_BASE_SLEEP_SECONDS = float(os.environ.get("GAMELOGS_FULL_REFRESH_BASE_SLEEP_SECONDS", "4.5"))
+SEGMENT_ENDPOINT_EXTRA_SLEEP_SECONDS = float(os.environ.get("GAMELOGS_SEGMENT_ENDPOINT_EXTRA_SLEEP_SECONDS", "4.0"))
+ADVANCED_ENDPOINT_EXTRA_SLEEP_SECONDS = float(os.environ.get("GAMELOGS_ADVANCED_ENDPOINT_EXTRA_SLEEP_SECONDS", "2.5"))
+EDGE_ERROR_EXTRA_COOLDOWN_SECONDS = float(os.environ.get("GAMELOGS_EDGE_ERROR_EXTRA_COOLDOWN_SECONDS", "12.0"))
 RETRYABLE_STATUS_CODES = {
     408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524, 525, 526, 530
 }
+EDGE_RETRYABLE_STATUS_CODES = {520, 521, 522, 524, 525, 526, 530}
 
 # Default season to scrape. The output CSV will be named gamelogs_{SEASON}.csv automatically.
 SEASON = "2025-26"
@@ -124,15 +131,32 @@ def _retry_wait_seconds(exc, attempt_number, is_full_refresh=False):
     status_code = getattr(exc, "status_code", None)
     message = str(exc).lower()
 
-    if status_code in RETRYABLE_STATUS_CODES:
+    if status_code in EDGE_RETRYABLE_STATUS_CODES:
+        base_wait = 20 if is_full_refresh else 12
+    elif status_code == 429:
+        base_wait = 16 if is_full_refresh else 8
+    elif status_code in RETRYABLE_STATUS_CODES:
         base_wait = 12 if is_full_refresh else 6
     elif isinstance(exc, requests.Timeout) or "timed out" in message:
         base_wait = 10 if is_full_refresh else 5
     else:
         base_wait = 8 if is_full_refresh else 4
 
-    max_wait = 90 if is_full_refresh else 45
+    max_wait = 120 if is_full_refresh else 60
     return min(base_wait * attempt_number, max_wait)
+
+
+def _request_sleep_seconds(base_sleep, extra_sleep=0.0):
+    jitter = random.uniform(0.25, 0.9) if extra_sleep > 0 else random.uniform(0.0, 0.35)
+    return base_sleep + extra_sleep + jitter
+
+
+def _retry_wait_with_edge_cooldown(exc, attempt_number, is_full_refresh=False):
+    retry_wait = _retry_wait_seconds(exc, attempt_number, is_full_refresh=is_full_refresh)
+    if getattr(exc, "status_code", None) in EDGE_RETRYABLE_STATUS_CODES:
+        edge_wait = EDGE_ERROR_EXTRA_COOLDOWN_SECONDS + ((attempt_number - 1) * 4)
+        retry_wait = max(retry_wait, edge_wait)
+    return retry_wait
 
 
 def _result(status, message, **extra):
@@ -208,6 +232,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     """
     global _last_500_time
     max_retries = ENDPOINT_MAX_RETRIES
+    fragile_max_retries = max(max_retries, FRAGILE_ENDPOINT_MAX_RETRIES)
     if season is None:
         season = SEASON
 
@@ -222,7 +247,11 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     failed_endpoints = []
     encoded_date = urllib.parse.quote(date_str, safe='')
 
-    base_sleep = (4.0 + random.uniform(0.5, 2.0)) if is_full_refresh else 1.0
+    base_sleep = (
+        FULL_REFRESH_BASE_SLEEP_SECONDS + random.uniform(0.5, 2.0)
+        if is_full_refresh
+        else INCREMENTAL_BASE_SLEEP_SECONDS + random.uniform(0.25, 0.75)
+    )
 
     # -----------------------------------------------------------------------
     # 1. FETCH PT TRACKING DATA (Passing, Rebounds, Drives)
@@ -230,7 +259,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     for PT in PT_MEASURE_TYPES:
         for attempt in range(max_retries):
             try:
-                time.sleep(base_sleep)
+                time.sleep(_request_sleep_seconds(base_sleep))
                 url = (
                     f"https://stats.nba.com/stats/leaguedashptstats"
                     f"?DateFrom={encoded_date}&DateTo={encoded_date}"
@@ -271,7 +300,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
             except Exception as e:
                 if getattr(e, "status_code", None) == 500 and is_full_refresh:
                     _last_500_time = time.time()
-                retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
+                retry_wait = _retry_wait_with_edge_cooldown(e, attempt + 1, is_full_refresh=is_full_refresh)
                 print(f"      Attempt {attempt + 1} failed for {PT} on {date_str}: {type(e).__name__} ({e})")
                 if attempt < max_retries - 1:
                     time.sleep(retry_wait)
@@ -283,9 +312,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     # -----------------------------------------------------------------------
     # 2. FETCH 1ST QUARTER STATS
     # -----------------------------------------------------------------------
-    for attempt in range(max_retries):
+    for attempt in range(fragile_max_retries):
         try:
-            time.sleep(base_sleep)
+            time.sleep(_request_sleep_seconds(base_sleep, SEGMENT_ENDPOINT_EXTRA_SLEEP_SECONDS))
             q1_url = (
                 f"https://stats.nba.com/stats/leaguedashplayerstats"
                 f"?DateFrom={encoded_date}&DateTo={encoded_date}"
@@ -324,9 +353,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
         except Exception as e:
             if getattr(e, "status_code", None) == 500 and is_full_refresh:
                 _last_500_time = time.time()
-            retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
+            retry_wait = _retry_wait_with_edge_cooldown(e, attempt + 1, is_full_refresh=is_full_refresh)
             print(f"      Attempt {attempt + 1} failed for 1Q Stats on {date_str}: {type(e).__name__} ({e})")
-            if attempt < max_retries - 1:
+            if attempt < fragile_max_retries - 1:
                 time.sleep(retry_wait)
             else:
                 print(f"      Fatal failure for 1Q Stats on {date_str}. Saving partial.")
@@ -336,9 +365,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     # -----------------------------------------------------------------------
     # 3. FETCH 1ST HALF STATS
     # -----------------------------------------------------------------------
-    for attempt in range(max_retries):
+    for attempt in range(fragile_max_retries):
         try:
-            time.sleep(base_sleep)
+            time.sleep(_request_sleep_seconds(base_sleep, SEGMENT_ENDPOINT_EXTRA_SLEEP_SECONDS))
             h1_url = (
                 f"https://stats.nba.com/stats/leaguedashplayerstats"
                 f"?DateFrom={encoded_date}&DateTo={encoded_date}"
@@ -377,9 +406,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
         except Exception as e:
             if getattr(e, "status_code", None) == 500 and is_full_refresh:
                 _last_500_time = time.time()
-            retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
+            retry_wait = _retry_wait_with_edge_cooldown(e, attempt + 1, is_full_refresh=is_full_refresh)
             print(f"      Attempt {attempt + 1} failed for 1H Stats on {date_str}: {type(e).__name__} ({e})")
-            if attempt < max_retries - 1:
+            if attempt < fragile_max_retries - 1:
                 time.sleep(retry_wait)
             else:
                 print(f"      Fatal failure for 1H Stats on {date_str}. Saving partial.")
@@ -389,9 +418,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     # -----------------------------------------------------------------------
     # 4. FETCH ADVANCED STATS
     # -----------------------------------------------------------------------
-    for attempt in range(max_retries):
+    for attempt in range(fragile_max_retries):
         try:
-            time.sleep(base_sleep)
+            time.sleep(_request_sleep_seconds(base_sleep, ADVANCED_ENDPOINT_EXTRA_SLEEP_SECONDS))
             adv_url = (
                 f"https://stats.nba.com/stats/leaguedashplayerstats"
                 f"?DateFrom={encoded_date}&DateTo={encoded_date}"
@@ -432,9 +461,9 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
         except Exception as e:
             if getattr(e, "status_code", None) == 500 and is_full_refresh:
                 _last_500_time = time.time()
-            retry_wait = _retry_wait_seconds(e, attempt + 1, is_full_refresh=is_full_refresh)
+            retry_wait = _retry_wait_with_edge_cooldown(e, attempt + 1, is_full_refresh=is_full_refresh)
             print(f"      Attempt {attempt + 1} failed for Advanced Stats on {date_str}: {type(e).__name__} ({e})")
-            if attempt < max_retries - 1:
+            if attempt < fragile_max_retries - 1:
                 time.sleep(retry_wait)
             else:
                 print(f"      Fatal failure for Advanced Stats on {date_str}. Saving partial.")

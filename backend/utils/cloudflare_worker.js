@@ -18,6 +18,7 @@ const DEFAULT_ALLOWED_UPSTREAM_HOSTS = new Set([
 ]);
 
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504, 520, 521, 522, 524, 525, 526, 530]);
+const PROXY_MAX_RETRIES = 5;
 const rateBuckets = new Map();
 
 function parseCsv(rawValue) {
@@ -193,7 +194,7 @@ async function fetchWithRetry(request, targetUrl, targetObj) {
     let lastResponse = null;
     let lastError = null;
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < PROXY_MAX_RETRIES; attempt += 1) {
         try {
             const response = await fetch(targetUrl, {
                 method: "GET",
@@ -223,8 +224,8 @@ async function fetchWithRetry(request, targetUrl, targetObj) {
             lastError = error;
         }
 
-        if (attempt < 2) {
-            await sleep(750 * (attempt + 1));
+        if (attempt < PROXY_MAX_RETRIES - 1) {
+            await sleep((1250 * (attempt + 1)) + Math.floor(Math.random() * 400));
         }
     }
 
