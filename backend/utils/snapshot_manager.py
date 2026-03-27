@@ -215,6 +215,68 @@ class SnapshotManager:
                 return candidate
         return None
 
+    def _merge_props_tree(self, primary_props, fallback_props):
+        primary = primary_props if isinstance(primary_props, dict) else {}
+        fallback = fallback_props if isinstance(fallback_props, dict) else {}
+        merged = dict(primary)
+
+        for stat_key, fallback_books in fallback.items():
+            if not isinstance(fallback_books, dict):
+                continue
+
+            existing_books = merged.get(stat_key)
+            if not isinstance(existing_books, dict):
+                merged[stat_key] = fallback_books
+                continue
+
+            merged_books = dict(existing_books)
+            for book_key, fallback_line in fallback_books.items():
+                if not isinstance(fallback_line, dict):
+                    continue
+
+                existing_line = merged_books.get(book_key)
+                if not isinstance(existing_line, dict):
+                    merged_books[book_key] = fallback_line
+                    continue
+
+                merged_books[book_key] = {
+                    **fallback_line,
+                    **existing_line,
+                }
+
+            merged[stat_key] = merged_books
+
+        return merged
+
+    def _merge_historical_record(self, existing_record, incoming_record):
+        existing = existing_record if isinstance(existing_record, dict) else {}
+        incoming = incoming_record if isinstance(incoming_record, dict) else {}
+
+        existing_props = existing.get("props", {})
+        incoming_props = incoming.get("props", {})
+        merged_props = self._merge_props_tree(incoming_props, existing_props)
+
+        source_priority = {
+            "closing_line": 3,
+            "pre_game_snapshot_fallback": 2,
+            "last_snapshot_fallback": 1,
+            "line_movements_fallback": 1,
+            None: 0,
+        }
+        existing_source = existing.get("source")
+        incoming_source = incoming.get("source")
+        preferred_source = incoming_source
+        if source_priority.get(existing_source, 0) > source_priority.get(incoming_source, 0):
+            preferred_source = existing_source
+
+        return {
+            "name": incoming.get("name") or existing.get("name"),
+            "team": incoming.get("team") or existing.get("team"),
+            "props": merged_props,
+            "source": preferred_source,
+            "captured_at": incoming.get("captured_at") or existing.get("captured_at"),
+        }
+
     def process_closing_lines(self, players_data):
         """
         Process a batch of odds for closing lines.
@@ -244,10 +306,6 @@ class SnapshotManager:
             archive_date = pdata.get("game_date") or today_date
             if archive_date not in historical_odds:
                 historical_odds[archive_date] = {}
-
-            # Immutability Guardrail
-            if player_id in historical_odds[archive_date]:
-                continue
                 
             game_id = pdata.get("game_id")
             game_info = schedule_games.get(game_id)
@@ -288,15 +346,28 @@ class SnapshotManager:
                     gate_2_passed = True
                     
             if gate_1_passed and gate_2_passed:
-                # Clean capture
-                historical_odds[archive_date][player_id] = {
+                fallback_snapshot = self._get_fallback_snapshot_data(
+                    player_id,
+                    game_id=game_id,
+                    game_date=archive_date,
+                )
+                merged_props = self._merge_props_tree(
+                    pdata.get("props", {}),
+                    (fallback_snapshot or {}).get("props", {}),
+                )
+
+                incoming_record = {
                     "name": pdata.get("name"),
                     "team": pdata.get("team"),
-                    "props": pdata.get("props", {}),
+                    "props": merged_props,
                     "source": "closing_line",
                     "captured_at": now.isoformat()
                 }
-                updated = True
+                existing_record = historical_odds[archive_date].get(player_id)
+                next_record = self._merge_historical_record(existing_record, incoming_record)
+                if next_record != existing_record:
+                    historical_odds[archive_date][player_id] = next_record
+                    updated = True
             else:
                 # Fallback capture
                 self.logger.info(f"Skipped {player_id} ({pdata.get('name')}): {skip_reason}")
@@ -307,14 +378,18 @@ class SnapshotManager:
                     game_date=archive_date,
                 )
                 if fallback_props:
-                    historical_odds[archive_date][player_id] = {
+                    incoming_record = {
                         "name": pdata.get("name"),
                         "team": pdata.get("team"),
                         "props": fallback_props.get("props", {}),
                         "source": "last_snapshot_fallback",
                         "captured_at": now.isoformat()
                     }
-                    updated = True
+                    existing_record = historical_odds[archive_date].get(player_id)
+                    next_record = self._merge_historical_record(existing_record, incoming_record)
+                    if next_record != existing_record:
+                        historical_odds[archive_date][player_id] = next_record
+                        updated = True
                 else:
                     self.logger.info(f"  -> No fallback data found for {player_id}")
 

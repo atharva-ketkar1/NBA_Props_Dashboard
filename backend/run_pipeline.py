@@ -275,6 +275,7 @@ def main():
             # This call pushes the resolved prop lines (DK + FD) into player_props.
             logger.info("Upserting props to Supabase...")
             props_ok = True
+            historical_sync_ok = True
             try:
                 from utils.upsert_props import run_odds_update
                 props_ok = bool(run_odds_update(
@@ -286,12 +287,21 @@ def main():
                 logger.warning("props upsert failed (non-fatal): %s", e)
                 props_ok = False
 
+            try:
+                from utils.upsert_market_history import sync_recent_historical_odds_from_file
+                historical_sync_ok = bool(sync_recent_historical_odds_from_file(
+                    os.path.join(DATA_DIR, "archive", "historical_odds.json"),
+                ))
+            except Exception as e:
+                logger.warning("historical odds reconciliation failed (non-fatal): %s", e)
+                historical_sync_ok = False
+
             if critical_failures:
                 logger.warning("Critical scraper failures detected:")
                 for failure in critical_failures:
                     logger.warning(" - %s", failure)
 
-            return props_ok and not critical_failures
+            return props_ok and historical_sync_ok and not critical_failures
     finally:
         stdout_capture.flush()
 

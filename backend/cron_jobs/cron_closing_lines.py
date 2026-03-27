@@ -433,6 +433,10 @@ def main(dry_run=False):
         
         # Upsert fresh props to Supabase (non-fatal)
         # DATA_DIR is defined at module level in this file
+        props_ok = True
+        line_movements_ok = True
+        historical_ok = True
+
         try:
             from utils.upsert_props import run_odds_update
             props_ok = run_odds_update(
@@ -440,20 +444,30 @@ def main(dry_run=False):
                 fd_path=os.path.join(DATA_DIR, "fanduel.csv"),
                 stats_path=os.path.join(DATA_DIR, "season_stats.csv"),
             )
+        except Exception as e:
+            logger.warning(f"Props upsert failed (non-fatal): {e}")
+            props_ok = False
+
+        try:
             line_movements_ok = upsert_line_movements_from_file(os.path.join(DATA_DIR, "line_movements_today.json"))
+        except Exception as e:
+            logger.warning(f"Line movements upsert failed (non-fatal): {e}")
+            line_movements_ok = False
+
+        try:
             historical_path = os.path.join(BASE_DIR, "data", "archive", "historical_odds.json")
             archive_dates = sorted({pdata.get("game_date") or get_et_now().strftime("%Y-%m-%d") for pdata in players_data.values()})
-            historical_ok = True
             for archive_date in archive_dates:
                 historical_ok = upsert_historical_odds_from_file(historical_path, archive_date) and historical_ok
-            if not props_ok or not line_movements_ok or not historical_ok:
-                logger.warning(
-                    "Closing lines DB sync was incomplete "
-                    f"(props_ok={props_ok}, line_movements_ok={line_movements_ok}, historical_ok={historical_ok})."
-                )
-                return False
         except Exception as e:
-            logger.warning(f"Supabase market upsert failed (non-fatal): {e}")
+            logger.warning(f"Historical odds upsert failed (non-fatal): {e}")
+            historical_ok = False
+
+        if not props_ok or not line_movements_ok or not historical_ok:
+            logger.warning(
+                "Closing lines DB sync was incomplete "
+                f"(props_ok={props_ok}, line_movements_ok={line_movements_ok}, historical_ok={historical_ok})."
+            )
             return False
 
         for g in games_to_scrape:

@@ -1,11 +1,68 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime
 
 from utils.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
+
+UPSERT_BATCH_SIZE = max(1, int(os.getenv("SUPABASE_UPSERT_BATCH_SIZE", "50")))
+UPSERT_MAX_RETRIES = max(1, int(os.getenv("SUPABASE_UPSERT_MAX_RETRIES", "4")))
+
+
+def _chunk_rows(rows, chunk_size):
+    for start in range(0, len(rows), chunk_size):
+        yield rows[start:start + chunk_size]
+
+
+def _is_retryable_upsert_error(error):
+    message = str(error).lower()
+    return (
+        "statement timeout" in message
+        or "canceling statement due to statement timeout" in message
+        or "timed out" in message
+        or "connection" in message
+        or "temporarily unavailable" in message
+        or "429" in message
+    )
+
+
+def _batched_upsert(table_name: str, rows, on_conflict: str, context: str):
+    if not rows:
+        return True
+
+    client = get_supabase_client()
+
+    for chunk_index, chunk in enumerate(_chunk_rows(rows, UPSERT_BATCH_SIZE), start=1):
+        last_error = None
+
+        for attempt in range(1, UPSERT_MAX_RETRIES + 1):
+            try:
+                client.table(table_name).upsert(
+                    chunk,
+                    on_conflict=on_conflict,
+                ).execute()
+                last_error = None
+                break
+            except Exception as error:
+                last_error = error
+                if attempt >= UPSERT_MAX_RETRIES or not _is_retryable_upsert_error(error):
+                    break
+                time.sleep(1.5 * attempt)
+
+        if last_error is not None:
+            logger.warning(
+                "%s upsert failed on chunk %d/%d: %s",
+                context,
+                chunk_index,
+                max(1, (len(rows) + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE),
+                last_error,
+            )
+            return False
+
+    return True
 
 
 def upsert_line_movements_from_file(line_movements_path: str):
@@ -43,11 +100,12 @@ def upsert_line_movements_from_file(line_movements_path: str):
     if not rows:
         rows = [{"game_date": default_date, "snapshots": lm_data.get("snapshots", [])}]
 
-    get_supabase_client().table("line_movements").upsert(
+    return _batched_upsert(
+        "line_movements",
         rows,
         on_conflict="game_date",
-    ).execute()
-    return True
+        context="line_movements",
+    )
 
 
 def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
@@ -98,8 +156,34 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
             ", ".join(skipped_keys[:10]),
         )
 
-    get_supabase_client().table("historical_odds").upsert(
+    return _batched_upsert(
+        "historical_odds",
         rows,
         on_conflict="player_id,game_date",
-    ).execute()
-    return True
+        context=f"historical_odds[{game_date}]",
+    )
+
+
+def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: int = 5):
+    if not os.path.exists(historical_odds_path):
+        logger.warning("historical odds file not found: %s", historical_odds_path)
+        return True
+
+    with open(historical_odds_path, "r") as f:
+        historical_odds = json.load(f)
+
+    valid_dates = sorted(
+        [
+            game_date for game_date, payload in (historical_odds or {}).items()
+            if isinstance(game_date, str) and isinstance(payload, dict) and payload
+        ],
+        reverse=True,
+    )[:max(1, max_days)]
+
+    if not valid_dates:
+        return True
+
+    success = True
+    for game_date in valid_dates:
+        success = upsert_historical_odds_from_file(historical_odds_path, game_date) and success
+    return success
