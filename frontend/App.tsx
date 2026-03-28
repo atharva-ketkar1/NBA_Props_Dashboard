@@ -368,7 +368,9 @@ function App() {
               break;
             }
 
-            console.warn(`Supabase bootstrap attempt ${attempt} failed; retrying...`, err);
+            if (import.meta.env.DEV) {
+              console.warn(`Supabase bootstrap attempt ${attempt} failed; retrying...`, err);
+            }
             await sleep(800 * attempt);
           }
         }

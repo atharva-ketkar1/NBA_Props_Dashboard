@@ -20,6 +20,12 @@ const LINE_FALLBACK_SELECT = 'game_date, snapshots';
 const SLATE_SELECT = 'home_team_tricode, away_team_tricode';
 const PAGE_SIZE = 1000;
 const PLAYER_ID_CHUNK_SIZE = 200;
+const SNAPSHOT_SPORTSBOOK_MAP: Record<string, string> = {
+  draftkings: 'dk',
+  fanduel: 'fd',
+  dk: 'dk',
+  fd: 'fd',
+};
 
 function assertNoError(error: { message?: string } | null, context: string) {
   if (error) {
@@ -252,6 +258,77 @@ function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?:
   }));
 }
 
+function buildPropsRowsFromLineMovements(lineRows: any[]) {
+  const dedupedRows = new Map<string, any>();
+
+  for (const row of lineRows ?? []) {
+    const rowGameDate = normalizeGameDateKey(row?.game_date);
+    const snapshots = Array.isArray(row?.snapshots) ? row.snapshots : [];
+
+    for (let snapshotIndex = snapshots.length - 1; snapshotIndex >= 0; snapshotIndex -= 1) {
+      const snapshot = snapshots[snapshotIndex];
+      const updatedAt = typeof snapshot?.timestamp === 'string'
+        ? snapshot.timestamp
+        : (typeof row?.updated_at === 'string' ? row.updated_at : null);
+      const players = snapshot?.players && typeof snapshot.players === 'object'
+        ? snapshot.players
+        : {};
+
+      for (const [playerKey, playerData] of Object.entries(players)) {
+        const playerId = Number(playerKey);
+        if (!Number.isInteger(playerId) || playerId <= 0) {
+          continue;
+        }
+
+        const gameDate = normalizeGameDateKey((playerData as any)?.game_date) ?? rowGameDate;
+        const gameId = typeof (playerData as any)?.game_id === 'string'
+          ? (playerData as any).game_id
+          : null;
+        const propsTree = normalizePropsTree((playerData as any)?.props);
+
+        for (const [statType, sportsbookMap] of Object.entries(propsTree)) {
+          if (!sportsbookMap || typeof sportsbookMap !== 'object') {
+            continue;
+          }
+
+          for (const [rawSportsbook, line] of Object.entries(sportsbookMap as Record<string, any>)) {
+            if (!line || typeof line !== 'object') {
+              continue;
+            }
+
+            const sportsbook = SNAPSHOT_SPORTSBOOK_MAP[rawSportsbook] ?? rawSportsbook;
+            const dedupeKey = [
+              playerId,
+              statType,
+              sportsbook,
+              gameDate ?? '',
+            ].join('|');
+
+            if (dedupedRows.has(dedupeKey)) {
+              continue;
+            }
+
+            dedupedRows.set(dedupeKey, {
+              player_id: playerId,
+              stat_type: statType,
+              sportsbook,
+              line: (line as any).line ?? null,
+              over_odds: (line as any).over ?? null,
+              under_odds: (line as any).under ?? null,
+              implied: (line as any).implied ?? null,
+              game_date: gameDate,
+              game_id: gameId,
+              updated_at: updatedAt,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(dedupedRows.values());
+}
+
 async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = PLAYER_PROP_SELECT) {
   const supabase = getSupabaseAdmin();
   const allRows: any[] = [];
@@ -283,22 +360,23 @@ async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = P
 
 async function fetchPlayersByIds(playerIds: number[], selectClause = PLAYER_BASE_SELECT) {
   const supabase = getSupabaseAdmin();
-  const allRows: any[] = [];
+  const chunks: number[][] = [];
 
   for (let start = 0; start < playerIds.length; start += PLAYER_ID_CHUNK_SIZE) {
-    const chunk = playerIds.slice(start, start + PLAYER_ID_CHUNK_SIZE);
+    chunks.push(playerIds.slice(start, start + PLAYER_ID_CHUNK_SIZE));
+  }
+
+  const chunkResponses = await Promise.all(chunks.map(async (chunk) => {
     const { data, error } = await supabase
       .from('players')
       .select(selectClause)
       .in('id', chunk);
 
     assertNoError(error, 'players');
-    if (data?.length) {
-      allRows.push(...data);
-    }
-  }
+    return data ?? [];
+  }));
 
-  return allRows;
+  return chunkResponses.flat();
 }
 
 export async function fetchBootstrapPayload() {
@@ -307,17 +385,16 @@ export async function fetchBootstrapPayload() {
   const activePropDates = getFastRefreshDates(null);
 
   const [
-    propsRows,
-    { data: lineMetaRows, error: lineError },
+    { data: lineRows, error: lineRowsError },
     { data: gamesRows, error: gamesError },
   ] = await Promise.all([
-    fetchAllPlayerPropsForDates(activePropDates),
-    supabase.from('line_movements').select(LINE_META_SELECT).in('game_date', activePropDates),
+    supabase.from('line_movements').select(INITIAL_LINE_SELECT).in('game_date', activePropDates),
     supabase.from('games').select(SLATE_SELECT).eq('game_date', today),
   ]);
 
-  assertNoError(lineError, 'line_movements');
+  assertNoError(lineRowsError, 'line_movements');
   assertNoError(gamesError, 'games');
+  const propsRows = buildPropsRowsFromLineMovements(lineRows ?? []);
 
   const playerIds = Array.from(new Set(
     (propsRows ?? [])
@@ -335,8 +412,8 @@ export async function fetchBootstrapPayload() {
     })),
     propsRows,
     gamesRows: gamesRows ?? [],
-    lineRows: [],
-    lineVersion: serializeLineMovementVersion(lineMetaRows ?? []),
+    lineRows: lineRows ?? [],
+    lineVersion: serializeLineMovementVersion(lineRows ?? []),
   };
 }
 
@@ -344,13 +421,10 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
   const supabase = getSupabaseAdmin();
   const activeDates = getFastRefreshDates(selectedDate);
 
-  const [
-    propsRows,
-    { data: lineMetaRows, error: lineMetaError },
-  ] = await Promise.all([
-    fetchAllPlayerPropsForDates(activeDates),
-    supabase.from('line_movements').select(LINE_META_SELECT).in('game_date', activeDates),
-  ]);
+  const { data: lineMetaRows, error: lineMetaError } = await supabase
+    .from('line_movements')
+    .select(LINE_META_SELECT)
+    .in('game_date', activeDates);
 
   assertNoError(lineMetaError, 'line_movement metadata');
 
@@ -358,7 +432,7 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
 
   if (nextVersion === currentLineVersion) {
     return {
-      propsRows,
+      propsRows: [],
       lineVersion: nextVersion,
     };
   }
@@ -371,7 +445,7 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
   assertNoError(lineRowsError, 'line_movements');
 
   return {
-    propsRows,
+    propsRows: buildPropsRowsFromLineMovements(lineRows ?? []),
     lineVersion: nextVersion,
     lineRows: lineRows ?? [],
   };

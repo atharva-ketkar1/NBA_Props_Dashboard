@@ -1,7 +1,7 @@
 import { fetchAppJson } from './network';
 import { SimilarPlayerCandidate } from '../types';
 
-const BOOTSTRAP_TIMEOUT_MS = 20_000;
+const BOOTSTRAP_TIMEOUT_MS = 45_000;
 
 type BootstrapResponse = {
   playersRows: any[];

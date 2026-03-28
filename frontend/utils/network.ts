@@ -263,6 +263,8 @@ export async function guardedFetch(
     inflightRequests.set(requestKey, requestPromise);
     requestPromise.finally(() => {
       inflightRequests.delete(requestKey);
+    }).catch(() => {
+      // Prevent duplicate "Uncaught (in promise)" noise when callers already handle failures.
     });
   }
 
