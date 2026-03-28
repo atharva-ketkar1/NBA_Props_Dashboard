@@ -11,7 +11,7 @@ import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
 import { Player, PlayerPropsByDate, SimilarPlayerCandidate } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
-import { getDashboardDate } from './utils/dashboardDate';
+import { getDashboardDate, getDashboardScheduleDates } from './utils/dashboardDate';
 import {
   getResolvedPlayerGameDate,
   materializePlayerForGameDate,
@@ -23,8 +23,6 @@ import { rankSimilarPlayers } from './utils/similarPlayers';
 import {
   fetchDashboardAccess,
   fetchDashboardArchive,
-  fetchDashboardBootstrap,
-  fetchDashboardHot,
   fetchDashboardPlayer,
   fetchDashboardPlayerChart,
   fetchDashboardSimilar,
@@ -45,6 +43,9 @@ const STAT_LABELS: Record<string, string> = {
   'Steals': 'STL',
   'Turnovers': 'TOV'
 };
+
+const PLAYER_BASE_SELECT = 'id, name, team, position, stats, play_type_analysis';
+const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
 
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 
@@ -101,12 +102,6 @@ function mergePropsByDateMaps(existing: PlayerPropsByDate = {}, incoming: Player
   return merged;
 }
 
-function flattenIntradayMovements(rows: any[]) {
-  return (rows ?? [])
-    .flatMap((row: any) => Array.isArray(row?.snapshots) ? row.snapshots : [])
-    .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-}
-
 function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
   if (!players.length || !(propsRows ?? []).length) {
     return players;
@@ -157,6 +152,22 @@ function hasLoadedPlayerDetail(player?: Player | null) {
 
 function hasLoadedPlayerChart(player?: Player | null) {
   return Boolean((player?.game_log?.length ?? 0) > 0);
+}
+
+function getLiveBoardDates(selectedDate?: string | null) {
+  return Array.from(new Set(
+    (selectedDate ? [selectedDate] : Array.from(getDashboardScheduleDates()))
+      .filter((value): value is string => Boolean(value)),
+  ));
+}
+
+function buildSlateTeamsFromFeed(feed: Player[]) {
+  return Array.from(new Set(
+    (feed ?? [])
+      .filter(playerHasAnyProp)
+      .map((player) => player.team)
+      .filter(Boolean),
+  ));
 }
 
 function App() {
@@ -236,14 +247,13 @@ function App() {
 
   // ──────────────────────────────────────────────────────────────
   // Data fetching
-  // Set VITE_USE_DB=true in Vercel to fetch from the server-side Vercel API.
+  // Set VITE_USE_DB=true in Vercel to read the live board directly from browser-side Supabase.
+  // Protected player detail/archive routes still go through the Vercel API.
   // Set VITE_USE_DB=false (or omit) to fall back to master_feed.json.
   // ──────────────────────────────────────────────────────────────
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
-  const FULL_DB_POLL_MS = parsePollMs(import.meta.env.VITE_FULL_DB_POLL_MS, 30 * 60 * 1000);
   const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 5 * 60 * 1000);
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
-  const lineMovementVersionRef = useRef('');
   const rawDataRef = useRef<Player[]>([]);
   const playerDetailRequestsRef = useRef(new Map<number, Promise<void>>());
   const playerChartRequestsRef = useRef(new Map<number, Promise<void>>());
@@ -311,30 +321,36 @@ function App() {
     if (USE_DB) {
       let cancelled = false;
 
-      const fetchDbSnapshot = async (isInitial = false) => {
-        const maxAttempts = isInitial ? 2 : 1;
+      const fetchDbSnapshot = async () => {
+        const maxAttempts = 3;
         let lastError: unknown = null;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           try {
-            if (!isInitial && !isDocumentVisible()) {
-              return;
+            const { supabase } = await import('./utils/supabase');
+            const propDates = getLiveBoardDates();
+
+            const [
+              { data: playersRows, error: playersError },
+              { data: propsRows, error: propsError },
+            ] = await Promise.all([
+              supabase.from('players').select(PLAYER_BASE_SELECT),
+              supabase.from('player_props').select(PLAYER_PROP_SELECT).in('game_date', propDates),
+            ]);
+
+            if (playersError) {
+              throw playersError;
             }
 
-            const snapshot = await fetchDashboardBootstrap();
+            if (propsError) {
+              throw propsError;
+            }
 
             if (cancelled) return;
 
-            const mergedFeed = mergeFeedFromDB(snapshot.playersRows ?? [], snapshot.propsRows ?? []);
-            const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
+            const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
+            const slateTeams = buildSlateTeamsFromFeed(mergedFeed);
             setCurrentSlateTeams(slateTeams);
-
-            const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
-            if (isInitial) {
-              lineMovementVersionRef.current = (snapshot.lineRows ?? []).length > 0
-                ? (snapshot.lineVersion ?? '')
-                : '';
-            }
 
             setRawData(prev => {
               const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
@@ -351,20 +367,17 @@ function App() {
                   props: p.props,
                   props_by_date: p.props_by_date,
                   play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
-                  intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
+                  intraday_movements: existing?.intraday_movements ?? [],
                   detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
                 };
               });
             });
 
-            if (isInitial) {
-              setLoading(false);
-            }
-
+            setLoading(false);
             return;
           } catch (err) {
             lastError = err;
-            if (!isInitial || attempt >= maxAttempts || cancelled) {
+            if (attempt >= maxAttempts || cancelled) {
               break;
             }
 
@@ -379,16 +392,12 @@ function App() {
         if (lastError) {
           console.error('Supabase fetch failed:', lastError);
         }
-        if (isInitial) {
-          setLoading(false);
-        }
+        setLoading(false);
       };
 
-      void fetchDbSnapshot(true);
-      const intervalId = window.setInterval(() => fetchDbSnapshot(false), FULL_DB_POLL_MS);
+      void fetchDbSnapshot();
       return () => {
         cancelled = true;
-        window.clearInterval(intervalId);
       };
     } else {
       // ── JSON fallback (original behavior, unchanged) ──
@@ -419,9 +428,9 @@ function App() {
           setLoading(false);
         });
     }
-  }, [USE_DB, FULL_DB_POLL_MS]);
+  }, [USE_DB]);
 
-  // 1b. Hot refresh for live lines + history metadata
+  // 1b. Hot refresh for live lines
   useEffect(() => {
     if (!USE_DB || !isPageVisible || loading) return undefined;
 
@@ -433,27 +442,24 @@ function App() {
           return;
         }
 
-        const hotSnapshot = await fetchDashboardHot(
-          resolvedSelectedGameDate ?? selectedGameDate,
-          lineMovementVersionRef.current,
-        );
+        const { supabase } = await import('./utils/supabase');
+        const hotDates = getLiveBoardDates(resolvedSelectedGameDate ?? selectedGameDate);
+        const { data: propsRows, error } = await supabase
+          .from('player_props')
+          .select(PLAYER_PROP_SELECT)
+          .in('game_date', hotDates);
+
+        if (error) {
+          throw error;
+        }
 
         if (cancelled) return;
 
-        if ((hotSnapshot.propsRows ?? []).length > 0) {
-          setRawData(prev => mergePropsIntoPlayers(prev, hotSnapshot.propsRows ?? []));
-        }
-
-        if (!Object.prototype.hasOwnProperty.call(hotSnapshot, 'lineRows')) {
+        if ((propsRows ?? []).length === 0) {
           return;
         }
 
-        lineMovementVersionRef.current = hotSnapshot.lineVersion ?? '';
-        const intradayMovements = flattenIntradayMovements(hotSnapshot.lineRows ?? []);
-        setRawData(prev => prev.map((player) => ({
-          ...player,
-          intraday_movements: intradayMovements,
-        })));
+        setRawData(prev => mergePropsIntoPlayers(prev, propsRows ?? []));
       } catch (err) {
         if (!cancelled) {
           console.error('Supabase hot refresh failed:', err);

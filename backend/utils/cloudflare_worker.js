@@ -9,6 +9,7 @@ const USER_AGENTS = [
 
 const DEFAULT_ALLOWED_UPSTREAM_HOSTS = new Set([
     "api.pbpstats.com",
+    "api.prizepicks.com",
     "api.sportsbook.fanduel.com",
     "cdn.nba.com",
     "sportsbook-nash.draftkings.com",
@@ -93,6 +94,13 @@ function jsonResponse(payload, status, request, env) {
 function getUpstreamOriginAndReferer(targetObj) {
     const hostname = targetObj.hostname.toLowerCase();
 
+    if (hostname === "api.prizepicks.com") {
+        return {
+            origin: "https://app.prizepicks.com",
+            referer: "https://app.prizepicks.com/",
+        };
+    }
+
     if (hostname === "stats.nba.com" || hostname === "cdn.nba.com" || hostname === "www.nba.com") {
         return {
             origin: "https://www.nba.com",
@@ -120,11 +128,21 @@ function getUpstreamOriginAndReferer(targetObj) {
     };
 }
 
+function copyHeaderIfPresent(sourceHeaders, targetHeaders, name) {
+    const value = sourceHeaders.get(name);
+    if (value) {
+        targetHeaders.set(name, value);
+    }
+}
+
 function buildUpstreamHeaders(request, targetObj, userAgent) {
     const headers = new Headers();
+    const hostname = targetObj.hostname.toLowerCase();
     const acceptLanguage = request.headers.get("Accept-Language") || "en-US,en;q=0.9";
     const { origin, referer } = getUpstreamOriginAndReferer(targetObj);
     const incomingRegion = request.headers.get("x-sportsbook-region");
+    const incomingUserAgent = request.headers.get("User-Agent");
+    const effectiveUserAgent = hostname === "api.prizepicks.com" && incomingUserAgent ? incomingUserAgent : userAgent;
 
     headers.set("Accept", "application/json, text/plain, */*");
     headers.set("Accept-Language", acceptLanguage);
@@ -135,15 +153,23 @@ function buildUpstreamHeaders(request, targetObj, userAgent) {
     headers.set("Sec-Fetch-Dest", "empty");
     headers.set("Sec-Fetch-Mode", "cors");
     headers.set("Sec-Fetch-Site", "same-site");
-    headers.set("User-Agent", userAgent);
+    headers.set("User-Agent", effectiveUserAgent);
     if (incomingRegion) {
         headers.set("x-sportsbook-region", incomingRegion);
     }
 
-    if (userAgent.includes("Chrome") || userAgent.includes("Edge")) {
+    if (hostname === "api.prizepicks.com") {
+        copyHeaderIfPresent(request.headers, headers, "Cookie");
+        copyHeaderIfPresent(request.headers, headers, "content-type");
+        copyHeaderIfPresent(request.headers, headers, "x-device-id");
+        copyHeaderIfPresent(request.headers, headers, "x-device-info");
+        copyHeaderIfPresent(request.headers, headers, "sec-ch-ua");
+        copyHeaderIfPresent(request.headers, headers, "sec-ch-ua-mobile");
+        copyHeaderIfPresent(request.headers, headers, "sec-ch-ua-platform");
+    } else if (effectiveUserAgent.includes("Chrome") || effectiveUserAgent.includes("Edge")) {
         headers.set("sec-ch-ua", '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"');
         headers.set("sec-ch-ua-mobile", "?0");
-        headers.set("sec-ch-ua-platform", userAgent.includes("Windows") ? '"Windows"' : '"macOS"');
+        headers.set("sec-ch-ua-platform", effectiveUserAgent.includes("Windows") ? '"Windows"' : '"macOS"');
     }
 
     return headers;

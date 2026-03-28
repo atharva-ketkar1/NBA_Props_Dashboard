@@ -5,6 +5,8 @@ interface ImportMetaEnv {
   readonly VITE_ASSETS_URL?: string;
   readonly VITE_FULL_DB_POLL_MS?: string;
   readonly VITE_HOT_DATA_POLL_MS?: string;
+  readonly VITE_SUPABASE_ANON_KEY?: string;
+  readonly VITE_SUPABASE_URL?: string;
   readonly VITE_USE_DB?: string;
 }
 
