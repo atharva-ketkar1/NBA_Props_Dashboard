@@ -10,22 +10,13 @@ import type { Player, PlayerPropsByDate, SimilarPlayerCandidate } from '../../ty
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
 const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
-const PLAYER_CHART_SELECT = 'game_log';
 const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis, play_type_analysis';
 const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analysis, shot_type_analysis';
 const HISTORICAL_ODDS_SELECT = 'game_date, props, source';
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
-const LINE_FALLBACK_SELECT = 'game_date, snapshots';
 const SLATE_SELECT = 'home_team_tricode, away_team_tricode';
 const PAGE_SIZE = 1000;
-const PLAYER_ID_CHUNK_SIZE = 200;
-const SNAPSHOT_SPORTSBOOK_MAP: Record<string, string> = {
-  draftkings: 'dk',
-  fanduel: 'fd',
-  dk: 'dk',
-  fd: 'fd',
-};
 
 function assertNoError(error: { message?: string } | null, context: string) {
   if (error) {
@@ -62,181 +53,6 @@ function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
   return propsByDateMap;
 }
 
-function normalizeGameDateKey(value: unknown) {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  const match = trimmed.match(/^(\d{4}-\d{2}-\d{2})/);
-  return match ? match[1] : null;
-}
-
-function normalizePropsTree(value: any) {
-  if (!value || typeof value !== 'object') {
-    return {};
-  }
-
-  if (value.props && typeof value.props === 'object') {
-    return value.props;
-  }
-
-  return value;
-}
-
-function mergeHistoricalPropTrees(primaryValue: any, fallbackValue: any) {
-  const primary = normalizePropsTree(primaryValue);
-  const fallback = normalizePropsTree(fallbackValue);
-  const merged: Record<string, any> = { ...primary };
-  let changed = false;
-
-  for (const [statKey, fallbackBooks] of Object.entries(fallback)) {
-    if (!fallbackBooks || typeof fallbackBooks !== 'object') {
-      continue;
-    }
-
-    const existingBooks = merged[statKey];
-    if (!existingBooks || typeof existingBooks !== 'object') {
-      merged[statKey] = fallbackBooks;
-      changed = true;
-      continue;
-    }
-
-    const mergedBooks = { ...existingBooks };
-    let statChanged = false;
-
-    for (const [bookKey, fallbackLine] of Object.entries(fallbackBooks as Record<string, any>)) {
-      if (!fallbackLine || typeof fallbackLine !== 'object') {
-        continue;
-      }
-
-      const existingLine = mergedBooks[bookKey];
-      if (!existingLine || typeof existingLine !== 'object') {
-        mergedBooks[bookKey] = fallbackLine;
-        statChanged = true;
-        continue;
-      }
-
-      const nextLine = {
-        ...fallbackLine,
-        ...existingLine,
-      };
-
-      if (JSON.stringify(nextLine) !== JSON.stringify(existingLine)) {
-        mergedBooks[bookKey] = nextLine;
-        statChanged = true;
-      }
-    }
-
-    if (statChanged) {
-      merged[statKey] = mergedBooks;
-      changed = true;
-    }
-  }
-
-  return changed ? merged : primary;
-}
-
-function getSnapshotPlayerData(snapshot: any, playerId: number) {
-  const players = snapshot?.players;
-  if (!players || typeof players !== 'object') {
-    return null;
-  }
-
-  return players[String(playerId)] ?? players[playerId] ?? null;
-}
-
-function extractFallbackLineMovementProps(lineRows: any[], playerId: number) {
-  const byDate = new Map<string, { game_date: string; props: Record<string, any>; source: string }>();
-
-  for (const row of lineRows ?? []) {
-    const gameDate = normalizeGameDateKey(row?.game_date);
-    if (!gameDate) {
-      continue;
-    }
-
-    const snapshots = Array.isArray(row?.snapshots) ? row.snapshots : [];
-    let latestMatch: { props: Record<string, any>; source: string } | null = null;
-    let preGameMatch: { props: Record<string, any>; source: string } | null = null;
-
-    for (let index = snapshots.length - 1; index >= 0; index -= 1) {
-      const snapshot = snapshots[index];
-      const playerData = getSnapshotPlayerData(snapshot, playerId);
-      const props = normalizePropsTree(playerData?.props);
-      if (!Object.keys(props).length) {
-        continue;
-      }
-
-      const candidate = {
-        props,
-        source: snapshot?.label === 'pre_game' ? 'pre_game_snapshot_fallback' : 'line_movements_fallback',
-      };
-
-      if (!latestMatch) {
-        latestMatch = candidate;
-      }
-
-      if (snapshot?.label === 'pre_game') {
-        preGameMatch = candidate;
-        break;
-      }
-    }
-
-    const chosen = preGameMatch ?? latestMatch;
-    if (!chosen) {
-      continue;
-    }
-
-    byDate.set(gameDate, {
-      game_date: gameDate,
-      props: chosen.props,
-      source: chosen.source,
-    });
-  }
-
-  return byDate;
-}
-
-function mergeHistoricalOddsRows(
-  historicalOddsRows: any[],
-  lineMovementRows: any[],
-  playerId: number,
-) {
-  const mergedByDate = new Map<string, any>();
-
-  for (const row of historicalOddsRows ?? []) {
-    const gameDate = normalizeGameDateKey(row?.game_date);
-    if (!gameDate) {
-      continue;
-    }
-
-    mergedByDate.set(gameDate, {
-      ...row,
-      game_date: gameDate,
-      props: normalizePropsTree(row?.props),
-    });
-  }
-
-  const fallbackByDate = extractFallbackLineMovementProps(lineMovementRows, playerId);
-  for (const [gameDate, fallbackRow] of fallbackByDate.entries()) {
-    const existingRow = mergedByDate.get(gameDate);
-    if (!existingRow) {
-      mergedByDate.set(gameDate, fallbackRow);
-      continue;
-    }
-
-    mergedByDate.set(gameDate, {
-      ...existingRow,
-      props: mergeHistoricalPropTrees(existingRow.props, fallbackRow.props),
-      source: existingRow.source ?? fallbackRow.source,
-    });
-  }
-
-  return Array.from(mergedByDate.values()).sort((left, right) => (
-    String(left?.game_date ?? '').localeCompare(String(right?.game_date ?? ''))
-  ));
-}
-
 function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?: string | null): Player[] {
   const propsByDateMap = buildPropsByDateMap(props ?? []);
 
@@ -256,77 +72,6 @@ function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?:
     play_type_analysis: player.play_type_analysis ?? [],
     shot_type_analysis: player.shot_type_analysis ?? null,
   }));
-}
-
-function buildPropsRowsFromLineMovements(lineRows: any[]) {
-  const dedupedRows = new Map<string, any>();
-
-  for (const row of lineRows ?? []) {
-    const rowGameDate = normalizeGameDateKey(row?.game_date);
-    const snapshots = Array.isArray(row?.snapshots) ? row.snapshots : [];
-
-    for (let snapshotIndex = snapshots.length - 1; snapshotIndex >= 0; snapshotIndex -= 1) {
-      const snapshot = snapshots[snapshotIndex];
-      const updatedAt = typeof snapshot?.timestamp === 'string'
-        ? snapshot.timestamp
-        : (typeof row?.updated_at === 'string' ? row.updated_at : null);
-      const players = snapshot?.players && typeof snapshot.players === 'object'
-        ? snapshot.players
-        : {};
-
-      for (const [playerKey, playerData] of Object.entries(players)) {
-        const playerId = Number(playerKey);
-        if (!Number.isInteger(playerId) || playerId <= 0) {
-          continue;
-        }
-
-        const gameDate = normalizeGameDateKey((playerData as any)?.game_date) ?? rowGameDate;
-        const gameId = typeof (playerData as any)?.game_id === 'string'
-          ? (playerData as any).game_id
-          : null;
-        const propsTree = normalizePropsTree((playerData as any)?.props);
-
-        for (const [statType, sportsbookMap] of Object.entries(propsTree)) {
-          if (!sportsbookMap || typeof sportsbookMap !== 'object') {
-            continue;
-          }
-
-          for (const [rawSportsbook, line] of Object.entries(sportsbookMap as Record<string, any>)) {
-            if (!line || typeof line !== 'object') {
-              continue;
-            }
-
-            const sportsbook = SNAPSHOT_SPORTSBOOK_MAP[rawSportsbook] ?? rawSportsbook;
-            const dedupeKey = [
-              playerId,
-              statType,
-              sportsbook,
-              gameDate ?? '',
-            ].join('|');
-
-            if (dedupedRows.has(dedupeKey)) {
-              continue;
-            }
-
-            dedupedRows.set(dedupeKey, {
-              player_id: playerId,
-              stat_type: statType,
-              sportsbook,
-              line: (line as any).line ?? null,
-              over_odds: (line as any).over ?? null,
-              under_odds: (line as any).under ?? null,
-              implied: (line as any).implied ?? null,
-              game_date: gameDate,
-              game_id: gameId,
-              updated_at: updatedAt,
-            });
-          }
-        }
-      }
-    }
-  }
-
-  return Array.from(dedupedRows.values());
 }
 
 async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = PLAYER_PROP_SELECT) {
@@ -358,52 +103,27 @@ async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = P
   }
 }
 
-async function fetchPlayersByIds(playerIds: number[], selectClause = PLAYER_BASE_SELECT) {
-  const supabase = getSupabaseAdmin();
-  const chunks: number[][] = [];
-
-  for (let start = 0; start < playerIds.length; start += PLAYER_ID_CHUNK_SIZE) {
-    chunks.push(playerIds.slice(start, start + PLAYER_ID_CHUNK_SIZE));
-  }
-
-  const chunkResponses = await Promise.all(chunks.map(async (chunk) => {
-    const { data, error } = await supabase
-      .from('players')
-      .select(selectClause)
-      .in('id', chunk);
-
-    assertNoError(error, 'players');
-    return data ?? [];
-  }));
-
-  return chunkResponses.flat();
-}
-
 export async function fetchBootstrapPayload() {
   const supabase = getSupabaseAdmin();
   const today = getDashboardDate();
-  const activePropDates = getFastRefreshDates(null);
+  const futureDates = buildFutureDates(today, 14);
+  const fastRefreshDates = getFastRefreshDates(null);
 
   const [
-    { data: lineRows, error: lineRowsError },
+    { data: playersRows, error: playersError },
+    propsRows,
+    { data: lineRows, error: lineError },
     { data: gamesRows, error: gamesError },
   ] = await Promise.all([
-    supabase.from('line_movements').select(INITIAL_LINE_SELECT).in('game_date', activePropDates),
+    supabase.from('players').select(PLAYER_BASE_SELECT),
+    fetchAllPlayerPropsForDates(futureDates),
+    supabase.from('line_movements').select(INITIAL_LINE_SELECT).in('game_date', fastRefreshDates),
     supabase.from('games').select(SLATE_SELECT).eq('game_date', today),
   ]);
 
-  assertNoError(lineRowsError, 'line_movements');
+  assertNoError(playersError, 'players');
+  assertNoError(lineError, 'line_movements');
   assertNoError(gamesError, 'games');
-  const propsRows = buildPropsRowsFromLineMovements(lineRows ?? []);
-
-  const playerIds = Array.from(new Set(
-    (propsRows ?? [])
-      .map((row: any) => Number(row?.player_id))
-      .filter((playerId) => Number.isInteger(playerId) && playerId > 0),
-  ));
-  const playersRows = playerIds.length > 0
-    ? await fetchPlayersByIds(playerIds, PLAYER_BASE_SELECT)
-    : [];
 
   return {
     playersRows: (playersRows ?? []).map((row: any) => ({
@@ -421,10 +141,13 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
   const supabase = getSupabaseAdmin();
   const activeDates = getFastRefreshDates(selectedDate);
 
-  const { data: lineMetaRows, error: lineMetaError } = await supabase
-    .from('line_movements')
-    .select(LINE_META_SELECT)
-    .in('game_date', activeDates);
+  const [
+    propsRows,
+    { data: lineMetaRows, error: lineMetaError },
+  ] = await Promise.all([
+    fetchAllPlayerPropsForDates(activeDates),
+    supabase.from('line_movements').select(LINE_META_SELECT).in('game_date', activeDates),
+  ]);
 
   assertNoError(lineMetaError, 'line_movement metadata');
 
@@ -432,7 +155,7 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
 
   if (nextVersion === currentLineVersion) {
     return {
-      propsRows: [],
+      propsRows,
       lineVersion: nextVersion,
     };
   }
@@ -445,7 +168,7 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
   assertNoError(lineRowsError, 'line_movements');
 
   return {
-    propsRows: buildPropsRowsFromLineMovements(lineRows ?? []),
+    propsRows,
     lineVersion: nextVersion,
     lineRows: lineRows ?? [],
   };
@@ -483,47 +206,9 @@ export async function fetchPlayerPayload(playerId: number) {
     throw new Error('[supabase] player detail: Player not found.');
   }
 
-  const playerDetail = detail as Record<string, any>;
-  const recentGameDates = Array.from(new Set(
-    (playerDetail.game_log ?? [])
-      .map((game: any) => normalizeGameDateKey(game?.GAME_DATE))
-      .filter(Boolean),
-  )).slice(0, 45) as string[];
-
-  let mergedHistoricalOddsRows: any[] = (historicalOddsRows ?? []) as any[];
-
-  if (recentGameDates.length > 0) {
-    const { data: lineMovementRows, error: lineMovementError } = await supabase
-      .from('line_movements')
-      .select(LINE_FALLBACK_SELECT)
-      .in('game_date', recentGameDates);
-
-    assertNoError(lineMovementError, 'player line movement fallback');
-    mergedHistoricalOddsRows = mergeHistoricalOddsRows(historicalOddsRows ?? [], lineMovementRows ?? [], playerId);
-  }
-
   return {
-    detail: playerDetail,
-    historicalOddsRows: mergedHistoricalOddsRows,
-  };
-}
-
-export async function fetchPlayerChartPayload(playerId: number) {
-  const supabase = getSupabaseAdmin();
-  const { data: detail, error } = await supabase
-    .from('players')
-    .select(PLAYER_CHART_SELECT)
-    .eq('id', playerId)
-    .maybeSingle();
-
-  assertNoError(error, 'player chart');
-
-  if (!detail) {
-    throw new Error('[supabase] player chart: Player not found.');
-  }
-
-  return {
-    detail: detail as Record<string, any>,
+    detail,
+    historicalOddsRows: historicalOddsRows ?? [],
   };
 }
 

@@ -2,23 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
   "devCommand": "vite --host 0.0.0.0 --port $PORT",
-  "functions": {
-    "api/bootstrap.ts": {
-      "maxDuration": 60
-    },
-    "api/player.ts": {
-      "maxDuration": 30
-    },
-    "api/player-chart.ts": {
-      "maxDuration": 30
-    },
-    "api/similar.ts": {
-      "maxDuration": 30
-    },
-    "api/*.ts": {
-      "maxDuration": 20
-    }
-  },
   "headers": [
     {
       "source": "/(.*)",

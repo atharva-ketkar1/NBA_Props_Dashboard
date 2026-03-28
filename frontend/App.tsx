@@ -11,7 +11,7 @@ import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
 import { Player, PlayerPropsByDate, SimilarPlayerCandidate } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
-import { getDashboardDate, getDashboardScheduleDates } from './utils/dashboardDate';
+import { getDashboardDate } from './utils/dashboardDate';
 import {
   getResolvedPlayerGameDate,
   materializePlayerForGameDate,
@@ -23,8 +23,9 @@ import { rankSimilarPlayers } from './utils/similarPlayers';
 import {
   fetchDashboardAccess,
   fetchDashboardArchive,
+  fetchDashboardBootstrap,
+  fetchDashboardHot,
   fetchDashboardPlayer,
-  fetchDashboardPlayerChart,
   fetchDashboardSimilar,
 } from './utils/dashboardApi';
 
@@ -44,9 +45,6 @@ const STAT_LABELS: Record<string, string> = {
   'Turnovers': 'TOV'
 };
 
-const PLAYER_BASE_SELECT = 'id, name, team, position, stats, play_type_analysis';
-const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
-
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
@@ -56,12 +54,6 @@ function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
 
 function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState === 'visible';
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
 }
 
 function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
@@ -102,6 +94,12 @@ function mergePropsByDateMaps(existing: PlayerPropsByDate = {}, incoming: Player
   return merged;
 }
 
+function flattenIntradayMovements(rows: any[]) {
+  return (rows ?? [])
+    .flatMap((row: any) => Array.isArray(row?.snapshots) ? row.snapshots : [])
+    .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+}
+
 function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
   if (!players.length || !(propsRows ?? []).length) {
     return players;
@@ -123,51 +121,19 @@ function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
 }
 
 function buildHistoricalOddsMap(playerId: number, historicalOddsRows: any[]) {
-  return Object.fromEntries((historicalOddsRows ?? [])
-    .map((row: any) => {
-      const gameDate = typeof row?.game_date === 'string'
-        ? row.game_date.trim().slice(0, 10)
-        : '';
-
-      if (!gameDate) {
-        return null;
+  return Object.fromEntries((historicalOddsRows ?? []).map((row: any) => [
+    row.game_date,
+    {
+      [String(playerId)]: {
+        props: row.props,
+        source: row.source,
       }
-
-      return [
-        gameDate,
-        {
-          [String(playerId)]: {
-            props: row.props,
-            source: row.source,
-          },
-        },
-      ];
-    })
-    .filter(Boolean) as [string, any][]);
+    }
+  ]));
 }
 
 function hasLoadedPlayerDetail(player?: Player | null) {
   return Boolean(player?.detail_loaded);
-}
-
-function hasLoadedPlayerChart(player?: Player | null) {
-  return Boolean((player?.game_log?.length ?? 0) > 0);
-}
-
-function getLiveBoardDates(selectedDate?: string | null) {
-  return Array.from(new Set(
-    (selectedDate ? [selectedDate] : Array.from(getDashboardScheduleDates()))
-      .filter((value): value is string => Boolean(value)),
-  ));
-}
-
-function buildSlateTeamsFromFeed(feed: Player[]) {
-  return Array.from(new Set(
-    (feed ?? [])
-      .filter(playerHasAnyProp)
-      .map((player) => player.team)
-      .filter(Boolean),
-  ));
 }
 
 function App() {
@@ -247,16 +213,16 @@ function App() {
 
   // ──────────────────────────────────────────────────────────────
   // Data fetching
-  // Set VITE_USE_DB=true in Vercel to read the live board directly from browser-side Supabase.
-  // Protected player detail/archive routes still go through the Vercel API.
+  // Set VITE_USE_DB=true in Vercel to fetch from the server-side Vercel API.
   // Set VITE_USE_DB=false (or omit) to fall back to master_feed.json.
   // ──────────────────────────────────────────────────────────────
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
+  const FULL_DB_POLL_MS = parsePollMs(import.meta.env.VITE_FULL_DB_POLL_MS, 30 * 60 * 1000);
   const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 5 * 60 * 1000);
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
+  const lineMovementVersionRef = useRef('');
   const rawDataRef = useRef<Player[]>([]);
   const playerDetailRequestsRef = useRef(new Map<number, Promise<void>>());
-  const playerChartRequestsRef = useRef(new Map<number, Promise<void>>());
   const archiveRequestsRef = useRef(new Map<string, Promise<void>>());
   const selectionRequestRef = useRef(0);
   const accessCacheRef = useRef(new Map<string, {
@@ -321,83 +287,63 @@ function App() {
     if (USE_DB) {
       let cancelled = false;
 
-      const fetchDbSnapshot = async () => {
-        const maxAttempts = 3;
-        let lastError: unknown = null;
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          try {
-            const { supabase } = await import('./utils/supabase');
-            const propDates = getLiveBoardDates();
-
-            const [
-              { data: playersRows, error: playersError },
-              { data: propsRows, error: propsError },
-            ] = await Promise.all([
-              supabase.from('players').select(PLAYER_BASE_SELECT),
-              supabase.from('player_props').select(PLAYER_PROP_SELECT).in('game_date', propDates),
-            ]);
-
-            if (playersError) {
-              throw playersError;
-            }
-
-            if (propsError) {
-              throw propsError;
-            }
-
-            if (cancelled) return;
-
-            const mergedFeed = mergeFeedFromDB(playersRows ?? [], propsRows ?? []);
-            const slateTeams = buildSlateTeamsFromFeed(mergedFeed);
-            setCurrentSlateTeams(slateTeams);
-
-            setRawData(prev => {
-              const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
-              return mergedFeed.map(p => {
-                const existing = prevMap.get(String(p.id));
-                return {
-                  ...p,
-                  ...existing,
-                  id: p.id,
-                  name: p.name,
-                  team: p.team,
-                  position: p.position,
-                  stats: p.stats,
-                  props: p.props,
-                  props_by_date: p.props_by_date,
-                  play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
-                  intraday_movements: existing?.intraday_movements ?? [],
-                  detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
-                };
-              });
-            });
-
-            setLoading(false);
+      const fetchDbSnapshot = async (isInitial = false) => {
+        try {
+          if (!isInitial && !isDocumentVisible()) {
             return;
-          } catch (err) {
-            lastError = err;
-            if (attempt >= maxAttempts || cancelled) {
-              break;
-            }
+          }
 
-            if (import.meta.env.DEV) {
-              console.warn(`Supabase bootstrap attempt ${attempt} failed; retrying...`, err);
-            }
-            await sleep(800 * attempt);
+          const snapshot = await fetchDashboardBootstrap();
+
+          if (cancelled) return;
+
+          const mergedFeed = mergeFeedFromDB(snapshot.playersRows ?? [], snapshot.propsRows ?? []);
+          const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
+          setCurrentSlateTeams(slateTeams);
+
+          const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
+          if (isInitial) {
+            lineMovementVersionRef.current = snapshot.lineVersion ?? '';
+          }
+
+          setRawData(prev => {
+            const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
+            return mergedFeed.map(p => {
+              const existing = prevMap.get(String(p.id));
+              return {
+                ...p,
+                ...existing,
+                id: p.id,
+                name: p.name,
+                team: p.team,
+                position: p.position,
+                stats: p.stats,
+                props: p.props,
+                props_by_date: p.props_by_date,
+                play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
+                intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
+                detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
+              };
+            });
+          });
+
+          if (isInitial) {
+            setLoading(false);
+          }
+        } catch (err) {
+          if (cancelled) return;
+          console.error('Supabase fetch failed:', err);
+          if (isInitial) {
+            setLoading(false);
           }
         }
-
-        if (cancelled) return;
-        if (lastError) {
-          console.error('Supabase fetch failed:', lastError);
-        }
-        setLoading(false);
       };
 
-      void fetchDbSnapshot();
+      void fetchDbSnapshot(true);
+      const intervalId = window.setInterval(() => fetchDbSnapshot(false), FULL_DB_POLL_MS);
       return () => {
         cancelled = true;
+        window.clearInterval(intervalId);
       };
     } else {
       // ── JSON fallback (original behavior, unchanged) ──
@@ -428,9 +374,9 @@ function App() {
           setLoading(false);
         });
     }
-  }, [USE_DB]);
+  }, [USE_DB, FULL_DB_POLL_MS]);
 
-  // 1b. Hot refresh for live lines
+  // 1b. Hot refresh for live lines + history metadata
   useEffect(() => {
     if (!USE_DB || !isPageVisible || loading) return undefined;
 
@@ -442,24 +388,27 @@ function App() {
           return;
         }
 
-        const { supabase } = await import('./utils/supabase');
-        const hotDates = getLiveBoardDates(resolvedSelectedGameDate ?? selectedGameDate);
-        const { data: propsRows, error } = await supabase
-          .from('player_props')
-          .select(PLAYER_PROP_SELECT)
-          .in('game_date', hotDates);
-
-        if (error) {
-          throw error;
-        }
+        const hotSnapshot = await fetchDashboardHot(
+          resolvedSelectedGameDate ?? selectedGameDate,
+          lineMovementVersionRef.current,
+        );
 
         if (cancelled) return;
 
-        if ((propsRows ?? []).length === 0) {
+        if ((hotSnapshot.propsRows ?? []).length > 0) {
+          setRawData(prev => mergePropsIntoPlayers(prev, hotSnapshot.propsRows ?? []));
+        }
+
+        if (!Object.prototype.hasOwnProperty.call(hotSnapshot, 'lineRows')) {
           return;
         }
 
-        setRawData(prev => mergePropsIntoPlayers(prev, propsRows ?? []));
+        lineMovementVersionRef.current = hotSnapshot.lineVersion ?? '';
+        const intradayMovements = flattenIntradayMovements(hotSnapshot.lineRows ?? []);
+        setRawData(prev => prev.map((player) => ({
+          ...player,
+          intraday_movements: intradayMovements,
+        })));
       } catch (err) {
         if (!cancelled) {
           console.error('Supabase hot refresh failed:', err);
@@ -522,34 +471,6 @@ function App() {
     return request;
   };
 
-  const ensurePlayerChartLoaded = async (playerId: number) => {
-    const cachedPlayer = rawDataRef.current.find((player) => player.id === playerId);
-    if (hasLoadedPlayerChart(cachedPlayer)) {
-      return;
-    }
-
-    const existingRequest = playerChartRequestsRef.current.get(playerId);
-    if (existingRequest) {
-      return existingRequest;
-    }
-
-    const request = ensurePlayerAccess(playerId)
-      .then((access) => fetchDashboardPlayerChart(access.playerToken))
-      .then(({ detail }) => {
-        setRawData(prev => prev.map((player) => (
-          player.id === playerId
-            ? { ...player, ...detail }
-            : player
-        )));
-      })
-      .finally(() => {
-        playerChartRequestsRef.current.delete(playerId);
-      });
-
-    playerChartRequestsRef.current.set(playerId, request);
-    return request;
-  };
-
   const ensureArchiveLoaded = async (playerId: number, season: string) => {
     if (archiveGameLogs[String(playerId)]) {
       return;
@@ -584,7 +505,7 @@ function App() {
   };
 
   const preparePlayerForSelection = async (playerId: number, season?: string | null) => {
-    await ensurePlayerChartLoaded(playerId);
+    await ensurePlayerDetailLoaded(playerId);
     if (season) {
       await ensureArchiveLoaded(playerId, season);
     }
@@ -606,7 +527,7 @@ function App() {
 
     const nextPlayer = playersWithProps[index];
     const shouldPreloadArchive = USE_DB && activeSeason === '24/25';
-    const needsChartLoad = USE_DB && activeSeason === '25/26' && !hasLoadedPlayerChart(nextPlayer);
+    const needsDetailLoad = USE_DB && !hasLoadedPlayerDetail(nextPlayer);
     const needsArchiveLoad = shouldPreloadArchive && !archiveGameLogs[String(id)];
     const requestId = selectionRequestRef.current + 1;
     selectionRequestRef.current = requestId;
@@ -615,7 +536,7 @@ function App() {
     setSelectedGameDate(nextGameDate);
     setCustomLineValue(null);
 
-    if (!needsChartLoad && !needsArchiveLoad) {
+    if (!needsDetailLoad && !needsArchiveLoad) {
       setPendingSelection(null);
       return;
     }
@@ -912,7 +833,7 @@ function App() {
           return;
         }
 
-        void ensurePlayerChartLoaded(id).catch(() => {});
+        void ensurePlayerDetailLoaded(id).catch(() => {});
       },
       activeTab: activeTab,
       onTabChange: handleTabChange

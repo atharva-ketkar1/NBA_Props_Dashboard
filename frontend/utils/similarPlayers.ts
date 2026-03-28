@@ -321,13 +321,6 @@ function formatShortDate(gameDate?: string | null) {
   return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed);
 }
 
-function normalizeHistoricalDateKey(gameDate?: string | null) {
-  if (!gameDate) return null;
-  const trimmed = gameDate.trim();
-  const match = trimmed.match(/^(\d{4}-\d{2}-\d{2})/);
-  return match ? match[1] : trimmed;
-}
-
 function getHistoricalLine(
   player: Player,
   gameDate: string | undefined,
@@ -336,8 +329,7 @@ function getHistoricalLine(
 ) {
   if (!gameDate || !player.historical_odds) return null;
 
-  const gameDateKey = normalizeHistoricalDateKey(gameDate);
-  const dateRecord = (gameDateKey ? player.historical_odds[gameDateKey] : null) ?? player.historical_odds[gameDate];
+  const dateRecord = player.historical_odds[gameDate];
   const playerRecord = dateRecord?.[String(player.id)] ?? dateRecord?.[player.id];
   if (!playerRecord?.props) return null;
 

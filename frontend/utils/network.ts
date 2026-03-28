@@ -263,8 +263,6 @@ export async function guardedFetch(
     inflightRequests.set(requestKey, requestPromise);
     requestPromise.finally(() => {
       inflightRequests.delete(requestKey);
-    }).catch(() => {
-      // Prevent duplicate "Uncaught (in promise)" noise when callers already handle failures.
     });
   }
 
@@ -296,7 +294,6 @@ export function fetchAppJson<T>(
   path: string,
   params?: Record<string, string | number | boolean | null | undefined>,
   init?: RequestInit,
-  options?: GuardedFetchOptions,
 ) {
   const headers = new Headers(init?.headers);
   headers.set('x-propx-client', 'web');
@@ -305,7 +302,6 @@ export function fetchAppJson<T>(
     ...init,
     headers,
   }, {
-    ...options,
     dedupe: true,
   });
 }

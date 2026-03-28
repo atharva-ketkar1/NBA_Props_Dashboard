@@ -1,8 +1,6 @@
 import { fetchAppJson } from './network';
 import { SimilarPlayerCandidate } from '../types';
 
-const BOOTSTRAP_TIMEOUT_MS = 45_000;
-
 type BootstrapResponse = {
   playersRows: any[];
   propsRows: any[];
@@ -26,10 +24,6 @@ type PlayerResponse = {
   historicalOddsRows: any[];
 };
 
-type PlayerChartResponse = {
-  detail: Record<string, any>;
-};
-
 type ArchiveResponse = {
   gameLog: any[];
 };
@@ -46,9 +40,7 @@ type SimilarResponse = {
 };
 
 export function fetchDashboardBootstrap() {
-  return fetchAppJson<BootstrapResponse>('/api/bootstrap', undefined, undefined, {
-    timeoutMs: BOOTSTRAP_TIMEOUT_MS,
-  });
+  return fetchAppJson<BootstrapResponse>('/api/bootstrap');
 }
 
 export function fetchDashboardHot(selectedDate: string | null, lineVersion: string) {
@@ -73,12 +65,6 @@ export function fetchDashboardAccess(playerId: number, archiveSeason?: string | 
 
 export function fetchDashboardPlayer(token: string) {
   return fetchAppJson<PlayerResponse>('/api/player', {
-    token,
-  });
-}
-
-export function fetchDashboardPlayerChart(token: string) {
-  return fetchAppJson<PlayerChartResponse>('/api/player-chart', {
     token,
   });
 }
