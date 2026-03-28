@@ -57,6 +57,12 @@ function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState === 'visible';
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
   const propsByDateMap: Record<number, PlayerPropsByDate> = {};
 
@@ -306,54 +312,73 @@ function App() {
       let cancelled = false;
 
       const fetchDbSnapshot = async (isInitial = false) => {
-        try {
-          if (!isInitial && !isDocumentVisible()) {
-            return;
-          }
+        const maxAttempts = isInitial ? 2 : 1;
+        let lastError: unknown = null;
 
-          const snapshot = await fetchDashboardBootstrap();
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            if (!isInitial && !isDocumentVisible()) {
+              return;
+            }
 
-          if (cancelled) return;
+            const snapshot = await fetchDashboardBootstrap();
 
-          const mergedFeed = mergeFeedFromDB(snapshot.playersRows ?? [], snapshot.propsRows ?? []);
-          const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
-          setCurrentSlateTeams(slateTeams);
+            if (cancelled) return;
 
-          const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
-          if (isInitial) {
-            lineMovementVersionRef.current = snapshot.lineVersion ?? '';
-          }
+            const mergedFeed = mergeFeedFromDB(snapshot.playersRows ?? [], snapshot.propsRows ?? []);
+            const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
+            setCurrentSlateTeams(slateTeams);
 
-          setRawData(prev => {
-            const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
-            return mergedFeed.map(p => {
-              const existing = prevMap.get(String(p.id));
-              return {
-                ...p,
-                ...existing,
-                id: p.id,
-                name: p.name,
-                team: p.team,
-                position: p.position,
-                stats: p.stats,
-                props: p.props,
-                props_by_date: p.props_by_date,
-                play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
-                intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
-                detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
-              };
+            const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
+            if (isInitial) {
+              lineMovementVersionRef.current = (snapshot.lineRows ?? []).length > 0
+                ? (snapshot.lineVersion ?? '')
+                : '';
+            }
+
+            setRawData(prev => {
+              const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
+              return mergedFeed.map(p => {
+                const existing = prevMap.get(String(p.id));
+                return {
+                  ...p,
+                  ...existing,
+                  id: p.id,
+                  name: p.name,
+                  team: p.team,
+                  position: p.position,
+                  stats: p.stats,
+                  props: p.props,
+                  props_by_date: p.props_by_date,
+                  play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
+                  intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
+                  detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
+                };
+              });
             });
-          });
 
-          if (isInitial) {
-            setLoading(false);
+            if (isInitial) {
+              setLoading(false);
+            }
+
+            return;
+          } catch (err) {
+            lastError = err;
+            if (!isInitial || attempt >= maxAttempts || cancelled) {
+              break;
+            }
+
+            console.warn(`Supabase bootstrap attempt ${attempt} failed; retrying...`, err);
+            await sleep(800 * attempt);
           }
-        } catch (err) {
-          if (cancelled) return;
-          console.error('Supabase fetch failed:', err);
-          if (isInitial) {
-            setLoading(false);
-          }
+        }
+
+        if (cancelled) return;
+        if (lastError) {
+          console.error('Supabase fetch failed:', lastError);
+        }
+        if (isInitial) {
+          setLoading(false);
         }
       };
 

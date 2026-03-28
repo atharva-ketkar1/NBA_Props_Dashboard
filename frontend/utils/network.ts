@@ -294,6 +294,7 @@ export function fetchAppJson<T>(
   path: string,
   params?: Record<string, string | number | boolean | null | undefined>,
   init?: RequestInit,
+  options?: GuardedFetchOptions,
 ) {
   const headers = new Headers(init?.headers);
   headers.set('x-propx-client', 'web');
@@ -302,6 +303,7 @@ export function fetchAppJson<T>(
     ...init,
     headers,
   }, {
+    ...options,
     dedupe: true,
   });
 }

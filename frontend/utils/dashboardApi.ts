@@ -1,6 +1,8 @@
 import { fetchAppJson } from './network';
 import { SimilarPlayerCandidate } from '../types';
 
+const BOOTSTRAP_TIMEOUT_MS = 20_000;
+
 type BootstrapResponse = {
   playersRows: any[];
   propsRows: any[];
@@ -44,7 +46,9 @@ type SimilarResponse = {
 };
 
 export function fetchDashboardBootstrap() {
-  return fetchAppJson<BootstrapResponse>('/api/bootstrap');
+  return fetchAppJson<BootstrapResponse>('/api/bootstrap', undefined, undefined, {
+    timeoutMs: BOOTSTRAP_TIMEOUT_MS,
+  });
 }
 
 export function fetchDashboardHot(selectedDate: string | null, lineVersion: string) {

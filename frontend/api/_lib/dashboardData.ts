@@ -19,6 +19,7 @@ const LINE_META_SELECT = 'game_date, updated_at';
 const LINE_FALLBACK_SELECT = 'game_date, snapshots';
 const SLATE_SELECT = 'home_team_tricode, away_team_tricode';
 const PAGE_SIZE = 1000;
+const PLAYER_ID_CHUNK_SIZE = 200;
 
 function assertNoError(error: { message?: string } | null, context: string) {
   if (error) {
@@ -280,27 +281,52 @@ async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = P
   }
 }
 
+async function fetchPlayersByIds(playerIds: number[], selectClause = PLAYER_BASE_SELECT) {
+  const supabase = getSupabaseAdmin();
+  const allRows: any[] = [];
+
+  for (let start = 0; start < playerIds.length; start += PLAYER_ID_CHUNK_SIZE) {
+    const chunk = playerIds.slice(start, start + PLAYER_ID_CHUNK_SIZE);
+    const { data, error } = await supabase
+      .from('players')
+      .select(selectClause)
+      .in('id', chunk);
+
+    assertNoError(error, 'players');
+    if (data?.length) {
+      allRows.push(...data);
+    }
+  }
+
+  return allRows;
+}
+
 export async function fetchBootstrapPayload() {
   const supabase = getSupabaseAdmin();
   const today = getDashboardDate();
-  const futureDates = buildFutureDates(today, 14);
-  const fastRefreshDates = getFastRefreshDates(null);
+  const activePropDates = getFastRefreshDates(null);
 
   const [
-    { data: playersRows, error: playersError },
     propsRows,
-    { data: lineRows, error: lineError },
+    { data: lineMetaRows, error: lineError },
     { data: gamesRows, error: gamesError },
   ] = await Promise.all([
-    supabase.from('players').select(PLAYER_BASE_SELECT),
-    fetchAllPlayerPropsForDates(futureDates),
-    supabase.from('line_movements').select(INITIAL_LINE_SELECT).in('game_date', fastRefreshDates),
+    fetchAllPlayerPropsForDates(activePropDates),
+    supabase.from('line_movements').select(LINE_META_SELECT).in('game_date', activePropDates),
     supabase.from('games').select(SLATE_SELECT).eq('game_date', today),
   ]);
 
-  assertNoError(playersError, 'players');
   assertNoError(lineError, 'line_movements');
   assertNoError(gamesError, 'games');
+
+  const playerIds = Array.from(new Set(
+    (propsRows ?? [])
+      .map((row: any) => Number(row?.player_id))
+      .filter((playerId) => Number.isInteger(playerId) && playerId > 0),
+  ));
+  const playersRows = playerIds.length > 0
+    ? await fetchPlayersByIds(playerIds, PLAYER_BASE_SELECT)
+    : [];
 
   return {
     playersRows: (playersRows ?? []).map((row: any) => ({
@@ -309,8 +335,8 @@ export async function fetchBootstrapPayload() {
     })),
     propsRows,
     gamesRows: gamesRows ?? [],
-    lineRows: lineRows ?? [],
-    lineVersion: serializeLineMovementVersion(lineRows ?? []),
+    lineRows: [],
+    lineVersion: serializeLineMovementVersion(lineMetaRows ?? []),
   };
 }
 
