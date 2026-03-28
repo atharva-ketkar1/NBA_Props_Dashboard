@@ -4,6 +4,7 @@ import os
 import numpy as np
 import gc
 import logging
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from utils.player_matcher import PlayerMatcher
@@ -11,6 +12,19 @@ from utils.prop_date_resolver import resolve_prop_game_date
 
 logger = logging.getLogger(__name__)
 UNDATED_PROP_KEY = '__undated__'
+
+
+def _is_retryable_players_upsert_error(error) -> bool:
+    message = str(error).lower()
+    return (
+        "statement timeout" in message
+        or "canceling statement due to statement timeout" in message
+        or "timed out" in message
+        or "connection" in message
+        or "temporarily unavailable" in message
+        or "429" in message
+        or "57014" in message
+    )
 
 # ==========================================
 # DB HELPERS
@@ -72,10 +86,20 @@ def upsert_players_to_db(master_data: dict):
     # Batch in smaller chunks to stay within PostgREST request size and timeout limits
     chunk_size = 25
     for i in range(0, len(rows), chunk_size):
-        try:
-            sb.table('players').upsert(rows[i:i + chunk_size]).execute()
-        except Exception as e:
-            logger.error("players upsert failed for chunk %d–%d: %s", i, i + chunk_size, e)
+        chunk = rows[i:i + chunk_size]
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                sb.table('players').upsert(chunk).execute()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                if attempt >= 3 or not _is_retryable_players_upsert_error(e):
+                    break
+                time.sleep(1.5 * attempt)
+        if last_error is not None:
+            logger.error("players upsert failed for chunk %d–%d: %s", i, i + chunk_size, last_error)
 
     logger.info("✅ players upsert complete (%d rows).", len(rows))
 

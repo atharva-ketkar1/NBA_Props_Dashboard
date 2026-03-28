@@ -18,6 +18,8 @@ const DEFAULT_ALLOWED_UPSTREAM_HOSTS = new Set([
 ]);
 
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504, 520, 521, 522, 524, 525, 526, 530]);
+const PROXY_MAX_RETRIES = 2;
+const UPSTREAM_TIMEOUT_MS = 15_000;
 const rateBuckets = new Map();
 
 function parseCsv(rawValue) {
@@ -88,20 +90,55 @@ function jsonResponse(payload, status, request, env) {
     });
 }
 
+function getUpstreamOriginAndReferer(targetObj) {
+    const hostname = targetObj.hostname.toLowerCase();
+
+    if (hostname === "stats.nba.com" || hostname === "cdn.nba.com" || hostname === "www.nba.com") {
+        return {
+            origin: "https://www.nba.com",
+            referer: "https://www.nba.com/",
+        };
+    }
+
+    if (hostname === "api.sportsbook.fanduel.com") {
+        return {
+            origin: "https://sportsbook.fanduel.com",
+            referer: "https://sportsbook.fanduel.com/",
+        };
+    }
+
+    if (hostname === "sportsbook-nash.draftkings.com" || hostname === "sportsbook.draftkings.com") {
+        return {
+            origin: "https://sportsbook.draftkings.com",
+            referer: "https://sportsbook.draftkings.com/",
+        };
+    }
+
+    return {
+        origin: `${targetObj.protocol}//${targetObj.host}`,
+        referer: `${targetObj.protocol}//${targetObj.host}/`,
+    };
+}
+
 function buildUpstreamHeaders(request, targetObj, userAgent) {
     const headers = new Headers();
     const acceptLanguage = request.headers.get("Accept-Language") || "en-US,en;q=0.9";
+    const { origin, referer } = getUpstreamOriginAndReferer(targetObj);
+    const incomingRegion = request.headers.get("x-sportsbook-region");
 
     headers.set("Accept", "application/json, text/plain, */*");
     headers.set("Accept-Language", acceptLanguage);
     headers.set("Cache-Control", "no-cache");
-    headers.set("Origin", `${targetObj.protocol}//${targetObj.host}`);
+    headers.set("Origin", origin);
     headers.set("Pragma", "no-cache");
-    headers.set("Referer", `${targetObj.protocol}//${targetObj.host}/`);
+    headers.set("Referer", referer);
     headers.set("Sec-Fetch-Dest", "empty");
     headers.set("Sec-Fetch-Mode", "cors");
     headers.set("Sec-Fetch-Site", "same-site");
     headers.set("User-Agent", userAgent);
+    if (incomingRegion) {
+        headers.set("x-sportsbook-region", incomingRegion);
+    }
 
     if (userAgent.includes("Chrome") || userAgent.includes("Edge")) {
         headers.set("sec-ch-ua", '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"');
@@ -193,12 +230,13 @@ async function fetchWithRetry(request, targetUrl, targetObj) {
     let lastResponse = null;
     let lastError = null;
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < PROXY_MAX_RETRIES; attempt += 1) {
         try {
             const response = await fetch(targetUrl, {
                 method: "GET",
                 headers: buildUpstreamHeaders(request, targetObj, randomUserAgent()),
                 redirect: "manual",
+                signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
                 cf: {
                     cacheEverything: false,
                     cacheTtl: 0,
@@ -223,7 +261,7 @@ async function fetchWithRetry(request, targetUrl, targetObj) {
             lastError = error;
         }
 
-        if (attempt < 2) {
+        if (attempt < PROXY_MAX_RETRIES - 1) {
             await sleep(750 * (attempt + 1));
         }
     }
@@ -278,9 +316,13 @@ export default {
             const response = await fetchWithRetry(request, targetUrl, targetObj);
             const headers = applyResponseHeaders({}, request, env);
             const contentType = response.headers.get("Content-Type");
+            const contentEncoding = response.headers.get("Content-Encoding");
 
             if (contentType) {
                 headers.set("Content-Type", contentType);
+            }
+            if (contentEncoding) {
+                headers.set("Content-Encoding", contentEncoding);
             }
 
             headers.set("X-Proxy-Target", targetObj.hostname);
@@ -289,6 +331,7 @@ export default {
                 status: response.status,
                 statusText: response.statusText,
                 headers,
+                encodeBody: "manual",
             });
         } catch {
             return jsonResponse({ error: "Proxy fetch failed." }, 500, request, env);

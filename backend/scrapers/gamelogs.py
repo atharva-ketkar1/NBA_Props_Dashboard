@@ -32,7 +32,7 @@ COMPLETED_SEASONS = {"2024-25"}
 
 HEADERS = {
     "accept": "*/*",
-    "accept-encoding": "gzip, deflate, br, zstd",
+    "accept-encoding": "gzip, deflate",
     "accept-language": "en-US,en;q=0.9",
     "connection": "keep-alive",
     "dnt": "1",

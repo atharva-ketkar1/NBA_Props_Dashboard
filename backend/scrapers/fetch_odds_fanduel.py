@@ -16,11 +16,14 @@ logger = logging.getLogger(__name__)
 FANDUEL_PUBLIC_ACCESS_KEY = os.getenv("FANDUEL_PUBLIC_ACCESS_KEY")
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Origin': 'https://sportsbook.fanduel.com',
+    'Referer': 'https://sportsbook.fanduel.com/',
     'x-sportsbook-region': 'OH',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     'Pragma': 'no-cache',
     'Expires': '0',
-    'Accept': 'application/json'
+    'Accept': 'application/json',
+    'Accept-Language': 'en-US,en;q=0.9'
 }
 
 def _fetch_via_proxy(url):

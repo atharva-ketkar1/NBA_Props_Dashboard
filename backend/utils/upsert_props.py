@@ -141,11 +141,15 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
 
     try:
         df_dk = pd.read_csv(dk_path)
+    except pd.errors.EmptyDataError:
+        df_dk = pd.DataFrame()
     except Exception as e:
         logger.warning("Failed to load DraftKings CSV (%s): %s", dk_path, e)
 
     try:
         df_fd = pd.read_csv(fd_path)
+    except pd.errors.EmptyDataError:
+        df_fd = pd.DataFrame()
     except Exception as e:
         logger.warning("Failed to load FanDuel CSV (%s): %s", fd_path, e)
 

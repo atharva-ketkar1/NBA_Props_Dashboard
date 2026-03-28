@@ -26,6 +26,7 @@ from scrapers import opp_shot_type_analysis as opp_shot_type_analysis
 from scrapers import play_type_analysis as play_type_analysis
 from scrapers import boxscores as boxscores
 from utils import aggregator
+from utils.odds_csv import write_odds_csv
 import json
 
 logger = logging.getLogger("RunPipeline")
@@ -90,15 +91,15 @@ BOXSCORES_PATH = os.path.join(DATA_DIR, "boxscores.json")
 def run_dk():
     logger.info("Starting DraftKings...")
     data = draftkings.fetch_dk_odds()
-    df = pd.DataFrame(data)
-    df.to_csv(DK_PATH, index=False)
+    write_odds_csv(DK_PATH, data)
+    df = pd.DataFrame(data or [])
     return f"DraftKings: {len(df)} rows"
 
 def run_fd():
     logger.info("Starting FanDuel...")
     data = fanduel.fetch_odds()
-    df = pd.DataFrame(data)
-    df.to_csv(FD_PATH, index=False)
+    write_odds_csv(FD_PATH, data)
+    df = pd.DataFrame(data or [])
     return f"FanDuel: {len(df)} rows"
 
 def run_stats():
@@ -116,7 +117,15 @@ def run_logs():
         status = result.get("status")
         message = result.get("message", "Game Logs Updated")
         if status == "failed":
+            if result.get("last_saved_date") and os.path.exists(LOGS_PATH):
+                logger.warning(
+                    "Game logs refresh failed; continuing with existing logs through %s.",
+                    result["last_saved_date"],
+                )
+                return message
             raise RuntimeError(message)
+        if status == "partial":
+            logger.warning("Game logs completed with partial coverage: %s", message)
         return message
 
     if result is False:
@@ -290,7 +299,7 @@ def main():
             try:
                 from utils.upsert_market_history import sync_recent_historical_odds_from_file
                 historical_sync_ok = bool(sync_recent_historical_odds_from_file(
-                    os.path.join(DATA_DIR, "archive", "historical_odds.json"),
+                    os.path.join(BASE_DIR, "data", "archive", "historical_odds.json"),
                 ))
             except Exception as e:
                 logger.warning("historical odds reconciliation failed (non-fatal): %s", e)
@@ -301,7 +310,7 @@ def main():
                 for failure in critical_failures:
                     logger.warning(" - %s", failure)
 
-            return props_ok and historical_sync_ok and not critical_failures
+            return not critical_failures
     finally:
         stdout_capture.flush()
 

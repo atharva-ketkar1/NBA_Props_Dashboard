@@ -18,6 +18,7 @@ from scrapers import fetch_odds_fanduel as fanduel
 from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import resolve_prop_game_date
 from utils.snapshot_manager import SnapshotManager
+from utils.odds_csv import write_odds_csv
 from utils.upsert_market_history import (
     upsert_historical_odds_from_file,
     upsert_line_movements_from_file,
@@ -147,8 +148,8 @@ def load_master_feed_maps():
 def persist_raw_odds_csvs(dk_data, fd_data):
     """Persist the latest raw scraper output so downstream upserts use fresh data."""
     try:
-        pd.DataFrame(dk_data or []).to_csv(os.path.join(DATA_DIR, "draftkings.csv"), index=False)
-        pd.DataFrame(fd_data or []).to_csv(os.path.join(DATA_DIR, "fanduel.csv"), index=False)
+        write_odds_csv(os.path.join(DATA_DIR, "draftkings.csv"), dk_data)
+        write_odds_csv(os.path.join(DATA_DIR, "fanduel.csv"), fd_data)
     except Exception as e:
         logger.warning(f"Unable to persist raw odds CSVs: {e}")
 

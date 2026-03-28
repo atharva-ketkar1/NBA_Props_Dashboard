@@ -21,11 +21,25 @@ CURRENT_DATA_DIR = os.path.join(
     "current",
 )
 LINE_MOVEMENT_SYNC_STATE_PATH = os.path.join(CURRENT_DATA_DIR, "line_movements_sync_state.json")
+ARCHIVE_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "archive",
+)
+DEFAULT_HISTORICAL_ODDS_PATH = os.path.join(ARCHIVE_DATA_DIR, "historical_odds.json")
 
 
 def _chunk_rows(rows, chunk_size):
     for start in range(0, len(rows), chunk_size):
         yield rows[start:start + chunk_size]
+
+
+def _resolve_historical_odds_path(path: str) -> str:
+    if path and os.path.exists(path):
+        return path
+    if os.path.exists(DEFAULT_HISTORICAL_ODDS_PATH):
+        return DEFAULT_HISTORICAL_ODDS_PATH
+    return path
 
 
 def _is_retryable_upsert_error(error):
@@ -197,6 +211,7 @@ def upsert_line_movements_from_file(line_movements_path: str):
 
 def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
     """Mirror one game date from the local historical archive into Supabase rows."""
+    historical_odds_path = _resolve_historical_odds_path(historical_odds_path)
     if not os.path.exists(historical_odds_path):
         logger.warning("historical odds file not found: %s", historical_odds_path)
         return False
@@ -252,6 +267,7 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
 
 
 def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: int = 5):
+    historical_odds_path = _resolve_historical_odds_path(historical_odds_path)
     if not os.path.exists(historical_odds_path):
         logger.warning("historical odds file not found: %s", historical_odds_path)
         return True
