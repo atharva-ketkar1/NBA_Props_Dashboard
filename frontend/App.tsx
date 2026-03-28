@@ -26,6 +26,7 @@ import {
   fetchDashboardBootstrap,
   fetchDashboardHot,
   fetchDashboardPlayer,
+  fetchDashboardPlayerChart,
   fetchDashboardSimilar,
 } from './utils/dashboardApi';
 
@@ -148,6 +149,10 @@ function hasLoadedPlayerDetail(player?: Player | null) {
   return Boolean(player?.detail_loaded);
 }
 
+function hasLoadedPlayerChart(player?: Player | null) {
+  return Boolean((player?.game_log?.length ?? 0) > 0);
+}
+
 function App() {
   const [rawData, setRawData] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
@@ -235,6 +240,7 @@ function App() {
   const lineMovementVersionRef = useRef('');
   const rawDataRef = useRef<Player[]>([]);
   const playerDetailRequestsRef = useRef(new Map<number, Promise<void>>());
+  const playerChartRequestsRef = useRef(new Map<number, Promise<void>>());
   const archiveRequestsRef = useRef(new Map<string, Promise<void>>());
   const selectionRequestRef = useRef(0);
   const accessCacheRef = useRef(new Map<string, {
@@ -483,6 +489,34 @@ function App() {
     return request;
   };
 
+  const ensurePlayerChartLoaded = async (playerId: number) => {
+    const cachedPlayer = rawDataRef.current.find((player) => player.id === playerId);
+    if (hasLoadedPlayerChart(cachedPlayer)) {
+      return;
+    }
+
+    const existingRequest = playerChartRequestsRef.current.get(playerId);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = ensurePlayerAccess(playerId)
+      .then((access) => fetchDashboardPlayerChart(access.playerToken))
+      .then(({ detail }) => {
+        setRawData(prev => prev.map((player) => (
+          player.id === playerId
+            ? { ...player, ...detail }
+            : player
+        )));
+      })
+      .finally(() => {
+        playerChartRequestsRef.current.delete(playerId);
+      });
+
+    playerChartRequestsRef.current.set(playerId, request);
+    return request;
+  };
+
   const ensureArchiveLoaded = async (playerId: number, season: string) => {
     if (archiveGameLogs[String(playerId)]) {
       return;
@@ -517,7 +551,7 @@ function App() {
   };
 
   const preparePlayerForSelection = async (playerId: number, season?: string | null) => {
-    await ensurePlayerDetailLoaded(playerId);
+    await ensurePlayerChartLoaded(playerId);
     if (season) {
       await ensureArchiveLoaded(playerId, season);
     }
@@ -539,7 +573,7 @@ function App() {
 
     const nextPlayer = playersWithProps[index];
     const shouldPreloadArchive = USE_DB && activeSeason === '24/25';
-    const needsDetailLoad = USE_DB && !hasLoadedPlayerDetail(nextPlayer);
+    const needsChartLoad = USE_DB && activeSeason === '25/26' && !hasLoadedPlayerChart(nextPlayer);
     const needsArchiveLoad = shouldPreloadArchive && !archiveGameLogs[String(id)];
     const requestId = selectionRequestRef.current + 1;
     selectionRequestRef.current = requestId;
@@ -548,7 +582,7 @@ function App() {
     setSelectedGameDate(nextGameDate);
     setCustomLineValue(null);
 
-    if (!needsDetailLoad && !needsArchiveLoad) {
+    if (!needsChartLoad && !needsArchiveLoad) {
       setPendingSelection(null);
       return;
     }
@@ -845,7 +879,7 @@ function App() {
           return;
         }
 
-        void ensurePlayerDetailLoaded(id).catch(() => {});
+        void ensurePlayerChartLoaded(id).catch(() => {});
       },
       activeTab: activeTab,
       onTabChange: handleTabChange

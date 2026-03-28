@@ -24,6 +24,10 @@ type PlayerResponse = {
   historicalOddsRows: any[];
 };
 
+type PlayerChartResponse = {
+  detail: Record<string, any>;
+};
+
 type ArchiveResponse = {
   gameLog: any[];
 };
@@ -65,6 +69,12 @@ export function fetchDashboardAccess(playerId: number, archiveSeason?: string | 
 
 export function fetchDashboardPlayer(token: string) {
   return fetchAppJson<PlayerResponse>('/api/player', {
+    token,
+  });
+}
+
+export function fetchDashboardPlayerChart(token: string) {
+  return fetchAppJson<PlayerChartResponse>('/api/player-chart', {
     token,
   });
 }

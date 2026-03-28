@@ -10,6 +10,7 @@ import type { Player, PlayerPropsByDate, SimilarPlayerCandidate } from '../../ty
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
 const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
+const PLAYER_CHART_SELECT = 'game_log';
 const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis, play_type_analysis';
 const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analysis, shot_type_analysis';
 const HISTORICAL_ODDS_SELECT = 'game_date, props, source';
@@ -404,6 +405,25 @@ export async function fetchPlayerPayload(playerId: number) {
   return {
     detail: playerDetail,
     historicalOddsRows: mergedHistoricalOddsRows,
+  };
+}
+
+export async function fetchPlayerChartPayload(playerId: number) {
+  const supabase = getSupabaseAdmin();
+  const { data: detail, error } = await supabase
+    .from('players')
+    .select(PLAYER_CHART_SELECT)
+    .eq('id', playerId)
+    .maybeSingle();
+
+  assertNoError(error, 'player chart');
+
+  if (!detail) {
+    throw new Error('[supabase] player chart: Player not found.');
+  }
+
+  return {
+    detail: detail as Record<string, any>,
   };
 }
 
