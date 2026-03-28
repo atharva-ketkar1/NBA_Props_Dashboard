@@ -10,7 +10,49 @@ import {
 } from './_lib/http.js';
 
 export const runtime = 'nodejs';
-export const maxDuration = 10;
+export const maxDuration = 60;
+
+async function handleGet(request: Request) {
+  const crossSiteResponse = rejectCrossSiteBrowserRequest(request);
+  if (crossSiteResponse) {
+    return crossSiteResponse;
+  }
+
+  const navigationResponse = rejectBrowserNavigation(request);
+  if (navigationResponse) {
+    return navigationResponse;
+  }
+
+  const clientResponse = rejectUnknownAppClient(request);
+  if (clientResponse) {
+    return clientResponse;
+  }
+
+  const rateLimitResponse = enforceRateLimit(request, {
+    bucket: 'bootstrap',
+    limit: 45,
+    windowMs: 60_000,
+  });
+  if (rateLimitResponse) {
+    return rateLimitResponse;
+  }
+
+  try {
+    const payload = await fetchBootstrapPayload();
+    return jsonResponse(payload, {
+      cache: {
+        browserMaxAge: 0,
+        sMaxAge: 60,
+        staleWhileRevalidate: 300,
+      },
+    });
+  } catch (error) {
+    console.error('[api/bootstrap]', error);
+    return errorResponse(500, 'Failed to load dashboard bootstrap data.');
+  }
+}
+
+export const GET = handleGet;
 
 export default {
   async fetch(request: Request) {
@@ -18,42 +60,6 @@ export default {
       return methodNotAllowed();
     }
 
-    const crossSiteResponse = rejectCrossSiteBrowserRequest(request);
-    if (crossSiteResponse) {
-      return crossSiteResponse;
-    }
-
-    const navigationResponse = rejectBrowserNavigation(request);
-    if (navigationResponse) {
-      return navigationResponse;
-    }
-
-    const clientResponse = rejectUnknownAppClient(request);
-    if (clientResponse) {
-      return clientResponse;
-    }
-
-    const rateLimitResponse = enforceRateLimit(request, {
-      bucket: 'bootstrap',
-      limit: 45,
-      windowMs: 60_000,
-    });
-    if (rateLimitResponse) {
-      return rateLimitResponse;
-    }
-
-    try {
-      const payload = await fetchBootstrapPayload();
-      return jsonResponse(payload, {
-        cache: {
-          browserMaxAge: 0,
-          sMaxAge: 60,
-          staleWhileRevalidate: 300,
-        },
-      });
-    } catch (error) {
-      console.error('[api/bootstrap]', error);
-      return errorResponse(500, 'Failed to load dashboard bootstrap data.');
-    }
+    return handleGet(request);
   },
 };

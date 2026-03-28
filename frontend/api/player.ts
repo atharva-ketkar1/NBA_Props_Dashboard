@@ -11,7 +11,51 @@ import {
 } from './_lib/http.js';
 
 export const runtime = 'nodejs';
-export const maxDuration = 10;
+export const maxDuration = 60;
+
+async function handleGet(request: Request) {
+  const crossSiteResponse = rejectCrossSiteBrowserRequest(request);
+  if (crossSiteResponse) {
+    return crossSiteResponse;
+  }
+
+  const navigationResponse = rejectBrowserNavigation(request);
+  if (navigationResponse) {
+    return navigationResponse;
+  }
+
+  const clientResponse = rejectUnknownAppClient(request);
+  if (clientResponse) {
+    return clientResponse;
+  }
+
+  const rateLimitResponse = enforceRateLimit(request, {
+    bucket: 'player',
+    limit: 90,
+    windowMs: 60_000,
+  });
+  if (rateLimitResponse) {
+    return rateLimitResponse;
+  }
+
+  const requestUrl = new URL(request.url);
+  const token = requestUrl.searchParams.get('token') ?? '';
+  const playerAccess = readPlayerToken(request, token);
+
+  if (!playerAccess) {
+    return errorResponse(403, 'A valid player access token is required.');
+  }
+
+  try {
+    const payload = await fetchPlayerPayload(playerAccess.playerId);
+    return jsonResponse(payload);
+  } catch (error) {
+    console.error('[api/player]', error);
+    return errorResponse(500, 'Failed to load player details.');
+  }
+}
+
+export const GET = handleGet;
 
 export default {
   async fetch(request: Request) {
@@ -19,44 +63,6 @@ export default {
       return methodNotAllowed();
     }
 
-    const crossSiteResponse = rejectCrossSiteBrowserRequest(request);
-    if (crossSiteResponse) {
-      return crossSiteResponse;
-    }
-
-    const navigationResponse = rejectBrowserNavigation(request);
-    if (navigationResponse) {
-      return navigationResponse;
-    }
-
-    const clientResponse = rejectUnknownAppClient(request);
-    if (clientResponse) {
-      return clientResponse;
-    }
-
-    const rateLimitResponse = enforceRateLimit(request, {
-      bucket: 'player',
-      limit: 90,
-      windowMs: 60_000,
-    });
-    if (rateLimitResponse) {
-      return rateLimitResponse;
-    }
-
-    const requestUrl = new URL(request.url);
-    const token = requestUrl.searchParams.get('token') ?? '';
-    const playerAccess = readPlayerToken(request, token);
-
-    if (!playerAccess) {
-      return errorResponse(403, 'A valid player access token is required.');
-    }
-
-    try {
-      const payload = await fetchPlayerPayload(playerAccess.playerId);
-      return jsonResponse(payload);
-    } catch (error) {
-      console.error('[api/player]', error);
-      return errorResponse(500, 'Failed to load player details.');
-    }
+    return handleGet(request);
   },
 };

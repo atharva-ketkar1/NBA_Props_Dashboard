@@ -102,22 +102,20 @@ export function getOptionalEnv(name: string) {
   return loadLocalEnvFallback().get(name)?.trim() || '';
 }
 
-function getRequiredEnv(name: string) {
-  const value = getOptionalEnv(name);
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-
-  return value;
-}
-
 export function getSupabaseAdmin() {
   if (!globalThis.__propsmadnessSupabaseAdmin) {
-    const url = getRequiredEnv('SUPABASE_URL');
-    const key = getOptionalEnv('SUPABASE_SECRET_KEY') || getOptionalEnv('SUPABASE_SERVICE_ROLE_KEY');
+    const url = getOptionalEnv('SUPABASE_URL') || getOptionalEnv('VITE_SUPABASE_URL');
+    const key = getOptionalEnv('SUPABASE_SERVICE_ROLE_KEY')
+      || getOptionalEnv('SUPABASE_SERVICE_KEY')
+      || getOptionalEnv('SUPABASE_SECRET_KEY')
+      || getOptionalEnv('VITE_SUPABASE_ANON_KEY');
+
+    if (!url) {
+      throw new Error('Missing SUPABASE_URL or VITE_SUPABASE_URL.');
+    }
 
     if (!key) {
-      throw new Error('Missing SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY.');
+      throw new Error('Missing SUPABASE_SECRET_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_SERVICE_KEY, or VITE_SUPABASE_ANON_KEY.');
     }
 
     globalThis.__propsmadnessSupabaseAdmin = createClient(url, key, {

@@ -250,16 +250,16 @@ Frontend:
 
 ```bash
 VITE_USE_DB=true
-VITE_SUPABASE_URL=...
-VITE_SUPABASE_ANON_KEY=...
 VITE_ASSETS_URL=
 ```
 
-Backend:
+Server-side Vercel API routes:
 
 ```bash
 SUPABASE_URL=...
-SUPABASE_SERVICE_KEY=...
+SUPABASE_SECRET_KEY=...
+# or
+SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
 ## Repository Guide

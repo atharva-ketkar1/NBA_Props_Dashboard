@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from './supabaseAdmin.js';
+import { getOptionalEnv, getSupabaseAdmin } from './supabaseAdmin.js';
 import {
   buildFutureDates,
   getDashboardDate,
@@ -17,11 +17,97 @@ const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
 const SLATE_SELECT = 'home_team_tricode, away_team_tricode';
 const PAGE_SIZE = 1000;
+const MAX_UPCOMING_PROP_DAYS = 2;
+const DEFAULT_BOOTSTRAP_PROP_DAYS = MAX_UPCOMING_PROP_DAYS;
+const DEFAULT_SIMILAR_PROP_DAYS = MAX_UPCOMING_PROP_DAYS;
+const DEFAULT_PLAYERS_CACHE_MS = 60_000;
+const DEFAULT_PROPS_CACHE_MS = 30_000;
+const DEFAULT_GAMES_CACHE_MS = 60_000;
+const DEFAULT_LINE_META_CACHE_MS = 15_000;
+const DEFAULT_LINE_ROWS_CACHE_MS = 30_000;
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __propsmadnessDashboardCache:
+    | Map<string, { expiresAt: number; value: unknown }>
+    | undefined;
+  // eslint-disable-next-line no-var
+  var __propsmadnessDashboardInflight:
+    | Map<string, Promise<unknown>>
+    | undefined;
+}
+
+const dashboardCache = globalThis.__propsmadnessDashboardCache ??= new Map();
+const dashboardInflight = globalThis.__propsmadnessDashboardInflight ??= new Map();
+
+function parsePositiveInteger(rawValue: string, fallbackValue: number) {
+  const parsed = Number(rawValue);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallbackValue;
+}
+
+function getServerNumberEnv(name: string, fallbackValue: number) {
+  return parsePositiveInteger(getOptionalEnv(name), fallbackValue);
+}
+
+function clampPropDayWindow(days: number) {
+  return Math.min(MAX_UPCOMING_PROP_DAYS, Math.max(1, days));
+}
+
+const BOOTSTRAP_PROP_DAYS = clampPropDayWindow(
+  getServerNumberEnv('DASHBOARD_BOOTSTRAP_PROP_DAYS', DEFAULT_BOOTSTRAP_PROP_DAYS),
+);
+const SIMILAR_PROP_DAYS = clampPropDayWindow(
+  getServerNumberEnv('DASHBOARD_SIMILAR_PROP_DAYS', DEFAULT_SIMILAR_PROP_DAYS),
+);
+const PLAYERS_CACHE_MS = getServerNumberEnv('DASHBOARD_PLAYERS_CACHE_MS', DEFAULT_PLAYERS_CACHE_MS);
+const PROPS_CACHE_MS = getServerNumberEnv('DASHBOARD_PROPS_CACHE_MS', DEFAULT_PROPS_CACHE_MS);
+const GAMES_CACHE_MS = getServerNumberEnv('DASHBOARD_GAMES_CACHE_MS', DEFAULT_GAMES_CACHE_MS);
+const LINE_META_CACHE_MS = getServerNumberEnv('DASHBOARD_LINE_META_CACHE_MS', DEFAULT_LINE_META_CACHE_MS);
+const LINE_ROWS_CACHE_MS = getServerNumberEnv('DASHBOARD_LINE_ROWS_CACHE_MS', DEFAULT_LINE_ROWS_CACHE_MS);
 
 function assertNoError(error: { message?: string } | null, context: string) {
   if (error) {
     throw new Error(`[supabase] ${context}: ${error.message ?? 'Unknown error'}`);
   }
+}
+
+function buildCacheKey(parts: Array<string | number>) {
+  return parts.join('::');
+}
+
+async function readCached<T>(key: string, ttlMs: number, loader: () => Promise<T>) {
+  const now = Date.now();
+  const cachedEntry = dashboardCache.get(key);
+
+  if (cachedEntry && cachedEntry.expiresAt > now) {
+    return cachedEntry.value as T;
+  }
+
+  const inflightEntry = dashboardInflight.get(key);
+  if (inflightEntry) {
+    return inflightEntry as Promise<T>;
+  }
+
+  const loadPromise = (async () => {
+    try {
+      const value = await loader();
+      dashboardCache.set(key, {
+        expiresAt: Date.now() + ttlMs,
+        value,
+      });
+      return value;
+    } catch (error) {
+      if (cachedEntry) {
+        return cachedEntry.value as T;
+      }
+      throw error;
+    } finally {
+      dashboardInflight.delete(key);
+    }
+  })();
+
+  dashboardInflight.set(key, loadPromise as Promise<unknown>);
+  return loadPromise;
 }
 
 export function serializeLineMovementVersion(rows: Array<{ game_date?: string; updated_at?: string | null }>) {
@@ -75,55 +161,118 @@ function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?:
 }
 
 async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = PLAYER_PROP_SELECT) {
-  const supabase = getSupabaseAdmin();
-  const allRows: any[] = [];
-
-  for (let start = 0; ; start += PAGE_SIZE) {
-    const { data, error } = await supabase
-      .from('player_props')
-      .select(selectClause)
-      .in('game_date', gameDates)
-      .order('game_date', { ascending: true })
-      .order('player_id', { ascending: true })
-      .order('stat_type', { ascending: true })
-      .order('sportsbook', { ascending: true })
-      .range(start, start + PAGE_SIZE - 1);
-
-    assertNoError(error, 'player_props');
-
-    if (!data?.length) {
-      return allRows;
-    }
-
-    allRows.push(...data);
-
-    if (data.length < PAGE_SIZE) {
-      return allRows;
-    }
+  const normalizedDates = Array.from(new Set((gameDates ?? []).filter(Boolean))).sort();
+  if (!normalizedDates.length) {
+    return [];
   }
+
+  return readCached(
+    buildCacheKey(['player_props', selectClause, normalizedDates.join(',')]),
+    PROPS_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const allRows: any[] = [];
+
+      for (let start = 0; ; start += PAGE_SIZE) {
+        const { data, error } = await supabase
+          .from('player_props')
+          .select(selectClause)
+          .in('game_date', normalizedDates)
+          .order('game_date', { ascending: true })
+          .order('player_id', { ascending: true })
+          .order('stat_type', { ascending: true })
+          .order('sportsbook', { ascending: true })
+          .range(start, start + PAGE_SIZE - 1);
+
+        assertNoError(error, 'player_props');
+
+        if (!data?.length) {
+          return allRows;
+        }
+
+        allRows.push(...data);
+
+        if (data.length < PAGE_SIZE) {
+          return allRows;
+        }
+      }
+    },
+  );
+}
+
+async function fetchPlayers(selectClause: string) {
+  return readCached(
+    buildCacheKey(['players', selectClause]),
+    PLAYERS_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase.from('players').select(selectClause);
+      assertNoError(error, 'players');
+      return data ?? [];
+    },
+  );
+}
+
+async function fetchGamesForDates(dates: string[], selectClause = '*') {
+  const normalizedDates = Array.from(new Set((dates ?? []).filter(Boolean))).sort();
+  if (!normalizedDates.length) {
+    return [];
+  }
+
+  return readCached(
+    buildCacheKey(['games', selectClause, normalizedDates.join(',')]),
+    GAMES_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase
+        .from('games')
+        .select(selectClause)
+        .in('game_date', normalizedDates);
+
+      assertNoError(error, 'games');
+      return data ?? [];
+    },
+  );
+}
+
+async function fetchLineMovementsForDates(
+  dates: string[],
+  selectClause: string,
+  ttlMs: number,
+  context: string,
+) {
+  const normalizedDates = Array.from(new Set((dates ?? []).filter(Boolean))).sort();
+  if (!normalizedDates.length) {
+    return [];
+  }
+
+  return readCached(
+    buildCacheKey(['line_movements', selectClause, normalizedDates.join(',')]),
+    ttlMs,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase
+        .from('line_movements')
+        .select(selectClause)
+        .in('game_date', normalizedDates);
+
+      assertNoError(error, context);
+      return data ?? [];
+    },
+  );
 }
 
 export async function fetchBootstrapPayload() {
-  const supabase = getSupabaseAdmin();
   const today = getDashboardDate();
-  const futureDates = buildFutureDates(today, 14);
+  const futureDates = buildFutureDates(today, BOOTSTRAP_PROP_DAYS);
   const fastRefreshDates = getFastRefreshDates(null);
 
-  const [
-    { data: playersRows, error: playersError },
-    propsRows,
-    { data: lineRows, error: lineError },
-    { data: gamesRows, error: gamesError },
-  ] = await Promise.all([
-    supabase.from('players').select(PLAYER_BASE_SELECT),
+  const [playersRows, propsRows, lineRows, gamesRows] = await Promise.all([
+    fetchPlayers(PLAYER_BASE_SELECT),
     fetchAllPlayerPropsForDates(futureDates),
-    supabase.from('line_movements').select(INITIAL_LINE_SELECT).in('game_date', fastRefreshDates),
-    supabase.from('games').select(SLATE_SELECT).eq('game_date', today),
+    fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements'),
+    fetchGamesForDates([today], SLATE_SELECT),
   ]);
-
-  assertNoError(playersError, 'players');
-  assertNoError(lineError, 'line_movements');
-  assertNoError(gamesError, 'games');
 
   return {
     playersRows: (playersRows ?? []).map((row: any) => ({
@@ -138,18 +287,17 @@ export async function fetchBootstrapPayload() {
 }
 
 export async function fetchHotPayload(selectedDate: string | null, currentLineVersion: string) {
-  const supabase = getSupabaseAdmin();
   const activeDates = getFastRefreshDates(selectedDate);
 
-  const [
-    propsRows,
-    { data: lineMetaRows, error: lineMetaError },
-  ] = await Promise.all([
+  const [propsRows, lineMetaRows] = await Promise.all([
     fetchAllPlayerPropsForDates(activeDates),
-    supabase.from('line_movements').select(LINE_META_SELECT).in('game_date', activeDates),
+    fetchLineMovementsForDates(
+      activeDates,
+      LINE_META_SELECT,
+      LINE_META_CACHE_MS,
+      'line_movement metadata',
+    ),
   ]);
-
-  assertNoError(lineMetaError, 'line_movement metadata');
 
   const nextVersion = serializeLineMovementVersion(lineMetaRows ?? []);
 
@@ -160,12 +308,12 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
     };
   }
 
-  const { data: lineRows, error: lineRowsError } = await supabase
-    .from('line_movements')
-    .select(INITIAL_LINE_SELECT)
-    .in('game_date', activeDates);
-
-  assertNoError(lineRowsError, 'line_movements');
+  const lineRows = await fetchLineMovementsForDates(
+    activeDates,
+    INITIAL_LINE_SELECT,
+    LINE_ROWS_CACHE_MS,
+    'line_movements',
+  );
 
   return {
     propsRows,
@@ -175,16 +323,8 @@ export async function fetchHotPayload(selectedDate: string | null, currentLineVe
 }
 
 export async function fetchGamesPayload(dates: string[]) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from('games')
-    .select('*')
-    .in('game_date', dates);
-
-  assertNoError(error, 'games');
-
   return {
-    games: data ?? [],
+    games: await fetchGamesForDates(dates),
   };
 }
 
@@ -225,17 +365,12 @@ export async function fetchSimilarCandidatesPayload({
 }) {
   const supabase = getSupabaseAdmin();
   const today = getDashboardDate();
-  const propDates = selectedGameDate ? [selectedGameDate] : buildFutureDates(today, 14);
+  const propDates = selectedGameDate ? [selectedGameDate] : buildFutureDates(today, SIMILAR_PROP_DAYS);
 
-  const [
-    { data: playersRows, error: playersError },
-    propsRows,
-  ] = await Promise.all([
-    supabase.from('players').select(PLAYER_SIMILAR_SELECT),
+  const [playersRows, propsRows] = await Promise.all([
+    fetchPlayers(PLAYER_SIMILAR_SELECT),
     fetchAllPlayerPropsForDates(propDates),
   ]);
-
-  assertNoError(playersError, 'similar players');
 
   const players = buildSimilarityPlayers(playersRows ?? [], propsRows ?? [], selectedGameDate ?? null)
     .filter(playerHasAnyProp);
