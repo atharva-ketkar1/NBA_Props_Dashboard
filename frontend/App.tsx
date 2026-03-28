@@ -121,15 +121,27 @@ function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
 }
 
 function buildHistoricalOddsMap(playerId: number, historicalOddsRows: any[]) {
-  return Object.fromEntries((historicalOddsRows ?? []).map((row: any) => [
-    row.game_date,
-    {
-      [String(playerId)]: {
-        props: row.props,
-        source: row.source,
+  return Object.fromEntries((historicalOddsRows ?? [])
+    .map((row: any) => {
+      const gameDate = typeof row?.game_date === 'string'
+        ? row.game_date.trim().slice(0, 10)
+        : '';
+
+      if (!gameDate) {
+        return null;
       }
-    }
-  ]));
+
+      return [
+        gameDate,
+        {
+          [String(playerId)]: {
+            props: row.props,
+            source: row.source,
+          },
+        },
+      ];
+    })
+    .filter(Boolean) as [string, any][]);
 }
 
 function hasLoadedPlayerDetail(player?: Player | null) {

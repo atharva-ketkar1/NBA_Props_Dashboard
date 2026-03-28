@@ -8,6 +8,7 @@ import atexit
 import signal
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("MasterCron")
@@ -15,6 +16,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 DATA_DIR = os.path.join(BASE_DIR, "data", "current")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -265,7 +267,10 @@ def run_intraday_if_needed(now, state, dry_run=False):
         if not intraday_ok:
             return False
                 
-        state["last_intraday_time"] = current_timestamp
+        # Anchor the interval to the completion time, not the start time.
+        # Otherwise a long-running scrape can immediately retrigger on the next
+        # cron tick and create a write-amplification loop.
+        state["last_intraday_time"] = time.time()
         if not dry_run:
             save_state(state)
         return True

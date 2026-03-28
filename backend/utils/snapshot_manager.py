@@ -1,8 +1,12 @@
 import os
 import json
+import hashlib
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
@@ -128,6 +132,10 @@ class SnapshotManager:
             return {}
         return players_data
 
+    def _players_fingerprint(self, players_data):
+        serialized = json.dumps(players_data or {}, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+
     def _carry_forward_snapshots(self, existing_data, active_teams):
         carried = []
         for snapshot in existing_data.get("snapshots", []):
@@ -184,6 +192,11 @@ class SnapshotManager:
         )
         if not filtered_players:
             return False
+
+        if not bypass_dedupe and data.get("snapshots"):
+            last_players = data["snapshots"][-1].get("players", {})
+            if self._players_fingerprint(last_players) == self._players_fingerprint(filtered_players):
+                return False
 
         new_snapshot = {
             "timestamp": timestamp_str,

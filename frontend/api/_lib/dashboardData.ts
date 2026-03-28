@@ -15,6 +15,7 @@ const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analys
 const HISTORICAL_ODDS_SELECT = 'game_date, props, source';
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
+const LINE_FALLBACK_SELECT = 'game_date, snapshots';
 const SLATE_SELECT = 'home_team_tricode, away_team_tricode';
 const PAGE_SIZE = 1000;
 
@@ -51,6 +52,181 @@ function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
   }
 
   return propsByDateMap;
+}
+
+function normalizeGameDateKey(value: unknown) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : null;
+}
+
+function normalizePropsTree(value: any) {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  if (value.props && typeof value.props === 'object') {
+    return value.props;
+  }
+
+  return value;
+}
+
+function mergeHistoricalPropTrees(primaryValue: any, fallbackValue: any) {
+  const primary = normalizePropsTree(primaryValue);
+  const fallback = normalizePropsTree(fallbackValue);
+  const merged: Record<string, any> = { ...primary };
+  let changed = false;
+
+  for (const [statKey, fallbackBooks] of Object.entries(fallback)) {
+    if (!fallbackBooks || typeof fallbackBooks !== 'object') {
+      continue;
+    }
+
+    const existingBooks = merged[statKey];
+    if (!existingBooks || typeof existingBooks !== 'object') {
+      merged[statKey] = fallbackBooks;
+      changed = true;
+      continue;
+    }
+
+    const mergedBooks = { ...existingBooks };
+    let statChanged = false;
+
+    for (const [bookKey, fallbackLine] of Object.entries(fallbackBooks as Record<string, any>)) {
+      if (!fallbackLine || typeof fallbackLine !== 'object') {
+        continue;
+      }
+
+      const existingLine = mergedBooks[bookKey];
+      if (!existingLine || typeof existingLine !== 'object') {
+        mergedBooks[bookKey] = fallbackLine;
+        statChanged = true;
+        continue;
+      }
+
+      const nextLine = {
+        ...fallbackLine,
+        ...existingLine,
+      };
+
+      if (JSON.stringify(nextLine) !== JSON.stringify(existingLine)) {
+        mergedBooks[bookKey] = nextLine;
+        statChanged = true;
+      }
+    }
+
+    if (statChanged) {
+      merged[statKey] = mergedBooks;
+      changed = true;
+    }
+  }
+
+  return changed ? merged : primary;
+}
+
+function getSnapshotPlayerData(snapshot: any, playerId: number) {
+  const players = snapshot?.players;
+  if (!players || typeof players !== 'object') {
+    return null;
+  }
+
+  return players[String(playerId)] ?? players[playerId] ?? null;
+}
+
+function extractFallbackLineMovementProps(lineRows: any[], playerId: number) {
+  const byDate = new Map<string, { game_date: string; props: Record<string, any>; source: string }>();
+
+  for (const row of lineRows ?? []) {
+    const gameDate = normalizeGameDateKey(row?.game_date);
+    if (!gameDate) {
+      continue;
+    }
+
+    const snapshots = Array.isArray(row?.snapshots) ? row.snapshots : [];
+    let latestMatch: { props: Record<string, any>; source: string } | null = null;
+    let preGameMatch: { props: Record<string, any>; source: string } | null = null;
+
+    for (let index = snapshots.length - 1; index >= 0; index -= 1) {
+      const snapshot = snapshots[index];
+      const playerData = getSnapshotPlayerData(snapshot, playerId);
+      const props = normalizePropsTree(playerData?.props);
+      if (!Object.keys(props).length) {
+        continue;
+      }
+
+      const candidate = {
+        props,
+        source: snapshot?.label === 'pre_game' ? 'pre_game_snapshot_fallback' : 'line_movements_fallback',
+      };
+
+      if (!latestMatch) {
+        latestMatch = candidate;
+      }
+
+      if (snapshot?.label === 'pre_game') {
+        preGameMatch = candidate;
+        break;
+      }
+    }
+
+    const chosen = preGameMatch ?? latestMatch;
+    if (!chosen) {
+      continue;
+    }
+
+    byDate.set(gameDate, {
+      game_date: gameDate,
+      props: chosen.props,
+      source: chosen.source,
+    });
+  }
+
+  return byDate;
+}
+
+function mergeHistoricalOddsRows(
+  historicalOddsRows: any[],
+  lineMovementRows: any[],
+  playerId: number,
+) {
+  const mergedByDate = new Map<string, any>();
+
+  for (const row of historicalOddsRows ?? []) {
+    const gameDate = normalizeGameDateKey(row?.game_date);
+    if (!gameDate) {
+      continue;
+    }
+
+    mergedByDate.set(gameDate, {
+      ...row,
+      game_date: gameDate,
+      props: normalizePropsTree(row?.props),
+    });
+  }
+
+  const fallbackByDate = extractFallbackLineMovementProps(lineMovementRows, playerId);
+  for (const [gameDate, fallbackRow] of fallbackByDate.entries()) {
+    const existingRow = mergedByDate.get(gameDate);
+    if (!existingRow) {
+      mergedByDate.set(gameDate, fallbackRow);
+      continue;
+    }
+
+    mergedByDate.set(gameDate, {
+      ...existingRow,
+      props: mergeHistoricalPropTrees(existingRow.props, fallbackRow.props),
+      source: existingRow.source ?? fallbackRow.source,
+    });
+  }
+
+  return Array.from(mergedByDate.values()).sort((left, right) => (
+    String(left?.game_date ?? '').localeCompare(String(right?.game_date ?? ''))
+  ));
 }
 
 function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?: string | null): Player[] {
@@ -206,9 +382,28 @@ export async function fetchPlayerPayload(playerId: number) {
     throw new Error('[supabase] player detail: Player not found.');
   }
 
+  const playerDetail = detail as Record<string, any>;
+  const recentGameDates = Array.from(new Set(
+    (playerDetail.game_log ?? [])
+      .map((game: any) => normalizeGameDateKey(game?.GAME_DATE))
+      .filter(Boolean),
+  )).slice(0, 45) as string[];
+
+  let mergedHistoricalOddsRows: any[] = (historicalOddsRows ?? []) as any[];
+
+  if (recentGameDates.length > 0) {
+    const { data: lineMovementRows, error: lineMovementError } = await supabase
+      .from('line_movements')
+      .select(LINE_FALLBACK_SELECT)
+      .in('game_date', recentGameDates);
+
+    assertNoError(lineMovementError, 'player line movement fallback');
+    mergedHistoricalOddsRows = mergeHistoricalOddsRows(historicalOddsRows ?? [], lineMovementRows ?? [], playerId);
+  }
+
   return {
-    detail,
-    historicalOddsRows: historicalOddsRows ?? [],
+    detail: playerDetail,
+    historicalOddsRows: mergedHistoricalOddsRows,
   };
 }
 

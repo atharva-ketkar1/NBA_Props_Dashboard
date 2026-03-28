@@ -14,6 +14,8 @@ constants imported from run_pipeline.py.
 
 import os
 import ast
+import hashlib
+import json
 import logging
 import pandas as pd
 from datetime import datetime
@@ -26,6 +28,12 @@ from utils.supabase_client import get_supabase_client
 logger = logging.getLogger(__name__)
 
 ET_ZONE = ZoneInfo("America/New_York")
+SYNC_STATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "current",
+    "player_props_sync_state.json",
+)
 
 # Mirrors PROP_MAP in aggregator.py — kept in sync manually.
 # Maps raw prop_type strings from scrapers → internal stat keys.
@@ -42,6 +50,48 @@ PROP_MAP = {
     'ra':       'REB+AST',
     'stocks':   'STL+BLK',
 }
+
+
+def _load_sync_state():
+    if not os.path.exists(SYNC_STATE_PATH):
+        return {}
+    try:
+        with open(SYNC_STATE_PATH, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("Could not read player_props sync state: %s", exc)
+        return {}
+
+
+def _save_sync_state(state):
+    os.makedirs(os.path.dirname(SYNC_STATE_PATH), exist_ok=True)
+    temp_path = f"{SYNC_STATE_PATH}.tmp"
+    with open(temp_path, "w") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    os.replace(temp_path, SYNC_STATE_PATH)
+
+
+def _row_sync_key(row):
+    return "|".join(
+        [
+            str(row.get("player_id", "")),
+            str(row.get("stat_type", "")),
+            str(row.get("sportsbook", "")),
+            str(row.get("game_date", "")),
+        ]
+    )
+
+
+def _row_fingerprint(row):
+    payload = {
+        "line": row.get("line"),
+        "over_odds": row.get("over_odds"),
+        "under_odds": row.get("under_odds"),
+        "implied": row.get("implied"),
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
 
 
 def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str = None):
@@ -176,13 +226,40 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
             unresolved_missing_dates,
         )
 
-    logger.info("Upserting %d player_props rows for %s...", len(rows), game_date)
+    sync_state = _load_sync_state()
+    next_sync_state = {}
+    changed_rows = []
+    for row in rows:
+        sync_key = _row_sync_key(row)
+        fingerprint = _row_fingerprint(row)
+        next_sync_state[sync_key] = fingerprint
+        if sync_state.get(sync_key) != fingerprint:
+            changed_rows.append(row)
+
+    if not changed_rows:
+        logger.info(
+            "Skipping player_props sync for %s; %d rows are unchanged from the last successful upload.",
+            game_date,
+            len(rows),
+        )
+        try:
+            _save_sync_state(next_sync_state)
+        except Exception as exc:
+            logger.warning("Could not persist player_props sync state: %s", exc)
+        return True
+
+    logger.info(
+        "Upserting %d changed player_props rows (%d prepared) for %s...",
+        len(changed_rows),
+        len(rows),
+        game_date,
+    )
 
     # --- Batch upsert in chunks of 100 to avoid request size limits ---
     sb = get_supabase_client()
     all_chunks_ok = True
-    for i in range(0, len(rows), 100):
-        chunk = rows[i:i + 100]
+    for i in range(0, len(changed_rows), 100):
+        chunk = changed_rows[i:i + 100]
         try:
             sb.table('player_props').upsert(
                 chunk,
@@ -193,6 +270,10 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
             all_chunks_ok = False
 
     if all_chunks_ok:
+        try:
+            _save_sync_state(next_sync_state)
+        except Exception as exc:
+            logger.warning("Could not persist player_props sync state: %s", exc)
         logger.info("player_props upsert complete.")
     return all_chunks_ok
 

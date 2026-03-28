@@ -45,11 +45,14 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
     else if (activeSportsbook === 'fd') sbLogo = `/assets/sportsbook_logos/fanduel.webp`;
 
     const logoSrc = `${ASSETS_BASE}${sbLogo}`;
+    const gameDateKey = typeof game.GAME_DATE === 'string'
+        ? game.GAME_DATE.trim().slice(0, 10)
+        : null;
 
     // Extract historical odds if available
-    if (player && player.historical_odds && game.GAME_DATE) {
+    if (player && player.historical_odds && gameDateKey) {
         // Find the record for this exact date
-        const dateRecord = player.historical_odds[game.GAME_DATE];
+        const dateRecord = player.historical_odds[gameDateKey] || player.historical_odds[game.GAME_DATE];
         if (dateRecord) {
             // Find the player in that date record (by numeric or stringified ID)
             const playerRecord = dateRecord[String(player.id)] || dateRecord[player.id];

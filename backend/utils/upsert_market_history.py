@@ -1,15 +1,26 @@
 import json
+import hashlib
 import logging
 import os
 import time
 from datetime import datetime
 
+from dotenv import load_dotenv
 from utils.supabase_client import get_supabase_client
+
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 logger = logging.getLogger(__name__)
 
 UPSERT_BATCH_SIZE = max(1, int(os.getenv("SUPABASE_UPSERT_BATCH_SIZE", "50")))
 UPSERT_MAX_RETRIES = max(1, int(os.getenv("SUPABASE_UPSERT_MAX_RETRIES", "4")))
+LINE_MOVEMENT_MAX_SNAPSHOTS = max(0, int(os.getenv("SUPABASE_LINE_MOVEMENT_MAX_SNAPSHOTS", "32")))
+CURRENT_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "current",
+)
+LINE_MOVEMENT_SYNC_STATE_PATH = os.path.join(CURRENT_DATA_DIR, "line_movements_sync_state.json")
 
 
 def _chunk_rows(rows, chunk_size):
@@ -27,6 +38,55 @@ def _is_retryable_upsert_error(error):
         or "temporarily unavailable" in message
         or "429" in message
     )
+
+
+def _load_sync_state(path: str):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("Could not read sync state %s: %s", path, exc)
+        return {}
+
+
+def _save_sync_state(path: str, state):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    os.replace(temp_path, path)
+
+
+def _fingerprint_payload(payload) -> str:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+
+
+def _compact_snapshots_for_supabase(snapshots):
+    if LINE_MOVEMENT_MAX_SNAPSHOTS <= 0 or len(snapshots) <= LINE_MOVEMENT_MAX_SNAPSHOTS:
+        return snapshots
+
+    keep = []
+    if snapshots:
+        keep.append(snapshots[0])
+
+    keep.extend(snapshot for snapshot in snapshots if snapshot.get("label") == "pre_game")
+    keep.extend(snapshots[-LINE_MOVEMENT_MAX_SNAPSHOTS:])
+
+    compacted = []
+    seen = set()
+    for snapshot in keep:
+        dedupe_key = f"{snapshot.get('timestamp', '')}|{snapshot.get('label', '')}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        compacted.append(snapshot)
+
+    compacted.sort(key=lambda snapshot: str(snapshot.get("timestamp") or ""))
+    return compacted
 
 
 def _batched_upsert(table_name: str, rows, on_conflict: str, context: str):
@@ -93,19 +153,46 @@ def upsert_line_movements_from_file(line_movements_path: str):
             })
 
     rows = [
-        {"game_date": game_date, "snapshots": snapshots}
+        {"game_date": game_date, "snapshots": _compact_snapshots_for_supabase(snapshots)}
         for game_date, snapshots in snapshots_by_date.items()
     ]
 
     if not rows:
-        rows = [{"game_date": default_date, "snapshots": lm_data.get("snapshots", [])}]
+        rows = [{
+            "game_date": default_date,
+            "snapshots": _compact_snapshots_for_supabase(lm_data.get("snapshots", [])),
+        }]
 
-    return _batched_upsert(
+    sync_state = _load_sync_state(LINE_MOVEMENT_SYNC_STATE_PATH)
+    next_sync_state = dict(sync_state)
+    changed_rows = []
+    for row in rows:
+        game_date = str(row.get("game_date", ""))
+        fingerprint = _fingerprint_payload(row.get("snapshots", []))
+        next_sync_state[game_date] = fingerprint
+        if sync_state.get(game_date) != fingerprint:
+            changed_rows.append(row)
+
+    if not changed_rows:
+        logger.info("Skipping line_movements sync; uploaded payload is unchanged.")
+        try:
+            _save_sync_state(LINE_MOVEMENT_SYNC_STATE_PATH, next_sync_state)
+        except Exception as exc:
+            logger.warning("Could not persist line_movements sync state: %s", exc)
+        return True
+
+    success = _batched_upsert(
         "line_movements",
-        rows,
+        changed_rows,
         on_conflict="game_date",
         context="line_movements",
     )
+    if success:
+        try:
+            _save_sync_state(LINE_MOVEMENT_SYNC_STATE_PATH, next_sync_state)
+        except Exception as exc:
+            logger.warning("Could not persist line_movements sync state: %s", exc)
+    return success
 
 
 def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
