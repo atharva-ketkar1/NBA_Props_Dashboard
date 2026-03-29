@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { Player } from '../types';
+import { Player, SportsbookId } from '../types';
 import { HelpCircle, SlidersHorizontal, ChevronRight, ChevronLeft, Ban, Activity } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { TEAM_IDS, TEAM_COLORS } from '../constants';
@@ -14,8 +14,8 @@ interface HeaderProps {
   player?: Player;
   activeTab: string;
   onTabChange: (tab: string) => void;
-  activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
-  onSportsbookChange: (sb: 'dk' | 'fd' | 'mgm' | 'cz') => void;
+  activeSportsbook: SportsbookId;
+  onSportsbookChange: (sb: SportsbookId) => void;
   customLine?: number | null;
   onToggleFilters?: () => void;
   isFiltersOpen?: boolean;
@@ -54,10 +54,13 @@ const TAB_ORDER = [
   'Steals', 'Blocks', 'Stl+Blk', 'Turnovers', 'Fouls', 'FT Attempted'
 ];
 
-const SPORTSBOOKS = [
+const ENABLE_PRIZEPICKS = import.meta.env.VITE_ENABLE_PRIZEPICKS === 'true';
+
+const SPORTSBOOKS: Array<{ id: SportsbookId; label: string; logo: string }> = [
   { id: 'dk', label: 'DraftKings', logo: `${ASSETS_BASE}/assets/sportsbook_logos/draftkings.webp` },
   { id: 'fd', label: 'FanDuel', logo: `${ASSETS_BASE}/assets/sportsbook_logos/fanduel.webp` },
-] as const;
+  ...(ENABLE_PRIZEPICKS ? [{ id: 'pp' as const, label: 'PrizePicks', logo: `${ASSETS_BASE}/assets/sportsbook_logos/prizepicks.webp` }] : []),
+];
 
 
 const StatItem = ({ label, value, diff, isCompact }: { label: string, value: string | number, diff?: string | number, isCompact?: boolean }) => {
@@ -138,13 +141,16 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
     let prop = player.props?.[statKey]?.[activeSportsbook];
     const hasLine = !!prop;
     const lineVal = prop?.line || 0;
+    const supportsPricedOdds = activeSportsbook !== 'pp';
+    const hasPricedOdds = supportsPricedOdds && prop?.over !== null && prop?.over !== undefined && prop?.under !== null && prop?.under !== undefined;
 
-    const formatOdds = (val: number | string) => {
+    const formatOdds = (val: number | string | null | undefined) => {
+      if (val === null || val === undefined || val === '') return '-';
       const num = Number(val);
       if (isNaN(num)) return val;
       return num > 0 ? `+${num}` : `${num}`;
     };
-    const oddsVal = { over: formatOdds(prop?.over || 0), under: formatOdds(prop?.under || 0) };
+    const oddsVal = { over: hasPricedOdds ? formatOdds(prop?.over) : '-', under: hasPricedOdds ? formatOdds(prop?.under) : '-' };
 
     const logs = player.game_log || [];
     const visibleLogs = historicalGameCount ? logs.slice(0, historicalGameCount) : logs;
@@ -256,19 +262,9 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
   }, [player, statKey, activeSportsbook, customLine, historicalGameCount, mobileGameCount]);
 
 
-  useEffect(() => {
-    if (!player || !player.props || !player.props[statKey]) return;
-    const activeProp = player.props[statKey]?.[activeSportsbook];
-    if (!activeProp) {
-      const availableSb = SPORTSBOOKS.find(sb => player.props?.[statKey]?.[sb.id]);
-      if (availableSb) {
-        onSportsbookChange(availableSb.id as any);
-      }
-    }
-  }, [player, statKey, activeSportsbook, onSportsbookChange]);
-
   const currentSbLogo = SPORTSBOOKS.find(sb => sb.id === activeSportsbook)?.logo;
   const activePropForSparkline = player?.props?.[statKey]?.[activeSportsbook];
+  const showPricedOdds = activeSportsbook !== 'pp' && activePropForSparkline?.over !== null && activePropForSparkline?.over !== undefined && activePropForSparkline?.under !== null && activePropForSparkline?.under !== undefined;
 
   const teamId = player && TEAM_IDS[player.team] ? TEAM_IDS[player.team] : null;
   const teamLogoUrl = teamId
@@ -414,13 +410,18 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                       {line} <span className="text-neutral400 font-medium text-[10px] ml-1">{STAT_LABELS[activeTab] === 'PTS' ? 'Pts' : STAT_LABELS[activeTab]}</span>
                     </span>
                   ) : (
-                    <span className="text-red-500 font-bold text-[10px] whitespace-nowrap flex items-center gap-1">No Line</span>
+                    <span className="text-red-500 font-bold text-[10px] whitespace-nowrap flex items-center gap-1">Unavailable</span>
                   )}
 
-                  {hasLine && (
+                  {hasLine && showPricedOdds && (
                     <div className="flex gap-2 text-[10px] font-bold ml-1 border-l border-borderMuted pl-2 whitespace-nowrap leading-none">
                       <span className="text-neutral500">O <span className="text-green600">{odds.over}</span></span>
                       <span className="text-neutral500">U <span className="text-red600">{odds.under}</span></span>
+                    </div>
+                  )}
+                  {hasLine && !showPricedOdds && (
+                    <div className="text-[9px] font-bold ml-1 border-l border-borderMuted pl-2 whitespace-nowrap uppercase tracking-wider text-fgSubtle">
+                      Line Only
                     </div>
                   )}
 
@@ -447,7 +448,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                           disabled={!sbHasLine}
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (sbHasLine) onSportsbookChange(sb.id as any);
+                            if (sbHasLine) onSportsbookChange(sb.id);
                           }}
                           className={`
                                         flex items-center justify-between gap-4 px-3 py-2.5 rounded-lg text-xs font-bold text-left transition-all relative
@@ -465,14 +466,20 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                           {sbHasLine && (
                             <div className="flex items-center gap-3 shrink-0 ml-4 font-chakra">
                               <span className="text-[14px] text-white font-bold tracking-tight">{sbProp.line}</span>
-                              <div className="flex items-center gap-2.5 text-[13px] font-bold border-l border-borderMuted pl-3">
-                                <span className="text-neutral500 flex items-center gap-1">
-                                  O <span className="text-green500 tracking-tight">{formatOdds(sbProp.over)}</span>
-                                </span>
-                                <span className="text-neutral500 flex items-center gap-1">
-                                  U <span className="text-red500 tracking-tight">{formatOdds(sbProp.under)}</span>
-                                </span>
-                              </div>
+                              {sb.id !== 'pp' && sbProp.over !== null && sbProp.over !== undefined && sbProp.under !== null && sbProp.under !== undefined ? (
+                                <div className="flex items-center gap-2.5 text-[13px] font-bold border-l border-borderMuted pl-3">
+                                  <span className="text-neutral500 flex items-center gap-1">
+                                    O <span className="text-green500 tracking-tight">{formatOdds(sbProp.over)}</span>
+                                  </span>
+                                  <span className="text-neutral500 flex items-center gap-1">
+                                    U <span className="text-red500 tracking-tight">{formatOdds(sbProp.under)}</span>
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className="text-[9px] font-bold border-l border-borderMuted pl-3 uppercase tracking-wider text-fgSubtle">
+                                  Line Only
+                                </div>
+                              )}
                             </div>
                           )}
                         </button>
@@ -559,7 +566,15 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
         </div>
 
         {/* Line Movement Strip — below stats row, full-width */}
-        {player?.intraday_movements && player.intraday_movements.length >= 2 && hasLine && (
+        {activeSportsbook === 'pp' && hasLine && (
+          <div className="hidden md:flex items-center gap-4 px-4 py-1.5 bg-bgElevation0/60">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-fgSubtle shrink-0 opacity-70">Line Movement</span>
+            <div className="flex-1 min-w-0 text-[11px] text-fgSubtle">
+              PrizePicks line movement is unavailable in v1.
+            </div>
+          </div>
+        )}
+        {activeSportsbook !== 'pp' && player?.intraday_movements && player.intraday_movements.length >= 2 && hasLine && (
           <div className="hidden md:flex items-center gap-4 px-4 py-1.5 bg-bgElevation0/60">
             <span className="text-[9px] font-bold uppercase tracking-widest text-fgSubtle shrink-0 opacity-70">Line Movement</span>
             <div className="flex-1 min-w-0">

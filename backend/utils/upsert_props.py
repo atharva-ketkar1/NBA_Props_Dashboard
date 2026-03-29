@@ -95,9 +95,15 @@ def _row_fingerprint(row):
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
 
 
-def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str = None):
+def run_odds_update(
+    dk_path: str,
+    fd_path: str,
+    stats_path: str,
+    game_date: str = None,
+    pp_path: str = None,
+):
     """
-    Load raw DK/FD CSV files and season stats, resolve player IDs via
+    Load raw sportsbook CSV files and season stats, resolve player IDs via
     PlayerMatcher, then batch-upsert into the player_props table.
 
     Parameters
@@ -106,6 +112,8 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
         Absolute or relative path to draftkings.csv
     fd_path : str
         Absolute or relative path to fanduel.csv
+    pp_path : str, optional
+        Absolute or relative path to prizepicks.csv
     stats_path : str
         Absolute or relative path to season_stats.csv
         (needed to build the PlayerMatcher roster)
@@ -139,6 +147,7 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
 
     df_dk = pd.DataFrame()
     df_fd = pd.DataFrame()
+    df_pp = pd.DataFrame()
 
     try:
         df_dk = pd.read_csv(dk_path)
@@ -154,8 +163,16 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
     except Exception as e:
         logger.warning("Failed to load FanDuel CSV (%s): %s", fd_path, e)
 
-    if df_dk.empty and df_fd.empty:
-        logger.warning("Both DK and FD CSVs are empty — nothing to upsert.")
+    if pp_path:
+        try:
+            df_pp = pd.read_csv(pp_path)
+        except pd.errors.EmptyDataError:
+            df_pp = pd.DataFrame()
+        except Exception as e:
+            logger.warning("Failed to load PrizePicks CSV (%s): %s", pp_path, e)
+
+    if df_dk.empty and df_fd.empty and df_pp.empty:
+        logger.warning("All sportsbook CSVs are empty — nothing to upsert.")
         return False
 
     # --- Build PlayerMatcher from season stats roster ---
@@ -171,7 +188,7 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
     rows = []
     resolved_from_schedule = 0
     unresolved_missing_dates = 0
-    for df, book in [(df_dk, 'dk'), (df_fd, 'fd')]:
+    for df, book in [(df_dk, 'dk'), (df_fd, 'fd'), (df_pp, 'pp')]:
         if df.empty:
             continue
         for _, row in df.iterrows():

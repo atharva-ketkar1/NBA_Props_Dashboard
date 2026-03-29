@@ -1,13 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Info, ChevronLeft, ChevronRight } from 'lucide-react';
-import { Player, SimilarPlayerCandidate, SimilarPlayersMode } from '../types';
+import { Player, SimilarPlayerCandidate, SimilarPlayersMode, SportsbookId } from '../types';
 import { buildSimilarPlayersDataset } from '../utils/similarPlayers';
 
 interface SimilarPlayersProps {
    player?: Player | null;
    players: Player[];
    activeTab: string;
-   activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
+   activeSportsbook: SportsbookId;
    activeSeason: '25/26' | '24/25';
    isLoadingCandidates?: boolean;
    similarCandidatesByProp: SimilarPlayerCandidate[];
@@ -69,6 +69,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    const modeDescription = mode === 'prop'
       ? 'Closest current lines plus matching production profile on the active slate.'
       : 'Closest position archetypes, then filtered by line and role profile.';
+   const ppHistoryUnavailable = activeSportsbook === 'pp';
    const summary = dataset.summary;
    const candidatePreview = dataset.candidateNames.join(', ');
    const avgDiffColor = summary.total === 0 ? 'text-white' : summary.avgDiff >= 0 ? 'text-green500' : 'text-red500';
@@ -155,7 +156,11 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                   {modeDescription}
                   {candidatePreview ? ` Top comps: ${candidatePreview}.` : ''}
                 </p>
-               {rowsMissingHistoricalLine > 0 && (
+               {ppHistoryUnavailable ? (
+                  <p className="text-[11px] text-gray-500 mt-1">
+                     PrizePicks comparable rows use current PP lines only. Archived closing-line history is unavailable in v1.
+                  </p>
+               ) : rowsMissingHistoricalLine > 0 && (
                   <p className="text-[11px] text-gray-500 mt-1">
                      {rowsMissingHistoricalLine} row{rowsMissingHistoricalLine === 1 ? '' : 's'} shown without archived closing lines yet.
                   </p>

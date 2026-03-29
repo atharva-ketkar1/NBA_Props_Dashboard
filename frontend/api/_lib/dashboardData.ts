@@ -6,7 +6,7 @@ import {
 } from './dashboardDate.js';
 import { rankSimilarPlayers } from '../../utils/similarPlayers.js';
 import { playerHasAnyProp } from '../../utils/propResolution.js';
-import type { Player, PlayerPropsByDate, SimilarPlayerCandidate } from '../../types.js';
+import type { Player, PlayerPropsByDate, SimilarPlayerCandidate, SportsbookId } from '../../types.js';
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
 const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
@@ -166,29 +166,38 @@ function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?:
   }));
 }
 
-async function fetchAllPlayerPropsForDates(gameDates: string[], selectClause = PLAYER_PROP_SELECT) {
+async function fetchAllPlayerPropsForDates(
+  gameDates: string[],
+  selectClause = PLAYER_PROP_SELECT,
+  sportsbook?: SportsbookId | null,
+) {
   const normalizedDates = Array.from(new Set((gameDates ?? []).filter(Boolean))).sort();
   if (!normalizedDates.length) {
     return [];
   }
 
   return readCached(
-    buildCacheKey(['player_props', selectClause, normalizedDates.join(',')]),
+    buildCacheKey(['player_props', selectClause, sportsbook ?? 'all', normalizedDates.join(',')]),
     PROPS_CACHE_MS,
     async () => {
       const supabase = getSupabaseAdmin();
       const allRows: any[] = [];
 
       for (let start = 0; ; start += PAGE_SIZE) {
-        const { data, error } = await supabase
+        let query = supabase
           .from('player_props')
           .select(selectClause)
           .in('game_date', normalizedDates)
           .order('game_date', { ascending: true })
           .order('player_id', { ascending: true })
           .order('stat_type', { ascending: true })
-          .order('sportsbook', { ascending: true })
-          .range(start, start + PAGE_SIZE - 1);
+          .order('sportsbook', { ascending: true });
+
+        if (sportsbook) {
+          query = query.eq('sportsbook', sportsbook);
+        }
+
+        const { data, error } = await query.range(start, start + PAGE_SIZE - 1);
 
         assertNoError(error, 'player_props');
 
@@ -268,15 +277,18 @@ async function fetchLineMovementsForDates(
   );
 }
 
-export async function fetchBootstrapPayload() {
+export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk') {
   const today = getDashboardDate();
   const futureDates = buildFutureDates(today, BOOTSTRAP_PROP_DAYS);
   const fastRefreshDates = getFastRefreshDates(null);
+  const includeLineMovements = activeSportsbook !== 'pp';
 
   const [playersRows, propsRows, lineRows, gamesRows] = await Promise.all([
     fetchPlayers(PLAYER_BASE_SELECT),
-    fetchAllPlayerPropsForDates(futureDates),
-    fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements'),
+    fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT, activeSportsbook),
+    includeLineMovements
+      ? fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements')
+      : Promise.resolve([]),
     fetchGamesForDates([today], SLATE_SELECT),
   ]);
 
@@ -292,20 +304,34 @@ export async function fetchBootstrapPayload() {
   };
 }
 
-export async function fetchHotPayload(selectedDate: string | null, currentLineVersion: string) {
+export async function fetchHotPayload(
+  selectedDate: string | null,
+  currentLineVersion: string,
+  activeSportsbook: SportsbookId = 'dk',
+) {
   const activeDates = getFastRefreshDates(selectedDate);
+  const includeLineMovements = activeSportsbook !== 'pp';
 
   const [propsRows, lineMetaRows] = await Promise.all([
-    fetchAllPlayerPropsForDates(activeDates),
-    fetchLineMovementsForDates(
-      activeDates,
-      LINE_META_SELECT,
-      LINE_META_CACHE_MS,
-      'line_movement metadata',
-    ),
+    fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_SELECT, activeSportsbook),
+    includeLineMovements
+      ? fetchLineMovementsForDates(
+        activeDates,
+        LINE_META_SELECT,
+        LINE_META_CACHE_MS,
+        'line_movement metadata',
+      )
+      : Promise.resolve([]),
   ]);
 
   const nextVersion = serializeLineMovementVersion(lineMetaRows ?? []);
+
+  if (!includeLineMovements) {
+    return {
+      propsRows,
+      lineVersion: currentLineVersion,
+    };
+  }
 
   if (nextVersion === currentLineVersion) {
     return {
@@ -370,7 +396,7 @@ export async function fetchSimilarCandidatesPayload({
   playerId,
   selectedGameDate,
 }: {
-  activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
+  activeSportsbook: SportsbookId;
   activeTab: string;
   playerId: number;
   selectedGameDate?: string | null;
@@ -390,7 +416,7 @@ export async function fetchSimilarCandidatesPayload({
 
       const [playersRows, propsRows] = await Promise.all([
         fetchPlayers(PLAYER_SIMILAR_SELECT),
-        fetchAllPlayerPropsForDates(propDates),
+        fetchAllPlayerPropsForDates(propDates, PLAYER_PROP_SELECT, activeSportsbook),
       ]);
 
       const players = buildSimilarityPlayers(playersRows ?? [], propsRows ?? [], selectedGameDate ?? null)

@@ -145,6 +145,7 @@ function buildUpstreamHeaders(request, targetObj, userAgent) {
     const effectiveUserAgent = hostname === "api.prizepicks.com" && incomingUserAgent ? incomingUserAgent : userAgent;
 
     headers.set("Accept", "application/json, text/plain, */*");
+    headers.set("Accept-Encoding", "gzip, deflate");
     headers.set("Accept-Language", acceptLanguage);
     headers.set("Cache-Control", "no-cache");
     headers.set("Origin", origin);

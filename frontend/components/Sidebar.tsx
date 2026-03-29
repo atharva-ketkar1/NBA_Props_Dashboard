@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-react';
-import { Player, Game } from '../types';
+import { Player, Game, SportsbookId } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
-import { getPreferredSportsbookProp, playerHasPropForDate } from '../utils/propResolution';
+import { getSportsbookProp, playerHasSportsbookPropForDate } from '../utils/propResolution';
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
 
@@ -75,7 +75,7 @@ interface SidebarProps {
     activeGameDate?: string | null;
     pendingPlayerId?: number;
     pendingGameDate?: string | null;
-    activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz';
+    activeSportsbook?: SportsbookId;
     onSelectPlayer: (id: number, gameDate?: string | null) => void;
     onPrefetchPlayer?: (id: number, gameDate?: string | null) => void;
     activeTab?: string;
@@ -110,17 +110,16 @@ const PlayerRow = ({
     player: Player,
     statFilter: string,
     gameDate?: string | null,
-    activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz',
+    activeSportsbook?: SportsbookId,
     isActive: boolean,
     isPending: boolean,
     onClick: () => void,
     onPrefetch?: () => void
 }) => {
     const prefetchTimeoutRef = useRef<number | null>(null);
-    const preferredSportsbooks = Array.from(new Set([activeSportsbook, 'dk', 'fd', 'mgm', 'cz']));
-    const preferredProp = getPreferredSportsbookProp(player, statFilter, gameDate, preferredSportsbooks);
-    const book = preferredProp?.book ?? null;
-    const prop = preferredProp?.prop ?? null;
+    const selectedProp = getSportsbookProp(player, statFilter, activeSportsbook, gameDate);
+    const book = selectedProp?.book ?? null;
+    const prop = selectedProp?.prop ?? null;
     const hasProp = !!prop;
     const line = prop?.line;
 
@@ -129,6 +128,8 @@ const PlayerRow = ({
             ? "draftkings.webp"
             : book === "fd"
                 ? "fanduel.webp"
+                : book === "pp"
+                    ? "prizepicks.webp"
                 : null;
 
     const logoSrc = logoFile
@@ -143,6 +144,7 @@ const PlayerRow = ({
         if (isNaN(num)) return String(val);
         return num > 0 ? `+${num}` : String(num);
     };
+    const showPricedOdds = book !== 'pp' && prop?.over !== null && prop?.over !== undefined && prop?.under !== null && prop?.under !== undefined;
 
     useEffect(() => {
         return () => {
@@ -205,19 +207,25 @@ const PlayerRow = ({
                                 )}
                             </div>
                             <span className="text-white font-bold font-chakra text-xs">{line}</span>
-                            <div className="flex items-center gap-1">
-                                <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">O</span> <span className="text-green500 font-chakra">{formatOdds(prop?.over)}</span>
+                            {showPricedOdds ? (
+                                <div className="flex items-center gap-1">
+                                    <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
+                                        <span className="text-fgSubtle">O</span> <span className="text-green500 font-chakra">{formatOdds(prop?.over)}</span>
+                                    </div>
+                                    <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
+                                        <span className="text-fgSubtle">U</span> <span className="text-red500 font-chakra">{formatOdds(prop?.under)}</span>
+                                    </div>
                                 </div>
-                                <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">U</span> <span className="text-red500 font-chakra">{formatOdds(prop?.under)}</span>
+                            ) : (
+                                <div className="text-[9px] font-bold uppercase tracking-wider text-fgSubtle">
+                                    Line Only
                                 </div>
-                            </div>
+                            )}
                         </div>
                     ) : (
                         <div className="flex items-center gap-1.5 bg-borderMedium px-2 py-1 rounded-[4px] text-[10px] font-bold text-neutral400 border border-transparent w-fit mt-0.5">
                             <Lock className="w-2.5 h-2.5" />
-                            UNLOCK
+                            UNAVAILABLE
                         </div>
                     )}
                 </div>
@@ -241,7 +249,7 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: 'dk' | 'fd' | 'mgm' | 'cz', onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: SportsbookId, onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
     game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, onSelectPlayer, onPrefetchPlayer, statFilter
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
@@ -442,7 +450,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 if (!isInGame) return false;
 
                 // Prop Match
-                if (!playerHasPropForDate(p, statFilter, game.game_date)) return false;
+                if (!playerHasSportsbookPropForDate(p, statFilter, activeSportsbook, game.game_date)) return false;
 
                 // Search Match (Player Name)
                 if (searchTerm && !gameMatchesSearch) {
@@ -469,7 +477,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         }
 
         return result;
-    }, [scheduleData, players, statFilter, gameFilter, searchTerm]);
+    }, [scheduleData, players, statFilter, gameFilter, searchTerm, activeSportsbook]);
 
     const toggleGame = (gameId: string) => {
         setExpandedGames(prev => ({

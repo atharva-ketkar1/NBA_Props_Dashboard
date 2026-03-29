@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { SportsbookId } from '../types';
 
 interface MovementSnapshot {
     timestamp: string;
@@ -11,7 +12,7 @@ interface SparklineProps {
     movements: MovementSnapshot[];
     playerId: string | number;
     statKey: string;
-    activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
+    activeSportsbook: SportsbookId;
     mode: 'line' | 'juice';
     activeGameDate?: string | null;
 }
@@ -70,6 +71,15 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
         if (probDelta === 0) return { text: 'No change', show: false };
         return { text: `${probDelta > 0 ? '+' : ''}${probDelta}% impl.`, show: true };
     }, [delta, opening, current, mode]);
+
+    if (activeSportsbook === 'pp') {
+        return (
+            <div className="flex items-center gap-1.5 text-borderMuted text-[10px] italic opacity-80">
+                <Minus className="w-3 h-3" />
+                PrizePicks line movement is unavailable in v1.
+            </div>
+        );
+    }
 
     // ── EARLY RETURN (after all hooks) ────────────────────────────────────────
     if (dataPoints.length < 2) {

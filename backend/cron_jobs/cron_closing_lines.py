@@ -453,10 +453,19 @@ def main(dry_run=False):
 
         try:
             from utils.upsert_props import run_odds_update
+            from scrapers import fetch_odds_prizepicks as prizepicks
+            pp_path = None
+            if prizepicks.prizepicks_enabled():
+                try:
+                    prizepicks.fetch_and_write_rows(output_path=prizepicks.DEFAULT_OUTPUT_PATH)
+                    pp_path = str(prizepicks.DEFAULT_OUTPUT_PATH)
+                except Exception as error:
+                    log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
             props_ok = run_odds_update(
                 dk_path=os.path.join(DATA_DIR, "draftkings.csv"),
                 fd_path=os.path.join(DATA_DIR, "fanduel.csv"),
                 stats_path=os.path.join(DATA_DIR, "season_stats.csv"),
+                pp_path=pp_path,
             )
         except Exception as e:
             log_status(logger, "WARN", "Props upsert failed", error=e)

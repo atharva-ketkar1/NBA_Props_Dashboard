@@ -1,5 +1,5 @@
 import { fetchAppJson } from './network';
-import { SimilarPlayerCandidate } from '../types';
+import { SimilarPlayerCandidate, SportsbookId } from '../types';
 
 type BootstrapResponse = {
   playersRows: any[];
@@ -39,14 +39,17 @@ type SimilarResponse = {
   similarCandidatesByPosition: SimilarPlayerCandidate[];
 };
 
-export function fetchDashboardBootstrap() {
-  return fetchAppJson<BootstrapResponse>('/api/bootstrap');
+export function fetchDashboardBootstrap(sportsbook: SportsbookId) {
+  return fetchAppJson<BootstrapResponse>('/api/bootstrap', {
+    sportsbook,
+  });
 }
 
-export function fetchDashboardHot(selectedDate: string | null, lineVersion: string) {
+export function fetchDashboardHot(selectedDate: string | null, lineVersion: string, sportsbook: SportsbookId) {
   return fetchAppJson<HotResponse>('/api/hot', {
     lineVersion,
     selectedDate,
+    sportsbook,
   });
 }
 
@@ -78,7 +81,7 @@ export function fetchDashboardArchive(token: string) {
 export function fetchDashboardSimilar(
   playerId: number,
   activeTab: string,
-  activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz',
+  activeSportsbook: SportsbookId,
   selectedGameDate?: string | null,
 ) {
   return fetchAppJson<SimilarResponse>('/api/similar', {

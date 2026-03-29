@@ -7,6 +7,7 @@ import psutil
 import logging
 from contextlib import redirect_stdout
 from datetime import datetime
+from pathlib import Path
 
 from utils.logging_utils import configure_logging, log_section, log_status
 
@@ -16,6 +17,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
 # Import modules
 from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
+from scrapers import fetch_odds_prizepicks as prizepicks
 from scrapers import season_stats_scrape as nba_stats
 from scrapers import gamelogs as gamelogs
 from scrapers import fetch_todays_games as schedule
@@ -74,6 +76,7 @@ os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 STATS_PATH = os.path.join(DATA_DIR, "season_stats.csv")
 DK_PATH = os.path.join(DATA_DIR, "draftkings.csv")
 FD_PATH = os.path.join(DATA_DIR, "fanduel.csv")
+PP_PATH = os.path.join(DATA_DIR, "prizepicks.csv")
 LOGS_PATH = os.path.join(DATA_DIR, "gamelogs_2025-26.csv")
 MASTER_PATH = os.path.join(DATA_DIR, "master_feed.json")
 GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json")
@@ -100,6 +103,14 @@ def run_fd():
     write_odds_csv(FD_PATH, data)
     df = pd.DataFrame(data or [])
     return f"FanDuel: {len(df)} rows"
+
+def run_pp():
+    if not prizepicks.prizepicks_enabled():
+        return "PrizePicks: disabled"
+
+    logger.info("Starting PrizePicks...")
+    rows, _diagnostics = prizepicks.fetch_and_write_rows(output_path=Path(PP_PATH))
+    return f"PrizePicks: {len(rows)} rows"
 
 def run_stats():
     logger.info("Starting Season Stats...")
@@ -237,6 +248,7 @@ def main():
                 ("Play Type Analysis", run_play_type_analysis),
                 ("DraftKings", run_dk),
                 ("FanDuel", run_fd),
+                ("PrizePicks", run_pp),
                 ("Season Stats", run_stats),
                 ("Game Logs", run_logs),
                 ("Boxscores", run_boxscores)
@@ -291,6 +303,7 @@ def main():
                     dk_path=DK_PATH,
                     fd_path=FD_PATH,
                     stats_path=STATS_PATH,
+                    pp_path=PP_PATH if prizepicks.prizepicks_enabled() else None,
                 ))
             except Exception as e:
                 log_status(logger, "WARN", "Props sync failed", error=e)

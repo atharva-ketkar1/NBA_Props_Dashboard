@@ -9,14 +9,14 @@ import { PlayTypeAnalysis } from './components/PlayTypeAnalysis';
 import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
-import { Player, PlayerPropsByDate, SimilarPlayerCandidate } from './types';
+import { Player, PlayerPropsByDate, SimilarPlayerCandidate, SportsbookId } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
 import { getDashboardDate } from './utils/dashboardDate';
 import {
   getResolvedPlayerGameDate,
   materializePlayerForGameDate,
   playerHasAnyProp,
-  playerHasPropForDate,
+  playerHasSportsbookPropForDate,
 } from './utils/propResolution';
 import { fetchApiJson } from './utils/network';
 import { rankSimilarPlayers } from './utils/similarPlayers';
@@ -46,6 +46,7 @@ const STAT_LABELS: Record<string, string> = {
 };
 
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
+const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
 
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   const parsed = Number(rawValue);
@@ -147,7 +148,7 @@ function App() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [selectedGameDate, setSelectedGameDate] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('Points');
-  const [activeSportsbook, setActiveSportsbook] = useState<'dk' | 'fd' | 'mgm' | 'cz'>('dk');
+  const [activeSportsbook, setActiveSportsbook] = useState<SportsbookId>(DEFAULT_SPORTSBOOK);
   const [customLineValue, setCustomLineValue] = useState<number | null>(null);
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
@@ -186,12 +187,22 @@ function App() {
     if (!currentPlayer || !currentPlayer.props) return;
 
     const statKey = STAT_LABELS[newTab] || 'PTS';
-    const hasProp = playerHasPropForDate(currentPlayer, statKey, resolvedSelectedGameDate);
+    const hasProp = playerHasSportsbookPropForDate(
+      currentPlayer,
+      statKey,
+      activeSportsbook,
+      resolvedSelectedGameDate,
+    );
 
     if (!hasProp) {
       // Find all players on the SAME TEAM as currentPlayer who HAVE the selected prop
       const teamPlayers = playersWithProps.filter(p => p.team === currentPlayer.team);
-      const eligiblePlayers = teamPlayers.filter(p => playerHasPropForDate(p, statKey, resolvedSelectedGameDate));
+      const eligiblePlayers = teamPlayers.filter((p) => playerHasSportsbookPropForDate(
+        p,
+        statKey,
+        activeSportsbook,
+        resolvedSelectedGameDate,
+      ));
 
       if (eligiblePlayers.length > 0) {
         // Sort eligible players by their season average for the requested stat, descending
@@ -207,7 +218,12 @@ function App() {
         // If NO ONE on the team has the prop, fall back to the old logic of finding a valid tab for the current player
         const firstValidTab = TAB_ORDER.find(tab => {
           const k = STAT_LABELS[tab];
-          return playerHasPropForDate(currentPlayer, k, resolvedSelectedGameDate);
+          return playerHasSportsbookPropForDate(
+            currentPlayer,
+            k,
+            activeSportsbook,
+            resolvedSelectedGameDate,
+          );
         });
         if (firstValidTab) {
           setActiveTab(firstValidTab);
@@ -300,7 +316,7 @@ function App() {
             return;
           }
 
-          const snapshot = await fetchDashboardBootstrap();
+          const snapshot = await fetchDashboardBootstrap(DEFAULT_SPORTSBOOK);
 
           if (cancelled) return;
 
@@ -326,7 +342,7 @@ function App() {
                 position: p.position,
                 stats: p.stats,
                 props: p.props,
-                props_by_date: p.props_by_date,
+                props_by_date: mergePropsByDateMaps(existing?.props_by_date, p.props_by_date),
                 play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
                 intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
                 detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
@@ -398,6 +414,7 @@ function App() {
         const hotSnapshot = await fetchDashboardHot(
           resolvedSelectedGameDate ?? selectedGameDate,
           lineMovementVersionRef.current,
+          activeSportsbook,
         );
 
         if (cancelled) return;
@@ -430,7 +447,7 @@ function App() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [USE_DB, HOT_DATA_POLL_MS, isPageVisible, loading, resolvedSelectedGameDate, selectedGameDate]);
+  }, [USE_DB, HOT_DATA_POLL_MS, isPageVisible, loading, resolvedSelectedGameDate, selectedGameDate, activeSportsbook]);
 
 
   const [isInitialized, setIsInitialized] = useState(false);

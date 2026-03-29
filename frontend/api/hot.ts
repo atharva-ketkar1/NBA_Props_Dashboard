@@ -12,6 +12,7 @@ import {
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
+const SUPPORTED_SPORTSBOOKS = new Set(['dk', 'fd', 'mgm', 'cz', 'pp']);
 
 async function handleGet(request: Request) {
   const crossSiteResponse = rejectCrossSiteBrowserRequest(request);
@@ -41,9 +42,18 @@ async function handleGet(request: Request) {
   const requestUrl = new URL(request.url);
   const selectedDate = parseIsoDate(requestUrl.searchParams.get('selectedDate'));
   const lineVersion = requestUrl.searchParams.get('lineVersion') ?? '';
+  const sportsbook = requestUrl.searchParams.get('sportsbook') ?? 'dk';
+
+  if (!SUPPORTED_SPORTSBOOKS.has(sportsbook)) {
+    return errorResponse(400, 'A valid sportsbook is required.');
+  }
 
   try {
-    const payload = await fetchHotPayload(selectedDate, lineVersion);
+    const payload = await fetchHotPayload(
+      selectedDate,
+      lineVersion,
+      sportsbook as 'dk' | 'fd' | 'mgm' | 'cz' | 'pp',
+    );
     return jsonResponse(payload, {
       cache: {
         browserMaxAge: 0,

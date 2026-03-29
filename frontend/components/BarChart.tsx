@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { Player, Game } from '../types';
+import { Player, Game, SportsbookId } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
@@ -19,7 +19,7 @@ const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 interface BarChartProps {
     player?: Player;
     activeTab: string;
-    activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
+    activeSportsbook: SportsbookId;
     customLine?: number | null;
     onCustomLineChange?: (line: number | null) => void;
     activeFilterOverlay?: string | null;

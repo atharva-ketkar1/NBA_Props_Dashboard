@@ -1,4 +1,5 @@
 import React from 'react';
+import { SportsbookId } from '../types';
 import { ASSETS_BASE } from '../utils/config';
 
 // Represents the data structure parsed by BarChart when hovering over a game
@@ -8,7 +9,7 @@ export interface HoveredGameData {
     y: number;
     lineValue: number;
     statKey: string;
-    activeSportsbook: string;
+    activeSportsbook: SportsbookId;
 }
 
 interface TooltipProps {
@@ -38,16 +39,22 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
     let U_ODDS = 'N/A';
     let hasHistoricalData = false;
     let isFallback = false;
+    const isPrizePicks = activeSportsbook === 'pp';
 
     // Sportsbook logo resolution for the header
     let sbLogo = '';
     if (activeSportsbook === 'dk') sbLogo = `/assets/sportsbook_logos/draftkings.webp`;
     else if (activeSportsbook === 'fd') sbLogo = `/assets/sportsbook_logos/fanduel.webp`;
+    else if (activeSportsbook === 'pp') sbLogo = `/assets/sportsbook_logos/prizepicks.webp`;
 
     const logoSrc = `${ASSETS_BASE}${sbLogo}`;
 
+    if (isPrizePicks) {
+        displayLine = lineValue;
+    }
+
     // Extract historical odds if available
-    if (player && player.historical_odds && game.GAME_DATE) {
+    if (!isPrizePicks && player && player.historical_odds && game.GAME_DATE) {
         // Find the record for this exact date
         const dateRecord = player.historical_odds[game.GAME_DATE];
         if (dateRecord) {
@@ -301,7 +308,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                             <span className="text-white uppercase">{activeSportsbook}</span>
                         )}
                         <span className="text-white relative">
-                            CL {displayLine}
+                            {isPrizePicks ? `Line ${displayLine}` : `CL ${displayLine}`}
                             {isFallback && <span className="text-yellow-400 align-top text-[10px] ml-[1px] absolute -top-1">*</span>}
                         </span>
                         {hasHistoricalData && (
@@ -311,6 +318,11 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                             </>
                         )}
                     </div>
+                    {isPrizePicks && (
+                        <div className="text-[9px] text-gray-400 font-medium -mt-1 opacity-80">
+                            PrizePicks closing-line history unavailable in v1.
+                        </div>
+                    )}
                     {isFallback && (
                         <div className="text-[9px] text-yellow-400 font-medium -mt-1 opacity-80">
                             * Fallback Estimate

@@ -37,12 +37,21 @@ def run_intraday_snapshot(label="intraday"):
             # Upsert fresh props to Supabase (non-fatal)
             try:
                 from utils.upsert_props import run_odds_update
+                from scrapers import fetch_odds_prizepicks as prizepicks
                 # Derive paths relative to this file — never import from run_pipeline.py
                 _data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "current")
+                pp_path = None
+                if prizepicks.prizepicks_enabled():
+                    try:
+                        prizepicks.fetch_and_write_rows(output_path=prizepicks.DEFAULT_OUTPUT_PATH)
+                        pp_path = str(prizepicks.DEFAULT_OUTPUT_PATH)
+                    except Exception as error:
+                        log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
                 props_ok = run_odds_update(
                     dk_path=os.path.join(_data_dir, "draftkings.csv"),
                     fd_path=os.path.join(_data_dir, "fanduel.csv"),
                     stats_path=os.path.join(_data_dir, "season_stats.csv"),
+                    pp_path=pp_path,
                 )
                 
                 # Also upsert line movements blob to Supabase

@@ -89,13 +89,15 @@ export interface PlayerStats {
 
 export interface PropLine {
   line: number;
-  over: number;
-  under: number;
-  implied?: number;
+  over: number | null;
+  under: number | null;
+  implied?: number | null;
   game_date?: string;
   game_id?: string;
   updated_at?: string;
 }
+
+export type SportsbookId = 'dk' | 'fd' | 'mgm' | 'cz' | 'pp';
 
 export interface PlayerProps {
   [statType: string]: {

@@ -4,10 +4,11 @@ import type {
   SimilarPlayerGame,
   SimilarPlayersMode,
   SimilarPlayersSummary,
+  SportsbookId,
 } from '../types.js';
-import { getPreferredSportsbookProp, playerHasPropForDate } from './propResolution.js';
+import { getSportsbookProp, playerHasSportsbookPropForDate } from './propResolution.js';
 
-type SupportedSportsbook = 'dk' | 'fd' | 'mgm' | 'cz';
+type SupportedSportsbook = SportsbookId;
 type PositionBucket = 'guard' | 'wing' | 'big' | 'unknown';
 
 type SimilarStatContext = {
@@ -310,10 +311,6 @@ function getHistoricalGameValue(game: Record<string, any>, key: string) {
   return getStatValue(game, key);
 }
 
-function getPreferredSportsbooks(activeSportsbook: SupportedSportsbook) {
-  return Array.from(new Set([activeSportsbook, 'dk', 'fd', 'mgm', 'cz']));
-}
-
 function formatShortDate(gameDate?: string | null) {
   if (!gameDate) return 'N/A';
   const parsed = new Date(`${gameDate}T12:00:00`);
@@ -327,6 +324,7 @@ function getHistoricalLine(
   propKey: string,
   activeSportsbook: SupportedSportsbook,
 ) {
+  if (activeSportsbook === 'pp') return null;
   if (!gameDate || !player.historical_odds) return null;
 
   const dateRecord = player.historical_odds[gameDate];
@@ -339,8 +337,6 @@ function getHistoricalLine(
 
   const preferredBooks = [
     HISTORICAL_BOOK_KEY_MAP[activeSportsbook] ?? activeSportsbook,
-    'draftkings',
-    'fanduel',
     ...Object.keys(statProps),
   ];
 
@@ -442,8 +438,7 @@ export function rankSimilarPlayers({
   const context = getStatContext(activeTab);
   if (!context.propKey) return [];
 
-  const preferredBooks = getPreferredSportsbooks(activeSportsbook);
-  const selectedProp = getPreferredSportsbookProp(player, context.propKey, selectedGameDate, preferredBooks);
+  const selectedProp = getSportsbookProp(player, context.propKey, activeSportsbook, selectedGameDate);
   const selectedLine = toNumber(selectedProp?.prop?.line);
 
   const selectedPrimary = getStatValue(player.stats, context.rankingKey);
@@ -455,9 +450,14 @@ export function rankSimilarPlayers({
   return (players ?? [])
     .filter((candidate) => candidate.id !== player.id)
     .filter((candidate) => positionsAreCompatible(player.position, candidate.position))
-    .filter((candidate) => mode === 'position' || playerHasPropForDate(candidate, context.propKey!, selectedGameDate))
+    .filter((candidate) => mode === 'position' || playerHasSportsbookPropForDate(
+      candidate,
+      context.propKey!,
+      activeSportsbook,
+      selectedGameDate,
+    ))
     .map((candidate) => {
-      const candidateProp = getPreferredSportsbookProp(candidate, context.propKey!, selectedGameDate, preferredBooks);
+      const candidateProp = getSportsbookProp(candidate, context.propKey!, activeSportsbook, selectedGameDate);
       const candidateLine = toNumber(candidateProp?.prop?.line);
       if (mode === 'prop' && candidateLine === null) return null;
 
@@ -539,9 +539,8 @@ export function buildSimilarPlayersDataset({
   }
 
   const context = getStatContext(activeTab);
-  const preferredBooks = getPreferredSportsbooks(activeSportsbook);
   const activeProp = context.propKey
-    ? getPreferredSportsbookProp(player, context.propKey, player.active_game_date ?? null, preferredBooks)
+    ? getSportsbookProp(player, context.propKey, activeSportsbook, player.active_game_date ?? null)
     : null;
   const currentLine = toNumber(activeProp?.prop?.line);
   const lineWindow = getLineWindow(currentLine);

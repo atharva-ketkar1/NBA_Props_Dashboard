@@ -1,10 +1,12 @@
-import type { Player, PlayerProps, PlayerPropsByDate, PropLine } from '../types.js';
+import type { Player, PlayerProps, PlayerPropsByDate, PropLine, SportsbookId } from '../types.js';
 import { getDashboardDate } from './dashboardDate.js';
 
 const UNDATED_PROP_KEY = '__undated__';
 const INTRADAY_SPORTSBOOK_MAP: Record<string, string> = {
   draftkings: 'dk',
   fanduel: 'fd',
+  pp: 'pp',
+  prizepicks: 'pp',
   dk: 'dk',
   fd: 'fd',
 };
@@ -123,6 +125,33 @@ export function playerHasPropForDate(player: Player, statType: string, gameDate?
   if (!sportsbookMap) return false;
 
   return Object.values(sportsbookMap).some((propBucket) => !!resolvePropBucket(propBucket, gameDate));
+}
+
+export function getSportsbookProp(
+  player: Player,
+  statType: string,
+  sportsbook: SportsbookId | string,
+  gameDate?: string | null,
+) {
+  const propsByDate = getPropsByDate(player);
+  const prop = resolvePropBucket(propsByDate[statType]?.[sportsbook], gameDate);
+  if (!prop) {
+    return null;
+  }
+
+  return {
+    book: sportsbook,
+    prop,
+  };
+}
+
+export function playerHasSportsbookPropForDate(
+  player: Player,
+  statType: string,
+  sportsbook: SportsbookId | string,
+  gameDate?: string | null,
+) {
+  return Boolean(getSportsbookProp(player, statType, sportsbook, gameDate));
 }
 
 export function getPreferredSportsbookProp(

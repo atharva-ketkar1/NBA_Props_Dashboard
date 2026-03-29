@@ -14,7 +14,7 @@ import {
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-const SUPPORTED_SPORTSBOOKS = new Set(['dk', 'fd', 'mgm', 'cz']);
+const SUPPORTED_SPORTSBOOKS = new Set(['dk', 'fd', 'mgm', 'cz', 'pp']);
 
 async function handleGet(request: Request) {
   const crossSiteResponse = rejectCrossSiteBrowserRequest(request);
@@ -57,7 +57,7 @@ async function handleGet(request: Request) {
 
   try {
     const payload = await fetchSimilarCandidatesPayload({
-      activeSportsbook: activeSportsbook as 'dk' | 'fd' | 'mgm' | 'cz',
+      activeSportsbook: activeSportsbook as 'dk' | 'fd' | 'mgm' | 'cz' | 'pp',
       activeTab,
       playerId,
       selectedGameDate,
