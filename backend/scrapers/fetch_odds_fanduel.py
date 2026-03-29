@@ -156,7 +156,7 @@ def extract_event_game_date(event):
     return ''
 
 def fetch_odds():
-    logger.info("Starting FanDuel Odds Fetch...")
+    logger.info("[RUN] FanDuel odds fetch")
     main_page = get_nba_main_page_data()
     if not main_page: return []
 
@@ -224,7 +224,7 @@ def fetch_odds():
                 }
                 all_props.append(prop_entry)
     
-    logger.info("Finished. Collected %d props.", len(all_props))
+    logger.info("[OK] FanDuel odds fetch complete | props=%d", len(all_props))
     return all_props
 
 if __name__ == "__main__":

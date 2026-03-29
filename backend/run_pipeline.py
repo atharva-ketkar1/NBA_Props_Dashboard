@@ -8,6 +8,8 @@ import logging
 from contextlib import redirect_stdout
 from datetime import datetime
 
+from utils.logging_utils import configure_logging, log_section, log_status
+
 # Add path to scrapers
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
 
@@ -34,10 +36,7 @@ stdout_logger = logging.getLogger("PipelineStdout")
 
 
 def ensure_logging_configured():
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    configure_logging()
 
 
 class LoggerWriter:
@@ -210,7 +209,7 @@ def run_boxscores():
 def log_memory(stage_name):
     process = psutil.Process(os.getpid())
     mem_mb = process.memory_info().rss / (1024 * 1024)
-    logger.info("[%s] Memory Usage: %.1f MB", stage_name, mem_mb)
+    log_status(logger, "INFO", "Memory usage", stage=stage_name, rss_mb=f"{mem_mb:.1f}")
 
 def main():
     ensure_logging_configured()
@@ -222,7 +221,7 @@ def main():
 
     try:
         with redirect_stdout(stdout_capture):
-            logger.info("PIPELINE STARTED: %s", start_str)
+            log_section(logger, "Daily pipeline", started_at=start_str)
             log_memory("START")
 
             # STEP 1: Run Scrapers (Sequential - Memory Safe)
@@ -247,10 +246,11 @@ def main():
             
             for name, func in scrapers:
                 try:
+                    log_status(logger, "RUN", "Scraper started", step=name)
                     result = func()
-                    logger.info("%s", result)
+                    log_status(logger, "OK", str(result), step=name)
                 except Exception as e:
-                    logger.error("Scraper Failed [%s]: %s", name, e)
+                    log_status(logger, "FAIL", "Scraper failed", step=name, error=e)
                     if name in critical_scrapers:
                         critical_failures.append(f"{name}: {e}")
                 finally:
@@ -258,7 +258,7 @@ def main():
                     log_memory(f"After {name}")
 
             # STEP 2: Run Aggregator
-            logger.info("Running Aggregator...")
+            log_status(logger, "RUN", "Aggregator started")
             aggregator.run_aggregation(
                 stats_path=STATS_PATH,
                 dk_path=DK_PATH,
@@ -277,12 +277,12 @@ def main():
             )
 
             total_time = time.time() - start_time
-            logger.info("PIPELINE COMPLETE in %.2f seconds", total_time)
+            log_status(logger, "OK", "Pipeline complete", duration_s=f"{total_time:.1f}")
 
             # STEP 3: Upsert props to Supabase (non-fatal)
             # The players table was already upserted inside aggregator.run_aggregation().
             # This call pushes the resolved prop lines (DK + FD) into player_props.
-            logger.info("Upserting props to Supabase...")
+            log_status(logger, "RUN", "Supabase sync started")
             props_ok = True
             historical_sync_ok = True
             try:
@@ -293,7 +293,7 @@ def main():
                     stats_path=STATS_PATH,
                 ))
             except Exception as e:
-                logger.warning("props upsert failed (non-fatal): %s", e)
+                log_status(logger, "WARN", "Props sync failed", error=e)
                 props_ok = False
 
             try:
@@ -302,13 +302,24 @@ def main():
                     os.path.join(BASE_DIR, "data", "archive", "historical_odds.json"),
                 ))
             except Exception as e:
-                logger.warning("historical odds reconciliation failed (non-fatal): %s", e)
+                log_status(logger, "WARN", "Historical odds sync failed", error=e)
                 historical_sync_ok = False
 
+            if props_ok and historical_sync_ok:
+                log_status(logger, "OK", "Supabase sync complete")
+            else:
+                log_status(
+                    logger,
+                    "WARN",
+                    "Supabase sync incomplete",
+                    props_ok=props_ok,
+                    historical_ok=historical_sync_ok,
+                )
+
             if critical_failures:
-                logger.warning("Critical scraper failures detected:")
+                log_status(logger, "WARN", "Critical scraper failures detected", count=len(critical_failures))
                 for failure in critical_failures:
-                    logger.warning(" - %s", failure)
+                    logger.warning("  %s", failure)
 
             return not critical_failures
     finally:

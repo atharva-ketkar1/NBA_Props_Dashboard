@@ -21,6 +21,7 @@ import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import load_schedule_rows, resolve_prop_game_date
 from utils.supabase_client import get_supabase_client
@@ -223,11 +224,13 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
         return False
 
     if resolved_from_schedule:
-        logger.info("Resolved %d prop rows to a game_date via schedule fallback.", resolved_from_schedule)
+        log_status(logger, "INFO", "Resolved prop rows via schedule fallback", rows=resolved_from_schedule)
     if unresolved_missing_dates:
-        logger.warning(
-            "%d prop rows were still missing a resolvable game_date and fell back to the run date.",
-            unresolved_missing_dates,
+        log_status(
+            logger,
+            "WARN",
+            "Prop rows fell back to the run date",
+            rows=unresolved_missing_dates,
         )
 
     sync_state = _load_sync_state()
@@ -241,22 +244,20 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
             changed_rows.append(row)
 
     if not changed_rows:
-        logger.info(
-            "Skipping player_props sync for %s; %d rows are unchanged from the last successful upload.",
-            game_date,
-            len(rows),
-        )
+        log_status(logger, "SKIP", "player_props sync unchanged", date=game_date, rows=len(rows))
         try:
             _save_sync_state(next_sync_state)
         except Exception as exc:
             logger.warning("Could not persist player_props sync state: %s", exc)
         return True
 
-    logger.info(
-        "Upserting %d changed player_props rows (%d prepared) for %s...",
-        len(changed_rows),
-        len(rows),
-        game_date,
+    log_status(
+        logger,
+        "RUN",
+        "player_props sync",
+        changed=len(changed_rows),
+        prepared=len(rows),
+        date=game_date,
     )
 
     # --- Batch upsert in chunks of 100 to avoid request size limits ---
@@ -278,7 +279,14 @@ def run_odds_update(dk_path: str, fd_path: str, stats_path: str, game_date: str 
             _save_sync_state(next_sync_state)
         except Exception as exc:
             logger.warning("Could not persist player_props sync state: %s", exc)
-        logger.info("player_props upsert complete.")
+        log_status(
+            logger,
+            "OK",
+            "player_props sync complete",
+            changed=len(changed_rows),
+            prepared=len(rows),
+            date=game_date,
+        )
     return all_chunks_ok
 
 

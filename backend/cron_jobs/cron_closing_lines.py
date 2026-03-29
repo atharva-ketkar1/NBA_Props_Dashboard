@@ -13,6 +13,7 @@ import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scrapers'))
+from utils.logging_utils import configure_logging, log_section, log_status
 from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
 from utils.player_matcher import PlayerMatcher
@@ -24,7 +25,7 @@ from utils.upsert_market_history import (
     upsert_line_movements_from_file,
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+configure_logging()
 logger = logging.getLogger("CronClosingLines")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -141,7 +142,7 @@ def load_master_feed_maps():
                     if pid and team:
                         id_to_team[pid] = team
         except Exception as e:
-            logger.error(f"Error loading master feed for IDs: {e}")
+            log_status(logger, "FAIL", "Could not load master feed IDs", error=e)
     return PlayerMatcher(players_metadata), id_to_team
 
 
@@ -151,11 +152,11 @@ def persist_raw_odds_csvs(dk_data, fd_data):
         write_odds_csv(os.path.join(DATA_DIR, "draftkings.csv"), dk_data)
         write_odds_csv(os.path.join(DATA_DIR, "fanduel.csv"), fd_data)
     except Exception as e:
-        logger.warning(f"Unable to persist raw odds CSVs: {e}")
+        log_status(logger, "WARN", "Unable to persist raw odds CSVs", error=e)
 
 def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
-    logger.info("Executing odds scrapers...")
+    log_status(logger, "RUN", "Odds scrapers")
     
     dk_data = []
     fd_data = []
@@ -168,17 +169,17 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         try:
             dk_data = f1.result(timeout=120) 
         except concurrent.futures.TimeoutError:
-            logger.error("DraftKings scraper timed out (Infinite block prevented).")
+            log_status(logger, "FAIL", "DraftKings scraper timed out")
         except Exception as e:
-            logger.error(f"DraftKings scraper crashed: {e}")
+            log_status(logger, "FAIL", "DraftKings scraper crashed", error=e)
             
         # --- FanDuel Safeguard ---
         try:
             fd_data = f2.result(timeout=120)
         except concurrent.futures.TimeoutError:
-            logger.error("FanDuel scraper timed out (Infinite block prevented).")
+            log_status(logger, "FAIL", "FanDuel scraper timed out")
         except Exception as e:
-            logger.error(f"FanDuel scraper crashed: {e}")
+            log_status(logger, "FAIL", "FanDuel scraper crashed", error=e)
             
     if not dk_data: dk_data = []
     if not fd_data: fd_data = []
@@ -192,7 +193,7 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             with open(SCHEDULE_PATH, "r") as f:
                 schedule = json.load(f)
         except Exception as e:
-            logger.warning(f"Unable to load schedule context while shaping odds: {e}")
+            log_status(logger, "WARN", "Unable to load schedule context while shaping odds", error=e)
 
     schedule_maps = build_schedule_maps(schedule)
     allowed_game_ids = {str(gid) for gid in (allowed_game_ids or []) if gid}
@@ -317,21 +318,27 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         }
         
     if skipped_schedule_mismatch:
-        logger.info(
-            "Skipped %d odds rows because they matched a non-active scheduled game for that team.",
-            skipped_schedule_mismatch,
+        log_status(
+            logger,
+            "SKIP",
+            "Skipped non-active scheduled-game odds rows",
+            skipped=skipped_schedule_mismatch,
         )
     if skipped_non_target_game:
-        logger.info(
-            "Skipped %d odds rows because they were outside the targeted closing-line games.",
-            skipped_non_target_game,
+        log_status(
+            logger,
+            "SKIP",
+            "Skipped non-target closing-game odds rows",
+            skipped=skipped_non_target_game,
         )
 
-    logger.info(
-        "Odds scrape complete: DK=%d rows, FD=%d rows, mapped_players=%d",
-        len(dk_data),
-        len(fd_data),
-        len(players_dict),
+    log_status(
+        logger,
+        "OK",
+        "Odds scrape complete",
+        dk_rows=len(dk_data),
+        fd_rows=len(fd_data),
+        mapped_players=len(players_dict),
     )
 
     return players_dict
@@ -351,9 +358,9 @@ def save_cron_state(state):
         json.dump(state, f, indent=2)
 
 def main(dry_run=False):
-    logger.info("Initializing Cron Closing Lines Check...")
     now = get_et_now()
     today_date = now.strftime("%Y-%m-%d")
+    log_section(logger, "Closing line sweep", date=today_date, dry_run=dry_run)
     
     # Load state
     state = load_cron_state()
@@ -363,14 +370,14 @@ def main(dry_run=False):
     
     # Read schedule
     if not os.path.exists(SCHEDULE_PATH):
-        logger.error(f"Schedule file not found: {SCHEDULE_PATH}")
+        log_status(logger, "FAIL", "Schedule file not found", path=SCHEDULE_PATH)
         return
         
     try:
         with open(SCHEDULE_PATH, 'r') as f:
             sched = json.load(f)
     except Exception as e:
-        logger.error(f"Could not load schedule JSON: {e}")
+        log_status(logger, "FAIL", "Could not load schedule JSON", error=e)
         return
         
     games_to_scrape = []
@@ -407,13 +414,19 @@ def main(dry_run=False):
             pass
 
     if not games_to_scrape:
-        logger.info("No games within the 10-minute closing window.")
+        log_status(logger, "SKIP", "No games within the closing window")
         return False
         
-    logger.info(f"Triggering closing lines scrape for games: {[g['matchup'] for g in games_to_scrape]}")
+    log_status(
+        logger,
+        "RUN",
+        "Triggering closing lines scrape",
+        games=len(games_to_scrape),
+        matchups=[g["matchup"] for g in games_to_scrape],
+    )
     
     if dry_run:
-        logger.info("DRY RUN: Exiting before actual scrape.")
+        log_status(logger, "OK", "Dry run complete")
         return True
         
     # Run the expensive logic
@@ -423,7 +436,7 @@ def main(dry_run=False):
             allowed_game_ids=[g["game_id"] for g in games_to_scrape],
         )
         if not players_data:
-            logger.warning("Closing lines scrape produced no mapped players for the targeted games.")
+            log_status(logger, "WARN", "Closing lines scrape produced no mapped players")
             return False
         sm = SnapshotManager()
                 
@@ -446,13 +459,13 @@ def main(dry_run=False):
                 stats_path=os.path.join(DATA_DIR, "season_stats.csv"),
             )
         except Exception as e:
-            logger.warning(f"Props upsert failed (non-fatal): {e}")
+            log_status(logger, "WARN", "Props upsert failed", error=e)
             props_ok = False
 
         try:
             line_movements_ok = upsert_line_movements_from_file(os.path.join(DATA_DIR, "line_movements_today.json"))
         except Exception as e:
-            logger.warning(f"Line movements upsert failed (non-fatal): {e}")
+            log_status(logger, "WARN", "Line movements upsert failed", error=e)
             line_movements_ok = False
 
         try:
@@ -461,13 +474,17 @@ def main(dry_run=False):
             for archive_date in archive_dates:
                 historical_ok = upsert_historical_odds_from_file(historical_path, archive_date) and historical_ok
         except Exception as e:
-            logger.warning(f"Historical odds upsert failed (non-fatal): {e}")
+            log_status(logger, "WARN", "Historical odds upsert failed", error=e)
             historical_ok = False
 
         if not props_ok or not line_movements_ok or not historical_ok:
-            logger.warning(
-                "Closing lines DB sync was incomplete "
-                f"(props_ok={props_ok}, line_movements_ok={line_movements_ok}, historical_ok={historical_ok})."
+            log_status(
+                logger,
+                "WARN",
+                "Closing lines DB sync incomplete",
+                props_ok=props_ok,
+                line_movements_ok=line_movements_ok,
+                historical_ok=historical_ok,
             )
             return False
 
@@ -476,11 +493,11 @@ def main(dry_run=False):
                 state["scraped_games"].append(g["game_id"])
 
         save_cron_state(state)
-        logger.info("Closing sweeps complete!")
+        log_status(logger, "OK", "Closing line sweep complete", games=len(games_to_scrape))
         return True
 
     except Exception as e:
-        logger.error(f"Failed to execute scrape: {e}")
+        log_status(logger, "FAIL", "Failed to execute closing line scrape", error=e)
         return False
 
 if __name__ == "__main__":

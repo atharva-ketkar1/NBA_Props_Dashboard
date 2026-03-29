@@ -207,7 +207,7 @@ def parse_dk_data(data, prop_type_key):
     return parsed
 
 def fetch_dk_odds():
-    logger.info("Starting DraftKings Odds Fetch...")
+    logger.info("[RUN] DraftKings odds fetch")
     all_props = []
     
     for prop_key, cat_id in PLAYER_PROP_CATEGORIES.items():
@@ -218,7 +218,7 @@ def fetch_dk_odds():
         # print(f"  Found {len(props)} props for '{prop_key}'")
         all_props.extend(props)
     
-    logger.info("Finished DK. Collected %d total props.", len(all_props))
+    logger.info("[OK] DraftKings odds fetch complete | props=%d", len(all_props))
 
     # --- DEBUG: Show user the formatted output with PLUS SIGNS ---
     if len(all_props) > 10:

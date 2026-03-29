@@ -43,7 +43,7 @@ docs/deployment/
 
 backend/scrapers/archive/
 /docs/security/
-/supabase/
+/supabase/*
 /vercel.json
 
 .vercel

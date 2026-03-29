@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 
 from dotenv import load_dotenv
+from utils.logging_utils import log_status
 from utils.supabase_client import get_supabase_client
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
@@ -188,7 +189,7 @@ def upsert_line_movements_from_file(line_movements_path: str):
             changed_rows.append(row)
 
     if not changed_rows:
-        logger.info("Skipping line_movements sync; uploaded payload is unchanged.")
+        log_status(logger, "SKIP", "line_movements sync unchanged", dates=len(rows))
         try:
             _save_sync_state(LINE_MOVEMENT_SYNC_STATE_PATH, next_sync_state)
         except Exception as exc:
@@ -206,6 +207,7 @@ def upsert_line_movements_from_file(line_movements_path: str):
             _save_sync_state(LINE_MOVEMENT_SYNC_STATE_PATH, next_sync_state)
         except Exception as exc:
             logger.warning("Could not persist line_movements sync state: %s", exc)
+        log_status(logger, "OK", "line_movements sync complete", dates=len(changed_rows))
     return success
 
 
@@ -247,23 +249,27 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
         )
 
     if not rows:
-        logger.info("No historical odds rows prepared for %s", game_date)
+        log_status(logger, "SKIP", "No historical odds rows prepared", date=game_date)
         return False
 
     if skipped_keys:
-        logger.warning(
-            "Skipping %d historical odds rows with unresolved player ids for %s: %s",
-            len(skipped_keys),
-            game_date,
-            ", ".join(skipped_keys[:10]),
+        log_status(
+            logger,
+            "WARN",
+            "Skipped historical odds rows with unresolved player ids",
+            skipped=len(skipped_keys),
+            date=game_date,
         )
 
-    return _batched_upsert(
+    success = _batched_upsert(
         "historical_odds",
         rows,
         on_conflict="player_id,game_date",
         context=f"historical_odds[{game_date}]",
     )
+    if success:
+        log_status(logger, "OK", "historical_odds sync complete", date=game_date, rows=len(rows))
+    return success
 
 
 def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: int = 5):

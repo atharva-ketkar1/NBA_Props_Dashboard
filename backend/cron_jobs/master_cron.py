@@ -10,12 +10,15 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("MasterCron")
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+from utils.logging_utils import configure_logging, log_section, log_status
+
+configure_logging()
+logger = logging.getLogger("MasterCron")
+
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 DATA_DIR = os.path.join(BASE_DIR, "data", "current")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
@@ -136,7 +139,7 @@ def run_pipeline_if_needed(now, state, dry_run=False):
     # Check if we should run it
     if now.hour >= 6:
         if state.get("last_pipeline_date") != today_str:
-            logger.info("Priority 1 Match: Running 6:00 AM Full Pipeline.")
+            log_section(logger, "Priority 1 - Full pipeline", date=today_str, dry_run=dry_run)
             pipeline_ok = True
             if not dry_run:
                 try:
@@ -146,7 +149,7 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                     if pipeline_result is False:
                         pipeline_ok = False
                 except Exception as e:
-                    logger.error(f"Pipeline failed: {e}")
+                    log_status(logger, "FAIL", "Pipeline failed", error=e)
                     pipeline_ok = False
 
                 # Purge stale player_props and line_movements rows (rolling 3-day window)
@@ -158,9 +161,9 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                         sb = get_supabase_client()
                         sb.table("player_props").delete().lt("game_date", cutoff).execute()
                         sb.table("line_movements").delete().lt("game_date", cutoff).execute()
-                        logger.info(f"Pruned player_props and line_movements rows older than {cutoff}")
+                        log_status(logger, "OK", "Pruned stale props history", cutoff=cutoff)
                     except Exception as e:
-                        logger.warning(f"stale DB cleanup failed (non-fatal): {e}")
+                        log_status(logger, "WARN", "Stale DB cleanup failed", error=e)
 
             if not pipeline_ok:
                 return False
@@ -219,7 +222,13 @@ def check_closing_lines(now, state, dry_run=False):
             pass
             
     if games_to_scrape:
-        logger.info(f"Priority 2 Match: Running Closing Lines for {[g['matchup'] for g in games_to_scrape]}")
+        log_section(
+            logger,
+            "Priority 2 - Closing lines",
+            games=len(games_to_scrape),
+            matchups=[g["matchup"] for g in games_to_scrape],
+            dry_run=dry_run,
+        )
         closing_ok = True
         if not dry_run:
             try:
@@ -230,7 +239,7 @@ def check_closing_lines(now, state, dry_run=False):
                 # Since cron_closing_lines.main() manages its own state, it's safer to just call it.
                 closing_ok = bool(cron_closing_lines.main(dry_run=False))
             except Exception as e:
-                logger.error(f"Closing lines failed: {e}")
+                log_status(logger, "FAIL", "Closing lines failed", error=e)
                 closing_ok = False
                 
         if not closing_ok:
@@ -253,7 +262,7 @@ def run_intraday_if_needed(now, state, dry_run=False):
     interval_seconds = get_intraday_interval_seconds()
 
     if current_timestamp - last_run >= interval_seconds:
-        logger.info("Priority 3 Match: Running Intraday Line Movement.")
+        log_section(logger, "Priority 3 - Intraday line movement", every_s=interval_seconds, dry_run=dry_run)
         intraday_ok = True
         if not dry_run:
             try:
@@ -261,7 +270,7 @@ def run_intraday_if_needed(now, state, dry_run=False):
                 import cron_line_movement
                 intraday_ok = bool(cron_line_movement.run_intraday_snapshot())
             except Exception as e:
-                logger.error(f"Intraday scrape failed: {e}")
+                log_status(logger, "FAIL", "Intraday scrape failed", error=e)
                 intraday_ok = False
 
         if not intraday_ok:
@@ -285,19 +294,19 @@ def check_mutual_exclusion():
             lock_pid = lock_info.get("pid")
 
             if lock_pid and _is_pid_running(lock_pid):
-                logger.warning("Another instance of Master Cron is currently running (pid=%s). Exiting.", lock_pid)
+                log_status(logger, "WARN", "Another master cron instance is active", pid=lock_pid)
                 return False
 
             if lock_pid and not _is_pid_running(lock_pid):
-                logger.warning("Found orphaned lock file for dead pid=%s. Removing it and proceeding.", lock_pid)
+                log_status(logger, "WARN", "Removing orphaned cron lock", pid=lock_pid)
                 os.remove(LOCK_FILE)
             else:
                 mtime = os.path.getmtime(LOCK_FILE)
                 if time.time() - mtime > LOCK_STALE_SECONDS:
-                    logger.warning("Found stale lock file. Removing it and proceeding.")
+                    log_status(logger, "WARN", "Removing stale cron lock")
                     os.remove(LOCK_FILE)
                 else:
-                    logger.warning("Another instance of Master Cron is currently running. Exiting.")
+                    log_status(logger, "WARN", "Another master cron instance is active")
                     return False
         except Exception:
             return False
@@ -312,7 +321,7 @@ def check_mutual_exclusion():
             _LOCK_REGISTERED = True
         return True
     except Exception as e:
-        logger.error(f"Could not create lock file: {e}")
+        log_status(logger, "FAIL", "Could not create cron lock", error=e)
         return False
 
 def release_lock():
