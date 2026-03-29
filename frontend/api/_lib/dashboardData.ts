@@ -25,6 +25,9 @@ const DEFAULT_PROPS_CACHE_MS = 30_000;
 const DEFAULT_GAMES_CACHE_MS = 60_000;
 const DEFAULT_LINE_META_CACHE_MS = 15_000;
 const DEFAULT_LINE_ROWS_CACHE_MS = 30_000;
+const DEFAULT_PLAYER_DETAIL_CACHE_MS = 5 * 60_000;
+const DEFAULT_ARCHIVE_CACHE_MS = 60 * 60_000;
+const DEFAULT_SIMILAR_CACHE_MS = 60_000;
 
 declare global {
   // eslint-disable-next-line no-var
@@ -64,6 +67,9 @@ const PROPS_CACHE_MS = getServerNumberEnv('DASHBOARD_PROPS_CACHE_MS', DEFAULT_PR
 const GAMES_CACHE_MS = getServerNumberEnv('DASHBOARD_GAMES_CACHE_MS', DEFAULT_GAMES_CACHE_MS);
 const LINE_META_CACHE_MS = getServerNumberEnv('DASHBOARD_LINE_META_CACHE_MS', DEFAULT_LINE_META_CACHE_MS);
 const LINE_ROWS_CACHE_MS = getServerNumberEnv('DASHBOARD_LINE_ROWS_CACHE_MS', DEFAULT_LINE_ROWS_CACHE_MS);
+const PLAYER_DETAIL_CACHE_MS = getServerNumberEnv('DASHBOARD_PLAYER_DETAIL_CACHE_MS', DEFAULT_PLAYER_DETAIL_CACHE_MS);
+const ARCHIVE_CACHE_MS = getServerNumberEnv('DASHBOARD_ARCHIVE_CACHE_MS', DEFAULT_ARCHIVE_CACHE_MS);
+const SIMILAR_CACHE_MS = getServerNumberEnv('DASHBOARD_SIMILAR_CACHE_MS', DEFAULT_SIMILAR_CACHE_MS);
 
 function assertNoError(error: { message?: string } | null, context: string) {
   if (error) {
@@ -329,27 +335,33 @@ export async function fetchGamesPayload(dates: string[]) {
 }
 
 export async function fetchPlayerPayload(playerId: number) {
-  const supabase = getSupabaseAdmin();
+  return readCached(
+    buildCacheKey(['player_detail', playerId]),
+    PLAYER_DETAIL_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
 
-  const [
-    { data: detail, error: detailError },
-    { data: historicalOddsRows, error: historicalOddsError },
-  ] = await Promise.all([
-    supabase.from('players').select(PLAYER_DETAIL_SELECT).eq('id', playerId).maybeSingle(),
-    supabase.from('historical_odds').select(HISTORICAL_ODDS_SELECT).eq('player_id', playerId),
-  ]);
+      const [
+        { data: detail, error: detailError },
+        { data: historicalOddsRows, error: historicalOddsError },
+      ] = await Promise.all([
+        supabase.from('players').select(PLAYER_DETAIL_SELECT).eq('id', playerId).maybeSingle(),
+        supabase.from('historical_odds').select(HISTORICAL_ODDS_SELECT).eq('player_id', playerId),
+      ]);
 
-  assertNoError(detailError, 'player detail');
-  assertNoError(historicalOddsError, 'historical_odds');
+      assertNoError(detailError, 'player detail');
+      assertNoError(historicalOddsError, 'historical_odds');
 
-  if (!detail) {
-    throw new Error('[supabase] player detail: Player not found.');
-  }
+      if (!detail) {
+        throw new Error('[supabase] player detail: Player not found.');
+      }
 
-  return {
-    detail,
-    historicalOddsRows: historicalOddsRows ?? [],
-  };
+      return {
+        detail,
+        historicalOddsRows: historicalOddsRows ?? [],
+      };
+    },
+  );
 }
 
 export async function fetchSimilarCandidatesPayload({
@@ -363,59 +375,76 @@ export async function fetchSimilarCandidatesPayload({
   playerId: number;
   selectedGameDate?: string | null;
 }) {
-  const supabase = getSupabaseAdmin();
-  const today = getDashboardDate();
-  const propDates = selectedGameDate ? [selectedGameDate] : buildFutureDates(today, SIMILAR_PROP_DAYS);
-
-  const [playersRows, propsRows] = await Promise.all([
-    fetchPlayers(PLAYER_SIMILAR_SELECT),
-    fetchAllPlayerPropsForDates(propDates),
-  ]);
-
-  const players = buildSimilarityPlayers(playersRows ?? [], propsRows ?? [], selectedGameDate ?? null)
-    .filter(playerHasAnyProp);
-  const player = players.find((entry) => entry.id === playerId);
-
-  if (!player) {
-    throw new Error('[supabase] similar players: Player not found in active prop pool.');
-  }
-
-  return {
-    similarCandidatesByPosition: rankSimilarPlayers({
-      player,
-      players,
+  return readCached(
+    buildCacheKey([
+      'similar',
+      playerId,
       activeTab,
       activeSportsbook,
-      selectedGameDate: selectedGameDate ?? null,
-      mode: 'position',
-      limit: 14,
-    }) satisfies SimilarPlayerCandidate[],
-    similarCandidatesByProp: rankSimilarPlayers({
-      player,
-      players,
-      activeTab,
-      activeSportsbook,
-      selectedGameDate: selectedGameDate ?? null,
-      mode: 'prop',
-      limit: 12,
-    }) satisfies SimilarPlayerCandidate[],
-  };
+      selectedGameDate ?? '',
+    ]),
+    SIMILAR_CACHE_MS,
+    async () => {
+      const today = getDashboardDate();
+      const propDates = selectedGameDate ? [selectedGameDate] : buildFutureDates(today, SIMILAR_PROP_DAYS);
+
+      const [playersRows, propsRows] = await Promise.all([
+        fetchPlayers(PLAYER_SIMILAR_SELECT),
+        fetchAllPlayerPropsForDates(propDates),
+      ]);
+
+      const players = buildSimilarityPlayers(playersRows ?? [], propsRows ?? [], selectedGameDate ?? null)
+        .filter(playerHasAnyProp);
+      const player = players.find((entry) => entry.id === playerId);
+
+      if (!player) {
+        throw new Error('[supabase] similar players: Player not found in active prop pool.');
+      }
+
+      return {
+        similarCandidatesByPosition: rankSimilarPlayers({
+          player,
+          players,
+          activeTab,
+          activeSportsbook,
+          selectedGameDate: selectedGameDate ?? null,
+          mode: 'position',
+          limit: 14,
+        }) satisfies SimilarPlayerCandidate[],
+        similarCandidatesByProp: rankSimilarPlayers({
+          player,
+          players,
+          activeTab,
+          activeSportsbook,
+          selectedGameDate: selectedGameDate ?? null,
+          mode: 'prop',
+          limit: 12,
+        }) satisfies SimilarPlayerCandidate[],
+      };
+    },
+  );
 }
 
 export async function fetchArchivePayload(playerId: number, season: string) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from('archive_gamelogs')
-    .select('game_log')
-    .eq('player_id', playerId)
-    .eq('season', season)
-    .maybeSingle();
+  return readCached(
+    buildCacheKey(['archive', playerId, season]),
+    ARCHIVE_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase
+        .from('archive_gamelogs')
+        .select('game_log')
+        .eq('player_id', playerId)
+        .eq('season', season)
+        .maybeSingle();
 
-  assertNoError(error, 'archive_gamelogs');
-  const archiveRow = (data ?? null) as { game_log?: unknown } | null;
-  const gameLog = archiveRow?.game_log;
+      assertNoError(error, 'archive_gamelogs');
+      const archiveRow = (data ?? null) as { game_log?: unknown } | null;
+      const gameLog = archiveRow?.game_log;
 
-  return {
-    gameLog: Array.isArray(gameLog) ? gameLog : [],
-  };
+      return {
+        gameLog: Array.isArray(gameLog) ? gameLog : [],
+      };
+    },
+  );
 }

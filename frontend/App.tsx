@@ -52,6 +52,11 @@ function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   return Number.isFinite(parsed) && parsed >= 60_000 ? parsed : fallbackMs;
 }
 
+function parsePositiveInt(rawValue: string | undefined, fallbackValue: number) {
+  const parsed = Number(rawValue);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallbackValue;
+}
+
 function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState === 'visible';
 }
@@ -219,6 +224,8 @@ function App() {
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
   const FULL_DB_POLL_MS = parsePollMs(import.meta.env.VITE_FULL_DB_POLL_MS, 30 * 60 * 1000);
   const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 5 * 60 * 1000);
+  const SIMILAR_PREFETCH_PROP_LIMIT = parsePositiveInt(import.meta.env.VITE_SIMILAR_PREFETCH_PROP_LIMIT, 2);
+  const SIMILAR_PREFETCH_POSITION_LIMIT = parsePositiveInt(import.meta.env.VITE_SIMILAR_PREFETCH_POSITION_LIMIT, 3);
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
   const lineMovementVersionRef = useRef('');
   const rawDataRef = useRef<Player[]>([]);
@@ -756,11 +763,20 @@ function App() {
 
   useEffect(() => {
     const similarPrefetchIds = Array.from(new Set(
-      [...readySimilarCandidatesByProp.slice(0, 6), ...readySimilarCandidatesByPosition.slice(0, 8)]
+      [
+        ...readySimilarCandidatesByProp.slice(0, SIMILAR_PREFETCH_PROP_LIMIT),
+        ...readySimilarCandidatesByPosition.slice(0, SIMILAR_PREFETCH_POSITION_LIMIT),
+      ]
         .map((candidate) => candidate.id),
     )).filter((id) => id !== displayPlayer?.id);
 
-    if (!USE_DB || activeSeason !== '25/26' || !displayPlayer || similarPrefetchIds.length === 0) {
+    if (
+      !USE_DB
+      || !isPageVisible
+      || activeSeason !== '25/26'
+      || !displayPlayer
+      || similarPrefetchIds.length === 0
+    ) {
       return;
     }
 
@@ -798,7 +814,16 @@ function App() {
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [USE_DB, activeSeason, displayPlayer?.id, readySimilarCandidatesByProp, readySimilarCandidatesByPosition]);
+  }, [
+    USE_DB,
+    isPageVisible,
+    activeSeason,
+    displayPlayer?.id,
+    readySimilarCandidatesByProp,
+    readySimilarCandidatesByPosition,
+    SIMILAR_PREFETCH_PROP_LIMIT,
+    SIMILAR_PREFETCH_POSITION_LIMIT,
+  ]);
 
 
   if (loading) {
