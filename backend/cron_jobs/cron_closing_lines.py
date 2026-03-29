@@ -20,6 +20,7 @@ from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import resolve_prop_game_date
 from utils.snapshot_manager import SnapshotManager
 from utils.odds_csv import write_odds_csv
+from utils.prizepicks_archive import archive_prizepicks_rows
 from utils.upsert_market_history import (
     upsert_historical_odds_from_file,
     upsert_line_movements_from_file,
@@ -450,6 +451,7 @@ def main(dry_run=False):
         props_ok = True
         line_movements_ok = True
         historical_ok = True
+        pp_rows = []
 
         try:
             from utils.upsert_props import run_odds_update
@@ -457,8 +459,28 @@ def main(dry_run=False):
             pp_path = None
             if prizepicks.prizepicks_enabled():
                 try:
-                    prizepicks.fetch_and_write_rows(output_path=prizepicks.DEFAULT_OUTPUT_PATH)
+                    pp_rows, _pp_diagnostics = prizepicks.fetch_and_write_rows(output_path=prizepicks.DEFAULT_OUTPUT_PATH)
                     pp_path = str(prizepicks.DEFAULT_OUTPUT_PATH)
+                    pp_archive = archive_prizepicks_rows(
+                        pp_rows,
+                        allowed_game_ids=[g["game_id"] for g in games_to_scrape],
+                    )
+                    if pp_archive.get("rows_archived", 0):
+                        log_status(
+                            logger,
+                            "OK",
+                            "PrizePicks local archive updated",
+                            rows=pp_archive.get("rows_archived", 0),
+                            dates=pp_archive.get("dates_written", 0),
+                        )
+                    else:
+                        log_status(
+                            logger,
+                            "SKIP",
+                            "PrizePicks local archive had no closing-window rows",
+                            seen=pp_archive.get("rows_seen", 0),
+                            skipped_not_target_game=pp_archive.get("skipped_not_target_game", 0),
+                        )
                 except Exception as error:
                     log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
             props_ok = run_odds_update(
