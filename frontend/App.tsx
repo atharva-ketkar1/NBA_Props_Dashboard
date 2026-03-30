@@ -84,6 +84,44 @@ function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
   return propsByDateMap;
 }
 
+type PlayerPropAvailabilityByDate = Record<number, Record<string, Record<string, Record<string, boolean>>>>;
+
+function buildAvailabilityByDateMap(rows: any[]): PlayerPropAvailabilityByDate {
+  const availabilityMap: PlayerPropAvailabilityByDate = {};
+
+  for (const row of rows ?? []) {
+    const gameDateKey = row.game_date || '__undated__';
+    availabilityMap[row.player_id] ??= {};
+    availabilityMap[row.player_id][row.stat_type] ??= {};
+    availabilityMap[row.player_id][row.stat_type][row.sportsbook] ??= {};
+    availabilityMap[row.player_id][row.stat_type][row.sportsbook][gameDateKey] = true;
+  }
+
+  return availabilityMap;
+}
+
+function mergeAvailabilityMaps(
+  existing: PlayerPropAvailabilityByDate = {},
+  incoming: PlayerPropAvailabilityByDate = {},
+): PlayerPropAvailabilityByDate {
+  const merged: PlayerPropAvailabilityByDate = { ...existing };
+
+  Object.entries(incoming).forEach(([playerId, statMap]) => {
+    merged[playerId as unknown as number] ??= {};
+    Object.entries(statMap ?? {}).forEach(([statType, sportsbookMap]) => {
+      merged[playerId as unknown as number][statType] ??= {};
+      Object.entries(sportsbookMap ?? {}).forEach(([sportsbook, dateMap]) => {
+        merged[playerId as unknown as number][statType][sportsbook] = {
+          ...(merged[playerId as unknown as number][statType][sportsbook] ?? {}),
+          ...(dateMap ?? {}),
+        };
+      });
+    });
+  });
+
+  return merged;
+}
+
 function mergePropsByDateMaps(existing: PlayerPropsByDate = {}, incoming: PlayerPropsByDate = {}): PlayerPropsByDate {
   const merged: PlayerPropsByDate = { ...existing };
 
@@ -155,6 +193,7 @@ function App() {
   const [filterGameCount, setFilterGameCount] = useState<number>(19);
   const [activeSeason, setActiveSeason] = useState<'25/26' | '24/25'>('25/26');
   const [archiveGameLogs, setArchiveGameLogs] = useState<Record<string, any[]>>({});
+  const [propsAvailabilityByDate, setPropsAvailabilityByDate] = useState<PlayerPropAvailabilityByDate>({});
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>('graph');
   const [currentSlateTeams, setCurrentSlateTeams] = useState<string[]>([]);
@@ -245,6 +284,10 @@ function App() {
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
   const lineMovementVersionRef = useRef('');
   const rawDataRef = useRef<Player[]>([]);
+  const selectionAnchorRef = useRef<{ playerId: number | null; gameDate: string | null }>({
+    playerId: null,
+    gameDate: null,
+  });
   const playerDetailRequestsRef = useRef(new Map<number, Promise<void>>());
   const archiveRequestsRef = useRef(new Map<string, Promise<void>>());
   const selectionRequestRef = useRef(0);
@@ -257,6 +300,13 @@ function App() {
   useEffect(() => {
     rawDataRef.current = rawData;
   }, [rawData]);
+
+  useEffect(() => {
+    selectionAnchorRef.current = {
+      playerId: currentPlayer?.id ?? null,
+      gameDate: resolvedSelectedGameDate ?? selectedGameDate ?? null,
+    };
+  }, [currentPlayer?.id, resolvedSelectedGameDate, selectedGameDate]);
 
   /** Reconstruct the Player[] shape from API rows. */
   function mergeFeedFromDB(
@@ -316,22 +366,26 @@ function App() {
             return;
           }
 
-          const snapshot = await fetchDashboardBootstrap(DEFAULT_SPORTSBOOK);
+          const snapshot = await fetchDashboardBootstrap(activeSportsbook);
 
           if (cancelled) return;
 
           const mergedFeed = mergeFeedFromDB(snapshot.playersRows ?? [], snapshot.propsRows ?? []);
+          const availabilityMap = buildAvailabilityByDateMap(snapshot.availabilityRows ?? []);
           const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+          setPropsAvailabilityByDate(prev => mergeAvailabilityMaps(prev, availabilityMap));
 
           const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
           if (isInitial) {
             lineMovementVersionRef.current = snapshot.lineVersion ?? '';
           }
 
+          const selectionAnchor = selectionAnchorRef.current;
+
           setRawData(prev => {
             const prevMap = new Map((prev ?? []).map(p => [String(p.id), p]));
-            return mergedFeed.map(p => {
+            const nextRawData = mergedFeed.map(p => {
               const existing = prevMap.get(String(p.id));
               return {
                 ...p,
@@ -348,6 +402,29 @@ function App() {
                 detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
               };
             });
+
+            const nextPlayersWithProps = nextRawData.filter(playerHasAnyProp);
+            if (!nextPlayersWithProps.length) {
+              setSelectedIndex(0);
+              return nextRawData;
+            }
+
+            const anchoredIndex = selectionAnchor.playerId != null
+              ? nextPlayersWithProps.findIndex((player) => player.id === selectionAnchor.playerId)
+              : -1;
+
+            if (anchoredIndex >= 0) {
+              setSelectedIndex(anchoredIndex);
+            } else {
+              if (selectionAnchor.gameDate) {
+                setSelectedGameDate(null);
+              }
+              setSelectedIndex((previousIndex) => (
+                previousIndex < nextPlayersWithProps.length ? previousIndex : 0
+              ));
+            }
+
+            return nextRawData;
           });
 
           if (isInitial) {
@@ -397,7 +474,7 @@ function App() {
           setLoading(false);
         });
     }
-  }, [USE_DB, FULL_DB_POLL_MS]);
+  }, [USE_DB, FULL_DB_POLL_MS, activeSportsbook]);
 
   // 1b. Hot refresh for live lines + history metadata
   useEffect(() => {
@@ -421,6 +498,11 @@ function App() {
 
         if ((hotSnapshot.propsRows ?? []).length > 0) {
           setRawData(prev => mergePropsIntoPlayers(prev, hotSnapshot.propsRows ?? []));
+        }
+
+        if ((hotSnapshot.availabilityRows ?? []).length > 0) {
+          const availabilityMap = buildAvailabilityByDateMap(hotSnapshot.availabilityRows ?? []);
+          setPropsAvailabilityByDate(prev => mergeAvailabilityMaps(prev, availabilityMap));
         }
 
         if (!Object.prototype.hasOwnProperty.call(hotSnapshot, 'lineRows')) {
@@ -625,6 +707,13 @@ function App() {
     }
     return materializedPlayer;
   }, [currentPlayer, resolvedSelectedGameDate, activeSeason, archiveGameLogs]);
+  const displayPlayerAvailability = useMemo(() => {
+    if (!displayPlayer) {
+      return {};
+    }
+
+    return propsAvailabilityByDate[displayPlayer.id] ?? {};
+  }, [displayPlayer, propsAvailabilityByDate]);
   const maxAvailableHistoricalGames = displayPlayer?.game_log?.length ?? 0;
   const defaultFilterGameCount = maxAvailableHistoricalGames > 0
     ? Math.min(19, maxAvailableHistoricalGames)
@@ -897,6 +986,7 @@ function App() {
             )}
             <Header
               player={displayPlayer}
+              playerAvailabilityByDate={displayPlayerAvailability}
               activeTab={activeTab}
               onTabChange={handleTabChange}
               activeSportsbook={activeSportsbook}
@@ -904,6 +994,7 @@ function App() {
                 setActiveSportsbook(sb);
                 setCustomLineValue(null);
               }}
+              activeGameDate={resolvedSelectedGameDate}
               customLine={customLineValue}
               onToggleFilters={() => setIsFiltersOpen(!isFiltersOpen)}
               isFiltersOpen={isFiltersOpen}

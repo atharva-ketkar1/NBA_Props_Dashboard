@@ -9,6 +9,7 @@ import { playerHasAnyProp } from '../../utils/propResolution.js';
 import type { Player, PlayerPropsByDate, SimilarPlayerCandidate, SportsbookId } from '../../types.js';
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
+const PLAYER_PROP_AVAIL_SELECT = 'player_id, stat_type, sportsbook, game_date';
 const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
 const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis, play_type_analysis';
 const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analysis, shot_type_analysis';
@@ -283,9 +284,10 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
   const fastRefreshDates = getFastRefreshDates(null);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [playersRows, propsRows, lineRows, gamesRows] = await Promise.all([
+  const [playersRows, propsRows, availabilityRows, lineRows, gamesRows] = await Promise.all([
     fetchPlayers(PLAYER_BASE_SELECT),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT, activeSportsbook),
+    fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_AVAIL_SELECT),
     includeLineMovements
       ? fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements')
       : Promise.resolve([]),
@@ -298,6 +300,7 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
       play_type_analysis: undefined,
     })),
     propsRows,
+    availabilityRows,
     gamesRows: gamesRows ?? [],
     lineRows: lineRows ?? [],
     lineVersion: serializeLineMovementVersion(lineRows ?? []),
@@ -312,8 +315,9 @@ export async function fetchHotPayload(
   const activeDates = getFastRefreshDates(selectedDate);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [propsRows, lineMetaRows] = await Promise.all([
+  const [propsRows, availabilityRows, lineMetaRows] = await Promise.all([
     fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_SELECT, activeSportsbook),
+    fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_AVAIL_SELECT),
     includeLineMovements
       ? fetchLineMovementsForDates(
         activeDates,
@@ -329,6 +333,7 @@ export async function fetchHotPayload(
   if (!includeLineMovements) {
     return {
       propsRows,
+      availabilityRows,
       lineVersion: currentLineVersion,
     };
   }
@@ -336,6 +341,7 @@ export async function fetchHotPayload(
   if (nextVersion === currentLineVersion) {
     return {
       propsRows,
+      availabilityRows,
       lineVersion: nextVersion,
     };
   }
@@ -349,6 +355,7 @@ export async function fetchHotPayload(
 
   return {
     propsRows,
+    availabilityRows,
     lineVersion: nextVersion,
     lineRows: lineRows ?? [],
   };

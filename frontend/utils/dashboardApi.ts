@@ -4,6 +4,7 @@ import { SimilarPlayerCandidate, SportsbookId } from '../types';
 type BootstrapResponse = {
   playersRows: any[];
   propsRows: any[];
+  availabilityRows: any[];
   gamesRows: any[];
   lineRows: any[];
   lineVersion: string;
@@ -11,6 +12,7 @@ type BootstrapResponse = {
 
 type HotResponse = {
   propsRows: any[];
+  availabilityRows: any[];
   lineVersion: string;
   lineRows?: any[];
 };

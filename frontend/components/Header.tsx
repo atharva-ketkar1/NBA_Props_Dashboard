@@ -9,13 +9,16 @@ import { createPortal } from 'react-dom';
 import { ASSETS_BASE } from '../utils/config';
 import { MobileViewSwitcher, MobileView } from './MobileViewSwitcher';
 
+type PlayerAvailabilityByDate = Record<string, Record<string, Record<string, boolean>>>;
 
 interface HeaderProps {
   player?: Player;
+  playerAvailabilityByDate?: PlayerAvailabilityByDate;
   activeTab: string;
   onTabChange: (tab: string) => void;
   activeSportsbook: SportsbookId;
   onSportsbookChange: (sb: SportsbookId) => void;
+  activeGameDate?: string | null;
   customLine?: number | null;
   onToggleFilters?: () => void;
   isFiltersOpen?: boolean;
@@ -83,7 +86,7 @@ const StatItem = ({ label, value, diff, isCompact }: { label: string, value: str
   );
 };
 
-export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, activeSportsbook, onSportsbookChange, customLine, onToggleFilters, isFiltersOpen, historicalGameCount, mobileView, onMobileViewChange }) => {
+export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate = {}, activeTab, onTabChange, activeSportsbook, onSportsbookChange, activeGameDate, customLine, onToggleFilters, isFiltersOpen, historicalGameCount, mobileView, onMobileViewChange }) => {
   const [sparklineMode, setSparklineMode] = useState<'line' | 'juice'>('line');
   const [showHelp, setShowHelp] = useState(false);
 
@@ -125,6 +128,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
   };
 
   const statKey = STAT_LABELS[activeTab] || 'PTS';
+  const activeGameDateKey = activeGameDate || '__undated__';
 
   const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth < 1024);
   useEffect(() => {
@@ -434,7 +438,13 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                                 before:absolute before:-top-4 before:left-0 before:w-full before:h-4 before:bg-transparent">
                     {SPORTSBOOKS.map(sb => {
                       const sbProp = player.props?.[statKey]?.[sb.id];
+                      const availabilityBucket = playerAvailabilityByDate?.[statKey]?.[sb.id] ?? {};
                       const sbHasLine = !!sbProp;
+                      const sbIsAvailable = Boolean(
+                        availabilityBucket[activeGameDateKey]
+                        || (!activeGameDate && availabilityBucket.__undated__)
+                        || sbProp
+                      );
                       const isSelected = activeSportsbook === sb.id;
                       const formatOdds = (val: number | string) => {
                         const num = Number(val);
@@ -445,15 +455,17 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                       return (
                         <button
                           key={sb.id}
-                          disabled={!sbHasLine}
+                          disabled={!sbIsAvailable}
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (sbHasLine) onSportsbookChange(sb.id);
+                            if (sbIsAvailable) {
+                              onSportsbookChange(sb.id);
+                            }
                           }}
                           className={`
                                         flex items-center justify-between gap-4 px-3 py-2.5 rounded-lg text-xs font-bold text-left transition-all relative
                                         ${isSelected ? 'bg-bgElevation2 border border-borderMedium/50 text-white shadow-sm' : 'border border-transparent text-gray-400 hover:text-white hover:bg-bgElevation2/50'}
-                                        ${!sbHasLine ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:border-transparent' : ''}
+                                        ${!sbIsAvailable ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:border-transparent' : ''}
                                     `}
                         >
                           <div className="flex items-center gap-2.5">
@@ -463,7 +475,7 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                             <span className="truncate tracking-wide">{sb.label}</span>
                           </div>
 
-                          {sbHasLine && (
+                          {sbHasLine ? (
                             <div className="flex items-center gap-3 shrink-0 ml-4 font-chakra">
                               <span className="text-[14px] text-white font-bold tracking-tight">{sbProp.line}</span>
                               {sb.id !== 'pp' && sbProp.over !== null && sbProp.over !== undefined && sbProp.under !== null && sbProp.under !== undefined ? (
@@ -480,6 +492,14 @@ export const Header: React.FC<HeaderProps> = ({ player, activeTab, onTabChange, 
                                   Line Only
                                 </div>
                               )}
+                            </div>
+                          ) : sbIsAvailable ? (
+                            <div className="text-[9px] font-bold border-l border-borderMuted pl-3 uppercase tracking-wider text-fgSubtle">
+                              Available
+                            </div>
+                          ) : (
+                            <div className="text-[9px] font-bold border-l border-borderMuted pl-3 uppercase tracking-wider text-fgSubtle">
+                              Unavailable
                             </div>
                           )}
                         </button>
