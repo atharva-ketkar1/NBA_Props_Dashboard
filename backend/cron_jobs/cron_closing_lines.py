@@ -23,6 +23,7 @@ from utils.odds_csv import write_odds_csv
 from utils.prizepicks_archive import archive_prizepicks_rows
 from utils.upsert_market_history import (
     upsert_historical_odds_from_file,
+    upsert_live_historical_player_props,
     upsert_line_movements_from_file,
 )
 
@@ -480,7 +481,7 @@ def main(dry_run=False, preselected_games=None):
         sm = SnapshotManager()
                 
         # Send to SnapshotManager
-        sm.process_closing_lines(players_data)
+        closing_summary = sm.process_closing_lines(players_data)
         # SnapshotManager ALSO writes a final intraday snapshot for "pre_game"
         sm.write_snapshot("pre_game", players_data, bypass_dedupe=True, filter_to_active_schedule=True)
         
@@ -489,6 +490,8 @@ def main(dry_run=False, preselected_games=None):
         props_ok = True
         line_movements_ok = True
         historical_ok = True
+        normalized_historical_ok = True
+        legacy_historical_ok = True
         pp_rows = []
 
         try:
@@ -549,13 +552,21 @@ def main(dry_run=False, preselected_games=None):
             line_movements_ok = False
 
         try:
+            normalized_historical_ok = upsert_live_historical_player_props(closing_summary.get("records", []))
+        except Exception as e:
+            log_status(logger, "WARN", "Normalized historical odds upsert failed", error=e)
+            normalized_historical_ok = False
+
+        try:
             historical_path = os.path.join(BASE_DIR, "data", "archive", "historical_odds.json")
             archive_dates = sorted({pdata.get("game_date") or get_et_now().strftime("%Y-%m-%d") for pdata in players_data.values()})
             for archive_date in archive_dates:
-                historical_ok = upsert_historical_odds_from_file(historical_path, archive_date) and historical_ok
+                legacy_historical_ok = upsert_historical_odds_from_file(historical_path, archive_date) and legacy_historical_ok
         except Exception as e:
             log_status(logger, "WARN", "Historical odds upsert failed", error=e)
-            historical_ok = False
+            legacy_historical_ok = False
+
+        historical_ok = normalized_historical_ok and legacy_historical_ok
 
         if not props_ok or not line_movements_ok or not historical_ok:
             log_status(
@@ -565,6 +576,8 @@ def main(dry_run=False, preselected_games=None):
                 props_ok=props_ok,
                 line_movements_ok=line_movements_ok,
                 historical_ok=historical_ok,
+                normalized_historical_ok=normalized_historical_ok,
+                legacy_historical_ok=legacy_historical_ok,
             )
             return False
 

@@ -14,6 +14,7 @@ const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
 const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis, play_type_analysis';
 const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analysis, shot_type_analysis';
 const HISTORICAL_ODDS_SELECT = 'game_date, props, source';
+const HISTORICAL_PLAYER_PROP_SELECT = 'game_date, stat_type, sportsbook, line, over_odds, under_odds, implied, source, captured_at, is_closing_line';
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
 const SLATE_SELECT = 'home_team_tricode, away_team_tricode';
@@ -29,6 +30,20 @@ const DEFAULT_LINE_ROWS_CACHE_MS = 30_000;
 const DEFAULT_PLAYER_DETAIL_CACHE_MS = 5 * 60_000;
 const DEFAULT_ARCHIVE_CACHE_MS = 60 * 60_000;
 const DEFAULT_SIMILAR_CACHE_MS = 60_000;
+const HISTORICAL_SOURCE_PRIORITY: Record<string, number> = {
+  closing_line: 3,
+  pre_game_snapshot_fallback: 2,
+  last_snapshot_fallback: 1,
+  line_movements_fallback: 1,
+};
+const LEGACY_HISTORICAL_BOOK_MAP: Record<string, string> = {
+  dk: 'draftkings',
+  fd: 'fanduel',
+  pp: 'pp',
+  draftkings: 'draftkings',
+  fanduel: 'fanduel',
+  prizepicks: 'pp',
+};
 
 declare global {
   // eslint-disable-next-line no-var
@@ -80,6 +95,130 @@ function assertNoError(error: { message?: string } | null, context: string) {
 
 function buildCacheKey(parts: Array<string | number>) {
   return parts.join('::');
+}
+
+function getHistoricalSourcePriority(source?: string | null) {
+  if (!source) return 0;
+  return HISTORICAL_SOURCE_PRIORITY[source] ?? 0;
+}
+
+function isMissingSupabaseTableError(error: { message?: string } | null, tableName: string) {
+  const message = String(error?.message ?? '').toLowerCase();
+  const tableToken = tableName.toLowerCase();
+  return (
+    (message.includes('relation') && message.includes('does not exist') && message.includes(tableToken))
+    || (message.includes('could not find the table') && message.includes(tableToken))
+    || (message.includes('schema cache') && message.includes(tableToken))
+  );
+}
+
+function reshapeHistoricalOddsRows(rows: any[]) {
+  const byDate = new Map<string, {
+    props: Record<string, any>;
+    source: string | null;
+    capturedAt: string | null;
+  }>();
+
+  for (const row of rows ?? []) {
+    const gameDate = String(row?.game_date ?? '').trim();
+    const statType = String(row?.stat_type ?? '').trim();
+    const sportsbook = LEGACY_HISTORICAL_BOOK_MAP[String(row?.sportsbook ?? '').trim()] ?? String(row?.sportsbook ?? '').trim();
+
+    if (!gameDate || !statType || !sportsbook) {
+      continue;
+    }
+
+    const existing = byDate.get(gameDate) ?? {
+      props: {},
+      source: null,
+      capturedAt: null,
+    };
+
+    existing.props[statType] ??= {};
+    existing.props[statType][sportsbook] = {
+      line: row.line,
+      over: row.over_odds ?? null,
+      under: row.under_odds ?? null,
+      implied: row.implied ?? null,
+    };
+
+    if (getHistoricalSourcePriority(row.source) >= getHistoricalSourcePriority(existing.source)) {
+      existing.source = row.source ?? existing.source;
+    }
+
+    if (row.captured_at && (!existing.capturedAt || String(row.captured_at) > existing.capturedAt)) {
+      existing.capturedAt = String(row.captured_at);
+    }
+
+    byDate.set(gameDate, existing);
+  }
+
+  return Array.from(byDate.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([game_date, entry]) => ({
+      game_date,
+      props: entry.props,
+      source: entry.source,
+      captured_at: entry.capturedAt,
+    }));
+}
+
+function unwrapHistoricalPropsTree(rawProps: any) {
+  if (rawProps && typeof rawProps === 'object' && rawProps.props && typeof rawProps.props === 'object') {
+    return rawProps.props;
+  }
+  return rawProps ?? {};
+}
+
+function mergeHistoricalPropsTrees(preferredProps: any, fallbackProps: any) {
+  const normalizedFallbackProps = unwrapHistoricalPropsTree(fallbackProps);
+  const normalizedPreferredProps = unwrapHistoricalPropsTree(preferredProps);
+  const merged: Record<string, any> = {
+    ...(normalizedFallbackProps ?? {}),
+  };
+
+  Object.entries(normalizedPreferredProps ?? {}).forEach(([statType, preferredBooks]) => {
+    merged[statType] = {
+      ...(normalizedFallbackProps?.[statType] ?? {}),
+      ...(preferredBooks ?? {}),
+    };
+  });
+
+  return merged;
+}
+
+function mergeHistoricalOddsRows(preferredRows: any[], fallbackRows: any[]) {
+  const byDate = new Map<string, any>();
+
+  for (const row of fallbackRows ?? []) {
+    const gameDate = String(row?.game_date ?? '').trim();
+    if (!gameDate) continue;
+    byDate.set(gameDate, row);
+  }
+
+  for (const row of preferredRows ?? []) {
+    const gameDate = String(row?.game_date ?? '').trim();
+    if (!gameDate) continue;
+    const fallbackRow = byDate.get(gameDate);
+    if (!fallbackRow) {
+      byDate.set(gameDate, row);
+      continue;
+    }
+
+    byDate.set(gameDate, {
+      ...fallbackRow,
+      ...row,
+      props: mergeHistoricalPropsTrees(row?.props, fallbackRow?.props),
+      source: getHistoricalSourcePriority(row?.source) >= getHistoricalSourcePriority(fallbackRow?.source)
+        ? row?.source ?? fallbackRow?.source ?? null
+        : fallbackRow?.source ?? row?.source ?? null,
+      captured_at: row?.captured_at ?? fallbackRow?.captured_at ?? null,
+    });
+  }
+
+  return Array.from(byDate.values()).sort((a, b) => (
+    String(a?.game_date ?? '').localeCompare(String(b?.game_date ?? ''))
+  ));
 }
 
 async function readCached<T>(key: string, ttlMs: number, loader: () => Promise<T>) {
@@ -376,22 +515,42 @@ export async function fetchPlayerPayload(playerId: number) {
 
       const [
         { data: detail, error: detailError },
-        { data: historicalOddsRows, error: historicalOddsError },
+        normalizedHistoricalResult,
+        { data: fallbackHistoricalOddsRows, error: fallbackHistoricalOddsError },
       ] = await Promise.all([
         supabase.from('players').select(PLAYER_DETAIL_SELECT).eq('id', playerId).maybeSingle(),
+        supabase
+          .from('historical_player_props')
+          .select(HISTORICAL_PLAYER_PROP_SELECT)
+          .eq('player_id', playerId)
+          .order('game_date', { ascending: true })
+          .order('stat_type', { ascending: true })
+          .order('sportsbook', { ascending: true }),
         supabase.from('historical_odds').select(HISTORICAL_ODDS_SELECT).eq('player_id', playerId),
       ]);
 
       assertNoError(detailError, 'player detail');
-      assertNoError(historicalOddsError, 'historical_odds');
+      assertNoError(fallbackHistoricalOddsError, 'historical_odds');
 
       if (!detail) {
         throw new Error('[supabase] player detail: Player not found.');
       }
 
+      let normalizedHistoricalOddsRows: any[] = [];
+      if (normalizedHistoricalResult.error) {
+        if (!isMissingSupabaseTableError(normalizedHistoricalResult.error, 'historical_player_props')) {
+          assertNoError(normalizedHistoricalResult.error, 'historical_player_props');
+        }
+      } else {
+        normalizedHistoricalOddsRows = reshapeHistoricalOddsRows(normalizedHistoricalResult.data ?? []);
+      }
+
       return {
         detail,
-        historicalOddsRows: historicalOddsRows ?? [],
+        historicalOddsRows: mergeHistoricalOddsRows(
+          normalizedHistoricalOddsRows,
+          fallbackHistoricalOddsRows ?? [],
+        ),
       };
     },
   );

@@ -45,5 +45,5 @@ backend/scrapers/archive/
 /docs/security/
 /supabase/*
 /vercel.json
-
+sql/
 .vercel

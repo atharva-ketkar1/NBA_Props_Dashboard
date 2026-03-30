@@ -314,6 +314,7 @@ class SnapshotManager:
         historical_odds = self._read_json(self.historical_odds_path, default={})
             
         updated = False
+        materialized_records = []
 
         for player_id, pdata in players_data.items():
             archive_date = pdata.get("game_date") or today_date
@@ -378,6 +379,12 @@ class SnapshotManager:
                 }
                 existing_record = historical_odds[archive_date].get(player_id)
                 next_record = self._merge_historical_record(existing_record, incoming_record)
+                materialized_records.append({
+                    "player_id": player_id,
+                    "game_date": archive_date,
+                    "game_id": game_id,
+                    "record": next_record,
+                })
                 if next_record != existing_record:
                     historical_odds[archive_date][player_id] = next_record
                     updated = True
@@ -400,6 +407,12 @@ class SnapshotManager:
                     }
                     existing_record = historical_odds[archive_date].get(player_id)
                     next_record = self._merge_historical_record(existing_record, incoming_record)
+                    materialized_records.append({
+                        "player_id": player_id,
+                        "game_date": archive_date,
+                        "game_id": game_id,
+                        "record": next_record,
+                    })
                     if next_record != existing_record:
                         historical_odds[archive_date][player_id] = next_record
                         updated = True
@@ -408,5 +421,9 @@ class SnapshotManager:
 
         if updated:
             self._write_json(self.historical_odds_path, historical_odds)
-            
-        return True
+
+        return {
+            "ok": True,
+            "updated": updated,
+            "records": materialized_records,
+        }

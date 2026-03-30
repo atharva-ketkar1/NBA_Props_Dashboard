@@ -6,6 +6,11 @@ import time
 from datetime import datetime
 
 from dotenv import load_dotenv
+from utils.historical_player_props import (
+    flatten_historical_date_blob,
+    flatten_historical_record,
+    merge_rows_by_precedence,
+)
 from utils.logging_utils import log_status
 from utils.supabase_client import get_supabase_client
 
@@ -28,6 +33,7 @@ ARCHIVE_DATA_DIR = os.path.join(
     "archive",
 )
 DEFAULT_HISTORICAL_ODDS_PATH = os.path.join(ARCHIVE_DATA_DIR, "historical_odds.json")
+HISTORICAL_PLAYER_PROPS_TABLE = "historical_player_props"
 
 
 def _chunk_rows(rows, chunk_size):
@@ -52,6 +58,16 @@ def _is_retryable_upsert_error(error):
         or "connection" in message
         or "temporarily unavailable" in message
         or "429" in message
+    )
+
+
+def _is_missing_relation_error(error, table_name: str):
+    message = str(error).lower()
+    table_token = str(table_name).lower()
+    return (
+        ("relation" in message and "does not exist" in message and table_token in message)
+        or ("could not find the table" in message and table_token in message)
+        or ("schema cache" in message and table_token in message)
     )
 
 
@@ -104,7 +120,7 @@ def _compact_snapshots_for_supabase(snapshots):
     return compacted
 
 
-def _batched_upsert(table_name: str, rows, on_conflict: str, context: str):
+def _batched_upsert(table_name: str, rows, on_conflict: str, context: str, raise_on_failure: bool = False):
     if not rows:
         return True
 
@@ -135,9 +151,52 @@ def _batched_upsert(table_name: str, rows, on_conflict: str, context: str):
                 max(1, (len(rows) + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE),
                 last_error,
             )
+            if raise_on_failure:
+                raise last_error
             return False
 
     return True
+
+
+def _load_historical_archive(historical_odds_path: str):
+    historical_odds_path = _resolve_historical_odds_path(historical_odds_path)
+    if not os.path.exists(historical_odds_path):
+        return historical_odds_path, None
+
+    with open(historical_odds_path, "r") as f:
+        return historical_odds_path, json.load(f)
+
+
+def _prepare_legacy_historical_rows_from_blob(game_date: str, date_blob):
+    rows = []
+    skipped_keys = []
+
+    for player_id, record in (date_blob or {}).items():
+        if not isinstance(record, dict):
+            continue
+        try:
+            normalized_player_id = int(player_id)
+        except (TypeError, ValueError):
+            skipped_keys.append(str(player_id))
+            continue
+        rows.append(
+            {
+                "player_id": normalized_player_id,
+                "player_name": record.get("name"),
+                "team": record.get("team"),
+                "game_date": game_date,
+                "props": record.get("props", {}),
+                "source": record.get("source"),
+                "captured_at": record.get("captured_at"),
+            }
+        )
+
+    return rows, skipped_keys
+
+
+def _prepare_normalized_historical_rows_from_blob(game_date: str, date_blob, include_pp=False):
+    rows = flatten_historical_date_blob(game_date, date_blob, include_pp=include_pp)
+    return merge_rows_by_precedence(rows)
 
 
 def upsert_line_movements_from_file(line_movements_path: str):
@@ -213,41 +272,17 @@ def upsert_line_movements_from_file(line_movements_path: str):
 
 def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
     """Mirror one game date from the local historical archive into Supabase rows."""
-    historical_odds_path = _resolve_historical_odds_path(historical_odds_path)
-    if not os.path.exists(historical_odds_path):
+    historical_odds_path, historical_odds = _load_historical_archive(historical_odds_path)
+    if historical_odds is None:
         logger.warning("historical odds file not found: %s", historical_odds_path)
         return False
-
-    with open(historical_odds_path, "r") as f:
-        historical_odds = json.load(f)
 
     date_blob = historical_odds.get(game_date, {})
     if not isinstance(date_blob, dict) or not date_blob:
         logger.info("No historical odds found for %s", game_date)
         return False
 
-    rows = []
-    skipped_keys = []
-    for player_id, record in date_blob.items():
-        if not isinstance(record, dict):
-            continue
-        try:
-            normalized_player_id = int(player_id)
-        except (TypeError, ValueError):
-            skipped_keys.append(str(player_id))
-            continue
-        rows.append(
-            {
-                "player_id": normalized_player_id,
-                "player_name": record.get("name"),
-                "team": record.get("team"),
-                "game_date": game_date,
-                "props": record.get("props", {}),
-                "source": record.get("source"),
-                "captured_at": record.get("captured_at"),
-            }
-        )
-
+    rows, skipped_keys = _prepare_legacy_historical_rows_from_blob(game_date, date_blob)
     if not rows:
         log_status(logger, "SKIP", "No historical odds rows prepared", date=game_date)
         return False
@@ -272,14 +307,114 @@ def upsert_historical_odds_from_file(historical_odds_path: str, game_date: str):
     return success
 
 
-def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: int = 5):
-    historical_odds_path = _resolve_historical_odds_path(historical_odds_path)
-    if not os.path.exists(historical_odds_path):
-        logger.warning("historical odds file not found: %s", historical_odds_path)
+def upsert_historical_player_props_rows(rows, context="historical_player_props", skip_if_table_missing=True):
+    normalized_rows = merge_rows_by_precedence(rows)
+    if not normalized_rows:
+        log_status(logger, "SKIP", "No normalized historical rows prepared", context=context)
         return True
 
-    with open(historical_odds_path, "r") as f:
-        historical_odds = json.load(f)
+    try:
+        success = _batched_upsert(
+            HISTORICAL_PLAYER_PROPS_TABLE,
+            normalized_rows,
+            on_conflict="player_id,game_date,sportsbook,stat_type",
+            context=context,
+            raise_on_failure=True,
+        )
+    except Exception as exc:
+        if skip_if_table_missing and _is_missing_relation_error(exc, HISTORICAL_PLAYER_PROPS_TABLE):
+            log_status(
+                logger,
+                "WARN",
+                "Normalized historical sync skipped; table missing",
+                table=HISTORICAL_PLAYER_PROPS_TABLE,
+            )
+            return True
+        raise
+
+    if success:
+        log_status(logger, "OK", "historical_player_props sync complete", context=context, rows=len(normalized_rows))
+    return success
+
+
+def upsert_historical_player_props_from_file(historical_odds_path: str, game_date: str, include_pp: bool = False):
+    historical_odds_path, historical_odds = _load_historical_archive(historical_odds_path)
+    if historical_odds is None:
+        logger.warning("historical odds file not found: %s", historical_odds_path)
+        return False
+
+    date_blob = historical_odds.get(game_date, {})
+    if not isinstance(date_blob, dict) or not date_blob:
+        logger.info("No normalized historical odds found for %s", game_date)
+        return False
+
+    rows = _prepare_normalized_historical_rows_from_blob(game_date, date_blob, include_pp=include_pp)
+    if not rows:
+        log_status(logger, "SKIP", "No normalized historical rows prepared", date=game_date)
+        return False
+
+    return upsert_historical_player_props_rows(
+        rows,
+        context=f"historical_player_props[{game_date}]",
+    )
+
+
+def upsert_live_historical_player_props(records, include_pp: bool = False):
+    rows = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        rows.extend(
+            flatten_historical_record(
+                player_id=record.get("player_id"),
+                game_date=record.get("game_date"),
+                game_id=record.get("game_id"),
+                record=record.get("record"),
+                include_pp=include_pp,
+            )
+        )
+
+    return upsert_historical_player_props_rows(rows, context="historical_player_props[live]")
+
+
+def backfill_historical_player_props_from_file(historical_odds_path: str, game_dates=None, include_pp: bool = False):
+    historical_odds_path, historical_odds = _load_historical_archive(historical_odds_path)
+    if historical_odds is None:
+        logger.warning("historical odds file not found: %s", historical_odds_path)
+        return False
+
+    if game_dates:
+        target_dates = [game_date for game_date in game_dates if isinstance(game_date, str) and historical_odds.get(game_date)]
+    else:
+        target_dates = sorted(
+            [
+                game_date for game_date, payload in (historical_odds or {}).items()
+                if isinstance(game_date, str) and isinstance(payload, dict) and payload
+            ]
+        )
+
+    if not target_dates:
+        log_status(logger, "SKIP", "No historical dates available for normalized backfill")
+        return False
+
+    success = True
+    for game_date in target_dates:
+        success = upsert_historical_player_props_from_file(
+            historical_odds_path,
+            game_date,
+            include_pp=include_pp,
+        ) and success
+
+    if success:
+        log_status(logger, "OK", "Normalized historical backfill complete", dates=len(target_dates))
+    return success
+
+
+def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: int = 5):
+    historical_odds_path, historical_odds = _load_historical_archive(historical_odds_path)
+    if historical_odds is None:
+        logger.warning("historical odds file not found: %s", historical_odds_path)
+        return True
 
     valid_dates = sorted(
         [
@@ -294,5 +429,7 @@ def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: i
 
     success = True
     for game_date in valid_dates:
-        success = upsert_historical_odds_from_file(historical_odds_path, game_date) and success
+        legacy_ok = upsert_historical_odds_from_file(historical_odds_path, game_date)
+        normalized_ok = upsert_historical_player_props_from_file(historical_odds_path, game_date)
+        success = legacy_ok and normalized_ok and success
     return success
