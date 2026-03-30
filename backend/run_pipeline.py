@@ -8,6 +8,7 @@ import logging
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from utils.logging_utils import configure_logging, log_section, log_status
 
@@ -89,18 +90,31 @@ SHOT_TYPE_PATH = os.path.join(DATA_DIR, "shot_type_analysis.json")
 OPP_SHOT_TYPE_PATH = os.path.join(DATA_DIR, "opponent_defensive_ranks.json")
 PLAY_TYPE_PATH = os.path.join(DATA_DIR, "play_type_analysis.json")
 BOXSCORES_PATH = os.path.join(DATA_DIR, "boxscores.json")
+ET_ZONE = ZoneInfo("America/New_York")
 
 def run_dk():
     logger.info("Starting DraftKings...")
     data = draftkings.fetch_dk_odds()
-    write_odds_csv(DK_PATH, data)
+    write_odds_csv(
+        DK_PATH,
+        data,
+        preserve_on_empty=True,
+        target_game_date=datetime.now(ET_ZONE).date().isoformat(),
+        sportsbook_label="DraftKings",
+    )
     df = pd.DataFrame(data or [])
     return f"DraftKings: {len(df)} rows"
 
 def run_fd():
     logger.info("Starting FanDuel...")
     data = fanduel.fetch_odds()
-    write_odds_csv(FD_PATH, data)
+    write_odds_csv(
+        FD_PATH,
+        data,
+        preserve_on_empty=True,
+        target_game_date=datetime.now(ET_ZONE).date().isoformat(),
+        sportsbook_label="FanDuel",
+    )
     df = pd.DataFrame(data or [])
     return f"FanDuel: {len(df)} rows"
 
@@ -253,7 +267,10 @@ def main():
                 ("Game Logs", run_logs),
                 ("Boxscores", run_boxscores)
             ]
-            critical_scrapers = {"Schedule", "Season Stats", "Game Logs"}
+            # These are the only blockers that should cause the daily pipeline
+            # to be treated as a failed run by master_cron. Game logs can lag
+            # temporarily without breaking same-day schedule or props refreshes.
+            critical_scrapers = {"Schedule", "Season Stats"}
             critical_failures = []
             
             for name, func in scrapers:

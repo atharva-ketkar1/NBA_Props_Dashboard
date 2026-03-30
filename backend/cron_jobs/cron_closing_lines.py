@@ -150,8 +150,21 @@ def load_master_feed_maps():
 def persist_raw_odds_csvs(dk_data, fd_data):
     """Persist the latest raw scraper output so downstream upserts use fresh data."""
     try:
-        write_odds_csv(os.path.join(DATA_DIR, "draftkings.csv"), dk_data)
-        write_odds_csv(os.path.join(DATA_DIR, "fanduel.csv"), fd_data)
+        target_game_date = get_et_now().date().isoformat()
+        write_odds_csv(
+            os.path.join(DATA_DIR, "draftkings.csv"),
+            dk_data,
+            preserve_on_empty=True,
+            target_game_date=target_game_date,
+            sportsbook_label="DraftKings",
+        )
+        write_odds_csv(
+            os.path.join(DATA_DIR, "fanduel.csv"),
+            fd_data,
+            preserve_on_empty=True,
+            target_game_date=target_game_date,
+            sportsbook_label="FanDuel",
+        )
     except Exception as e:
         log_status(logger, "WARN", "Unable to persist raw odds CSVs", error=e)
 
@@ -358,7 +371,7 @@ def save_cron_state(state):
     with open(STATE_PATH, 'w') as f:
         json.dump(state, f, indent=2)
 
-def main(dry_run=False):
+def main(dry_run=False, preselected_games=None):
     now = get_et_now()
     today_date = now.strftime("%Y-%m-%d")
     log_section(logger, "Closing line sweep", date=today_date, dry_run=dry_run)
@@ -382,37 +395,62 @@ def main(dry_run=False):
         return
         
     games_to_scrape = []
-    
-    for game in sched.get("games", []):
-        game_id = game.get("game_id")
-        deadline_str = game.get("closing_scrape_deadline")
-        if not deadline_str or not game_id:
-            continue
-            
-        # If we already scraped this game today, skip
-        if game_id in state["scraped_games"]:
-            continue
-            
-        try:
-            deadline_dt = datetime.fromisoformat(deadline_str)
-            # The target logic: Scrape if we are within 12 minutes before the deadline
-            # If cron runs every 5 mins (e.g. at XX:15, XX:20) and game is at XX:30
-            # At XX:15: deadline is 15 mins away (delta=15)
-            # At XX:20: deadline is 10 mins away (delta=10) -> TRIGGER!
-            
-            delta = deadline_dt - now
-            delta_minutes = delta.total_seconds() / 60.0
-            
-            # If the game is starting in <= 12 minutes, and it hasn't started yet
-            # (or it started max 5 mins ago and we missed it)
-            if -5 <= delta_minutes <= 12:
-                games_to_scrape.append({
-                    "game_id": game_id,
-                    "deadline": deadline_dt,
-                    "matchup": game.get("matchup", "Unknown")
-                })
-        except ValueError:
-            pass
+
+    if preselected_games is not None:
+        schedule_by_id = {
+            str(game.get("game_id")): game
+            for game in sched.get("games", [])
+            if isinstance(game, dict) and game.get("game_id")
+        }
+        for selected in preselected_games:
+            if not isinstance(selected, dict):
+                continue
+            game_id = str(selected.get("game_id") or "")
+            if not game_id or game_id in state["scraped_games"]:
+                continue
+            selected_deadline = selected.get("deadline")
+            if isinstance(selected_deadline, str):
+                try:
+                    selected_deadline = datetime.fromisoformat(selected_deadline)
+                except ValueError:
+                    selected_deadline = None
+            games_to_scrape.append({
+                "game_id": game_id,
+                "deadline": selected_deadline,
+                "matchup": selected.get("matchup")
+                or schedule_by_id.get(game_id, {}).get("matchup", "Unknown"),
+            })
+    else:
+        for game in sched.get("games", []):
+            game_id = game.get("game_id")
+            deadline_str = game.get("closing_scrape_deadline")
+            if not deadline_str or not game_id:
+                continue
+                
+            # If we already scraped this game today, skip
+            if game_id in state["scraped_games"]:
+                continue
+                
+            try:
+                deadline_dt = datetime.fromisoformat(deadline_str)
+                # The target logic: Scrape if we are within 12 minutes before the deadline
+                # If cron runs every 5 mins (e.g. at XX:15, XX:20) and game is at XX:30
+                # At XX:15: deadline is 15 mins away (delta=15)
+                # At XX:20: deadline is 10 mins away (delta=10) -> TRIGGER!
+                
+                delta = deadline_dt - now
+                delta_minutes = delta.total_seconds() / 60.0
+                
+                # If the game is starting in <= 12 minutes, and it hasn't started yet
+                # (or it started max 5 mins ago and we missed it)
+                if -5 <= delta_minutes <= 12:
+                    games_to_scrape.append({
+                        "game_id": game_id,
+                        "deadline": deadline_dt,
+                        "matchup": game.get("matchup", "Unknown")
+                    })
+            except ValueError:
+                pass
 
     if not games_to_scrape:
         log_status(logger, "SKIP", "No games within the closing window")

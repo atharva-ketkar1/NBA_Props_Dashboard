@@ -43,6 +43,28 @@ def get_intraday_interval_seconds():
     return max(300, parsed)
 
 
+def get_pipeline_retry_cooldown_seconds():
+    raw_value = os.getenv("PIPELINE_RETRY_COOLDOWN_SECONDS", "3600")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 3600
+    return max(300, parsed)
+
+
+def get_max_pipeline_failures_per_day():
+    raw_value = os.getenv("MAX_PIPELINE_FAILURES_PER_DAY", "2")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 2
+    return max(1, parsed)
+
+
+PIPELINE_RETRY_COOLDOWN_SECONDS = get_pipeline_retry_cooldown_seconds()
+MAX_PIPELINE_FAILURES_PER_DAY = get_max_pipeline_failures_per_day()
+
+
 def parse_mock_time(value):
     if not value:
         return None
@@ -58,13 +80,23 @@ def parse_mock_time(value):
     return dt.astimezone(ZoneInfo("America/New_York"))
 
 def load_state():
+    default_state = {
+        "last_pipeline_date": "",
+        "scraped_closing_games": [],
+        "last_intraday_time": 0,
+        "pipeline_failure_date": "",
+        "pipeline_failures_today": 0,
+        "last_pipeline_attempt_ts": 0,
+    }
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
-                return json.load(f)
+                raw_state = json.load(f)
+                if isinstance(raw_state, dict):
+                    return {**default_state, **raw_state}
         except Exception as e:
             logger.error(f"Error loading state: {e}")
-    return {"last_pipeline_date": "", "scraped_closing_games": [], "last_intraday_time": 0}
+    return default_state
 
 def save_state(state):
     try:
@@ -139,8 +171,31 @@ def run_pipeline_if_needed(now, state, dry_run=False):
     # Check if we should run it
     if now.hour >= 6:
         if state.get("last_pipeline_date") != today_str:
+            failed_today = state.get("pipeline_failure_date") == today_str
+            failures_today = int(state.get("pipeline_failures_today", 0) or 0) if failed_today else 0
+            last_attempt_ts = float(state.get("last_pipeline_attempt_ts", 0) or 0)
+            seconds_since_attempt = now.timestamp() - last_attempt_ts if last_attempt_ts else None
+
+            if failed_today and failures_today >= MAX_PIPELINE_FAILURES_PER_DAY:
+                log_status(
+                    logger,
+                    "WARN",
+                    "Skipping full pipeline after repeated failures",
+                    date=today_str,
+                    failures=failures_today,
+                )
+                return False
+
+            if (
+                failed_today
+                and seconds_since_attempt is not None
+                and seconds_since_attempt < PIPELINE_RETRY_COOLDOWN_SECONDS
+            ):
+                return False
+
             log_section(logger, "Priority 1 - Full pipeline", date=today_str, dry_run=dry_run)
             pipeline_ok = True
+            attempt_ts = now.timestamp()
             if not dry_run:
                 try:
                     sys.path.append(BASE_DIR)
@@ -166,11 +221,27 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                         log_status(logger, "WARN", "Stale DB cleanup failed", error=e)
 
             if not pipeline_ok:
+                state["pipeline_failure_date"] = today_str
+                state["pipeline_failures_today"] = failures_today + 1
+                state["last_pipeline_attempt_ts"] = attempt_ts
+                if not dry_run:
+                    save_state(state)
+                log_status(
+                    logger,
+                    "WARN",
+                    "Full pipeline attempt failed; deferring retry",
+                    date=today_str,
+                    failures_today=state["pipeline_failures_today"],
+                    retry_cooldown_s=PIPELINE_RETRY_COOLDOWN_SECONDS,
+                )
                 return False
 
             state["last_pipeline_date"] = today_str
             # Reset scraped games for the new day
             state["scraped_closing_games"] = []
+            state["pipeline_failure_date"] = ""
+            state["pipeline_failures_today"] = 0
+            state["last_pipeline_attempt_ts"] = attempt_ts
             if not dry_run:
                 save_state(state)
             return True
@@ -237,7 +308,12 @@ def check_closing_lines(now, state, dry_run=False):
                 # Modify the state of the cron_closing_lines strictly locally if needed,
                 # but we will just call scrape_and_shape_odds directly via a wrapper to ensure single run.
                 # Since cron_closing_lines.main() manages its own state, it's safer to just call it.
-                closing_ok = bool(cron_closing_lines.main(dry_run=False))
+                closing_ok = bool(
+                    cron_closing_lines.main(
+                        dry_run=False,
+                        preselected_games=games_to_scrape,
+                    )
+                )
             except Exception as e:
                 log_status(logger, "FAIL", "Pre-tip props refresh failed", error=e)
                 closing_ok = False
