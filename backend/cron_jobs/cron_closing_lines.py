@@ -22,6 +22,7 @@ from utils.snapshot_manager import SnapshotManager
 from utils.odds_csv import write_odds_csv
 from utils.prizepicks_archive import archive_prizepicks_rows
 from utils.upsert_market_history import (
+    historical_odds_legacy_fallback_enabled,
     upsert_historical_odds_from_file,
     upsert_live_historical_player_props,
     upsert_line_movements_from_file,
@@ -489,9 +490,9 @@ def main(dry_run=False, preselected_games=None):
         # DATA_DIR is defined at module level in this file
         props_ok = True
         line_movements_ok = True
-        historical_ok = True
         normalized_historical_ok = True
         legacy_historical_ok = True
+        legacy_historical_fallback = historical_odds_legacy_fallback_enabled()
         pp_rows = []
 
         try:
@@ -557,14 +558,15 @@ def main(dry_run=False, preselected_games=None):
             log_status(logger, "WARN", "Normalized historical odds upsert failed", error=e)
             normalized_historical_ok = False
 
-        try:
-            historical_path = os.path.join(BASE_DIR, "data", "archive", "historical_odds.json")
-            archive_dates = sorted({pdata.get("game_date") or get_et_now().strftime("%Y-%m-%d") for pdata in players_data.values()})
-            for archive_date in archive_dates:
-                legacy_historical_ok = upsert_historical_odds_from_file(historical_path, archive_date) and legacy_historical_ok
-        except Exception as e:
-            log_status(logger, "WARN", "Historical odds upsert failed", error=e)
-            legacy_historical_ok = False
+        if legacy_historical_fallback:
+            try:
+                historical_path = os.path.join(BASE_DIR, "data", "archive", "historical_odds.json")
+                archive_dates = sorted({pdata.get("game_date") or get_et_now().strftime("%Y-%m-%d") for pdata in players_data.values()})
+                for archive_date in archive_dates:
+                    legacy_historical_ok = upsert_historical_odds_from_file(historical_path, archive_date) and legacy_historical_ok
+            except Exception as e:
+                log_status(logger, "WARN", "Historical odds upsert failed", error=e)
+                legacy_historical_ok = False
 
         historical_ok = normalized_historical_ok and legacy_historical_ok
 
@@ -578,6 +580,7 @@ def main(dry_run=False, preselected_games=None):
                 historical_ok=historical_ok,
                 normalized_historical_ok=normalized_historical_ok,
                 legacy_historical_ok=legacy_historical_ok,
+                legacy_historical_fallback_enabled=legacy_historical_fallback,
             )
             return False
 

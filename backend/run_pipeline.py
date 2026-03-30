@@ -314,6 +314,9 @@ def main():
             log_status(logger, "RUN", "Supabase sync started")
             props_ok = True
             historical_sync_ok = True
+            normalized_historical_ok = True
+            legacy_historical_ok = True
+            legacy_historical_fallback_enabled = True
             try:
                 from utils.upsert_props import run_odds_update
                 props_ok = bool(run_odds_update(
@@ -327,13 +330,25 @@ def main():
                 props_ok = False
 
             try:
-                from utils.upsert_market_history import sync_recent_historical_odds_from_file
-                historical_sync_ok = bool(sync_recent_historical_odds_from_file(
+                from utils.upsert_market_history import (
+                    historical_odds_legacy_fallback_enabled,
+                    sync_recent_historical_odds_from_file,
+                    sync_recent_historical_player_props_from_file,
+                )
+                legacy_historical_fallback_enabled = historical_odds_legacy_fallback_enabled()
+                normalized_historical_ok = bool(sync_recent_historical_player_props_from_file(
                     os.path.join(BASE_DIR, "data", "archive", "historical_odds.json"),
                 ))
+                if legacy_historical_fallback_enabled:
+                    legacy_historical_ok = bool(sync_recent_historical_odds_from_file(
+                        os.path.join(BASE_DIR, "data", "archive", "historical_odds.json"),
+                    ))
+                historical_sync_ok = normalized_historical_ok and legacy_historical_ok
             except Exception as e:
-                log_status(logger, "WARN", "Historical odds sync failed", error=e)
+                log_status(logger, "WARN", "Normalized historical odds sync failed", error=e)
                 historical_sync_ok = False
+                normalized_historical_ok = False
+                legacy_historical_ok = False
 
             if props_ok and historical_sync_ok:
                 log_status(logger, "OK", "Supabase sync complete")
@@ -343,7 +358,9 @@ def main():
                     "WARN",
                     "Supabase sync incomplete",
                     props_ok=props_ok,
-                    historical_ok=historical_sync_ok,
+                    normalized_historical_ok=normalized_historical_ok,
+                    legacy_historical_ok=legacy_historical_ok,
+                    legacy_historical_fallback_enabled=legacy_historical_fallback_enabled,
                 )
 
             if critical_failures:

@@ -30,6 +30,7 @@ const DEFAULT_LINE_ROWS_CACHE_MS = 30_000;
 const DEFAULT_PLAYER_DETAIL_CACHE_MS = 5 * 60_000;
 const DEFAULT_ARCHIVE_CACHE_MS = 60 * 60_000;
 const DEFAULT_SIMILAR_CACHE_MS = 60_000;
+const DEFAULT_HISTORICAL_LEGACY_FALLBACK = true;
 const HISTORICAL_SOURCE_PRIORITY: Record<string, number> = {
   closing_line: 3,
   pre_game_snapshot_fallback: 2,
@@ -68,6 +69,20 @@ function getServerNumberEnv(name: string, fallbackValue: number) {
   return parsePositiveInteger(getOptionalEnv(name), fallbackValue);
 }
 
+function getServerBooleanEnv(name: string, fallbackValue: boolean) {
+  const rawValue = getOptionalEnv(name);
+  if (!rawValue) return fallbackValue;
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return fallbackValue;
+}
+
 function clampPropDayWindow(days: number) {
   return Math.min(MAX_UPCOMING_PROP_DAYS, Math.max(1, days));
 }
@@ -86,6 +101,10 @@ const LINE_ROWS_CACHE_MS = getServerNumberEnv('DASHBOARD_LINE_ROWS_CACHE_MS', DE
 const PLAYER_DETAIL_CACHE_MS = getServerNumberEnv('DASHBOARD_PLAYER_DETAIL_CACHE_MS', DEFAULT_PLAYER_DETAIL_CACHE_MS);
 const ARCHIVE_CACHE_MS = getServerNumberEnv('DASHBOARD_ARCHIVE_CACHE_MS', DEFAULT_ARCHIVE_CACHE_MS);
 const SIMILAR_CACHE_MS = getServerNumberEnv('DASHBOARD_SIMILAR_CACHE_MS', DEFAULT_SIMILAR_CACHE_MS);
+const HISTORICAL_ODDS_LEGACY_FALLBACK = getServerBooleanEnv(
+  'HISTORICAL_ODDS_LEGACY_FALLBACK',
+  DEFAULT_HISTORICAL_LEGACY_FALLBACK,
+);
 
 function assertNoError(error: { message?: string } | null, context: string) {
   if (error) {
@@ -100,16 +119,6 @@ function buildCacheKey(parts: Array<string | number>) {
 function getHistoricalSourcePriority(source?: string | null) {
   if (!source) return 0;
   return HISTORICAL_SOURCE_PRIORITY[source] ?? 0;
-}
-
-function isMissingSupabaseTableError(error: { message?: string } | null, tableName: string) {
-  const message = String(error?.message ?? '').toLowerCase();
-  const tableToken = tableName.toLowerCase();
-  return (
-    (message.includes('relation') && message.includes('does not exist') && message.includes(tableToken))
-    || (message.includes('could not find the table') && message.includes(tableToken))
-    || (message.includes('schema cache') && message.includes(tableToken))
-  );
 }
 
 function reshapeHistoricalOddsRows(rows: any[]) {
@@ -390,6 +399,40 @@ async function fetchGamesForDates(dates: string[], selectClause = '*') {
   );
 }
 
+async function fetchAllHistoricalPlayerPropsForPlayer(playerId: number) {
+  return readCached(
+    buildCacheKey(['historical_player_props', playerId]),
+    ARCHIVE_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const allRows: any[] = [];
+
+      for (let start = 0; ; start += PAGE_SIZE) {
+        const { data, error } = await supabase
+          .from('historical_player_props')
+          .select(HISTORICAL_PLAYER_PROP_SELECT)
+          .eq('player_id', playerId)
+          .order('game_date', { ascending: true })
+          .order('stat_type', { ascending: true })
+          .order('sportsbook', { ascending: true })
+          .range(start, start + PAGE_SIZE - 1);
+
+        assertNoError(error, 'historical_player_props');
+
+        if (!data?.length) {
+          return allRows;
+        }
+
+        allRows.push(...data);
+
+        if (data.length < PAGE_SIZE) {
+          return allRows;
+        }
+      }
+    },
+  );
+}
+
 async function fetchLineMovementsForDates(
   dates: string[],
   selectClause: string,
@@ -508,49 +551,49 @@ export async function fetchGamesPayload(dates: string[]) {
 
 export async function fetchPlayerPayload(playerId: number) {
   return readCached(
-    buildCacheKey(['player_detail', playerId]),
+    buildCacheKey([
+      'player_detail',
+      playerId,
+      HISTORICAL_ODDS_LEGACY_FALLBACK ? 'legacy-fallback' : 'normalized-only',
+    ]),
     PLAYER_DETAIL_CACHE_MS,
     async () => {
       const supabase = getSupabaseAdmin();
+      const detailPromise = supabase.from('players').select(PLAYER_DETAIL_SELECT).eq('id', playerId).maybeSingle();
+      const normalizedHistoricalPromise = fetchAllHistoricalPlayerPropsForPlayer(playerId);
+      const legacyFallbackPromise = HISTORICAL_ODDS_LEGACY_FALLBACK
+        ? supabase.from('historical_odds').select(HISTORICAL_ODDS_SELECT).eq('player_id', playerId)
+        : Promise.resolve({ data: [], error: null });
 
       const [
         { data: detail, error: detailError },
-        normalizedHistoricalResult,
+        normalizedHistoricalRows,
         { data: fallbackHistoricalOddsRows, error: fallbackHistoricalOddsError },
       ] = await Promise.all([
-        supabase.from('players').select(PLAYER_DETAIL_SELECT).eq('id', playerId).maybeSingle(),
-        supabase
-          .from('historical_player_props')
-          .select(HISTORICAL_PLAYER_PROP_SELECT)
-          .eq('player_id', playerId)
-          .order('game_date', { ascending: true })
-          .order('stat_type', { ascending: true })
-          .order('sportsbook', { ascending: true }),
-        supabase.from('historical_odds').select(HISTORICAL_ODDS_SELECT).eq('player_id', playerId),
+        detailPromise,
+        normalizedHistoricalPromise,
+        legacyFallbackPromise,
       ]);
 
       assertNoError(detailError, 'player detail');
-      assertNoError(fallbackHistoricalOddsError, 'historical_odds');
+      if (HISTORICAL_ODDS_LEGACY_FALLBACK) {
+        assertNoError(fallbackHistoricalOddsError, 'historical_odds');
+      }
 
       if (!detail) {
         throw new Error('[supabase] player detail: Player not found.');
       }
 
-      let normalizedHistoricalOddsRows: any[] = [];
-      if (normalizedHistoricalResult.error) {
-        if (!isMissingSupabaseTableError(normalizedHistoricalResult.error, 'historical_player_props')) {
-          assertNoError(normalizedHistoricalResult.error, 'historical_player_props');
-        }
-      } else {
-        normalizedHistoricalOddsRows = reshapeHistoricalOddsRows(normalizedHistoricalResult.data ?? []);
-      }
+      const normalizedHistoricalOddsRows = reshapeHistoricalOddsRows(normalizedHistoricalRows ?? []);
 
       return {
         detail,
-        historicalOddsRows: mergeHistoricalOddsRows(
-          normalizedHistoricalOddsRows,
-          fallbackHistoricalOddsRows ?? [],
-        ),
+        historicalOddsRows: HISTORICAL_ODDS_LEGACY_FALLBACK
+          ? mergeHistoricalOddsRows(
+            normalizedHistoricalOddsRows,
+            fallbackHistoricalOddsRows ?? [],
+          )
+          : normalizedHistoricalOddsRows,
       };
     },
   );

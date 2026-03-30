@@ -49,6 +49,13 @@ def _resolve_historical_odds_path(path: str) -> str:
     return path
 
 
+def historical_odds_legacy_fallback_enabled():
+    raw_value = str(os.getenv("HISTORICAL_ODDS_LEGACY_FALLBACK", "true")).strip().lower()
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
 def _is_retryable_upsert_error(error):
     message = str(error).lower()
     return (
@@ -410,13 +417,8 @@ def backfill_historical_player_props_from_file(historical_odds_path: str, game_d
     return success
 
 
-def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: int = 5):
-    historical_odds_path, historical_odds = _load_historical_archive(historical_odds_path)
-    if historical_odds is None:
-        logger.warning("historical odds file not found: %s", historical_odds_path)
-        return True
-
-    valid_dates = sorted(
+def _get_recent_historical_dates(historical_odds, max_days: int):
+    return sorted(
         [
             game_date for game_date, payload in (historical_odds or {}).items()
             if isinstance(game_date, str) and isinstance(payload, dict) and payload
@@ -424,12 +426,40 @@ def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: i
         reverse=True,
     )[:max(1, max_days)]
 
+
+def sync_recent_historical_odds_from_file(historical_odds_path: str, max_days: int = 5):
+    historical_odds_path, historical_odds = _load_historical_archive(historical_odds_path)
+    if historical_odds is None:
+        logger.warning("historical odds file not found: %s", historical_odds_path)
+        return True
+
+    valid_dates = _get_recent_historical_dates(historical_odds, max_days)
+
     if not valid_dates:
         return True
 
     success = True
     for game_date in valid_dates:
-        legacy_ok = upsert_historical_odds_from_file(historical_odds_path, game_date)
-        normalized_ok = upsert_historical_player_props_from_file(historical_odds_path, game_date)
-        success = legacy_ok and normalized_ok and success
+        success = upsert_historical_odds_from_file(historical_odds_path, game_date) and success
+    return success
+
+
+def sync_recent_historical_player_props_from_file(historical_odds_path: str, max_days: int = 5, include_pp: bool = False):
+    historical_odds_path, historical_odds = _load_historical_archive(historical_odds_path)
+    if historical_odds is None:
+        logger.warning("historical odds file not found: %s", historical_odds_path)
+        return True
+
+    valid_dates = _get_recent_historical_dates(historical_odds, max_days)
+
+    if not valid_dates:
+        return True
+
+    success = True
+    for game_date in valid_dates:
+        success = upsert_historical_player_props_from_file(
+            historical_odds_path,
+            game_date,
+            include_pp=include_pp,
+        ) and success
     return success

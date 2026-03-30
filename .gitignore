@@ -40,9 +40,10 @@ LLM_CONTEXT.md
 docs/prompts/
 docs/progress/
 docs/deployment/
+/docs/security/
+/docs/updates/2026-03-30_historical_odds_normalization.md 
 
 backend/scrapers/archive/
-/docs/security/
 /supabase/*
 /vercel.json
 sql/
