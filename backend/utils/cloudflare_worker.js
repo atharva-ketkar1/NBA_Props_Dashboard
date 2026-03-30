@@ -145,7 +145,7 @@ function buildUpstreamHeaders(request, targetObj, userAgent) {
     const effectiveUserAgent = hostname === "api.prizepicks.com" && incomingUserAgent ? incomingUserAgent : userAgent;
 
     headers.set("Accept", "application/json, text/plain, */*");
-    headers.set("Accept-Encoding", "gzip, deflate");
+    headers.set("Accept-Encoding", hostname === "api.prizepicks.com" ? "gzip, deflate" : "identity");
     headers.set("Accept-Language", acceptLanguage);
     headers.set("Cache-Control", "no-cache");
     headers.set("Origin", origin);
@@ -343,18 +343,40 @@ export default {
             const response = await fetchWithRetry(request, targetUrl, targetObj);
             const headers = applyResponseHeaders({}, request, env);
             const contentType = response.headers.get("Content-Type");
-            const contentEncoding = response.headers.get("Content-Encoding");
 
             if (contentType) {
                 headers.set("Content-Type", contentType);
             }
+
+            headers.set("X-Proxy-Target", targetObj.hostname);
+
+            if (request.method === "HEAD") {
+                return new Response(null, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers,
+                });
+            }
+
+            const normalizedContentType = String(contentType || "").toLowerCase();
+            const shouldNormalizeText =
+                normalizedContentType.includes("json") || normalizedContentType.startsWith("text/");
+
+            if (shouldNormalizeText) {
+                const textBody = await response.text();
+                return new Response(textBody, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers,
+                });
+            }
+
+            const contentEncoding = response.headers.get("Content-Encoding");
             if (contentEncoding) {
                 headers.set("Content-Encoding", contentEncoding);
             }
 
-            headers.set("X-Proxy-Target", targetObj.hostname);
-
-            return new Response(request.method === "HEAD" ? null : response.body, {
+            return new Response(response.body, {
                 status: response.status,
                 statusText: response.statusText,
                 headers,

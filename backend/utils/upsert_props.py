@@ -17,6 +17,7 @@ import ast
 import hashlib
 import json
 import logging
+import math
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -86,13 +87,43 @@ def _row_sync_key(row):
 
 def _row_fingerprint(row):
     payload = {
-        "line": row.get("line"),
-        "over_odds": row.get("over_odds"),
-        "under_odds": row.get("under_odds"),
-        "implied": row.get("implied"),
+        "line": _normalize_float(row.get("line")),
+        "over_odds": _normalize_int(row.get("over_odds")),
+        "under_odds": _normalize_int(row.get("under_odds")),
+        "implied": _normalize_float(row.get("implied"), default=0.0),
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+
+
+def _is_missing(value):
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    try:
+        return bool(pd.isna(value))
+    except Exception:
+        return False
+
+
+def _normalize_float(value, default=None):
+    if _is_missing(value):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return number
+
+
+def _normalize_int(value, default=None):
+    number = _normalize_float(value, default=None)
+    if number is None:
+        return default
+    return int(number)
 
 
 def run_odds_update(
@@ -188,6 +219,7 @@ def run_odds_update(
     rows = []
     resolved_from_schedule = 0
     unresolved_missing_dates = 0
+    skipped_missing_line = 0
     for df, book in [(df_dk, 'dk'), (df_fd, 'fd'), (df_pp, 'pp')]:
         if df.empty:
             continue
@@ -224,15 +256,19 @@ def run_odds_update(
 
             raw_prop = row.get('prop_type', '')
             stat_key = PROP_MAP.get(raw_prop, raw_prop).upper()
+            line = _normalize_float(row.get('line'))
+            if line is None:
+                skipped_missing_line += 1
+                continue
 
             rows.append({
                 'player_id':  pid,
                 'stat_type':  stat_key,
                 'sportsbook': book,
-                'line':       row.get('line'),
-                'over_odds':  row.get('over_odds'),
-                'under_odds': row.get('under_odds'),
-                'implied':    row.get('implied_prob', 0) or 0,
+                'line':       line,
+                'over_odds':  _normalize_int(row.get('over_odds')),
+                'under_odds': _normalize_int(row.get('under_odds')),
+                'implied':    _normalize_float(row.get('implied_prob'), default=0.0),
                 'game_date':  normalize_row_game_date(resolved_game_date),
             })
 
@@ -248,6 +284,13 @@ def run_odds_update(
             "WARN",
             "Prop rows fell back to the run date",
             rows=unresolved_missing_dates,
+        )
+    if skipped_missing_line:
+        log_status(
+            logger,
+            "WARN",
+            "Skipped prop rows missing a usable line",
+            rows=skipped_missing_line,
         )
 
     sync_state = _load_sync_state()
