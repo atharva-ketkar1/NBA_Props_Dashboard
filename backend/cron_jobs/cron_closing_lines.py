@@ -27,7 +27,7 @@ from utils.upsert_market_history import (
 )
 
 configure_logging()
-logger = logging.getLogger("CronClosingLines")
+logger = logging.getLogger("CronPreTipRefresh")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data", "current")
@@ -421,7 +421,7 @@ def main(dry_run=False):
     log_status(
         logger,
         "RUN",
-        "Triggering closing lines scrape",
+        "Triggering pre-tip props refresh",
         games=len(games_to_scrape),
         matchups=[g["matchup"] for g in games_to_scrape],
     )
@@ -437,7 +437,7 @@ def main(dry_run=False):
             allowed_game_ids=[g["game_id"] for g in games_to_scrape],
         )
         if not players_data:
-            log_status(logger, "WARN", "Closing lines scrape produced no mapped players")
+            log_status(logger, "WARN", "Pre-tip props refresh produced no mapped players")
             return False
         sm = SnapshotManager()
                 
@@ -482,7 +482,18 @@ def main(dry_run=False):
                             skipped_not_target_game=pp_archive.get("skipped_not_target_game", 0),
                         )
                 except Exception as error:
-                    log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
+                    cached_pp_path = prizepicks.cached_output_path_if_recent(prizepicks.DEFAULT_OUTPUT_PATH)
+                    if cached_pp_path:
+                        pp_path = str(cached_pp_path)
+                        log_status(
+                            logger,
+                            "WARN",
+                            "PrizePicks refresh failed; using recent cached CSV",
+                            error=error,
+                            cached_path=pp_path,
+                        )
+                    else:
+                        log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
             props_ok = run_odds_update(
                 dk_path=os.path.join(DATA_DIR, "draftkings.csv"),
                 fd_path=os.path.join(DATA_DIR, "fanduel.csv"),
@@ -512,7 +523,7 @@ def main(dry_run=False):
             log_status(
                 logger,
                 "WARN",
-                "Closing lines DB sync incomplete",
+                "Pre-tip refresh DB sync incomplete",
                 props_ok=props_ok,
                 line_movements_ok=line_movements_ok,
                 historical_ok=historical_ok,
@@ -524,15 +535,15 @@ def main(dry_run=False):
                 state["scraped_games"].append(g["game_id"])
 
         save_cron_state(state)
-        log_status(logger, "OK", "Closing line sweep complete", games=len(games_to_scrape))
+        log_status(logger, "OK", "Pre-tip props refresh complete", games=len(games_to_scrape))
         return True
 
     except Exception as e:
-        log_status(logger, "FAIL", "Failed to execute closing line scrape", error=e)
+        log_status(logger, "FAIL", "Failed to execute pre-tip props refresh", error=e)
         return False
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Cron script for closing lines")
+    parser = argparse.ArgumentParser(description="Cron script for pre-tip props refresh and local closing archive")
     parser.add_argument("--dry-run", action="store_true", help="Run checks without actually scraping")
     args = parser.parse_args()
     

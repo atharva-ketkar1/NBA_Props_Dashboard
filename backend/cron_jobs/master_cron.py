@@ -178,7 +178,7 @@ def run_pipeline_if_needed(now, state, dry_run=False):
     return False
 
 def check_closing_lines(now, state, dry_run=False):
-    """Priority 2: Closing lines 10 mins before game."""
+    """Priority 2: Pre-tip props refresh plus local closing archive."""
     if not os.path.exists(SCHEDULE_PATH):
         return False
         
@@ -224,7 +224,7 @@ def check_closing_lines(now, state, dry_run=False):
     if games_to_scrape:
         log_section(
             logger,
-            "Priority 2 - Closing lines",
+            "Priority 2 - Pre-tip props refresh",
             games=len(games_to_scrape),
             matchups=[g["matchup"] for g in games_to_scrape],
             dry_run=dry_run,
@@ -239,7 +239,7 @@ def check_closing_lines(now, state, dry_run=False):
                 # Since cron_closing_lines.main() manages its own state, it's safer to just call it.
                 closing_ok = bool(cron_closing_lines.main(dry_run=False))
             except Exception as e:
-                log_status(logger, "FAIL", "Closing lines failed", error=e)
+                log_status(logger, "FAIL", "Pre-tip props refresh failed", error=e)
                 closing_ok = False
                 
         if not closing_ok:
@@ -256,21 +256,21 @@ def check_closing_lines(now, state, dry_run=False):
     return False
 
 def run_intraday_if_needed(now, state, dry_run=False):
-    """Priority 3: Intraday tracking on a configurable interval."""
+    """Priority 3: Intraday props refresh plus snapshot sync."""
     last_run = state.get("last_intraday_time", 0)
     current_timestamp = now.timestamp()
     interval_seconds = get_intraday_interval_seconds()
 
     if current_timestamp - last_run >= interval_seconds:
-        log_section(logger, "Priority 3 - Intraday line movement", every_s=interval_seconds, dry_run=dry_run)
+        log_section(logger, "Priority 3 - Intraday props refresh", every_s=interval_seconds, dry_run=dry_run)
         intraday_ok = True
         if not dry_run:
             try:
                 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
                 import cron_line_movement
-                intraday_ok = bool(cron_line_movement.run_intraday_snapshot())
+                intraday_ok = bool(cron_line_movement.run_intraday_refresh())
             except Exception as e:
-                log_status(logger, "FAIL", "Intraday scrape failed", error=e)
+                log_status(logger, "FAIL", "Intraday props refresh failed", error=e)
                 intraday_ok = False
 
         if not intraday_ok:

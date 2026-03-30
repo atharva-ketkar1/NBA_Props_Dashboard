@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import re
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -119,6 +120,9 @@ DASHBOARD_PROP_TYPES = {
 }
 
 VALID_FETCH_MODES = {"proxy_first", "proxy_only", "direct_only"}
+FETCH_RETRY_DELAY_SECONDS = 1.0
+FETCH_RETRY_ATTEMPTS_PER_ROUTE = 3
+DEFAULT_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
 
 TEAM_NAME_TO_ABBREV = {
     "ATL": "ATL",
@@ -305,12 +309,16 @@ def fetch_payload(mode: str = "proxy_first", timeout: int = 20) -> Dict[str, Any
 
     last_error = None
     for label, via_proxy in routes:
-        try:
-            response = run_request(url, headers=headers, timeout=timeout, via_proxy=via_proxy)
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:
-            last_error = RuntimeError(f"{label} request failed: {exc}")
+        for attempt in range(1, FETCH_RETRY_ATTEMPTS_PER_ROUTE + 1):
+            try:
+                response = run_request(url, headers=headers, timeout=timeout, via_proxy=via_proxy)
+                response.raise_for_status()
+                return response.json()
+            except Exception as exc:
+                attempt_suffix = f" (attempt {attempt}/{FETCH_RETRY_ATTEMPTS_PER_ROUTE})"
+                last_error = RuntimeError(f"{label} request failed{attempt_suffix}: {exc}")
+                if attempt < FETCH_RETRY_ATTEMPTS_PER_ROUTE:
+                    time.sleep(FETCH_RETRY_DELAY_SECONDS * attempt)
 
     if last_error:
         raise last_error
@@ -807,6 +815,21 @@ def write_json(payload: Dict[str, Any], output_path: Path) -> None:
         json.dump(payload, handle, indent=2)
 
 
+def cached_output_path_if_recent(
+    output_path: Path = DEFAULT_OUTPUT_PATH,
+    max_age_seconds: int = DEFAULT_CACHE_MAX_AGE_SECONDS,
+) -> Optional[Path]:
+    try:
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            return None
+        age_seconds = time.time() - output_path.stat().st_mtime
+        if age_seconds > max_age_seconds:
+            return None
+        return output_path
+    except OSError:
+        return None
+
+
 def fetch_and_write_rows(
     *,
     output_path: Path = DEFAULT_OUTPUT_PATH,
@@ -836,7 +859,7 @@ def fetch_and_write_rows(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fetch PrizePicks player projections and normalize them to CSV.")
-    parser.add_argument("--mode", choices=["proxy_first", "proxy_only", "direct_only"], default="proxy_first")
+    parser.add_argument("--mode", choices=["proxy_first", "proxy_only", "direct_only"], default=None)
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--input-json", help="Parse a saved raw payload instead of making a network request.")
     parser.add_argument("--raw-output", help="Save the raw JSON payload to this path when fetching.")
@@ -856,7 +879,7 @@ def load_payload(args: argparse.Namespace) -> Dict[str, Any]:
         with Path(args.input_json).open("r", encoding="utf-8") as handle:
             return json.load(handle)
 
-    payload = fetch_payload(mode=args.mode, timeout=args.timeout)
+    payload = fetch_payload(mode=args.mode or get_fetch_mode(), timeout=args.timeout)
     if args.raw_output:
         write_json(payload, Path(args.raw_output))
     return payload

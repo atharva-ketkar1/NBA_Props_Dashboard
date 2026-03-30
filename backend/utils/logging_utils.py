@@ -3,6 +3,8 @@ import logging
 
 LOGGER_ALIASES = {
     "MasterCron": "master",
+    "CronIntradayRefresh": "intraday",
+    "CronPreTipRefresh": "pretip",
     "CronLineMovement": "intraday",
     "CronClosingLines": "closing",
     "RunPipeline": "pipeline",
@@ -119,4 +121,3 @@ def configure_logging(level=logging.INFO):
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-

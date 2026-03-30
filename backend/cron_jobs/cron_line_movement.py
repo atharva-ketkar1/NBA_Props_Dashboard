@@ -15,11 +15,11 @@ from cron_closing_lines import scrape_and_shape_odds
 from utils.snapshot_manager import SnapshotManager
 
 configure_logging()
-logger = logging.getLogger("CronLineMovement")
+logger = logging.getLogger("CronIntradayRefresh")
 
-def run_intraday_snapshot(label="intraday"):
+def run_intraday_refresh(label="intraday"):
     start_time = time.time()
-    log_section(logger, "Intraday snapshot", label=label)
+    log_section(logger, "Intraday props refresh", label=label)
     try:
         players_data = scrape_and_shape_odds(is_closing=False)
         sm = SnapshotManager()
@@ -29,7 +29,7 @@ def run_intraday_snapshot(label="intraday"):
             log_status(
                 logger,
                 "OK",
-                "Intraday snapshot written locally",
+                "Intraday props snapshot written locally",
                 label=label,
                 players=len(players_data),
                 duration_s=f"{duration_seconds:.1f}",
@@ -46,7 +46,18 @@ def run_intraday_snapshot(label="intraday"):
                         prizepicks.fetch_and_write_rows(output_path=prizepicks.DEFAULT_OUTPUT_PATH)
                         pp_path = str(prizepicks.DEFAULT_OUTPUT_PATH)
                     except Exception as error:
-                        log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
+                        cached_pp_path = prizepicks.cached_output_path_if_recent(prizepicks.DEFAULT_OUTPUT_PATH)
+                        if cached_pp_path:
+                            pp_path = str(cached_pp_path)
+                            log_status(
+                                logger,
+                                "WARN",
+                                "PrizePicks refresh failed; using recent cached CSV",
+                                error=error,
+                                cached_path=pp_path,
+                            )
+                        else:
+                            log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
                 props_ok = run_odds_update(
                     dk_path=os.path.join(_data_dir, "draftkings.csv"),
                     fd_path=os.path.join(_data_dir, "fanduel.csv"),
@@ -81,15 +92,20 @@ def run_intraday_snapshot(label="intraday"):
             log_status(
                 logger,
                 "SKIP",
-                "Intraday snapshot skipped by dedupe",
+                "Intraday props snapshot skipped by dedupe",
                 label=label,
                 players=len(players_data),
                 duration_s=f"{duration_seconds:.1f}",
             )
             return True
     except Exception as e:
-        log_status(logger, "FAIL", "Intraday snapshot failed", error=e)
+        log_status(logger, "FAIL", "Intraday props refresh failed", error=e)
         return False
 
+
+def run_intraday_snapshot(label="intraday"):
+    """Backward-compatible wrapper for older imports."""
+    return run_intraday_refresh(label=label)
+
 if __name__ == "__main__":
-    run_intraday_snapshot()
+    run_intraday_refresh()
