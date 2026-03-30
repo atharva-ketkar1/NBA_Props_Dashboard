@@ -41,6 +41,10 @@ type SimilarResponse = {
   similarCandidatesByPosition: SimilarPlayerCandidate[];
 };
 
+type BookPreviewResponse = {
+  propsRows: any[];
+};
+
 export function fetchDashboardBootstrap(sportsbook: SportsbookId) {
   return fetchAppJson<BootstrapResponse>('/api/bootstrap', {
     sportsbook,
@@ -91,5 +95,17 @@ export function fetchDashboardSimilar(
     activeTab,
     playerId,
     selectedGameDate,
+  });
+}
+
+export function fetchDashboardBookPreview(
+  playerId: number,
+  statType: string,
+  gameDate?: string | null,
+) {
+  return fetchAppJson<BookPreviewResponse>('/api/book-preview', {
+    gameDate,
+    playerId,
+    statType,
   });
 }

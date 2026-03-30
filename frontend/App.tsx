@@ -24,6 +24,7 @@ import {
   fetchDashboardAccess,
   fetchDashboardArchive,
   fetchDashboardBootstrap,
+  fetchDashboardBookPreview,
   fetchDashboardHot,
   fetchDashboardPlayer,
   fetchDashboardSimilar,
@@ -215,6 +216,7 @@ function App() {
   }, [rawData]);
 
   const currentPlayer = playersWithProps[selectedIndex];
+  const activeStatKey = useMemo(() => STAT_LABELS[activeTab] || 'PTS', [activeTab]);
   const resolvedSelectedGameDate = useMemo(() => {
     if (!currentPlayer) return null;
     return getResolvedPlayerGameDate(currentPlayer, selectedGameDate);
@@ -714,6 +716,42 @@ function App() {
 
     return propsAvailabilityByDate[displayPlayer.id] ?? {};
   }, [displayPlayer, propsAvailabilityByDate]);
+
+  useEffect(() => {
+    if (!USE_DB || !displayPlayer || !activeStatKey) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const loadBookPreview = async () => {
+      try {
+        const preview = await fetchDashboardBookPreview(
+          displayPlayer.id,
+          activeStatKey,
+          resolvedSelectedGameDate,
+        );
+
+        if (cancelled || !(preview.propsRows ?? []).length) {
+          return;
+        }
+
+        setRawData((prev) => mergePropsIntoPlayers(prev, preview.propsRows ?? []));
+        const availabilityMap = buildAvailabilityByDateMap(preview.propsRows ?? []);
+        setPropsAvailabilityByDate((prev) => mergeAvailabilityMaps(prev, availabilityMap));
+      } catch (error) {
+        if (!cancelled) {
+          console.error('[api] sportsbook preview error:', error);
+        }
+      }
+    };
+
+    void loadBookPreview();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [USE_DB, displayPlayer?.id, activeStatKey, resolvedSelectedGameDate]);
   const maxAvailableHistoricalGames = displayPlayer?.game_log?.length ?? 0;
   const defaultFilterGameCount = maxAvailableHistoricalGames > 0
     ? Math.min(19, maxAvailableHistoricalGames)

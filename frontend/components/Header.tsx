@@ -424,8 +424,8 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
                     </div>
                   )}
                   {hasLine && !showPricedOdds && (
-                    <div className="text-[9px] font-bold ml-1 border-l border-borderMuted pl-2 whitespace-nowrap uppercase tracking-wider text-fgSubtle">
-                      Line Only
+                    <div className="text-[9px] font-bold ml-1 border-l border-borderMuted pl-2 whitespace-nowrap uppercase tracking-[0.14em] text-fgSubtle">
+                      PP Line
                     </div>
                   )}
 
@@ -451,6 +451,11 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
                         if (isNaN(num)) return val;
                         return num > 0 ? `+${num}` : `${num}`;
                       };
+                      const hasPricedOdds = sb.id !== 'pp'
+                        && sbProp?.over !== null
+                        && sbProp?.over !== undefined
+                        && sbProp?.under !== null
+                        && sbProp?.under !== undefined;
 
                       return (
                         <button
@@ -468,40 +473,44 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
                                         ${!sbIsAvailable ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:border-transparent' : ''}
                                     `}
                         >
-                          <div className="flex items-center gap-2.5">
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
                             <div className="w-4 h-4 rounded-[2px] overflow-hidden bg-white shrink-0 flex items-center justify-center">
                               <img src={sb.logo} alt={sb.label} className="w-full h-full object-contain" />
                             </div>
                             <span className="truncate tracking-wide">{sb.label}</span>
                           </div>
 
-                          {sbHasLine ? (
-                            <div className="flex items-center gap-3 shrink-0 ml-4 font-chakra">
-                              <span className="text-[14px] text-white font-bold tracking-tight">{sbProp.line}</span>
-                              {sb.id !== 'pp' && sbProp.over !== null && sbProp.over !== undefined && sbProp.under !== null && sbProp.under !== undefined ? (
-                                <div className="flex items-center gap-2.5 text-[13px] font-bold border-l border-borderMuted pl-3">
-                                  <span className="text-neutral500 flex items-center gap-1">
-                                    O <span className="text-green500 tracking-tight">{formatOdds(sbProp.over)}</span>
-                                  </span>
-                                  <span className="text-neutral500 flex items-center gap-1">
-                                    U <span className="text-red500 tracking-tight">{formatOdds(sbProp.under)}</span>
-                                  </span>
+                          <div className="ml-4 shrink-0 flex items-center justify-end gap-3 font-chakra min-w-[150px]">
+                            <span className={`w-[44px] text-right text-[14px] font-bold tracking-tight ${sbHasLine ? 'text-white' : 'text-fgSubtle'}`}>
+                              {sbHasLine ? sbProp.line : '--'}
+                            </span>
+                            <div className="w-[92px] flex items-center justify-end border-l border-borderMuted pl-3">
+                              {sbHasLine ? (
+                                hasPricedOdds ? (
+                                  <div className="flex items-center gap-2.5 text-[13px] font-bold">
+                                    <span className="text-neutral500 flex items-center gap-1">
+                                      O <span className="text-green500 tracking-tight">{formatOdds(sbProp.over)}</span>
+                                    </span>
+                                    <span className="text-neutral500 flex items-center gap-1">
+                                      U <span className="text-red500 tracking-tight">{formatOdds(sbProp.under)}</span>
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fgSubtle">
+                                    PP Line
+                                  </div>
+                                )
+                              ) : sbIsAvailable ? (
+                                <div className="text-[11px] font-semibold tracking-wide text-fgSubtle">
+                                  ...
                                 </div>
                               ) : (
-                                <div className="text-[9px] font-bold border-l border-borderMuted pl-3 uppercase tracking-wider text-fgSubtle">
-                                  Line Only
+                                <div className="text-[11px] font-semibold tracking-wide text-fgSubtle">
+                                  --
                                 </div>
                               )}
                             </div>
-                          ) : sbIsAvailable ? (
-                            <div className="text-[9px] font-bold border-l border-borderMuted pl-3 uppercase tracking-wider text-fgSubtle">
-                              Available
-                            </div>
-                          ) : (
-                            <div className="text-[9px] font-bold border-l border-borderMuted pl-3 uppercase tracking-wider text-fgSubtle">
-                              Unavailable
-                            </div>
-                          )}
+                          </div>
                         </button>
                       )
                     })}

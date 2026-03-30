@@ -458,6 +458,41 @@ export async function fetchSimilarCandidatesPayload({
   );
 }
 
+export async function fetchPlayerSportsbookPreviewPayload({
+  playerId,
+  statType,
+  gameDate,
+}: {
+  playerId: number;
+  statType: string;
+  gameDate?: string | null;
+}) {
+  const normalizedDates = gameDate ? [gameDate] : getFastRefreshDates(null);
+
+  return readCached(
+    buildCacheKey(['player_props_preview', playerId, statType, normalizedDates.join(',')]),
+    PROPS_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      let query = supabase
+        .from('player_props')
+        .select(PLAYER_PROP_SELECT)
+        .eq('player_id', playerId)
+        .eq('stat_type', statType)
+        .in('game_date', normalizedDates)
+        .order('game_date', { ascending: true })
+        .order('sportsbook', { ascending: true });
+
+      const { data, error } = await query;
+      assertNoError(error, 'player_props preview');
+
+      return {
+        propsRows: data ?? [],
+      };
+    },
+  );
+}
+
 export async function fetchArchivePayload(playerId: number, season: string) {
   return readCached(
     buildCacheKey(['archive', playerId, season]),

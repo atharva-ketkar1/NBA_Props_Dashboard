@@ -217,9 +217,7 @@ const PlayerRow = ({
                                     </div>
                                 </div>
                             ) : (
-                                <div className="text-[9px] font-bold uppercase tracking-wider text-fgSubtle">
-                                    Line Only
-                                </div>
+                                <></>
                             )}
                         </div>
                     ) : (
