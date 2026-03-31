@@ -119,6 +119,19 @@ def _row_sync_key(row):
     )
 
 
+def _parse_sync_key(sync_key):
+    parts = str(sync_key or "").split("|")
+    if len(parts) != 4:
+        return None
+    player_id, stat_type, sportsbook, game_date = parts
+    return {
+        "player_id": player_id,
+        "stat_type": stat_type,
+        "sportsbook": sportsbook,
+        "game_date": game_date,
+    }
+
+
 def _row_fingerprint(row):
     payload = {
         "line": _normalize_float(row.get("line")),
@@ -532,7 +545,26 @@ def run_odds_update(
         if sync_state.get(sync_key) != fingerprint:
             changed_rows.append(row)
 
-    if not changed_rows:
+    active_pp_dates = {
+        str(row.get("game_date") or "")
+        for row in rows
+        if str(row.get("sportsbook") or "").strip().lower() == "pp"
+    }
+    stale_pp_rows = []
+    if active_pp_dates:
+        for sync_key in sync_state:
+            parsed_key = _parse_sync_key(sync_key)
+            if not parsed_key:
+                continue
+            if parsed_key["sportsbook"] != "pp":
+                continue
+            if parsed_key["game_date"] not in active_pp_dates:
+                continue
+            if sync_key in next_sync_state:
+                continue
+            stale_pp_rows.append(parsed_key)
+
+    if not changed_rows and not stale_pp_rows:
         log_status(logger, "SKIP", "player_props sync unchanged", date=game_date, rows=len(rows))
         try:
             _save_sync_state(next_sync_state)
@@ -545,6 +577,7 @@ def run_odds_update(
         "RUN",
         "player_props sync",
         changed=len(changed_rows),
+        stale_pp=len(stale_pp_rows),
         prepared=len(rows),
         date=game_date,
     )
@@ -563,6 +596,22 @@ def run_odds_update(
             logger.error("Upsert failed for chunk %d-%d: %s", i, i + len(chunk), e)
             all_chunks_ok = False
 
+    for stale_row in stale_pp_rows:
+        try:
+            sb.table('player_props').delete().eq('player_id', stale_row['player_id']).eq(
+                'stat_type', stale_row['stat_type']
+            ).eq('sportsbook', stale_row['sportsbook']).eq('game_date', stale_row['game_date']).execute()
+        except Exception as e:
+            logger.error(
+                "Delete failed for stale PrizePicks row %s/%s/%s/%s: %s",
+                stale_row['player_id'],
+                stale_row['stat_type'],
+                stale_row['sportsbook'],
+                stale_row['game_date'],
+                e,
+            )
+            all_chunks_ok = False
+
     if all_chunks_ok:
         try:
             _save_sync_state(next_sync_state)
@@ -573,6 +622,7 @@ def run_odds_update(
             "OK",
             "player_props sync complete",
             changed=len(changed_rows),
+            stale_pp_removed=len(stale_pp_rows),
             prepared=len(rows),
             date=game_date,
         )

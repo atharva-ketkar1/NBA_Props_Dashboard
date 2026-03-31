@@ -280,7 +280,7 @@ docs/
 
 ## Current Reality
 
-The core ETL and visualization pipeline is real and working. A few UI surfaces are still partially placeholder-driven, most notably the Similar Players panel and some fallback states in analysis cards. Those gaps are documented in [`docs/audit/PROJECT_AUDIT_ROADMAP.md`](/Users/atharvaketkar/Desktop/NBA_Dashboard/docs/audit/PROJECT_AUDIT_ROADMAP.md).
+The core ETL and visualization pipeline is real and working. A few UI surfaces still have fallback-driven or coverage-limited states, especially the missing-data fallbacks in the analysis cards and the archive-season or missing-book constraints in Similar Players. Those gaps are documented in [`docs/audit/PROJECT_AUDIT_ROADMAP.md`](/Users/atharvaketkar/Desktop/NBA_Dashboard/docs/audit/PROJECT_AUDIT_ROADMAP.md).
 
 ## Documentation
 

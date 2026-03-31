@@ -26,11 +26,11 @@ This audit reflects the current codebase, not the earlier scheduler/PM2 era.
 
 ## Current Gaps And Risks
 
-### 1. Similar Players Is Still Placeholder UI
+### 1. Similar Players Is Live, But Still Coverage-Limited
 
-- `frontend/components/SimilarPlayers.tsx` still renders `SIMILAR_GAMES` fallback content.
-- `App.tsx` passes `similarGames={undefined}`, so there is no live integration path yet.
-- This is the clearest product surface that should not be described as production-complete.
+- `frontend/components/SimilarPlayers.tsx` is wired to live ranked candidates and historical comp rows; it no longer relies on static placeholder rows.
+- The strongest path today is the live `25/26` slate, where shared ranking logic powers both JSON mode and the hosted `/api/similar` route.
+- Archive-season comps still need a dedicated historical fetch path, and PrizePicks rows still lack archived closing-line history.
 
 ### 2. Analysis Cards Still Have Demo Fallbacks
 
@@ -92,7 +92,7 @@ This audit reflects the current codebase, not the earlier scheduler/PM2 era.
 ### Near Term
 
 1. Make the main schedule pipeline write `today_schedule.json` in the same path the cron jobs consume.
-2. Replace Similar Players placeholder content with a real backend-generated dataset.
+2. Tighten Similar Players coverage for archive seasons and sportsbooks without archived closing-line history.
 3. Remove illustrative fallback arrays from analysis cards and switch to honest empty states.
 4. Tighten tooltip support for quarter and half splits so labels only appear when the fields exist.
 5. Add a lightweight quality check that validates output artifacts after the pipeline completes.
