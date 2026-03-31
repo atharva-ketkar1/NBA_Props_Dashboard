@@ -30,6 +30,12 @@ from utils.supabase_client import get_supabase_client
 logger = logging.getLogger(__name__)
 
 ET_ZONE = ZoneInfo("America/New_York")
+PP_ARCHIVE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "archive",
+    "prizepicks",
+)
 SYNC_STATE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "data",
@@ -143,6 +149,78 @@ def _is_live_or_final_schedule_game(game):
     return bool((game or {}).get("is_live")) or bool((game or {}).get("is_final"))
 
 
+def _load_archived_live_prizepicks_rows(schedule_rows):
+    live_games_by_date = {}
+    for game in schedule_rows or []:
+        if not _is_live_or_final_schedule_game(game):
+            continue
+        game_date = str(game.get("game_date") or "").strip()
+        game_id = str(game.get("game_id") or "").strip()
+        if not game_date or not game_id:
+            continue
+        live_games_by_date.setdefault(game_date, set()).add(game_id)
+
+    archived_rows = []
+    loaded_dates = 0
+    for game_date, allowed_game_ids in live_games_by_date.items():
+        archive_path = os.path.join(PP_ARCHIVE_DIR, f"{game_date}.json")
+        if not os.path.exists(archive_path):
+            continue
+
+        try:
+            with open(archive_path, "r") as handle:
+                archive_data = json.load(handle)
+        except Exception as exc:
+            logger.warning("Could not read PrizePicks archive %s: %s", archive_path, exc)
+            continue
+
+        if not isinstance(archive_data, dict):
+            continue
+
+        loaded_dates += 1
+        for player_key, record in archive_data.items():
+            if not isinstance(record, dict):
+                continue
+
+            archived_game_id = str(record.get("game_id") or "").strip()
+            if archived_game_id not in allowed_game_ids:
+                continue
+
+            props = record.get("props")
+            if not isinstance(props, dict):
+                continue
+
+            for stat_key, book_map in props.items():
+                if not isinstance(book_map, dict):
+                    continue
+
+                pp_line = book_map.get("pp")
+                if not isinstance(pp_line, dict):
+                    continue
+
+                line = _normalize_float(pp_line.get("line"))
+                if line is None:
+                    continue
+
+                try:
+                    player_id = int(player_key)
+                except (TypeError, ValueError):
+                    player_id = player_key
+
+                archived_rows.append({
+                    "player_id": player_id,
+                    "stat_type": str(stat_key or "").strip().upper(),
+                    "sportsbook": "pp",
+                    "line": line,
+                    "over_odds": _normalize_int(pp_line.get("over")),
+                    "under_odds": _normalize_int(pp_line.get("under")),
+                    "implied": 0.0,
+                    "game_date": game_date,
+                })
+
+    return archived_rows, loaded_dates
+
+
 def run_odds_update(
     dk_path: str,
     fd_path: str,
@@ -219,10 +297,6 @@ def run_odds_update(
         except Exception as e:
             logger.warning("Failed to load PrizePicks CSV (%s): %s", pp_path, e)
 
-    if df_dk.empty and df_fd.empty and df_pp.empty:
-        logger.warning("All sportsbook CSVs are empty — nothing to upsert.")
-        return False
-
     # --- Build PlayerMatcher from season stats roster ---
     stats_records = df_stats[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].to_dict('records')
     matcher = PlayerMatcher(stats_records)
@@ -232,6 +306,11 @@ def run_odds_update(
     }
     schedule_rows = load_schedule_rows(os.path.join(os.path.dirname(__file__), '..', 'data', 'current'))
     schedule_lookup = _build_schedule_lookup(schedule_rows)
+    archived_pp_rows, archived_pp_dates = _load_archived_live_prizepicks_rows(schedule_rows)
+
+    if df_dk.empty and df_fd.empty and df_pp.empty and not archived_pp_rows:
+        logger.warning("All sportsbook CSVs are empty — nothing to upsert.")
+        return False
 
     # --- Build upsert rows ---
     rows = []
@@ -295,6 +374,22 @@ def run_odds_update(
                 'implied':    _normalize_float(row.get('implied_prob'), default=0.0),
                 'game_date':  normalize_row_game_date(resolved_game_date),
             })
+
+    if archived_pp_rows:
+        rows.extend(archived_pp_rows)
+        log_status(
+            logger,
+            "INFO",
+            "Loaded archived PrizePicks pregame rows for live/final games",
+            rows=len(archived_pp_rows),
+            dates=archived_pp_dates,
+        )
+
+    if rows:
+        deduped_rows = {}
+        for row in rows:
+            deduped_rows[_row_sync_key(row)] = row
+        rows = list(deduped_rows.values())
 
     if not rows:
         logger.warning("No rows resolved — check matcher and CSV column names.")
