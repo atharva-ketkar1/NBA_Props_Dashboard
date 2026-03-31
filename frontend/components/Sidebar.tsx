@@ -18,6 +18,20 @@ const STAT_MAP: Record<string, string> = {
     'Double Double': 'DD2', 'Triple Double': 'TD3'
 };
 
+type PlayerAvailabilityByDate = Record<number, Record<string, Record<string, Record<string, boolean>>>>;
+
+function playerHasAvailableSportsbookPropForDate(
+    availabilityByPlayer: PlayerAvailabilityByDate,
+    playerId: number,
+    statType: string,
+    sportsbook: SportsbookId | string,
+    gameDate?: string | null,
+) {
+    const availabilityBucket = availabilityByPlayer?.[playerId]?.[statType]?.[sportsbook] ?? {};
+    const dateKey = gameDate || '__undated__';
+    return Boolean(availabilityBucket[dateKey] || availabilityBucket.__undated__);
+}
+
 const CustomDropdown = ({ value, options, onChange, placeholder }: { value: string, options: { label: string, value: string, disabled?: boolean }[], onChange: (val: string) => void, placeholder?: string }) => {
     const [isOpen, setIsOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
@@ -76,6 +90,7 @@ interface SidebarProps {
     pendingPlayerId?: number;
     pendingGameDate?: string | null;
     activeSportsbook?: SportsbookId;
+    propsAvailabilityByDate?: PlayerAvailabilityByDate;
     onSelectPlayer: (id: number, gameDate?: string | null) => void;
     onPrefetchPlayer?: (id: number, gameDate?: string | null) => void;
     activeTab?: string;
@@ -102,6 +117,7 @@ const PlayerRow = ({
     statFilter,
     gameDate,
     activeSportsbook = 'dk',
+    isAvailable = false,
     isActive,
     isPending,
     onClick,
@@ -111,6 +127,7 @@ const PlayerRow = ({
     statFilter: string,
     gameDate?: string | null,
     activeSportsbook?: SportsbookId,
+    isAvailable?: boolean,
     isActive: boolean,
     isPending: boolean,
     onClick: () => void,
@@ -121,14 +138,16 @@ const PlayerRow = ({
     const book = selectedProp?.book ?? null;
     const prop = selectedProp?.prop ?? null;
     const hasProp = !!prop;
+    const isHydratingProp = isAvailable && !hasProp;
     const line = prop?.line;
+    const displayBook = book ?? activeSportsbook;
 
     const logoFile =
-        book === "dk"
+        displayBook === "dk"
             ? "draftkings.webp"
-            : book === "fd"
+            : displayBook === "fd"
                 ? "fanduel.webp"
-                : book === "pp"
+                : displayBook === "pp"
                     ? "prizepicks.webp"
                 : null;
 
@@ -220,6 +239,22 @@ const PlayerRow = ({
                                 <></>
                             )}
                         </div>
+                    ) : isHydratingProp ? (
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <div className="w-3.5 h-3.5 rounded-[3px] overflow-hidden bg-white flex items-center justify-center">
+                                {logoSrc && (
+                                    <img
+                                        src={logoSrc}
+                                        alt={displayBook}
+                                        className="w-full h-full object-contain"
+                                    />
+                                )}
+                            </div>
+                            <span className="text-white font-bold font-chakra text-xs">...</span>
+                            <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium text-fgSubtle uppercase tracking-[0.12em]">
+                                Updating
+                            </div>
+                        </div>
                     ) : (
                         <div className="flex items-center gap-1.5 bg-borderMedium px-2 py-1 rounded-[4px] text-[10px] font-bold text-neutral400 border border-transparent w-fit mt-0.5">
                             <Lock className="w-2.5 h-2.5" />
@@ -247,8 +282,8 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: SportsbookId, onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
-    game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, onSelectPlayer, onPrefetchPlayer, statFilter
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: SportsbookId, propsAvailabilityByDate?: PlayerAvailabilityByDate, onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
+    game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, propsAvailabilityByDate = {}, onSelectPlayer, onPrefetchPlayer, statFilter
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
@@ -319,6 +354,13 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                                     statFilter={statFilter}
                                     gameDate={game.game_date}
                                     activeSportsbook={activeSportsbook}
+                                    isAvailable={playerHasAvailableSportsbookPropForDate(
+                                        propsAvailabilityByDate,
+                                        player.id,
+                                        statFilter,
+                                        activeSportsbook ?? 'dk',
+                                        game.game_date,
+                                    )}
                                     isActive={player.id === activePlayerId && game.game_date === activeGameDate}
                                     isPending={player.id === pendingPlayerId && game.game_date === pendingGameDate && !(player.id === activePlayerId && game.game_date === activeGameDate)}
                                     onClick={() => onSelectPlayer(player.id, game.game_date)}
@@ -339,7 +381,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
 export const Sidebar: React.FC<SidebarProps> = ({
     isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
-    activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook = 'dk', activeTab = 'Points', onTabChange = () => { }, onPrefetchPlayer
+    activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook = 'dk', propsAvailabilityByDate = {}, activeTab = 'Points', onTabChange = () => { }, onPrefetchPlayer
 }) => {
     const statFilter = STAT_MAP[activeTab] || 'PTS';
     const [gameFilter, setGameFilter] = useState('All Games');
@@ -452,7 +494,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 if (!isInGame) return false;
 
                 // Prop Match
-                if (!playerHasSportsbookPropForDate(p, statFilter, activeSportsbook, game.game_date)) return false;
+                const hasResolvedProp = playerHasSportsbookPropForDate(p, statFilter, activeSportsbook, game.game_date);
+                const hasAvailableProp = playerHasAvailableSportsbookPropForDate(
+                    propsAvailabilityByDate,
+                    p.id,
+                    statFilter,
+                    activeSportsbook,
+                    game.game_date,
+                );
+                if (!hasResolvedProp && !hasAvailableProp) return false;
 
                 // Search Match (Player Name)
                 if (searchTerm && !gameMatchesSearch) {
@@ -479,7 +529,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         }
 
         return result;
-    }, [scheduleData, players, statFilter, gameFilter, searchTerm, activeSportsbook]);
+    }, [scheduleData, players, statFilter, gameFilter, searchTerm, activeSportsbook, propsAvailabilityByDate]);
 
     const toggleGame = (gameId: string) => {
         setExpandedGames(prev => ({
@@ -559,6 +609,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 pendingPlayerId={pendingPlayerId}
                                 pendingGameDate={pendingGameDate}
                                 activeSportsbook={activeSportsbook}
+                                propsAvailabilityByDate={propsAvailabilityByDate}
                                 onSelectPlayer={onSelectPlayer}
                                 onPrefetchPlayer={onPrefetchPlayer}
                                 statFilter={statFilter}

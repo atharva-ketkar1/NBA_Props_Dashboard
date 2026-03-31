@@ -203,7 +203,6 @@ function App() {
   const [selectedGameDate, setSelectedGameDate] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('Points');
   const [activeSportsbook, setActiveSportsbook] = useState<SportsbookId>(DEFAULT_SPORTSBOOK);
-  const [sidebarDisplaySportsbook, setSidebarDisplaySportsbook] = useState<SportsbookId>(DEFAULT_SPORTSBOOK);
   const [customLineValue, setCustomLineValue] = useState<number | null>(null);
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
@@ -417,7 +416,6 @@ function App() {
             return;
           }
 
-          const requestedSportsbook = activeSportsbook;
           const snapshot = await fetchDashboardBootstrap(activeSportsbook);
 
           if (cancelled) return;
@@ -438,8 +436,6 @@ function App() {
           if (isInitial) {
             lineMovementVersionRef.current = snapshot.lineVersion ?? '';
           }
-
-          setSidebarDisplaySportsbook(requestedSportsbook);
 
           const selectionAnchor = selectionAnchorRef.current;
 
@@ -543,7 +539,6 @@ function App() {
             intraday_movements: lineMovements?.snapshots || [],
             detail_loaded: true,
           }));
-          setSidebarDisplaySportsbook(activeSportsbook);
           setRawData(enhancedFeed);
           setLoading(false);
         })
@@ -1085,7 +1080,8 @@ function App() {
       activeGameDate: resolvedSelectedGameDate,
       pendingPlayerId: pendingSelection?.id,
       pendingGameDate: pendingSelection?.gameDate,
-      activeSportsbook: sidebarDisplaySportsbook,
+      activeSportsbook: activeSportsbook,
+      propsAvailabilityByDate: propsAvailabilityByDate,
       onSelectPlayer: selectPlayerForView,
       onPrefetchPlayer: (id: number) => {
         if (!USE_DB) {

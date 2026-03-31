@@ -140,10 +140,15 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
 
   const mobileGameCount = isMobile && !isFiltersOpen ? 12 : (historicalGameCount || 29);
 
+  const activeSportsbookProp = useMemo(
+    () => player ? getSportsbookProp(player, statKey, activeSportsbook, activeGameDate)?.prop ?? null : null,
+    [player, statKey, activeSportsbook, activeGameDate],
+  );
+
   const { line, odds, hitRateInfo, statsData, activeStatAverages, hasLine, mobileHitRateInfo, mobileGraphAvg } = useMemo(() => {
     if (!player) return { line: 0, odds: { over: 0, under: 0 }, hitRateInfo: null, statsData: [], activeStatAverages: { graphAvg: 0, seasonAvg: 0, diff: 0 }, hasLine: false };
 
-    let prop = player.props?.[statKey]?.[activeSportsbook];
+    const prop = activeSportsbookProp;
     const hasLine = !!prop;
     const lineVal = prop?.line || 0;
     const supportsPricedOdds = activeSportsbook !== 'pp';
@@ -264,11 +269,11 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       mobileHitRateInfo: { rate: mobileRate, hits: mobileHits, gamesShown: mobileGameCount },
       mobileGraphAvg
     };
-  }, [player, statKey, activeSportsbook, customLine, historicalGameCount, mobileGameCount]);
+  }, [player, statKey, activeSportsbook, activeSportsbookProp, customLine, historicalGameCount, mobileGameCount]);
 
 
   const currentSbLogo = SPORTSBOOKS.find(sb => sb.id === activeSportsbook)?.logo;
-  const activePropForSparkline = player?.props?.[statKey]?.[activeSportsbook];
+  const activePropForSparkline = activeSportsbookProp;
   const showPricedOdds = activeSportsbook !== 'pp' && activePropForSparkline?.over !== null && activePropForSparkline?.over !== undefined && activePropForSparkline?.under !== null && activePropForSparkline?.under !== undefined;
 
   const teamId = player && TEAM_IDS[player.team] ? TEAM_IDS[player.team] : null;
@@ -326,7 +331,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
             {TAB_ORDER.map((tab, i) => {
               const isActive = tab === activeTab;
               const tabKey = STAT_LABELS[tab];
-              const tabProp = player.props?.[tabKey]?.[activeSportsbook];
+              const tabProp = getSportsbookProp(player, tabKey, activeSportsbook, activeGameDate)?.prop ?? null;
               const hasTabLine = !!tabProp;
 
               return (
