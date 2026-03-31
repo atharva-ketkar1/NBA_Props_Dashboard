@@ -170,6 +170,10 @@ def persist_raw_odds_csvs(dk_data, fd_data):
     except Exception as e:
         log_status(logger, "WARN", "Unable to persist raw odds CSVs", error=e)
 
+
+def is_live_or_final_game(game):
+    return bool((game or {}).get("is_live")) or bool((game or {}).get("is_final"))
+
 def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
     log_status(logger, "RUN", "Odds scrapers")
@@ -200,8 +204,6 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     if not dk_data: dk_data = []
     if not fd_data: fd_data = []
 
-    persist_raw_odds_csvs(dk_data, fd_data)
-        
     matcher, id_to_team = load_master_feed_maps()
     schedule = {}
     if os.path.exists(SCHEDULE_PATH):
@@ -216,6 +218,9 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     players_dict = {}
     skipped_schedule_mismatch = 0
     skipped_non_target_game = 0
+    skipped_live_game = 0
+    filtered_fd_data = []
+    filtered_dk_data = []
     
     # Process FanDuel first
     for row in fd_data:
@@ -238,6 +243,11 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         )
         schedule_game = schedule_maps["team_date_to_game"].get((canonical_team, row_game_date))
         active_team_game = schedule_maps["active_game_by_team"].get(canonical_team)
+        schedule_context_game = schedule_game or active_team_game
+
+        if is_live_or_final_game(schedule_context_game):
+            skipped_live_game += 1
+            continue
 
         if allowed_game_ids:
             if not schedule_game or str(schedule_game.get("game_id")) not in allowed_game_ids:
@@ -270,6 +280,7 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             "over": row.get("over_odds"),
             "under": row.get("under_odds")
         }
+        filtered_fd_data.append(row)
 
     # Process DraftKings
     for row in dk_data:
@@ -293,6 +304,11 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         )
         schedule_game = schedule_maps["team_date_to_game"].get((canonical_team, row_game_date))
         active_team_game = schedule_maps["active_game_by_team"].get(canonical_team)
+        schedule_context_game = schedule_game or active_team_game
+
+        if is_live_or_final_game(schedule_context_game):
+            skipped_live_game += 1
+            continue
 
         if allowed_game_ids:
             if not schedule_game or str(schedule_game.get("game_id")) not in allowed_game_ids:
@@ -332,7 +348,8 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             "over": row.get("over_odds"),
             "under": row.get("under_odds")
         }
-        
+        filtered_dk_data.append(row)
+
     if skipped_schedule_mismatch:
         log_status(
             logger,
@@ -347,6 +364,15 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             "Skipped non-target closing-game odds rows",
             skipped=skipped_non_target_game,
         )
+    if skipped_live_game:
+        log_status(
+            logger,
+            "SKIP",
+            "Skipped live/final odds rows",
+            skipped=skipped_live_game,
+        )
+
+    persist_raw_odds_csvs(filtered_dk_data, filtered_fd_data)
 
     log_status(
         logger,

@@ -655,6 +655,21 @@ def projection_priority(attrs: Dict[str, Any]) -> Tuple[int, int, int, int, int,
     )
 
 
+def is_live_projection(attrs: Dict[str, Any]) -> bool:
+    if attrs.get("is_live") or attrs.get("in_game"):
+        return True
+
+    status = str(attrs.get("status") or "").strip().lower()
+    return status in {
+        "in_progress",
+        "live",
+        "final",
+        "closed",
+        "settled",
+        "graded",
+    }
+
+
 def parse_player_projections(
     payload: Dict[str, Any],
     stats_path: Path = DEFAULT_STATS_PATH,
@@ -674,6 +689,7 @@ def parse_player_projections(
         "skipped_combo_projection": 0,
         "skipped_non_single_stat": 0,
         "skipped_non_full_game": 0,
+        "skipped_live_projection": 0,
         "skipped_missing_line": 0,
         "skipped_unsupported_prop": 0,
         "deduped_out": 0,
@@ -722,6 +738,10 @@ def parse_player_projections(
         duration_resource = resource_index.get(("duration", duration_id)) if duration_id else None
         if not is_full_game(duration_resource, duration_id):
             diagnostics["skipped_non_full_game"] += 1
+            continue
+
+        if is_live_projection(attrs):
+            diagnostics["skipped_live_projection"] += 1
             continue
 
         line = safe_float(attrs.get("line_score"))

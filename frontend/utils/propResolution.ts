@@ -68,6 +68,7 @@ function applyIntradayOverrides(
   player: Player,
   flattenedProps: PlayerProps,
   preferredDate?: string | null,
+  gameStatusById?: Record<string, { is_live?: boolean; is_final?: boolean }>,
 ): PlayerProps {
   const movements = Array.isArray(player.intraday_movements) ? player.intraday_movements : [];
   if (!movements.length) return flattenedProps;
@@ -95,6 +96,13 @@ function applyIntradayOverrides(
         const overrideKey = `${statType}:${mappedSportsbook}`;
         if (seen.has(overrideKey)) return;
         seen.add(overrideKey);
+
+        const existingProp = nextProps[statType]?.[mappedSportsbook];
+        const targetGameId = String(existingProp?.game_id ?? playerData.game_id ?? '').trim();
+        const targetGameStatus = targetGameId ? gameStatusById?.[targetGameId] : undefined;
+        if (targetGameStatus?.is_live || targetGameStatus?.is_final) {
+          return;
+        }
 
         nextProps[statType] ??= {};
         nextProps[statType][mappedSportsbook] = {
@@ -214,7 +222,12 @@ export function materializePlayerForGameDate(player: Player, gameDate?: string |
     });
   });
 
-  const resolvedProps = applyIntradayOverrides(player, flattenedProps, gameDate);
+  const resolvedProps = applyIntradayOverrides(
+    player,
+    flattenedProps,
+    gameDate,
+    player.game_status_by_id,
+  );
 
   return {
     ...player,

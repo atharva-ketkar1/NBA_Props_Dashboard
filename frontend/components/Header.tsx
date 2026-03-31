@@ -8,6 +8,7 @@ import { HelpModal } from './HelpModal';
 import { createPortal } from 'react-dom';
 import { ASSETS_BASE } from '../utils/config';
 import { MobileViewSwitcher, MobileView } from './MobileViewSwitcher';
+import { getSportsbookProp } from '../utils/propResolution';
 
 type PlayerAvailabilityByDate = Record<string, Record<string, Record<string, boolean>>>;
 
@@ -437,7 +438,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
                   <div className="absolute top-full left-0 mt-2 bg-bgElevation1 border border-borderMedium rounded-md shadow-xl z-50 flex-col gap-1 p-1 hidden group-hover:flex min-w-[200px] 
                                 before:absolute before:-top-4 before:left-0 before:w-full before:h-4 before:bg-transparent">
                     {SPORTSBOOKS.map(sb => {
-                      const sbProp = player.props?.[statKey]?.[sb.id];
+                      const sbProp = getSportsbookProp(player, statKey, sb.id, activeGameDate)?.prop ?? null;
                       const availabilityBucket = playerAvailabilityByDate?.[statKey]?.[sb.id] ?? {};
                       const sbHasLine = !!sbProp;
                       const sbIsAvailable = Boolean(

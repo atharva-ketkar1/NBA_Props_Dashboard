@@ -15,6 +15,7 @@ type HotResponse = {
   availabilityRows: any[];
   lineVersion: string;
   lineRows?: any[];
+  gamesRows?: any[];
 };
 
 type GamesResponse = {

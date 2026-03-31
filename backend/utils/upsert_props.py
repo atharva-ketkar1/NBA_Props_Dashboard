@@ -126,6 +126,23 @@ def _normalize_int(value, default=None):
     return int(number)
 
 
+def _build_schedule_lookup(schedule_rows):
+    lookup = {}
+    for game in schedule_rows or []:
+        game_date = str(game.get("game_date") or "").strip()
+        if not game_date:
+            continue
+        for team_key in ("home_team_tricode", "away_team_tricode"):
+            team = str(game.get(team_key) or "").strip()
+            if team:
+                lookup[(team, game_date)] = game
+    return lookup
+
+
+def _is_live_or_final_schedule_game(game):
+    return bool((game or {}).get("is_live")) or bool((game or {}).get("is_final"))
+
+
 def run_odds_update(
     dk_path: str,
     fd_path: str,
@@ -214,12 +231,14 @@ def run_odds_update(
         for _, row in df_stats.iterrows()
     }
     schedule_rows = load_schedule_rows(os.path.join(os.path.dirname(__file__), '..', 'data', 'current'))
+    schedule_lookup = _build_schedule_lookup(schedule_rows)
 
     # --- Build upsert rows ---
     rows = []
     resolved_from_schedule = 0
     unresolved_missing_dates = 0
     skipped_missing_line = 0
+    skipped_live_game = 0
     for df, book in [(df_dk, 'dk'), (df_fd, 'fd'), (df_pp, 'pp')]:
         if df.empty:
             continue
@@ -253,6 +272,11 @@ def run_odds_update(
                 resolved_from_schedule += 1
             elif not resolved_game_date:
                 unresolved_missing_dates += 1
+
+            schedule_game = schedule_lookup.get((canonical_team, normalize_row_game_date(resolved_game_date)))
+            if _is_live_or_final_schedule_game(schedule_game):
+                skipped_live_game += 1
+                continue
 
             raw_prop = row.get('prop_type', '')
             stat_key = PROP_MAP.get(raw_prop, raw_prop).upper()
@@ -291,6 +315,13 @@ def run_odds_update(
             "WARN",
             "Skipped prop rows missing a usable line",
             rows=skipped_missing_line,
+        )
+    if skipped_live_game:
+        log_status(
+            logger,
+            "SKIP",
+            "Skipped live/final player prop rows",
+            rows=skipped_live_game,
         )
 
     sync_state = _load_sync_state()

@@ -43,6 +43,15 @@ def get_intraday_interval_seconds():
     return max(300, parsed)
 
 
+def get_game_status_refresh_interval_seconds():
+    raw_value = os.getenv("GAME_STATUS_REFRESH_INTERVAL_SECONDS", "300")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 300
+    return max(60, parsed)
+
+
 def get_pipeline_retry_cooldown_seconds():
     raw_value = os.getenv("PIPELINE_RETRY_COOLDOWN_SECONDS", "3600")
     try:
@@ -84,6 +93,7 @@ def load_state():
         "last_pipeline_date": "",
         "scraped_closing_games": [],
         "last_intraday_time": 0,
+        "last_game_status_refresh_time": 0,
         "pipeline_failure_date": "",
         "pipeline_failures_today": 0,
         "last_pipeline_attempt_ts": 0,
@@ -362,6 +372,54 @@ def run_intraday_if_needed(now, state, dry_run=False):
         
     return False
 
+
+def refresh_game_status_if_needed(now, state, dry_run=False):
+    """Lightweight games table refresh for LIVE/FINAL status."""
+    last_run = state.get("last_game_status_refresh_time", 0)
+    current_timestamp = now.timestamp()
+    interval_seconds = get_game_status_refresh_interval_seconds()
+
+    if current_timestamp - last_run < interval_seconds:
+        return False
+
+    log_section(
+        logger,
+        "Game status refresh",
+        every_s=interval_seconds,
+        dry_run=dry_run,
+    )
+
+    refresh_ok = True
+    if not dry_run:
+        try:
+            from scrapers import fetch_todays_games as schedule
+
+            df, raw_data = schedule.get_dashboard_data()
+
+            games_path = os.path.join(DATA_DIR, "nba_dashboard_games.json")
+            with open(games_path, "w") as f:
+                json.dump(raw_data, f, indent=2, default=str)
+            with open(SCHEDULE_PATH, "w") as f:
+                json.dump({"games": raw_data}, f, indent=2, default=str)
+
+            schedule.upsert_games_to_db(raw_data)
+            log_status(
+                logger,
+                "OK",
+                "Game status refresh complete",
+                games=len(df),
+            )
+        except Exception as e:
+            log_status(logger, "FAIL", "Game status refresh failed", error=e)
+            refresh_ok = False
+
+    if refresh_ok:
+        state["last_game_status_refresh_time"] = time.time()
+        if not dry_run:
+            save_state(state)
+
+    return refresh_ok
+
 def check_mutual_exclusion():
     global _LOCK_REGISTERED
     if os.path.exists(LOCK_FILE):
@@ -420,6 +478,8 @@ def main(dry_run=False, mock_time=None):
         ran_pipeline = run_pipeline_if_needed(now, state, dry_run=dry_run)
         if ran_pipeline:
             return
+
+        refresh_game_status_if_needed(now, state, dry_run=dry_run)
             
         # Check Priority 2
         ran_closing = check_closing_lines(now, state, dry_run=dry_run)

@@ -252,13 +252,14 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
-    // We use UTC time to construct a localized Date object, then generate the short weekday
     const gameTimeObj = game.game_time_utc ? new Date(game.game_time_utc) : new Date(game.game_date + 'T23:59:59Z');
-    // For consistency with ET scheduling, checking day
-    const gameDay = gameTimeObj.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
-
-    // Clean up time string: "07:30 PM ET" -> "7:30 PM"
-    const formattedTime = game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '';
+    const hasValidGameTime = !Number.isNaN(gameTimeObj.getTime());
+    const gameDay = hasValidGameTime
+        ? gameTimeObj.toLocaleDateString(undefined, { weekday: 'short' })
+        : '';
+    const formattedTime = hasValidGameTime
+        ? gameTimeObj.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        : (game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '');
 
     return (
         <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-2 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
@@ -279,7 +280,10 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
                     <div className="flex flex-col items-center min-w-[70px] gap-0.5">
                         {game.is_live ? (
-                            <span className="text-green-500 animate-pulse text-xs font-bold">LIVE</span>
+                            <span className="flex items-center gap-1 text-green-500 text-xs font-bold">
+                                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                                LIVE
+                            </span>
                         ) : game.is_final ? (
                             <span className="text-xs text-gray-500 font-medium">FINAL</span>
                         ) : (
@@ -498,7 +502,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                 lg:static lg:inset-auto lg:translate-x-0 
                 lg:flex lg:flex-col lg:z-0
-                lg:sticky lg:top-4 lg:h-[calc(100vh-5rem)] lg:self-start
+                lg:sticky lg:top-4 lg:h-[calc(100vh-5rem)] lg:self-start lg:shrink-0 lg:min-w-[300px] lg:basis-[300px]
 
                 flex flex-col gap-3 p-4
             `}>

@@ -145,6 +145,20 @@ function flattenIntradayMovements(rows: any[]) {
     .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 }
 
+function buildGameStatusById(games: any[]) {
+  return Object.fromEntries(
+    (games ?? [])
+      .filter((game: any) => game?.game_id)
+      .map((game: any) => [
+        String(game.game_id),
+        {
+          is_live: Boolean(game.is_live),
+          is_final: Boolean(game.is_final),
+        },
+      ]),
+  ) as Record<string, { is_live: boolean; is_final: boolean }>;
+}
+
 function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
   if (!players.length || !(propsRows ?? []).length) {
     return players;
@@ -185,6 +199,7 @@ function App() {
   const [rawData, setRawData] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
   const [selectedGameDate, setSelectedGameDate] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('Points');
   const [activeSportsbook, setActiveSportsbook] = useState<SportsbookId>(DEFAULT_SPORTSBOOK);
@@ -198,6 +213,7 @@ function App() {
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>('graph');
   const [currentSlateTeams, setCurrentSlateTeams] = useState<string[]>([]);
+  const [gameStatusById, setGameStatusById] = useState<Record<string, { is_live: boolean; is_final: boolean }>>({});
   const [similarCandidatesByProp, setSimilarCandidatesByProp] = useState<SimilarPlayerCandidate[]>([]);
   const [similarCandidatesByPosition, setSimilarCandidatesByPosition] = useState<SimilarPlayerCandidate[]>([]);
   const [isSimilarCandidatesLoading, setIsSimilarCandidatesLoading] = useState(false);
@@ -215,12 +231,42 @@ function App() {
     return feed.filter(playerHasAnyProp);
   }, [rawData]);
 
-  const currentPlayer = playersWithProps[selectedIndex];
+  const currentPlayer = useMemo(() => {
+    if (!playersWithProps.length) {
+      return undefined;
+    }
+
+    if (selectedPlayerId != null) {
+      return playersWithProps.find((player) => player.id === selectedPlayerId)
+        ?? playersWithProps[selectedIndex]
+        ?? playersWithProps[0];
+    }
+
+    return playersWithProps[selectedIndex] ?? playersWithProps[0];
+  }, [playersWithProps, selectedIndex, selectedPlayerId]);
   const activeStatKey = useMemo(() => STAT_LABELS[activeTab] || 'PTS', [activeTab]);
   const resolvedSelectedGameDate = useMemo(() => {
     if (!currentPlayer) return null;
     return getResolvedPlayerGameDate(currentPlayer, selectedGameDate);
   }, [currentPlayer, selectedGameDate]);
+
+  useEffect(() => {
+    if (!playersWithProps.length) {
+      if (selectedPlayerId !== null) {
+        setSelectedPlayerId(null);
+      }
+      return;
+    }
+
+    if (selectedPlayerId != null && playersWithProps.some((player) => player.id === selectedPlayerId)) {
+      return;
+    }
+
+    const fallbackPlayer = playersWithProps[selectedIndex] ?? playersWithProps[0];
+    if (fallbackPlayer && fallbackPlayer.id !== selectedPlayerId) {
+      setSelectedPlayerId(fallbackPlayer.id);
+    }
+  }, [playersWithProps, selectedIndex, selectedPlayerId]);
 
   const handleTabChange = (newTab: string) => {
     setActiveTab(newTab);
@@ -314,6 +360,7 @@ function App() {
   function mergeFeedFromDB(
     players: any[],
     props: any[],
+    nextGameStatusById: Record<string, { is_live: boolean; is_final: boolean }> = {},
   ): Player[] {
     const propsByDateMap = buildPropsByDateMap(props ?? []);
 
@@ -326,6 +373,7 @@ function App() {
       game_log: p.game_log ?? [],   // null until lazy-loaded
       props: {},
       props_by_date: propsByDateMap[p.id] ?? {},
+      game_status_by_id: nextGameStatusById,
       historical_odds: {},                       // null until lazy-loaded on player select
       intraday_movements: [],
       detail_loaded: false,
@@ -372,10 +420,16 @@ function App() {
 
           if (cancelled) return;
 
-          const mergedFeed = mergeFeedFromDB(snapshot.playersRows ?? [], snapshot.propsRows ?? []);
+          const nextGameStatusById = buildGameStatusById(snapshot.gamesRows ?? []);
+          const mergedFeed = mergeFeedFromDB(
+            snapshot.playersRows ?? [],
+            snapshot.propsRows ?? [],
+            nextGameStatusById,
+          );
           const availabilityMap = buildAvailabilityByDateMap(snapshot.availabilityRows ?? []);
           const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+          setGameStatusById((prev) => ({ ...prev, ...nextGameStatusById }));
           setPropsAvailabilityByDate(prev => mergeAvailabilityMaps(prev, availabilityMap));
 
           const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
@@ -399,6 +453,10 @@ function App() {
                 stats: p.stats,
                 props: p.props,
                 props_by_date: mergePropsByDateMaps(existing?.props_by_date, p.props_by_date),
+                game_status_by_id: {
+                  ...(existing?.game_status_by_id ?? {}),
+                  ...nextGameStatusById,
+                },
                 play_type_analysis: existing?.play_type_analysis ?? p.play_type_analysis ?? [],
                 intraday_movements: intradayMovements ?? existing?.intraday_movements ?? [],
                 detail_loaded: existing?.detail_loaded ?? p.detail_loaded ?? false,
@@ -408,6 +466,7 @@ function App() {
             const nextPlayersWithProps = nextRawData.filter(playerHasAnyProp);
             if (!nextPlayersWithProps.length) {
               setSelectedIndex(0);
+              setSelectedPlayerId(null);
               return nextRawData;
             }
 
@@ -417,13 +476,19 @@ function App() {
 
             if (anchoredIndex >= 0) {
               setSelectedIndex(anchoredIndex);
+              setSelectedPlayerId(nextPlayersWithProps[anchoredIndex].id);
             } else {
               if (selectionAnchor.gameDate) {
                 setSelectedGameDate(null);
               }
-              setSelectedIndex((previousIndex) => (
-                previousIndex < nextPlayersWithProps.length ? previousIndex : 0
-              ));
+              const nextIndex = selectedPlayerId != null
+                ? nextPlayersWithProps.findIndex((player) => player.id === selectedPlayerId)
+                : -1;
+              const resolvedIndex = nextIndex >= 0
+                ? nextIndex
+                : (selectedIndex < nextPlayersWithProps.length ? selectedIndex : 0);
+              setSelectedIndex(resolvedIndex);
+              setSelectedPlayerId(nextPlayersWithProps[resolvedIndex].id);
             }
 
             return nextRawData;
@@ -457,13 +522,19 @@ function App() {
       ])
         .then(([masterFeed, historicalOdds, lineMovements, games]) => {
           const today = getDashboardDate();
+          const nextGameStatusById = buildGameStatusById(Array.isArray(games) ? games : []);
           const slateTeams = Array.from(new Set((Array.isArray(games) ? games : [])
             .filter((g: any) => g?.game_date === today)
             .flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode])
             .filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+          setGameStatusById(nextGameStatusById);
           const enhancedFeed = (Array.isArray(masterFeed) ? masterFeed : []).map((player: Player) => ({
-            ...materializePlayerForGameDate(player, getDashboardDate()),
+            ...materializePlayerForGameDate({
+              ...player,
+              game_status_by_id: nextGameStatusById,
+            }, getDashboardDate()),
+            game_status_by_id: nextGameStatusById,
             historical_odds: historicalOdds,
             intraday_movements: lineMovements?.snapshots || [],
             detail_loaded: true,
@@ -505,6 +576,18 @@ function App() {
         if ((hotSnapshot.availabilityRows ?? []).length > 0) {
           const availabilityMap = buildAvailabilityByDateMap(hotSnapshot.availabilityRows ?? []);
           setPropsAvailabilityByDate(prev => mergeAvailabilityMaps(prev, availabilityMap));
+        }
+
+        if ((hotSnapshot.gamesRows ?? []).length > 0) {
+          const nextGameStatusById = buildGameStatusById(hotSnapshot.gamesRows ?? []);
+          setGameStatusById((prev) => ({ ...prev, ...nextGameStatusById }));
+          setRawData(prev => prev.map((player) => ({
+            ...player,
+            game_status_by_id: {
+              ...(player.game_status_by_id ?? {}),
+              ...nextGameStatusById,
+            },
+          })));
         }
 
         if (!Object.prototype.hasOwnProperty.call(hotSnapshot, 'lineRows')) {
@@ -641,6 +724,7 @@ function App() {
     selectionRequestRef.current = requestId;
 
     setSelectedIndex(index);
+    setSelectedPlayerId(id);
     setSelectedGameDate(nextGameDate);
     setCustomLineValue(null);
 
@@ -805,6 +889,7 @@ function App() {
       });
 
       setSelectedIndex(bestIndex);
+      setSelectedPlayerId(playersWithProps[bestIndex]?.id ?? null);
       setIsInitialized(true);
     }
   }, [playersWithProps, currentSlateTeams, isInitialized]);
@@ -821,7 +906,7 @@ function App() {
       .catch((error) => {
         console.error('[api] player detail error:', error);
       });
-  }, [selectedIndex, USE_DB, currentPlayer]);
+  }, [selectedPlayerId, USE_DB, currentPlayer]);
 
   useEffect(() => {
     let cancelled = false;

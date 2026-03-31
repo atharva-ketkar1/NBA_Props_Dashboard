@@ -17,7 +17,7 @@ const HISTORICAL_ODDS_SELECT = 'game_date, props, source';
 const HISTORICAL_PLAYER_PROP_SELECT = 'game_date, stat_type, sportsbook, line, over_odds, under_odds, implied, source, captured_at, is_closing_line';
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
-const SLATE_SELECT = 'home_team_tricode, away_team_tricode';
+const SLATE_SELECT = 'game_id, game_date, home_team_tricode, away_team_tricode, is_live, is_final';
 const PAGE_SIZE = 1000;
 const MAX_UPCOMING_PROP_DAYS = 2;
 const DEFAULT_BOOTSTRAP_PROP_DAYS = MAX_UPCOMING_PROP_DAYS;
@@ -497,7 +497,7 @@ export async function fetchHotPayload(
   const activeDates = getFastRefreshDates(selectedDate);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [propsRows, availabilityRows, lineMetaRows] = await Promise.all([
+  const [propsRows, availabilityRows, lineMetaRows, gamesRows] = await Promise.all([
     fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_SELECT, activeSportsbook),
     fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_AVAIL_SELECT),
     includeLineMovements
@@ -508,6 +508,7 @@ export async function fetchHotPayload(
         'line_movement metadata',
       )
       : Promise.resolve([]),
+    fetchGamesForDates(activeDates, SLATE_SELECT),
   ]);
 
   const nextVersion = serializeLineMovementVersion(lineMetaRows ?? []);
@@ -516,6 +517,7 @@ export async function fetchHotPayload(
     return {
       propsRows,
       availabilityRows,
+      gamesRows,
       lineVersion: currentLineVersion,
     };
   }
@@ -524,6 +526,7 @@ export async function fetchHotPayload(
     return {
       propsRows,
       availabilityRows,
+      gamesRows,
       lineVersion: nextVersion,
     };
   }
@@ -538,6 +541,7 @@ export async function fetchHotPayload(
   return {
     propsRows,
     availabilityRows,
+    gamesRows,
     lineVersion: nextVersion,
     lineRows: lineRows ?? [],
   };
