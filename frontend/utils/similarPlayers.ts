@@ -18,6 +18,19 @@ type SimilarStatContext = {
   secondaryKeys: string[];
 };
 
+type SimilarProfileKey =
+  | 'scoringLoad'
+  | 'playmakingLoad'
+  | 'reboundLoad'
+  | 'spacingLoad'
+  | 'interiorLoad'
+  | 'defensiveActivity'
+  | 'ballPressure'
+  | 'allAround'
+  | 'minutes';
+
+type SimilarProfileFingerprint = Record<SimilarProfileKey, number>;
+
 type SimilarPlayersDataset = {
   rows: SimilarPlayerGame[];
   summary: SimilarPlayersSummary;
@@ -73,6 +86,136 @@ const PLAY_TYPE_KEYS = [
   'Putback',
   'Free Throws',
 ] as const;
+const TAB_TO_PROFILE_WEIGHTS: Record<string, Partial<Record<SimilarProfileKey, number>>> = {
+  Points: {
+    scoringLoad: 0.42,
+    ballPressure: 0.18,
+    spacingLoad: 0.14,
+    minutes: 0.1,
+    playmakingLoad: 0.08,
+    allAround: 0.08,
+  },
+  Assists: {
+    playmakingLoad: 0.48,
+    ballPressure: 0.18,
+    minutes: 0.14,
+    allAround: 0.12,
+    scoringLoad: 0.08,
+  },
+  Rebounds: {
+    reboundLoad: 0.56,
+    interiorLoad: 0.22,
+    minutes: 0.12,
+    allAround: 0.1,
+  },
+  Threes: {
+    spacingLoad: 0.54,
+    scoringLoad: 0.2,
+    minutes: 0.12,
+    allAround: 0.08,
+    ballPressure: 0.06,
+  },
+  'Pts+Ast': {
+    scoringLoad: 0.34,
+    playmakingLoad: 0.3,
+    ballPressure: 0.16,
+    allAround: 0.1,
+    minutes: 0.1,
+  },
+  'Pts+Reb': {
+    scoringLoad: 0.32,
+    reboundLoad: 0.28,
+    interiorLoad: 0.14,
+    allAround: 0.14,
+    minutes: 0.12,
+  },
+  'Reb+Ast': {
+    reboundLoad: 0.36,
+    playmakingLoad: 0.3,
+    interiorLoad: 0.12,
+    allAround: 0.12,
+    minutes: 0.1,
+  },
+  'Pts+Reb+Ast': {
+    allAround: 0.32,
+    scoringLoad: 0.22,
+    playmakingLoad: 0.18,
+    reboundLoad: 0.18,
+    minutes: 0.1,
+  },
+  Fantasy: {
+    allAround: 0.28,
+    scoringLoad: 0.18,
+    playmakingLoad: 0.16,
+    reboundLoad: 0.14,
+    defensiveActivity: 0.16,
+    minutes: 0.08,
+  },
+  Blocks: {
+    interiorLoad: 0.42,
+    defensiveActivity: 0.24,
+    reboundLoad: 0.16,
+    minutes: 0.18,
+  },
+  Steals: {
+    defensiveActivity: 0.4,
+    ballPressure: 0.16,
+    allAround: 0.16,
+    playmakingLoad: 0.1,
+    minutes: 0.18,
+  },
+  Turnovers: {
+    ballPressure: 0.48,
+    playmakingLoad: 0.18,
+    scoringLoad: 0.12,
+    allAround: 0.1,
+    minutes: 0.12,
+  },
+  '1Q Points': {
+    scoringLoad: 0.42,
+    ballPressure: 0.18,
+    spacingLoad: 0.14,
+    minutes: 0.1,
+    playmakingLoad: 0.08,
+    allAround: 0.08,
+  },
+  '1Q Assists': {
+    playmakingLoad: 0.48,
+    ballPressure: 0.18,
+    minutes: 0.14,
+    allAround: 0.12,
+    scoringLoad: 0.08,
+  },
+  '1Q Rebounds': {
+    reboundLoad: 0.56,
+    interiorLoad: 0.22,
+    minutes: 0.12,
+    allAround: 0.1,
+  },
+  '1H Points': {
+    scoringLoad: 0.42,
+    ballPressure: 0.18,
+    spacingLoad: 0.14,
+    minutes: 0.1,
+    playmakingLoad: 0.08,
+    allAround: 0.08,
+  },
+  'Double Double': {
+    allAround: 0.28,
+    reboundLoad: 0.24,
+    playmakingLoad: 0.16,
+    scoringLoad: 0.16,
+    interiorLoad: 0.08,
+    minutes: 0.08,
+  },
+  'Triple Double': {
+    allAround: 0.32,
+    playmakingLoad: 0.24,
+    reboundLoad: 0.18,
+    scoringLoad: 0.16,
+    minutes: 0.1,
+  },
+};
 
 const HISTORICAL_BOOK_KEY_MAP: Record<string, string> = {
   dk: 'draftkings',
@@ -112,35 +255,84 @@ function average(values: number[]) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+function weightedAverage(values: Array<[value: number, weight: number]>) {
+  const totalWeight = values.reduce((sum, [, weight]) => sum + weight, 0);
+  if (totalWeight <= 0) return 0;
+  return values.reduce((sum, [value, weight]) => sum + (value * weight), 0) / totalWeight;
+}
+
 function getPositionTokens(position?: string) {
   return String(position ?? '')
-    .split('-')
+    .split(/[-/]/)
     .map((token) => token.trim().toUpperCase())
     .filter(Boolean);
 }
 
-function getPositionBucket(position?: string): PositionBucket {
+function getPositionFamilies(position?: string) {
   const tokens = getPositionTokens(position);
+  const families = new Set<PositionBucket>();
 
-  if (tokens.includes('C')) return 'big';
-  if (tokens.includes('F')) return 'wing';
-  if (tokens.includes('G')) return 'guard';
-  return 'unknown';
+  tokens.forEach((token) => {
+    if (token.includes('G')) families.add('guard');
+    if (token.includes('F')) families.add('wing');
+    if (token.includes('C')) families.add('big');
+  });
+
+  return families;
+}
+
+function getPrimaryPositionToken(position?: string) {
+  return getPositionTokens(position)[0] ?? null;
 }
 
 function positionsAreCompatible(selectedPosition?: string, candidatePosition?: string) {
-  const selectedBucket = getPositionBucket(selectedPosition);
-  const candidateBucket = getPositionBucket(candidatePosition);
-
-  if (selectedBucket !== 'unknown' && candidateBucket !== 'unknown') {
-    return selectedBucket === candidateBucket;
-  }
-
   const selectedTokens = getPositionTokens(selectedPosition);
   const candidateTokens = getPositionTokens(candidatePosition);
   if (!selectedTokens.length || !candidateTokens.length) return false;
 
-  return selectedTokens.some((token) => candidateTokens.includes(token));
+  if (selectedTokens.some((token) => candidateTokens.includes(token))) {
+    return true;
+  }
+
+  const selectedFamilies = getPositionFamilies(selectedPosition);
+  const candidateFamilies = getPositionFamilies(candidatePosition);
+  if (!selectedFamilies.size || !candidateFamilies.size) {
+    return false;
+  }
+
+  return Array.from(selectedFamilies).some((family) => candidateFamilies.has(family));
+}
+
+function getPositionDistance(selectedPosition?: string, candidatePosition?: string) {
+  const selectedTokens = getPositionTokens(selectedPosition);
+  const candidateTokens = getPositionTokens(candidatePosition);
+  const selectedPrimary = getPrimaryPositionToken(selectedPosition);
+  const candidatePrimary = getPrimaryPositionToken(candidatePosition);
+  const sharedTokenCount = selectedTokens.filter((token) => candidateTokens.includes(token)).length;
+
+  if (!selectedTokens.length || !candidateTokens.length) {
+    return 0.35;
+  }
+
+  if (selectedPosition === candidatePosition) {
+    return 0;
+  }
+
+  if (selectedPrimary && selectedPrimary === candidatePrimary) {
+    return 0.04;
+  }
+
+  if (sharedTokenCount > 0) {
+    return 0.18;
+  }
+
+  const selectedFamilies = getPositionFamilies(selectedPosition);
+  const candidateFamilies = getPositionFamilies(candidatePosition);
+  if (Array.from(selectedFamilies).some((family) => candidateFamilies.has(family))) {
+    return 0.28;
+  }
+
+  return 0.5;
 }
 
 function parsePercent(value: unknown) {
@@ -226,6 +418,21 @@ function getStyleFingerprint(player: Player) {
   };
 }
 
+function getStyleDataConfidence(player: Player) {
+  const hasPlayTypeData = Array.isArray(player.play_type_analysis)
+    && player.play_type_analysis.some((entry: any) => parsePercent(entry?.percent ?? entry?.points) > 0);
+  const hasShotTypeData = [
+    'catch_and_shoot',
+    'pull_up',
+    'less_than_10_ft',
+  ].some((key) => toNumber(player.shot_type_analysis?.player?.[key]?.percentage) !== null);
+
+  return average([
+    hasPlayTypeData ? 1 : 0,
+    hasShotTypeData ? 1 : 0,
+  ]);
+}
+
 function getStructureFingerprint(player: Player) {
   const stats = (player.stats ?? {}) as Record<string, unknown>;
   const fga = toNumber(stats.FGA) ?? 0;
@@ -244,12 +451,96 @@ function getStructureFingerprint(player: Player) {
   };
 }
 
+function getRoleFingerprint(player: Player): SimilarProfileFingerprint {
+  const style = getStyleFingerprint(player);
+  const structure = getStructureFingerprint(player);
+  const stats = (player.stats ?? {}) as Record<string, unknown>;
+
+  const scoringLoad = average([
+    clamp((toNumber(stats.PTS) ?? 0) / 32),
+    structure.volume,
+    structure.usage,
+    style.selfCreation,
+    style.finisher,
+  ]);
+  const playmakingLoad = average([
+    clamp((toNumber(stats.AST) ?? 0) / 10),
+    clamp((toNumber(stats.POTENTIAL_AST) ?? 0) / 18),
+    style.creator,
+    structure.assistShare,
+    structure.driveRate,
+  ]);
+  const reboundLoad = average([
+    clamp((toNumber(stats.REB) ?? 0) / 14),
+    clamp((toNumber(stats.REB_CHANCES) ?? 0) / 20),
+    style.interior,
+    structure.reboundShare,
+  ]);
+  const spacingLoad = average([
+    clamp((toNumber(stats.FG3M) ?? 0) / 4.5),
+    clamp((toNumber(stats.FG3A) ?? 0) / 10),
+    style.spacer,
+    structure.shotMix,
+  ]);
+  const interiorLoad = average([
+    style.interior,
+    clamp((toNumber(stats.REB) ?? 0) / 14),
+    clamp((toNumber(stats.BLK) ?? 0) / 2.5),
+    style.finisher,
+  ]);
+  const defensiveActivity = average([
+    clamp((toNumber(stats.STL) ?? 0) / 2.2),
+    clamp((toNumber(stats.BLK) ?? 0) / 2.5),
+    style.athleticWing,
+    structure.minutes,
+  ]);
+  const ballPressure = average([
+    structure.usage,
+    structure.driveRate,
+    style.selfCreation,
+    style.creator,
+    clamp((toNumber(stats.TOV) ?? 0) / 4.5),
+  ]);
+  const allAround = average([
+    scoringLoad,
+    playmakingLoad,
+    reboundLoad,
+    defensiveActivity,
+    structure.minutes,
+  ]);
+
+  return {
+    scoringLoad,
+    playmakingLoad,
+    reboundLoad,
+    spacingLoad,
+    interiorLoad,
+    defensiveActivity,
+    ballPressure,
+    allAround,
+    minutes: structure.minutes,
+  };
+}
+
 function getFingerprintDistance(
   left: Record<string, number>,
   right: Record<string, number>,
 ) {
   const keys = Array.from(new Set([...Object.keys(left), ...Object.keys(right)]));
   return average(keys.map((key) => Math.abs((left[key] ?? 0) - (right[key] ?? 0))));
+}
+
+function getWeightedFingerprintDistance(
+  left: Record<string, number>,
+  right: Record<string, number>,
+  weights: Record<string, number>,
+) {
+  return weightedAverage(
+    Object.entries(weights).map(([key, weight]) => [
+      Math.abs((left[key] ?? 0) - (right[key] ?? 0)),
+      weight,
+    ]),
+  );
 }
 
 function deriveFantasyValue(source: Record<string, any> | undefined) {
@@ -446,6 +737,12 @@ export function rankSimilarPlayers({
   const selectedSecondary = context.secondaryKeys.map((key) => getStatValue(player.stats, key));
   const selectedStyle = getStyleFingerprint(player);
   const selectedStructure = getStructureFingerprint(player);
+  const selectedRole = getRoleFingerprint(player);
+  const selectedStyleConfidence = getStyleDataConfidence(player);
+  const selectedLineLean = selectedLine === null || selectedPrimary === null
+    ? null
+    : selectedLine - selectedPrimary;
+  const profileWeights = TAB_TO_PROFILE_WEIGHTS[activeTab] ?? TAB_TO_PROFILE_WEIGHTS.Points;
 
   return (players ?? [])
     .filter((candidate) => candidate.id !== player.id)
@@ -466,26 +763,65 @@ export function rankSimilarPlayers({
       const candidateSecondary = context.secondaryKeys.map((key) => getStatValue(candidate.stats, key));
       const styleDistance = getFingerprintDistance(selectedStyle, getStyleFingerprint(candidate));
       const structureDistance = getFingerprintDistance(selectedStructure, getStructureFingerprint(candidate));
+      const contextProfileDistance = getWeightedFingerprintDistance(
+        selectedRole,
+        getRoleFingerprint(candidate),
+        profileWeights,
+      );
+      const candidateStyleConfidence = getStyleDataConfidence(candidate);
+      const styleReliability = average([selectedStyleConfidence, candidateStyleConfidence]);
+      const effectiveStyleDistance = styleDistance * (0.45 + (styleReliability * 0.55));
+      const positionDistance = getPositionDistance(player.position, candidate.position);
       const lineGap = candidateLine === null || selectedLine === null
         ? normalizedDistance(candidatePrimary, selectedPrimary)
         : normalizedDistance(candidateLine, selectedLine);
+      const candidateLineLean = candidateLine === null || candidatePrimary === null
+        ? null
+        : candidateLine - candidatePrimary;
+      const lineLeanGap = normalizedDistance(candidateLineLean, selectedLineLean);
       const primaryGap = normalizedDistance(candidatePrimary, selectedPrimary);
       const minuteGap = normalizedDistance(candidateMinutes, selectedMinutes);
       const secondaryGap = average(
         candidateSecondary.map((value, index) => normalizedDistance(value, selectedSecondary[index] ?? null)),
       );
-      const sameTeamPenalty = candidate.team === player.team ? 0.02 : 0;
+      const sameTeamPenalty = candidate.team === player.team ? 0.03 : 0;
       const statContextDistance = (primaryGap * 0.65) + (secondaryGap * 0.25) + (minuteGap * 0.1);
 
       const similarityScore = mode === 'position'
-        ? (styleDistance * 0.64) + (structureDistance * 0.24) + (statContextDistance * 0.1) + (lineGap * 0.02) + sameTeamPenalty
-        : (styleDistance * 0.38) + (structureDistance * 0.18) + (statContextDistance * 0.2) + (lineGap * 0.22) + sameTeamPenalty;
+        ? (contextProfileDistance * 0.3)
+          + (effectiveStyleDistance * 0.22)
+          + (structureDistance * 0.16)
+          + (positionDistance * 0.16)
+          + (statContextDistance * 0.12)
+          + (lineGap * 0.02)
+          + (lineLeanGap * 0.01)
+          + sameTeamPenalty
+        : (lineGap * 0.24)
+          + (lineLeanGap * 0.08)
+          + (contextProfileDistance * 0.22)
+          + (statContextDistance * 0.18)
+          + (effectiveStyleDistance * 0.12)
+          + (structureDistance * 0.1)
+          + (positionDistance * 0.08)
+          + sameTeamPenalty;
 
-      if (mode === 'prop' && styleDistance > 0.42) {
+      if (mode === 'prop' && positionDistance > 0.16 && contextProfileDistance > 0.3) {
         return null;
       }
 
-      if (mode === 'position' && styleDistance > 0.58) {
+      if (mode === 'prop' && contextProfileDistance > 0.56) {
+        return null;
+      }
+
+      if (mode === 'prop' && styleReliability >= 0.75 && styleDistance > 0.5) {
+        return null;
+      }
+
+      if (mode === 'position' && contextProfileDistance > 0.62) {
+        return null;
+      }
+
+      if (mode === 'position' && styleReliability >= 0.75 && styleDistance > 0.62) {
         return null;
       }
 
