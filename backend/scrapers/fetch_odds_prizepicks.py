@@ -18,6 +18,8 @@ PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "prizepicks.csv"
 DEFAULT_STATS_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "season_stats.csv"
 DEFAULT_SCHEDULE_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "today_schedule.json"
+DEFAULT_DK_REFERENCE_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "draftkings.csv"
+DEFAULT_FD_REFERENCE_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "fanduel.csv"
 
 DEFAULT_PARAMS = {
     "league_id": 7,
@@ -409,6 +411,42 @@ def load_schedule_rows(schedule_path: Path) -> List[Dict[str, Any]]:
     return []
 
 
+def load_reference_lines(csv_path: Path) -> Dict[Tuple[str, str, str], List[float]]:
+    references: Dict[Tuple[str, str, str], List[float]] = {}
+    if not csv_path.exists():
+        return references
+
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            player = normalize_player_name(row.get("player") or row.get("raw_player_name") or "")
+            prop_type = normalize_prop_type(
+                row.get("prop_type")
+                or row.get("prop_label")
+                or row.get("market")
+                or row.get("stat")
+                or ""
+            )
+            game_date = str(row.get("game_date") or "").strip()[:10]
+            line = safe_float(row.get("line"))
+            if not player or not prop_type or not game_date or line is None:
+                continue
+            references.setdefault((player, prop_type, game_date), []).append(line)
+
+    return references
+
+
+def load_market_reference_lines(
+    draftkings_path: Path = DEFAULT_DK_REFERENCE_PATH,
+    fanduel_path: Path = DEFAULT_FD_REFERENCE_PATH,
+) -> Dict[Tuple[str, str, str], List[float]]:
+    merged: Dict[Tuple[str, str, str], List[float]] = {}
+    for path in (draftkings_path, fanduel_path):
+        for key, values in load_reference_lines(path).items():
+            merged.setdefault(key, []).extend(values)
+    return merged
+
+
 def build_schedule_index(schedule_rows: List[Dict[str, Any]]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
     index: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for game in schedule_rows:
@@ -655,6 +693,130 @@ def projection_priority(attrs: Dict[str, Any]) -> Tuple[int, int, int, int, int,
     )
 
 
+def is_canonical_standard_candidate(attrs: Dict[str, Any]) -> bool:
+    return (
+        str(attrs.get("odds_type") or "").strip().lower() == "standard"
+        and not attrs.get("is_promo")
+        and attrs.get("flash_sale_line_score") in (None, "")
+    )
+
+
+def median_value(values: List[float]) -> Optional[float]:
+    cleaned = sorted(value for value in values if value is not None)
+    if not cleaned:
+        return None
+    middle = len(cleaned) // 2
+    if len(cleaned) % 2 == 1:
+        return cleaned[middle]
+    return (cleaned[middle - 1] + cleaned[middle]) / 2.0
+
+
+def derive_component_targets(
+    selected_entries: Dict[str, Dict[str, Any]],
+) -> Dict[Tuple[str, str, str, str], float]:
+    grouped_lines: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+    for entry in selected_entries.values():
+        row = entry["selected"]["row"]
+        market_key = (
+            row["player"],
+            row["game_id"] or row["game"],
+            row["game_date"],
+        )
+        grouped_lines.setdefault(market_key, {})[row["prop_type"]] = row["line"]
+
+    targets: Dict[Tuple[str, str, str, str], float] = {}
+    for market_key, lines in grouped_lines.items():
+        estimates: Dict[str, List[float]] = {"points": [], "rebounds": [], "assists": []}
+
+        points = safe_float(lines.get("points"))
+        rebounds = safe_float(lines.get("rebounds"))
+        assists = safe_float(lines.get("assists"))
+        pa = safe_float(lines.get("pa"))
+        pr = safe_float(lines.get("pr"))
+        ra = safe_float(lines.get("ra"))
+        pra = safe_float(lines.get("pra"))
+
+        if pa is not None and assists is not None:
+            estimates["points"].append(pa - assists)
+        if pr is not None and rebounds is not None:
+            estimates["points"].append(pr - rebounds)
+        if pra is not None and rebounds is not None and assists is not None:
+            estimates["points"].append(pra - rebounds - assists)
+
+        if pr is not None and points is not None:
+            estimates["rebounds"].append(pr - points)
+        if ra is not None and assists is not None:
+            estimates["rebounds"].append(ra - assists)
+        if pra is not None and points is not None and assists is not None:
+            estimates["rebounds"].append(pra - points - assists)
+
+        if pa is not None and points is not None:
+            estimates["assists"].append(pa - points)
+        if ra is not None and rebounds is not None:
+            estimates["assists"].append(ra - rebounds)
+        if pra is not None and points is not None and rebounds is not None:
+            estimates["assists"].append(pra - points - rebounds)
+
+        for prop_type, prop_estimates in estimates.items():
+            valid_estimates = [value for value in prop_estimates if value is not None and value >= 0.0]
+            if len(valid_estimates) < 2:
+                continue
+            if max(valid_estimates) - min(valid_estimates) > 3.5:
+                continue
+            target = median_value(valid_estimates)
+            if target is None:
+                continue
+            targets[(market_key[0], market_key[1], market_key[2], prop_type)] = target
+
+    return targets
+
+
+VALIDATION_GAP_BY_PROP_TYPE = {
+    "points": 2.5,
+    "rebounds": 2.5,
+    "assists": 2.5,
+    "threes": 1.5,
+    "blocks": 1.0,
+    "steals": 1.0,
+    "stocks": 1.0,
+    "pr": 2.5,
+    "pa": 2.5,
+    "ra": 2.5,
+    "pra": 3.0,
+}
+
+
+def validation_target_for_row(
+    row: Dict[str, Any],
+    reference_lines: List[float],
+    component_targets: Dict[Tuple[str, str, str, str], float],
+) -> Optional[float]:
+    targets: List[float] = [line for line in reference_lines if line is not None]
+    component_target = component_targets.get(
+        (
+            row["player"],
+            row["game_id"] or row["game"],
+            row["game_date"],
+            row["prop_type"],
+        )
+    )
+    if component_target is not None:
+        targets.append(component_target)
+    return median_value(targets)
+
+
+def is_validated_standard_row(
+    row: Dict[str, Any],
+    reference_lines: List[float],
+    component_targets: Dict[Tuple[str, str, str, str], float],
+) -> bool:
+    target = validation_target_for_row(row, reference_lines, component_targets)
+    if target is None:
+        return True
+    max_gap = VALIDATION_GAP_BY_PROP_TYPE.get(row["prop_type"], 2.5)
+    return abs(float(row["line"]) - target) <= max_gap
+
+
 def is_live_projection(attrs: Dict[str, Any]) -> bool:
     if attrs.get("is_live") or attrs.get("in_game"):
         return True
@@ -674,12 +836,18 @@ def parse_player_projections(
     payload: Dict[str, Any],
     stats_path: Path = DEFAULT_STATS_PATH,
     schedule_path: Path = DEFAULT_SCHEDULE_PATH,
+    draftkings_reference_path: Path = DEFAULT_DK_REFERENCE_PATH,
+    fanduel_reference_path: Path = DEFAULT_FD_REFERENCE_PATH,
     dashboard_only: bool = True,
     include_source_ids: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     resource_index = build_resource_index(payload)
     roster_lookup = load_team_lookup(stats_path)
     schedule_index = build_schedule_index(load_schedule_rows(schedule_path))
+    market_reference_lines = load_market_reference_lines(
+        draftkings_path=draftkings_reference_path,
+        fanduel_path=fanduel_reference_path,
+    )
     diagnostics = {
         "raw_projection_count": 0,
         "candidate_count": 0,
@@ -693,10 +861,14 @@ def parse_player_projections(
         "skipped_missing_line": 0,
         "skipped_unsupported_prop": 0,
         "deduped_out": 0,
+        "reference_markets_loaded": len(market_reference_lines),
+        "reference_candidates_available": 0,
+        "skipped_missing_standard_market": 0,
+        "skipped_invalid_standard_market": 0,
         "rows_with_internal_game_id": 0,
     }
 
-    best_rows: Dict[str, Tuple[Tuple[int, int, int, int, int, float], Dict[str, Any]]] = {}
+    grouped_candidates: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     for projection in payload.get("data", []) or []:
         if projection.get("type") != "projection":
@@ -758,6 +930,7 @@ def parse_player_projections(
         parsed_start = parse_iso_datetime(start_time or attrs.get("board_time"))
         if parsed_start:
             game_date = parsed_start.date().isoformat()
+        source_game_id = str(attrs.get("game_id") or ((game_resource or {}).get("id") or "")).strip()
 
         row = {
             "player": normalize_player_name(player_name),
@@ -791,24 +964,82 @@ def parse_player_projections(
 
         if include_source_ids:
             row["projection_id"] = str(projection.get("id") or "")
-            row["source_game_id"] = str(attrs.get("game_id") or "")
+            row["source_game_id"] = source_game_id
 
-        dedupe_key = str(attrs.get("group_key") or "") or "|".join(
+        group_key = str(attrs.get("group_key") or "") or "|".join(
             [
                 row["player"],
                 row["prop_type"],
-                row["game_id"],
+                row["game_id"] or source_game_id,
+                duration_id,
+            ]
+        )
+        candidate_key = "|".join(
+            [
+                group_key,
+                str(line),
+                str(attrs.get("odds_type") or "").strip().lower(),
+                "1" if attrs.get("adjusted_odds") else "0",
+                "1" if attrs.get("is_promo") else "0",
+                str(attrs.get("flash_sale_line_score") or ""),
+            ]
+        )
+        logical_key = "|".join(
+            [
+                row["player"],
+                row["prop_type"],
+                row["game_id"] or source_game_id or row["game"],
+                row["game_date"],
                 duration_id,
             ]
         )
 
         diagnostics["candidate_count"] += 1
         priority = projection_priority(attrs)
-        existing = best_rows.get(dedupe_key)
-        if existing is None or priority < existing[0]:
-            best_rows[dedupe_key] = (priority, row)
+        candidate = {
+            "priority": priority,
+            "row": row,
+            "line": line,
+            "attrs": attrs,
+        }
+        existing = grouped_candidates.setdefault(logical_key, {}).get(candidate_key)
+        if existing is None or priority < existing["priority"]:
+            grouped_candidates[logical_key][candidate_key] = candidate
 
-    rows = [entry[1] for entry in best_rows.values()]
+    selected_entries: Dict[str, Dict[str, Any]] = {}
+    for logical_key, candidates_by_group in grouped_candidates.items():
+        candidates = list(candidates_by_group.values())
+        if not candidates:
+            continue
+        standard_candidates = [
+            candidate for candidate in candidates if is_canonical_standard_candidate(candidate["attrs"])
+        ]
+        if not standard_candidates:
+            diagnostics["skipped_missing_standard_market"] += 1
+            continue
+        selected_entries[logical_key] = {
+            "selected": min(standard_candidates, key=lambda candidate: candidate["priority"]),
+            "candidates": candidates,
+        }
+
+    component_targets = derive_component_targets(selected_entries)
+    rows: List[Dict[str, Any]] = []
+    for entry in selected_entries.values():
+        selected = entry["selected"]
+        row = selected["row"]
+        reference_key = (
+            row["player"],
+            row["prop_type"],
+            row["game_date"],
+        )
+        reference_lines = market_reference_lines.get(reference_key, [])
+        if reference_lines:
+            diagnostics["reference_candidates_available"] += 1
+        if not is_validated_standard_row(row, reference_lines, component_targets):
+            diagnostics["skipped_invalid_standard_market"] += 1
+            continue
+        rows.append(row)
+
     rows.sort(key=lambda row: (row["game_date"], row["game"], row["raw_player_name"], row["prop_type"]))
 
     diagnostics["parsed_count"] = len(rows)
@@ -886,6 +1117,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-csv", default=str(DEFAULT_OUTPUT_PATH))
     parser.add_argument("--stats-path", default=str(DEFAULT_STATS_PATH))
     parser.add_argument("--schedule-path", default=str(DEFAULT_SCHEDULE_PATH))
+    parser.add_argument("--draftkings-path", default=str(DEFAULT_DK_REFERENCE_PATH))
+    parser.add_argument("--fanduel-path", default=str(DEFAULT_FD_REFERENCE_PATH))
     parser.add_argument("--limit", type=int, default=0, help="Trim parsed rows for inspection.")
     parser.add_argument("--json", action="store_true", help="Print parsed rows as JSON instead of writing CSV.")
     parser.add_argument("--diag", action="store_true", help="Include parser diagnostics in stdout.")
@@ -912,6 +1145,8 @@ def main() -> int:
         payload,
         stats_path=Path(args.stats_path),
         schedule_path=Path(args.schedule_path),
+        draftkings_reference_path=Path(args.draftkings_path),
+        fanduel_reference_path=Path(args.fanduel_path),
         dashboard_only=not args.all_props,
         include_source_ids=args.include_source_ids,
     )

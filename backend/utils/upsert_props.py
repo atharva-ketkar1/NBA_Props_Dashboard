@@ -18,6 +18,8 @@ import hashlib
 import json
 import logging
 import math
+import re
+import unicodedata
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -57,6 +59,32 @@ PROP_MAP = {
     'pa':       'PTS+AST',
     'ra':       'REB+AST',
     'stocks':   'STL+BLK',
+}
+
+PP_LABEL_PROP_MAP = {
+    "3PTM": "threes",
+    "3-PT MADE": "threes",
+    "ASSISTS": "assists",
+    "BLKS+STLS": "stocks",
+    "BLOCKED SHOTS": "blocks",
+    "BLOCKS": "blocks",
+    "FANTASY SCORE": "fantasy",
+    "FG ATTEMPTED": "fga",
+    "FIELD GOAL ATTEMPTS": "fga",
+    "FTA": "fta",
+    "FREE THROW ATTEMPTS": "fta",
+    "PERSONAL FOULS": "fouls",
+    "POINTS": "points",
+    "PRA": "pra",
+    "PTS+ASTS": "pa",
+    "PTS+REBS": "pr",
+    "PTS+REBS+ASTS": "pra",
+    "RA": "ra",
+    "REBOUNDS": "rebounds",
+    "REBS+ASTS": "ra",
+    "STEALS": "steals",
+    "STEALS+BLOCKS": "stocks",
+    "TURNOVERS": "turnovers",
 }
 
 
@@ -147,6 +175,33 @@ def _build_schedule_lookup(schedule_rows):
 
 def _is_live_or_final_schedule_game(game):
     return bool((game or {}).get("is_live")) or bool((game or {}).get("is_final"))
+
+
+def _normalize_pp_prop_type_from_label(prop_label):
+    if not isinstance(prop_label, str):
+        return ""
+    cleaned = unicodedata.normalize("NFKD", prop_label).encode("ASCII", "ignore").decode("utf-8")
+    cleaned = re.sub(r"\s+", " ", cleaned).upper().strip()
+    return PP_LABEL_PROP_MAP.get(cleaned, "")
+
+
+def _choose_best_pp_candidate(candidates):
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    candidate_lines = [(_normalize_float(candidate.get("line")), candidate) for candidate in candidates]
+    candidate_lines = [(line, candidate) for line, candidate in candidate_lines if line is not None]
+    if not candidate_lines:
+        return None
+
+    unique_lines = {}
+    for line, candidate in candidate_lines:
+        unique_lines.setdefault(line, candidate)
+    if len(unique_lines) == 1:
+        return next(iter(unique_lines.values()))
+    return None
 
 
 def _load_archived_live_prizepicks_rows(schedule_rows):
@@ -318,6 +373,7 @@ def run_odds_update(
     unresolved_missing_dates = 0
     skipped_missing_line = 0
     skipped_live_game = 0
+    corrected_pp_prop_type = 0
     for df, book in [(df_dk, 'dk'), (df_fd, 'fd'), (df_pp, 'pp')]:
         if df.empty:
             continue
@@ -357,7 +413,12 @@ def run_odds_update(
                 skipped_live_game += 1
                 continue
 
-            raw_prop = row.get('prop_type', '')
+            raw_prop = str(row.get('prop_type', '') or '').strip()
+            if book == 'pp':
+                normalized_from_label = _normalize_pp_prop_type_from_label(row.get('prop_label'))
+                if normalized_from_label and normalized_from_label != raw_prop:
+                    raw_prop = normalized_from_label
+                    corrected_pp_prop_type += 1
             stat_key = PROP_MAP.get(raw_prop, raw_prop).upper()
             line = _normalize_float(row.get('line'))
             if line is None:
@@ -387,9 +448,44 @@ def run_odds_update(
 
     if rows:
         deduped_rows = {}
+        grouped_rows = {}
         for row in rows:
-            deduped_rows[_row_sync_key(row)] = row
+            grouped_rows.setdefault(_row_sync_key(row), []).append(row)
+
+        resolved_pp_duplicates = 0
+        skipped_pp_duplicate_candidates = 0
+        for sync_key, candidate_rows in grouped_rows.items():
+            if len(candidate_rows) == 1:
+                deduped_rows[sync_key] = candidate_rows[0]
+                continue
+
+            if all(str(candidate.get("sportsbook") or "").strip().lower() == "pp" for candidate in candidate_rows):
+                chosen_row = _choose_best_pp_candidate(candidate_rows)
+                if chosen_row is not None:
+                    deduped_rows[sync_key] = chosen_row
+                    resolved_pp_duplicates += 1
+                skipped_pp_duplicate_candidates += len(candidate_rows) - 1
+                continue
+
+            deduped_rows[sync_key] = candidate_rows[-1]
+
         rows = list(deduped_rows.values())
+
+        if resolved_pp_duplicates:
+            log_status(
+                logger,
+                "INFO",
+                "Collapsed identical PrizePicks duplicate candidates before upsert",
+                groups=resolved_pp_duplicates,
+                rows=skipped_pp_duplicate_candidates,
+            )
+        elif skipped_pp_duplicate_candidates:
+            log_status(
+                logger,
+                "WARN",
+                "Skipped conflicting PrizePicks duplicate candidates before upsert",
+                rows=skipped_pp_duplicate_candidates,
+            )
 
     if not rows:
         logger.warning("No rows resolved — check matcher and CSV column names.")
@@ -417,6 +513,13 @@ def run_odds_update(
             "SKIP",
             "Skipped live/final player prop rows",
             rows=skipped_live_game,
+        )
+    if corrected_pp_prop_type:
+        log_status(
+            logger,
+            "INFO",
+            "Corrected PrizePicks prop types from prop labels",
+            rows=corrected_pp_prop_type,
         )
 
     sync_state = _load_sync_state()

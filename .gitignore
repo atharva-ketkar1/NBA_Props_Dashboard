@@ -48,3 +48,7 @@ backend/scrapers/archive/
 /vercel.json
 sql/
 .vercel
+
+Agents.md
+backend/Agents.md
+frontend/Agents.md
