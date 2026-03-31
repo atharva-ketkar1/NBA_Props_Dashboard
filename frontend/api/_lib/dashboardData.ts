@@ -187,9 +187,13 @@ function mergeHistoricalPropsTrees(preferredProps: any, fallbackProps: any) {
   };
 
   Object.entries(normalizedPreferredProps ?? {}).forEach(([statType, preferredBooks]) => {
+    const normalizedPreferredBooks = preferredBooks && typeof preferredBooks === 'object'
+      ? preferredBooks
+      : {};
+
     merged[statType] = {
       ...(normalizedFallbackProps?.[statType] ?? {}),
-      ...(preferredBooks ?? {}),
+      ...normalizedPreferredBooks,
     };
   });
 
