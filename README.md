@@ -85,7 +85,7 @@ Signal Score recomputes inside the same refresh owners:
 - after each intraday odds refresh
 - after each pre-tip closing refresh
 
-If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, Discord acts as a narrower official alert stream rather than mirroring every refresh. By default it only sends props ranked in the top 5 with Signal Score 72.5+, posts the first qualifying board, sends intraday updates only for new entrants or market-visible changes like a better book, line move, or odds move, and sends one pre-tip final board only if that official board materially changed. The backend then grades only those official alerts in a single next-morning recap once fresh game logs can resolve every pick or clearly void it; otherwise the rankings are persisted locally and Supabase sync remains best-effort.
+If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, Discord acts as a narrower official alert stream rather than mirroring every refresh. By default it only sends props ranked in the top 5 with Signal Score 72.5+, posts the first qualifying board, sends intraday updates only for new entrants or market-visible changes like a better book, line move, or odds move, and sends one pre-tip final board only if that official board materially changed. Those alerts are grouped by sportsbook, show only the top couple of official picks per book by default, and include a player headshot thumbnail so the message is easier to scan. The backend then grades only those official alerts in a single next-morning recap once fresh game logs can resolve every pick or clearly void it; otherwise the rankings are persisted locally and Supabase sync remains best-effort.
 
 It uses a lock file plus persisted state to avoid duplicate runs and stale overlap.
 

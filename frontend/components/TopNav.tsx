@@ -87,8 +87,6 @@ export const TopNav: React.FC<TopNavProps> = ({
     dashboardUpdatedAt,
 }) => {
     const BASE_URL = `${ASSETS_BASE}/assets/sport_logos`;
-    const edgeCount = edgeSummary?.recommendationCount ?? 0;
-
     return (
         <div className="relative z-50 flex h-16 shrink-0 items-center justify-between border-b border-bgElevation0 bg-bgElevation0 px-4 lg:px-6">
             <div className="hidden flex-1 items-center gap-2 lg:flex">
@@ -121,11 +119,6 @@ export const TopNav: React.FC<TopNavProps> = ({
                     >
                         <TrendingUp className="h-3.5 w-3.5" />
                         Today&apos;s Best Props
-                        {edgeCount > 0 && (
-                            <span className="rounded border border-borderMedium bg-bgElevation1 px-1.5 py-0.5 text-[10px] font-black text-white">
-                                {edgeCount}
-                            </span>
-                        )}
                     </button>
                 )}
             </div>

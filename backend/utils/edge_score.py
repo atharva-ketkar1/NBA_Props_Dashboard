@@ -55,6 +55,8 @@ EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS = max(
 EDGE_SCORE_DISCORD_WEBHOOK_URL = os.getenv("EDGE_SCORE_DISCORD_WEBHOOK_URL", "").strip()
 EDGE_DISCORD_MIN_SIGNAL_SCORE = max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCORD_MIN_SIGNAL_SCORE", 72.5)))
 EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
+EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
+EDGE_SPORTSBOOK_BOARD_LIMIT = max(1, _env_int("EDGE_SPORTSBOOK_BOARD_LIMIT", 10))
 EDGE_DISCORD_LINE_MOVE_POINTS = max(0.25, _env_float("EDGE_SCORE_DISCORD_LINE_MOVE_POINTS", 1.0))
 EDGE_DISCORD_ODDS_MOVE_AMERICAN = max(5, _env_int("EDGE_SCORE_DISCORD_ODDS_MOVE_AMERICAN", 25))
 EDGE_DISCORD_SCORE_DELTA = max(1.0, _env_float("EDGE_SCORE_DISCORD_SCORE_DELTA", 6.0))
@@ -184,6 +186,13 @@ PLAY_TYPE_LABELS = [
     "Off Screen",
     "Misc",
 ]
+
+BOOK_DISPLAY_ORDER = ["dk", "fd", "pp"]
+BOOK_EMBED_COLORS = {
+    "dk": 0xF97316,
+    "fd": 0x2563EB,
+    "pp": 0xDC2626,
+}
 PP_PROP_MAP = {
     "points": "PTS",
     "rebounds": "REB",
@@ -425,6 +434,34 @@ def _rank_to_ease(raw_rank: Any) -> Optional[float]:
 
 def _side_name(side: str) -> str:
     return "Over" if side == "over" else "Under"
+
+
+def _book_sort_key(book: Any) -> Tuple[int, str]:
+    normalized = str(book or "").strip().lower()
+    try:
+        order = BOOK_DISPLAY_ORDER.index(normalized)
+    except ValueError:
+        order = len(BOOK_DISPLAY_ORDER)
+    return order, normalized
+
+
+def _candidate_sort_key(candidate: Dict[str, Any]) -> Tuple[float, float, float]:
+    return (
+        candidate.get("edge_score", 0.0),
+        candidate.get("confidence", 0.0),
+        candidate.get("signal_score", 0.0),
+    )
+
+
+def _format_signal_score_threshold(value: float) -> str:
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def _player_headshot_url(player_id: Any) -> Optional[str]:
+    normalized = str(player_id or "").strip()
+    if not normalized.isdigit():
+        return None
+    return f"https://cdn.nba.com/headshots/nba/latest/260x190/{normalized}.png"
 
 
 def _simple_position(position: Any) -> str:
@@ -1711,6 +1748,7 @@ def _build_candidate(
         "recommendation_key": recommendation_key,
         "player_id": int(player.get("id")),
         "player_name": player.get("name"),
+        "player_headshot_url": _player_headshot_url(player.get("id")),
         "team": player.get("team"),
         "opponent": opponent,
         "position": player.get("position"),
@@ -1776,6 +1814,28 @@ def _diversify_candidates(candidates: List[Dict[str, Any]], limit: int) -> List[
             break
 
     return output
+
+
+def _build_sportsbook_boards(candidates: List[Dict[str, Any]], limit_per_book: int) -> Dict[str, Dict[str, Any]]:
+    boards: Dict[str, Dict[str, Any]] = {}
+    ordered_books = sorted(SUPPORTED_BOOKS, key=_book_sort_key)
+
+    for book in ordered_books:
+        book_candidates = [dict(candidate) for candidate in candidates if candidate.get("sportsbook") == book]
+        book_candidates.sort(key=_candidate_sort_key, reverse=True)
+        book_recommendations = _diversify_candidates(book_candidates, limit_per_book)
+        for sportsbook_rank, recommendation in enumerate(book_recommendations, start=1):
+            recommendation["sportsbook_rank"] = sportsbook_rank
+
+        boards[book] = {
+            "sportsbook": book,
+            "sportsbook_label": BOOK_LABELS.get(book, str(book).title()),
+            "count": len(book_recommendations),
+            "limit": limit_per_book,
+            "recommendations": book_recommendations,
+        }
+
+    return boards
 
 
 def _write_history_snapshot(payload: Dict[str, Any]) -> None:
@@ -2013,10 +2073,18 @@ def _discord_signal_summary(recommendation: Dict[str, Any]) -> str:
     side = str(recommendation.get("pick") or "").lower()
 
     snippets: List[str] = []
+    line = _safe_float(recommendation.get("line"))
+    baseline_projection = _safe_float(inputs.get("projection", {}).get("baseline_projection"))
     projection_gap = _safe_float(inputs.get("projection", {}).get("projection_gap"))
-    if projection_gap is not None and abs(projection_gap) >= 0.5:
-        direction = "above" if projection_gap >= 0 else "below"
-        snippets.append(f"baseline sits {abs(projection_gap):.1f} {direction} the line")
+    projection_delta = None
+    if baseline_projection is not None and line is not None:
+        projection_delta = baseline_projection - line
+    elif projection_gap is not None and side in SIDE_MULTIPLIERS:
+        projection_delta = projection_gap * SIDE_MULTIPLIERS[side]
+
+    if projection_delta is not None and abs(projection_delta) >= 0.5:
+        direction = "above" if projection_delta >= 0 else "below"
+        snippets.append(f"baseline projection sits {abs(projection_delta):.1f} {direction} the line")
 
     recent_avg = _safe_float(inputs.get("recent_form", {}).get("averages", {}).get("last_10"))
     recent_hit_rate = _safe_float(inputs.get("recent_form", {}).get("hit_rates", {}).get("last_10"))
@@ -2356,6 +2424,30 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
     return True
 
 
+def _group_recommendations_by_sportsbook(
+    recommendations: List[Dict[str, Any]],
+    *,
+    limit_per_book: int,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for recommendation in recommendations:
+        book = str(recommendation.get("sportsbook") or "").strip().lower()
+        if not book:
+            continue
+        grouped.setdefault(book, []).append(recommendation)
+
+    grouped_output = []
+    for book in sorted(grouped.keys(), key=_book_sort_key):
+        book_recommendations = grouped[book]
+        grouped_output.append({
+            "sportsbook": book,
+            "sportsbook_label": BOOK_LABELS.get(book, book.title()),
+            "total_count": len(book_recommendations),
+            "recommendations": book_recommendations[:limit_per_book],
+        })
+    return grouped_output
+
+
 def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, Any]) -> Dict[str, Any]:
     pending = state.get("pending_result_recaps", {})
     if not isinstance(pending, dict) or not pending:
@@ -2424,16 +2516,6 @@ def _send_discord_webhook(payload: Dict[str, Any], notification_delta: Dict[str,
     changes = notification_delta.get("changes", [])
     recommendations = notification_delta.get("send_recommendations", [])
     alert_kind = notification_delta.get("alert_kind", "update")
-    lines = []
-    for recommendation in recommendations[:EDGE_DISCORD_MAX_RANK]:
-        stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
-        lines.append(
-            f"**#{recommendation['rank']}** {recommendation['player_name']} — "
-            f"{stat_label} {recommendation['pick_label']} {recommendation['line']:.1f}\n"
-            f"{_discord_book_label(recommendation)} | Signal Score {recommendation['edge_score']:.1f}\n"
-            f"Why it ranks high: {_discord_signal_summary(recommendation)}"
-        )
-
     change_lines = []
     for change in changes[:6]:
         change_lines.append(_discord_change_summary(change))
@@ -2454,63 +2536,105 @@ def _send_discord_webhook(payload: Dict[str, Any], notification_delta: Dict[str,
     }
     rules_text = (
         f"Discord only sends official alerts for props ranked in the top {EDGE_DISCORD_MAX_RANK} "
-        f"with Signal Score {EDGE_DISCORD_MIN_SIGNAL_SCORE:.0f}+."
+        f"with Signal Score {_format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)}+."
     )
     title_label = title_map.get(alert_kind) or "Today's Best Props Update"
     refresh_label_text = REFRESH_LABELS.get(
         payload.get("refresh_label"),
         str(payload.get("refresh_label") or "Refresh").replace("_", " ").title(),
     )
+    grouped_books = _group_recommendations_by_sportsbook(
+        recommendations,
+        limit_per_book=EDGE_DISCORD_PER_BOOK_LIMIT,
+    )
+    books_summary = ", ".join(
+        f"{group['sportsbook_label']} ({group['total_count']})"
+        for group in grouped_books
+    ) or "No official sportsbook groups."
+
+    embeds = [
+        {
+            "title": f"{title_label} • {refresh_label_text}",
+            "description": "Grouped by sportsbook below so you can scan the best numbers at each book.",
+            "color": 0x22C55E,
+            "timestamp": payload.get("generated_at"),
+            "fields": [
+                {
+                    "name": "What Signal Score Means",
+                    "value": (
+                        "Signal Score is our 1-99 ranking of how much the current data supports a prop. "
+                        "It blends projection, recent form, matchup, market value, line movement, and comparable-player context. "
+                        "Higher means more signals are lining up."
+                    )[:1024],
+                    "inline": False,
+                },
+                {
+                    "name": "Why You Got This Alert",
+                    "value": rules_text[:1024],
+                    "inline": False,
+                },
+                {
+                    "name": "Sportsbooks In This Alert",
+                    "value": books_summary[:1024],
+                    "inline": False,
+                },
+                {
+                    "name": "Slate Dates",
+                    "value": ", ".join(payload.get("game_dates", [])) or "n/a",
+                    "inline": True,
+                },
+                {
+                    "name": "What Changed",
+                    "value": (
+                        "\n".join(change_lines)[:1000]
+                        if alert_kind == "update" and change_lines
+                        else (
+                            "First official alert for this slate."
+                            if alert_kind == "opening"
+                            else "Final official board before tip."
+                        )
+                    ),
+                    "inline": False,
+                },
+                {
+                    "name": "Dropped From Official Alerts",
+                    "value": "\n".join(removed_lines)[:700] if removed_lines else "None.",
+                    "inline": False,
+                },
+            ],
+        }
+    ]
+
+    for group in grouped_books:
+        book_recommendations = group["recommendations"]
+        lines = []
+        for display_rank, recommendation in enumerate(book_recommendations, start=1):
+            stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
+            lines.append(
+                f"**{display_rank}.** {recommendation['player_name']} — "
+                f"{stat_label} {recommendation['pick_label']} {recommendation['line']:.1f}\n"
+                f"{_discord_book_label(recommendation)} | Signal Score {recommendation['edge_score']:.1f}\n"
+                f"Why it ranks high: {_discord_signal_summary(recommendation)}"
+            )
+
+        overflow_count = max(0, int(group.get("total_count", 0)) - len(book_recommendations))
+        if overflow_count:
+            lines.append(f"`+{overflow_count} more official {group['sportsbook_label']} spot(s)`")
+
+        top_recommendation = book_recommendations[0] if book_recommendations else {}
+        book_embed: Dict[str, Any] = {
+            "title": group["sportsbook_label"],
+            "description": "\n\n".join(lines)[:3800],
+            "color": BOOK_EMBED_COLORS.get(group["sportsbook"], 0x22C55E),
+        }
+        thumbnail_url = top_recommendation.get("player_headshot_url")
+        if thumbnail_url:
+            book_embed["thumbnail"] = {"url": thumbnail_url}
+        embeds.append(book_embed)
 
     discord_payload = {
         "username": "NBA Dashboard Top Spots",
-        "embeds": [
-            {
-                "title": f"{title_label} • {refresh_label_text}",
-                "description": "\n\n".join(lines[:EDGE_DISCORD_MAX_RANK])[:3800],
-                "color": 0x22C55E,
-                "timestamp": payload.get("generated_at"),
-                "fields": [
-                    {
-                        "name": "What Signal Score Means",
-                        "value": (
-                            "Signal Score is our 1-99 ranking of how much the current data supports a prop. "
-                            "It blends projection, recent form, matchup, market value, line movement, and comparable-player context. "
-                            "Higher means more signals are lining up."
-                        )[:1024],
-                        "inline": False,
-                    },
-                    {
-                        "name": "Why You Got This Alert",
-                        "value": rules_text[:1024],
-                        "inline": False,
-                    },
-                    {
-                        "name": "Slate Dates",
-                        "value": ", ".join(payload.get("game_dates", [])) or "n/a",
-                        "inline": True,
-                    },
-                    {
-                        "name": "What Changed",
-                        "value": (
-                            "\n".join(change_lines)[:1000]
-                            if alert_kind == "update" and change_lines
-                            else (
-                                "First official alert for this slate."
-                                if alert_kind == "opening"
-                                else "Final official board before tip."
-                            )
-                        ),
-                        "inline": False,
-                    },
-                    {
-                        "name": "Dropped From Official Alerts",
-                        "value": "\n".join(removed_lines)[:700] if removed_lines else "None.",
-                        "inline": False,
-                    },
-                ],
-            }
-        ],
+        "embeds": embeds,
     }
 
     response = requests.post(
@@ -2697,17 +2821,11 @@ def run_edge_score_refresh(
             )
             candidates.append(best_candidate)
 
-    candidates.sort(
-        key=lambda candidate: (
-            candidate.get("edge_score", 0.0),
-            candidate.get("confidence", 0.0),
-            candidate.get("signal_score", 0.0),
-        ),
-        reverse=True,
-    )
+    candidates.sort(key=_candidate_sort_key, reverse=True)
     top_recommendations = _diversify_candidates(candidates, EDGE_LIMIT)
     for rank, recommendation in enumerate(top_recommendations, start=1):
         recommendation["rank"] = rank
+    sportsbook_boards = _build_sportsbook_boards(candidates, EDGE_SPORTSBOOK_BOARD_LIMIT)
 
     notification_delta = _compute_notification_delta(top_recommendations, state, refresh_label)
     official_recommendations = notification_delta.get("official_recommendations", [])
@@ -2721,8 +2839,10 @@ def run_edge_score_refresh(
             "candidate_count": len(candidates),
             "top_count": len(top_recommendations),
             "available_books": sorted(SUPPORTED_BOOKS),
+            "sportsbook_board_limit": EDGE_SPORTSBOOK_BOARD_LIMIT,
+            "sportsbook_boards": sportsbook_boards,
             "duration_s": round(time.time() - start_time, 2),
-            "scoring_model": "Edge Score",
+            "scoring_model": "Signal Score",
         },
         "recommendations": top_recommendations,
         "notification": {

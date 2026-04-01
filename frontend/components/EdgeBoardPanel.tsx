@@ -1,7 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronRight, Clock3, ExternalLink, TrendingUp, X } from 'lucide-react';
-import { EdgeScorePayload, EdgeScoreRecommendation } from '../types';
+import { ChevronDown, ChevronRight, Clock3, ExternalLink, HelpCircle, TrendingUp, X } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { EdgeScorePayload, EdgeScoreRecommendation, EdgeScoreSportsbookBoard } from '../types';
 import { colors } from '../utils/propsmadness_colors';
+import { TopSpotsHelpModal } from './TopSpotsHelpModal';
+import { ImageWithFallback } from './ui/ImageWithFallback';
+import { ASSETS_BASE } from '../utils/config';
 
 const COMPONENT_LABELS: Record<string, string> = {
   projection: 'Projection edge',
@@ -25,6 +29,8 @@ const AREA_LABELS: Record<string, string> = {
   pull_up: 'pull-up',
   less_than_10_ft: 'inside 10 ft',
 };
+
+const SPORTSBOOK_FILTER_ORDER = ['dk', 'fd', 'pp'];
 
 function formatGeneratedAt(value?: string | null) {
   if (!value) return 'Waiting for refresh';
@@ -52,6 +58,45 @@ function safeNumber(value: unknown) {
 
 function renderMarketLabel(recommendation: EdgeScoreRecommendation) {
   return `${recommendation.stat_label} ${recommendation.pick_label} ${recommendation.line.toFixed(1)}`;
+}
+
+function getHeadshotSrc(recommendation: EdgeScoreRecommendation) {
+  if (recommendation.player_headshot_url) {
+    return recommendation.player_headshot_url;
+  }
+  return `https://cdn.nba.com/headshots/nba/latest/260x190/${recommendation.player_id}.png`;
+}
+
+function getSportsbookOrder(book: string) {
+  const normalized = String(book ?? '').toLowerCase();
+  const index = SPORTSBOOK_FILTER_ORDER.indexOf(normalized);
+  return index === -1 ? SPORTSBOOK_FILTER_ORDER.length : index;
+}
+
+function buildSportsbookOptions(
+  recommendations: EdgeScoreRecommendation[],
+  sportsbookBoards: Record<string, EdgeScoreSportsbookBoard>,
+) {
+  const labels = new Map<string, string>();
+
+  Object.entries(sportsbookBoards).forEach(([book, board]) => {
+    if (board?.count) {
+      labels.set(book, board.sportsbook_label);
+    }
+  });
+
+  recommendations.forEach((recommendation) => {
+    if (!labels.has(recommendation.sportsbook)) {
+      labels.set(recommendation.sportsbook, recommendation.sportsbook_label);
+    }
+  });
+
+  return [
+    { value: 'all', label: 'All books' },
+    ...Array.from(labels.entries())
+      .sort((left, right) => getSportsbookOrder(left[0]) - getSportsbookOrder(right[0]) || left[1].localeCompare(right[1]))
+      .map(([value, label]) => ({ value, label })),
+  ];
 }
 
 function getWeightedLeaders(weights: Record<string, any> | undefined, limit = 2) {
@@ -153,31 +198,31 @@ function getSupportDepth(confidence: number) {
 
   if (confidence >= 86) {
     return {
-      label: 'A lot is backing this pick',
-      detail: 'Projection, recent form, matchup data, and market context are all showing up here.',
+      label: 'High support',
+      detail: 'Projection, recent form, matchup, and market value are all helping this pick.',
       tone,
     };
   }
 
   if (confidence >= 72) {
     return {
-      label: 'Strong data support',
-      detail: 'Several different stats are pointing in the same direction.',
+      label: 'Solid support',
+      detail: 'Several different parts of the data are pointing the same way.',
       tone,
     };
   }
 
   if (confidence >= 58) {
     return {
-      label: 'Some good support',
-      detail: 'There is a solid case here, but fewer data points are available.',
+      label: 'Moderate support',
+      detail: 'There is a good case here, but with fewer supporting signals.',
       tone,
     };
   }
 
   return {
-    label: 'Less data behind it',
-    detail: 'This pick still ranks, but it is being supported by fewer inputs than the strongest plays.',
+    label: 'Lighter support',
+    detail: 'This still ranks, but it has less support than the strongest spots on the board.',
     tone,
   };
 }
@@ -539,8 +584,25 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
   onSelectRecommendation,
 }) => {
   const recommendations = payload?.recommendations ?? [];
-  const leader = recommendations[0] ?? null;
+  const sportsbookBoards = (payload?.summary?.sportsbook_boards ?? {}) as Record<string, EdgeScoreSportsbookBoard>;
+  const sportsbookOptions = buildSportsbookOptions(recommendations, sportsbookBoards);
+  const [selectedSportsbook, setSelectedSportsbook] = useState<string>('all');
   const [selectedRecommendationKey, setSelectedRecommendationKey] = useState<string | null>(null);
+  const [showHelp, setShowHelp] = useState(false);
+  const selectedSportsbookBoard = selectedSportsbook !== 'all'
+    ? sportsbookBoards[selectedSportsbook] ?? null
+    : null;
+  const sportsbookBoardLimit = Number(
+    selectedSportsbookBoard?.limit
+      ?? payload?.summary?.sportsbook_board_limit
+      ?? 10,
+  );
+  const visibleRecommendations = selectedSportsbook === 'all'
+    ? recommendations
+    : (selectedSportsbookBoard?.recommendations
+      ?? recommendations.filter((recommendation) => recommendation.sportsbook === selectedSportsbook).slice(0, sportsbookBoardLimit));
+  const leader = visibleRecommendations[0] ?? null;
+  const selectedSportsbookLabel = sportsbookOptions.find((option) => option.value === selectedSportsbook)?.label ?? 'All books';
 
   const changeCount = Number(payload?.notification?.change_count ?? 0);
   const discordConfigured = Boolean(payload?.notification?.discord_configured);
@@ -553,6 +615,28 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
 
     setSelectedRecommendationKey(activeRecommendationKey ?? null);
   }, [isOpen, activeRecommendationKey]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedSportsbook('all');
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setShowHelp(false);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!selectedRecommendationKey) {
+      return;
+    }
+
+    if (!visibleRecommendations.some((recommendation) => recommendation.recommendation_key === selectedRecommendationKey)) {
+      setSelectedRecommendationKey(null);
+    }
+  }, [selectedRecommendationKey, visibleRecommendations]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -589,15 +673,39 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
               <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-fgSubtle">
                 Top Spots
               </div>
-              <h2 className="mt-1 text-lg font-bold text-white sm:text-xl">
-                Today&apos;s scouting board
-              </h2>
+              <div className="mt-1 flex items-center gap-2">
+                <h2 className="text-lg font-bold text-white sm:text-xl">
+                  Today&apos;s scouting board
+                </h2>
+                <HelpCircle
+                  className="h-5 w-5 shrink-0 cursor-pointer text-borderMuted transition-colors hover:text-neutral400"
+                  onClick={() => setShowHelp(true)}
+                />
+              </div>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-fgSubtle">
                 Signal Score is our quick ranking number. This board helps you find today&apos;s strongest prop spots fast, understand why they stand out, and jump into the full player dashboard when you want more detail.
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="relative min-w-[148px]">
+                <label htmlFor="top-spots-sportsbook-filter" className="sr-only">
+                  Filter Top Spots by sportsbook
+                </label>
+                <select
+                  id="top-spots-sportsbook-filter"
+                  value={selectedSportsbook}
+                  onChange={(event) => setSelectedSportsbook(event.target.value)}
+                  className="h-9 w-full appearance-none rounded-lg border border-borderMedium bg-bgCanvas pl-3 pr-8 text-xs font-semibold text-white outline-none transition-colors focus:border-blue500"
+                >
+                  {sportsbookOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fgSubtle" />
+              </div>
               <div className="hidden items-center gap-1.5 rounded-lg border border-borderMedium bg-bgCanvas px-3 py-2 text-xs text-fgSubtle sm:flex">
                 <Clock3 className="h-3.5 w-3.5" />
                 {updatedAtLabel}
@@ -615,11 +723,18 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
           <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-5">
             <div className="mb-4 flex flex-wrap gap-2">
               <div className={`rounded-lg border px-3 py-2 text-[11px] ${getSummaryChipTone('count')}`}>
-                <span className="font-bold text-white">{recommendations.length || '--'}</span> live picks
+                <span className="font-bold text-white">{visibleRecommendations.length || '--'}</span>{' '}
+                {selectedSportsbook === 'all' ? 'live picks' : `${selectedSportsbookLabel} picks`}
               </div>
               {payload?.summary?.active_players && (
                 <div className={`rounded-lg border px-3 py-2 text-[11px] ${getSummaryChipTone('count')}`}>
                   <span className="font-bold text-white">{payload.summary.active_players}</span> active players
+                </div>
+              )}
+              {selectedSportsbookBoard && (
+                <div className={`rounded-lg border px-3 py-2 text-[11px] ${getSummaryChipTone('count')}`}>
+                  Showing top <span className="font-bold text-white">{selectedSportsbookBoard.limit ?? sportsbookBoardLimit}</span> for{' '}
+                  <span className="font-bold text-white">{selectedSportsbookBoard.sportsbook_label}</span>
                 </div>
               )}
               <div className={`rounded-lg border px-3 py-2 text-[11px] ${getSummaryChipTone('changes')}`}>
@@ -635,11 +750,14 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
               )}
             </div>
 
-            {recommendations.length > 0 ? (
+            {visibleRecommendations.length > 0 ? (
               <div className="space-y-2">
-                {recommendations.map((recommendation) => {
+                {visibleRecommendations.map((recommendation, index) => {
                   const isSelected = recommendation.recommendation_key === selectedRecommendationKey;
                   const isActive = recommendation.recommendation_key === activeRecommendationKey;
+                  const displayRank = selectedSportsbook === 'all'
+                    ? recommendation.rank
+                    : (recommendation.sportsbook_rank ?? index + 1);
                   const rowReasons = buildRowReasons(recommendation);
                   const supportDepth = getSupportDepth(recommendation.confidence);
                   const signalTone = getSignalTone(recommendation.edge_score);
@@ -677,21 +795,38 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                 ? 'bg-blue500 text-white'
                                 : 'bg-bgElevation1 text-fgSubtle'
                                 }`}>
-                                #{recommendation.rank}
+                                #{displayRank}
                               </span>
                               {isActive && (
                                 <span className="rounded-md border border-borderMedium bg-bgElevation0 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
                                   On dashboard
                                 </span>
                               )}
+                              {selectedSportsbook !== 'all' && Number.isFinite(recommendation.rank) && (
+                                <span className="rounded-md border border-borderMedium bg-bgElevation0 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
+                                  Overall #{recommendation.rank}
+                                </span>
+                              )}
                             </div>
-                            <div className="mt-3 truncate text-sm font-bold text-white">
-                              {recommendation.player_name}
-                            </div>
-                            <div className="truncate text-[11px] uppercase tracking-[0.16em] text-fgSubtle">
-                              {recommendation.team}
-                              {recommendation.opponent ? ` vs ${recommendation.opponent}` : ''}
-                              {recommendation.game_time_et ? ` • ${recommendation.game_time_et}` : ''}
+                            <div className="mt-3 flex items-center gap-3">
+                              <div className="h-11 w-11 shrink-0 overflow-hidden rounded-full border border-borderMedium bg-bgElevation1">
+                                <ImageWithFallback
+                                  src={getHeadshotSrc(recommendation)}
+                                  fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/${recommendation.player_id}.png`}
+                                  alt={recommendation.player_name}
+                                  className="h-full w-full object-cover pt-1.5 scale-[1.18]"
+                                />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-bold text-white">
+                                  {recommendation.player_name}
+                                </div>
+                                <div className="truncate text-[11px] uppercase tracking-[0.16em] text-fgSubtle">
+                                  {recommendation.team}
+                                  {recommendation.opponent ? ` vs ${recommendation.opponent}` : ''}
+                                  {recommendation.game_time_et ? ` • ${recommendation.game_time_et}` : ''}
+                                </div>
+                              </div>
                             </div>
                           </div>
 
@@ -720,20 +855,22 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                             <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-fgSubtle lg:mb-1">
                               Signal Score
                             </div>
-                            <div
-                              className="inline-flex rounded-md border px-2.5 py-1 font-chakra text-xl font-bold"
-                              style={signalTone.solidStyle}
-                            >
-                              {recommendation.edge_score.toFixed(1)}
-                            </div>
-                            <div
-                              className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-borderMedium bg-bgElevation0 px-2 py-0.5 text-[10px] font-semibold text-fgSubtle"
-                            >
-                              <span
-                                className="h-1.5 w-1.5 rounded-full"
-                                style={supportDepth.tone.dotStyle}
-                              />
-                              {supportDepth.label}
+                            <div className="mt-2 flex flex-wrap items-center gap-2 lg:flex-col lg:items-start lg:gap-2">
+                              <div
+                                className="inline-flex rounded-md border px-2.5 py-1 font-chakra text-xl font-bold"
+                                style={signalTone.solidStyle}
+                              >
+                                {recommendation.edge_score.toFixed(1)}
+                              </div>
+                              <div
+                                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-borderMedium bg-bgElevation0 px-2 py-0.5 text-[10px] font-semibold text-fgSubtle"
+                              >
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full"
+                                  style={supportDepth.tone.dotStyle}
+                                />
+                                {recommendation.confidence.toFixed(0)}% data support
+                              </div>
                             </div>
                           </div>
 
@@ -771,11 +908,26 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                   </span>
                                 )}
                               </div>
-                              <div className="mt-3 text-sm font-semibold text-white">
-                                {renderMarketLabel(recommendation)}
-                              </div>
-                              <div className="mt-1 text-[11px] text-fgSubtle">
-                                {recommendation.odds_display} on {recommendation.sportsbook_label}
+                              <div className="mt-3 flex items-center gap-3">
+                                <div className="h-14 w-14 shrink-0 overflow-hidden rounded-full border border-borderMedium bg-bgElevation1">
+                                  <ImageWithFallback
+                                    src={getHeadshotSrc(recommendation)}
+                                    fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/${recommendation.player_id}.png`}
+                                    alt={recommendation.player_name}
+                                    className="h-full w-full object-cover pt-2 scale-[1.2]"
+                                  />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="truncate text-sm font-semibold text-white">
+                                    {recommendation.player_name}
+                                  </div>
+                                  <div className="mt-1 text-sm font-semibold text-white">
+                                    {renderMarketLabel(recommendation)}
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-fgSubtle">
+                                    {recommendation.odds_display} on {recommendation.sportsbook_label}
+                                  </div>
+                                </div>
                               </div>
                             </div>
 
@@ -795,10 +947,10 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
 
                                 <div className="rounded-lg border border-borderMedium bg-bgElevation0 px-3 py-3">
                                   <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-fgSubtle">
-                                    How Much Backs It
+                                    Support Level
                                   </div>
                                   <div
-                                    className="mt-2 inline-flex items-center gap-2 rounded-full border border-borderMedium bg-bgElevation1 px-2 py-0.5 text-sm font-bold text-white"
+                                    className="mt-3 inline-flex items-center gap-2 rounded-full border border-borderMedium bg-bgElevation1 px-2.5 py-1 text-sm font-bold text-white"
                                   >
                                     <span
                                       className="h-2 w-2 rounded-full"
@@ -806,8 +958,8 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                     />
                                     {supportDepth.label}
                                   </div>
-                                  <div className="mt-1 text-[11px] leading-5 text-fgSubtle">
-                                    {recommendation.confidence.toFixed(0)}% coverage
+                                  <div className="mt-2 text-[11px] leading-5 text-fgSubtle">
+                                    {recommendation.confidence.toFixed(0)}% data support
                                   </div>
                                 </div>
                               </div>
@@ -880,7 +1032,7 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                     className="h-2 w-2 rounded-full"
                                     style={supportDepth.tone.dotStyle}
                                   />
-                                  How Much Backs It
+                                  Support Level
                                 </div>
                                 <div className="mt-2 text-sm font-semibold text-white">
                                   {supportDepth.detail}
@@ -898,14 +1050,16 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
               <div className="rounded-lg border border-borderMedium bg-bgCanvas px-4 py-10 text-center text-sm text-fgSubtle">
                 {isLoading
                   ? 'Loading current Top Spots slate...'
-                  : (payload?.summary?.unavailable_reason as string | undefined) || 'No ranked props are available yet for the active slate.'}
+                  : selectedSportsbook !== 'all'
+                    ? `No ranked props are available for ${selectedSportsbookLabel} yet.`
+                    : (payload?.summary?.unavailable_reason as string | undefined) || 'No ranked props are available yet for the active slate.'}
               </div>
             )}
 
             <div className="mt-4 flex flex-col gap-2 rounded-lg border border-borderMedium bg-bgCanvas px-3 py-3 text-[11px] text-fgSubtle sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
                 <TrendingUp className="h-3.5 w-3.5 text-white" />
-                Scan the board first, expand a row where it sits, then use Open to sync it into the dashboard.
+                Scan the board first, filter by book when you want a sportsbook-specific view, expand a row where it sits, then use Open to sync it into the dashboard.
               </div>
               <div className="hidden whitespace-nowrap sm:block">
                 This board stays separate so the player dashboard stays clean.
@@ -914,6 +1068,11 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
           </div>
         </section>
       </div>
+
+      {showHelp && createPortal(
+        <TopSpotsHelpModal onClose={() => setShowHelp(false)} />,
+        document.body,
+      )}
     </>
   );
 };

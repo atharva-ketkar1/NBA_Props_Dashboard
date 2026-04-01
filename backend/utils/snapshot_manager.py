@@ -5,20 +5,12 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+from utils.intraday_schedule import get_schedule_aware_intraday_interval_seconds
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
-
-
-def get_intraday_interval_seconds():
-    raw_value = os.getenv("INTRADAY_INTERVAL_SECONDS", "900")
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        parsed = 900
-    return max(300, parsed)
 
 class SnapshotManager:
     def __init__(self, data_dir=None, logs_dir=None):
@@ -180,7 +172,10 @@ class SnapshotManager:
             if last_timestamp_str:
                 try:
                     last_dt = datetime.fromisoformat(last_timestamp_str)
-                    if (now - last_dt).total_seconds() < get_intraday_interval_seconds():
+                    if (now - last_dt).total_seconds() < get_schedule_aware_intraday_interval_seconds(
+                        self.schedule_path,
+                        now=now,
+                    ):
                         return False 
                 except ValueError:
                     pass

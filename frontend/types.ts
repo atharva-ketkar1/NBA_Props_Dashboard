@@ -232,8 +232,10 @@ export interface SimilarPlayersSummary {
 export interface EdgeScoreRecommendation {
   recommendation_key: string;
   rank: number;
+  sportsbook_rank?: number;
   player_id: number;
   player_name: string;
+  player_headshot_url?: string | null;
   team: string;
   opponent?: string | null;
   position?: string;
@@ -259,11 +261,31 @@ export interface EdgeScoreRecommendation {
   available_component_weights?: number;
 }
 
+export interface EdgeScoreSportsbookBoard {
+  sportsbook: string;
+  sportsbook_label: string;
+  count: number;
+  limit: number;
+  recommendations: EdgeScoreRecommendation[];
+}
+
+export interface EdgeScoreSummary {
+  active_players?: number;
+  candidate_count?: number;
+  top_count?: number;
+  available_books?: string[];
+  sportsbook_board_limit?: number;
+  sportsbook_boards?: Record<string, EdgeScoreSportsbookBoard>;
+  duration_s?: number;
+  scoring_model?: string;
+  [key: string]: any;
+}
+
 export interface EdgeScorePayload {
   generated_at: string;
   refresh_label: string;
   game_dates: string[];
-  summary: Record<string, any>;
+  summary: EdgeScoreSummary;
   recommendations: EdgeScoreRecommendation[];
   notification: Record<string, any>;
 }

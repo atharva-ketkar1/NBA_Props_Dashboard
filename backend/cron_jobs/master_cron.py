@@ -14,6 +14,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
+from utils.intraday_schedule import get_schedule_aware_intraday_interval_seconds
 from utils.logging_utils import configure_logging, log_section, log_status
 
 configure_logging()
@@ -34,13 +35,8 @@ def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
 
-def get_intraday_interval_seconds():
-    raw_value = os.getenv("INTRADAY_INTERVAL_SECONDS", "900")
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        parsed = 900
-    return max(300, parsed)
+def get_intraday_interval_seconds(now=None):
+    return get_schedule_aware_intraday_interval_seconds(SCHEDULE_PATH, now=now or get_et_now())
 
 
 def get_game_status_refresh_interval_seconds():
@@ -345,7 +341,7 @@ def run_intraday_if_needed(now, state, dry_run=False):
     """Priority 3: Intraday props refresh plus snapshot sync."""
     last_run = state.get("last_intraday_time", 0)
     current_timestamp = now.timestamp()
-    interval_seconds = get_intraday_interval_seconds()
+    interval_seconds = get_intraday_interval_seconds(now=now)
 
     if current_timestamp - last_run >= interval_seconds:
         log_section(logger, "Priority 3 - Intraday props refresh", every_s=interval_seconds, dry_run=dry_run)

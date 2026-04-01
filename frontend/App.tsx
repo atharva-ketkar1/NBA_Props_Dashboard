@@ -378,8 +378,8 @@ function App() {
   // Set VITE_USE_DB=false (or omit) to fall back to master_feed.json.
   // ──────────────────────────────────────────────────────────────
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
-  const FULL_DB_POLL_MS = parsePollMs(import.meta.env.VITE_FULL_DB_POLL_MS, 30 * 60 * 1000);
-  const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 5 * 60 * 1000);
+  const FULL_DB_POLL_MS = parsePollMs(import.meta.env.VITE_FULL_DB_POLL_MS, 60 * 60 * 1000);
+  const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 2 * 60 * 1000);
   const SIMILAR_PREFETCH_PROP_LIMIT = parsePositiveInt(import.meta.env.VITE_SIMILAR_PREFETCH_PROP_LIMIT, 2);
   const SIMILAR_PREFETCH_POSITION_LIMIT = parsePositiveInt(import.meta.env.VITE_SIMILAR_PREFETCH_POSITION_LIMIT, 3);
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
