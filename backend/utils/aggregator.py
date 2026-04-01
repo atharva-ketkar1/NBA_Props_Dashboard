@@ -190,7 +190,7 @@ def normalize_game_date(raw_value):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path, pp_path=None):
     print(f"   Aggregating Data...")
     import gc
 
@@ -198,6 +198,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     df_stats = load_csv(stats_path)
     df_dk = load_csv(dk_path)
     df_fd = load_csv(fd_path)
+    df_pp = load_csv(pp_path) if pp_path else pd.DataFrame()
     df_logs = load_csv(logs_path)
     
     shooting_data = load_json(shooting_path)
@@ -210,7 +211,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     play_type_data = load_json(play_type_path)
     boxscores_data = load_json(boxscores_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)}), PlayTypes({len(play_type_data.get('players', {}))})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), PP({len(df_pp)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)}), PlayTypes({len(play_type_data.get('players', {}))})")
 
     if df_stats.empty:
         print("   No stats found. Aborting.")
@@ -689,9 +690,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
     process_odds(df_dk, "dk")
     process_odds(df_fd, "fd")
+    process_odds(df_pp, "pp")
     
     del df_dk
     del df_fd
+    del df_pp
     gc.collect()
 
     # F. Filter & Save

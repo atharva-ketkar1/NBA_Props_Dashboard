@@ -18,6 +18,7 @@ This project combines scheduled data collection, entity resolution, feature engi
 - Builds a canonical player feed with season stats, recent game logs, boxscore-derived context, and opponent matchup overlays.
 - Captures intraday line movement snapshots and near-tip closing lines.
 - Visualizes shot zones, assist zones, shot type splits, play type scoring mix, and prop hit-rate history.
+- Ranks the current slate with an explainable Signal Score that blends market numbers, recent form, matchup texture, similar-player context, and rest/back-to-back signals.
 - Supports two delivery modes:
   - Static JSON feed for local development and low-latency browsing
   - Supabase-backed reads for hosted deployments
@@ -66,6 +67,7 @@ Primary outputs:
 - `nba_dashboard_games.json`
 - `line_movements_today.json`
 - `historical_odds.json`
+- `edge_scores_top15.json`
 
 Database upserts are intentionally non-fatal so local feed generation still succeeds if cloud persistence is temporarily unavailable.
 
@@ -76,6 +78,14 @@ Database upserts are intentionally non-fatal so local feed generation still succ
 1. Daily full pipeline refresh after 6:00 AM ET
 2. Closing-line capture inside the pre-tip window
 3. Intraday line-movement snapshots every 30 minutes
+
+Signal Score recomputes inside the same refresh owners:
+
+- after the daily pipeline
+- after each intraday odds refresh
+- after each pre-tip closing refresh
+
+If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, only materially changed top-15 updates are sent to Discord; otherwise the rankings are persisted locally and Supabase sync remains best-effort.
 
 It uses a lock file plus persisted state to avoid duplicate runs and stale overlap.
 

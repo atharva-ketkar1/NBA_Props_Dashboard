@@ -399,6 +399,20 @@ def save_cron_state(state):
     with open(STATE_PATH, 'w') as f:
         json.dump(state, f, indent=2)
 
+
+def _run_edge_score_refresh(players_data, refresh_label):
+    try:
+        from utils.edge_score import run_edge_score_refresh
+        run_edge_score_refresh(
+            refresh_label=refresh_label,
+            current_players_data=players_data,
+        )
+        return True
+    except Exception as error:
+        log_status(logger, "WARN", "Edge Score refresh failed", error=error, label=refresh_label)
+        return False
+
+
 def main(dry_run=False, preselected_games=None):
     now = get_et_now()
     today_date = now.strftime("%Y-%m-%d")
@@ -595,6 +609,7 @@ def main(dry_run=False, preselected_games=None):
                 legacy_historical_ok = False
 
         historical_ok = normalized_historical_ok and legacy_historical_ok
+        _run_edge_score_refresh(players_data, "pre_game")
 
         if not props_ok or not line_movements_ok or not historical_ok:
             log_status(

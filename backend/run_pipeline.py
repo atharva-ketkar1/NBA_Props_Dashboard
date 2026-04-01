@@ -292,6 +292,7 @@ def main():
                 stats_path=STATS_PATH,
                 dk_path=DK_PATH,
                 fd_path=FD_PATH,
+                pp_path=PP_PATH if prizepicks.prizepicks_enabled() else None,
                 logs_path=LOGS_PATH, 
                 shooting_path=SHOOTING_PATH,
                 assists_path=ASSISTS_PATH,
@@ -362,6 +363,12 @@ def main():
                     legacy_historical_ok=legacy_historical_ok,
                     legacy_historical_fallback_enabled=legacy_historical_fallback_enabled,
                 )
+
+            try:
+                from utils.edge_score import run_edge_score_refresh
+                run_edge_score_refresh(refresh_label="pipeline")
+            except Exception as e:
+                log_status(logger, "WARN", "Edge Score refresh failed", error=e)
 
             if critical_failures:
                 log_status(logger, "WARN", "Critical scraper failures detected", count=len(critical_failures))

@@ -17,6 +17,20 @@ from utils.snapshot_manager import SnapshotManager
 configure_logging()
 logger = logging.getLogger("CronIntradayRefresh")
 
+
+def _run_edge_score_refresh(players_data, refresh_label):
+    try:
+        from utils.edge_score import run_edge_score_refresh
+        run_edge_score_refresh(
+            refresh_label=refresh_label,
+            current_players_data=players_data,
+        )
+        return True
+    except Exception as error:
+        log_status(logger, "WARN", "Edge Score refresh failed", error=error, label=refresh_label)
+        return False
+
+
 def run_intraday_refresh(label="intraday"):
     start_time = time.time()
     log_section(logger, "Intraday props refresh", label=label)
@@ -71,6 +85,7 @@ def run_intraday_refresh(label="intraday"):
                 lm_ok = upsert_line_movements_from_file(lm_path)
 
                 if not props_ok or not lm_ok:
+                    _run_edge_score_refresh(players_data, label)
                     log_status(
                         logger,
                         "WARN",
@@ -85,10 +100,13 @@ def run_intraday_refresh(label="intraday"):
                 log_status(logger, "OK", "Intraday DB sync complete", label=label, players=len(players_data))
                     
             except Exception as e:
+                _run_edge_score_refresh(players_data, label)
                 log_status(logger, "WARN", "Supabase upsert failed after snapshot success", error=e)
                 return True
+            _run_edge_score_refresh(players_data, label)
             return True
         else:
+            _run_edge_score_refresh(players_data, label)
             log_status(
                 logger,
                 "SKIP",

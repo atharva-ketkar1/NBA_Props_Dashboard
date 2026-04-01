@@ -9,8 +9,9 @@ import { PlayTypeAnalysis } from './components/PlayTypeAnalysis';
 import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
-import { Player, PlayerPropsByDate, SimilarPlayerCandidate, SportsbookId } from './types';
+import { EdgeScorePayload, EdgeScoreRecommendation, Player, PlayerPropsByDate, SimilarPlayerCandidate, SportsbookId } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
+import { EdgeBoardPanel } from './components/EdgeBoardPanel';
 import { getDashboardDate } from './utils/dashboardDate';
 import {
   getResolvedPlayerGameDate,
@@ -25,6 +26,7 @@ import {
   fetchDashboardArchive,
   fetchDashboardBootstrap,
   fetchDashboardBookPreview,
+  fetchDashboardEdge,
   fetchDashboardHot,
   fetchDashboardPlayer,
   fetchDashboardSimilar,
@@ -46,6 +48,23 @@ const STAT_LABELS: Record<string, string> = {
   'Turnovers': 'TOV'
 };
 
+const EDGE_STAT_TO_TAB: Record<string, string> = {
+  PTS: 'Points',
+  AST: 'Assists',
+  REB: 'Rebounds',
+  FG3M: 'Threes',
+  'PTS+AST': 'Pts+Ast',
+  'PTS+REB': 'Pts+Reb',
+  'REB+AST': 'Reb+Ast',
+  'PTS+REB+AST': 'Pts+Reb+Ast',
+  BLK: 'Blocks',
+  STL: 'Steals',
+  'STL+BLK': 'Stl+Blk',
+  TOV: 'Turnovers',
+  PF: 'Fouls',
+  FTA: 'FT Attempted',
+};
+
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
 
@@ -61,6 +80,36 @@ function parsePositiveInt(rawValue: string | undefined, fallbackValue: number) {
 
 function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState === 'visible';
+}
+
+function formatEdgeSummaryTime(value?: string | null) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  return parsed.toISOString();
+}
+
+function getLatestIsoTimestamp(values: Array<string | null | undefined>) {
+  let latestMs = Number.NEGATIVE_INFINITY;
+  let latestValue: string | null = null;
+
+  values.forEach((value) => {
+    if (!value) return;
+    const parsed = new Date(value);
+    const ms = parsed.getTime();
+    if (Number.isNaN(ms)) return;
+    if (ms > latestMs) {
+      latestMs = ms;
+      latestValue = parsed.toISOString();
+    }
+  });
+
+  return latestValue;
+}
+
+function getLatestUpdatedAtFromRows(rows: any[]) {
+  return getLatestIsoTimestamp((rows ?? []).map((row: any) => row?.updated_at ?? null));
 }
 
 function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
@@ -218,6 +267,10 @@ function App() {
   const [similarCandidatesByPosition, setSimilarCandidatesByPosition] = useState<SimilarPlayerCandidate[]>([]);
   const [isSimilarCandidatesLoading, setIsSimilarCandidatesLoading] = useState(false);
   const [similarCandidatesKey, setSimilarCandidatesKey] = useState('');
+  const [edgePayload, setEdgePayload] = useState<EdgeScorePayload | null>(null);
+  const [isEdgeLoading, setIsEdgeLoading] = useState(true);
+  const [isEdgeBoardOpen, setIsEdgeBoardOpen] = useState(false);
+  const [dashboardUpdatedAt, setDashboardUpdatedAt] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState<{
     id: number;
     gameDate: string | null;
@@ -416,7 +469,13 @@ function App() {
             return;
           }
 
-          const snapshot = await fetchDashboardBootstrap(activeSportsbook);
+          const [snapshot, edgeSnapshot] = await Promise.all([
+            fetchDashboardBootstrap(activeSportsbook),
+            fetchDashboardEdge().catch((error) => {
+              console.error('[api] edge bootstrap error:', error);
+              return null;
+            }),
+          ]);
 
           if (cancelled) return;
 
@@ -435,6 +494,19 @@ function App() {
           const intradayMovements = isInitial ? flattenIntradayMovements(snapshot.lineRows ?? []) : null;
           if (isInitial) {
             lineMovementVersionRef.current = snapshot.lineVersion ?? '';
+          }
+          if (edgeSnapshot) {
+            setEdgePayload(edgeSnapshot);
+          } else if (isInitial) {
+            setEdgePayload(null);
+          }
+          setDashboardUpdatedAt((current) => getLatestIsoTimestamp([
+            current,
+            getLatestUpdatedAtFromRows(snapshot.propsRows ?? []),
+            edgeSnapshot?.generated_at ?? null,
+          ]));
+          if (isInitial) {
+            setIsEdgeLoading(false);
           }
 
           const selectionAnchor = selectionAnchorRef.current;
@@ -502,6 +574,7 @@ function App() {
           console.error('Supabase fetch failed:', err);
           if (isInitial) {
             setLoading(false);
+            setIsEdgeLoading(false);
           }
         }
       };
@@ -519,8 +592,9 @@ function App() {
         fetchApiJson<Record<string, any>>('/data/archive/historical_odds.json').catch(() => ({})),
         fetchApiJson<{ snapshots?: any[] }>('/data/current/line_movements_today.json').catch(() => ({ snapshots: [] })),
         fetchApiJson<any[]>('/data/current/nba_dashboard_games.json').catch(() => ([])),
+        fetchApiJson<EdgeScorePayload>('/data/current/edge_scores_top15.json').catch(() => null),
       ])
-        .then(([masterFeed, historicalOdds, lineMovements, games]) => {
+        .then(([masterFeed, historicalOdds, lineMovements, games, edgeSnapshot]) => {
           const today = getDashboardDate();
           const nextGameStatusById = buildGameStatusById(Array.isArray(games) ? games : []);
           const slateTeams = Array.from(new Set((Array.isArray(games) ? games : [])
@@ -540,10 +614,16 @@ function App() {
             detail_loaded: true,
           }));
           setRawData(enhancedFeed);
+          setEdgePayload(edgeSnapshot);
+          setDashboardUpdatedAt(getLatestIsoTimestamp([
+            edgeSnapshot?.generated_at ?? null,
+          ]));
+          setIsEdgeLoading(false);
           setLoading(false);
         })
         .catch(err => {
           console.error('Failed to load data:', err);
+          setIsEdgeLoading(false);
           setLoading(false);
         });
     }
@@ -561,11 +641,17 @@ function App() {
           return;
         }
 
-        const hotSnapshot = await fetchDashboardHot(
-          resolvedSelectedGameDate ?? selectedGameDate,
-          lineMovementVersionRef.current,
-          activeSportsbook,
-        );
+        const [hotSnapshot, edgeSnapshot] = await Promise.all([
+          fetchDashboardHot(
+            resolvedSelectedGameDate ?? selectedGameDate,
+            lineMovementVersionRef.current,
+            activeSportsbook,
+          ),
+          fetchDashboardEdge().catch((error) => {
+            console.error('[api] edge hot refresh error:', error);
+            return null;
+          }),
+        ]);
 
         if (cancelled) return;
 
@@ -600,6 +686,14 @@ function App() {
           ...player,
           intraday_movements: intradayMovements,
         })));
+        if (edgeSnapshot) {
+          setEdgePayload(edgeSnapshot);
+        }
+        setDashboardUpdatedAt((current) => getLatestIsoTimestamp([
+          current,
+          getLatestUpdatedAtFromRows(hotSnapshot.propsRows ?? []),
+          edgeSnapshot?.generated_at ?? null,
+        ]));
       } catch (err) {
         if (!cancelled) {
           console.error('Supabase hot refresh failed:', err);
@@ -758,6 +852,26 @@ function App() {
       });
   };
 
+  const handleSelectEdgeRecommendation = (recommendation: EdgeScoreRecommendation) => {
+    const nextTab = EDGE_STAT_TO_TAB[recommendation.stat_type];
+
+    if (nextTab) {
+      setActiveTab(nextTab);
+    }
+
+    if (
+      recommendation.sportsbook === 'dk'
+      || recommendation.sportsbook === 'fd'
+      || recommendation.sportsbook === 'pp'
+    ) {
+      setActiveSportsbook(recommendation.sportsbook);
+    }
+
+    setCustomLineValue(null);
+    setIsEdgeBoardOpen(false);
+    selectPlayerForView(recommendation.player_id, recommendation.game_date ?? null);
+  };
+
   // 2. Archive fetching when season filter changes
   useEffect(() => {
     // Only fetch if 24/25 is active, and the current player exists, and we haven't fetched their logs yet
@@ -800,6 +914,36 @@ function App() {
 
     return propsAvailabilityByDate[displayPlayer.id] ?? {};
   }, [displayPlayer, propsAvailabilityByDate]);
+  const activeEdgeRecommendationKey = useMemo(() => {
+    if (!displayPlayer || !edgePayload?.recommendations?.length) {
+      return null;
+    }
+
+    const currentGameDate = resolvedSelectedGameDate ?? null;
+
+    return edgePayload.recommendations.find((recommendation) => (
+      recommendation.player_id === displayPlayer.id
+      && recommendation.stat_type === activeStatKey
+      && recommendation.sportsbook === activeSportsbook
+      && (recommendation.game_date ?? null) === currentGameDate
+    ))?.recommendation_key ?? null;
+  }, [
+    displayPlayer,
+    edgePayload,
+    resolvedSelectedGameDate,
+    activeStatKey,
+    activeSportsbook,
+  ]);
+  const edgeBoardSummary = useMemo(() => {
+    const leader = edgePayload?.recommendations?.[0] ?? null;
+
+    return {
+      recommendationCount: edgePayload?.recommendations?.length ?? 0,
+      changeCount: Number(edgePayload?.notification?.change_count ?? 0),
+      leaderLabel: leader ? `${leader.player_name} ${leader.pick_label} ${leader.line.toFixed(1)}` : null,
+      updatedAt: formatEdgeSummaryTime(edgePayload?.generated_at),
+    };
+  }, [edgePayload]);
 
   useEffect(() => {
     if (!USE_DB || !displayPlayer || !activeStatKey) {
@@ -1054,10 +1198,17 @@ function App() {
     SIMILAR_PREFETCH_POSITION_LIMIT,
   ]);
 
+  const topNavProps = {
+    dashboardUpdatedAt,
+    edgeSummary: edgeBoardSummary,
+    isEdgeBoardOpen,
+    onOpenEdgeBoard: () => setIsEdgeBoardOpen(true),
+  };
+
 
   if (loading) {
     return (
-      <Layout sidebarProps={{ players: [], activePlayerId: null, onSelectPlayer: () => { } }}>
+      <Layout sidebarProps={{ players: [], activePlayerId: null, onSelectPlayer: () => { } }} topNavProps={topNavProps}>
         <DashboardSkeleton />
       </Layout>
     );
@@ -1065,7 +1216,7 @@ function App() {
 
   if (playersWithProps.length === 0) {
     return (
-      <Layout sidebarProps={{ players: [], activePlayerId: null, onSelectPlayer: () => { } }}>
+      <Layout sidebarProps={{ players: [], activePlayerId: null, onSelectPlayer: () => { } }} topNavProps={topNavProps}>
         <div className="flex items-center justify-center h-full text-white">
           No active props found.
         </div>
@@ -1074,7 +1225,7 @@ function App() {
   }
 
   return (
-    <Layout sidebarProps={{
+    <Layout topNavProps={topNavProps} sidebarProps={{
       players: playersWithProps,
       activePlayerId: displayPlayer?.id,
       activeGameDate: resolvedSelectedGameDate,
@@ -1275,6 +1426,15 @@ function App() {
           )}
 
         </div>
+
+        <EdgeBoardPanel
+          isOpen={isEdgeBoardOpen}
+          payload={edgePayload}
+          isLoading={isEdgeLoading}
+          activeRecommendationKey={activeEdgeRecommendationKey}
+          onClose={() => setIsEdgeBoardOpen(false)}
+          onSelectRecommendation={handleSelectEdgeRecommendation}
+        />
 
       </div>
     </Layout>

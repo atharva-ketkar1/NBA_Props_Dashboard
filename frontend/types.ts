@@ -228,3 +228,42 @@ export interface SimilarPlayersSummary {
   hits: number;
   total: number;
 }
+
+export interface EdgeScoreRecommendation {
+  recommendation_key: string;
+  rank: number;
+  player_id: number;
+  player_name: string;
+  team: string;
+  opponent?: string | null;
+  position?: string;
+  game_id?: string | null;
+  game_date?: string | null;
+  game_time_et?: string | null;
+  sportsbook: string;
+  sportsbook_label: string;
+  stat_type: string;
+  stat_label: string;
+  pick: 'over' | 'under';
+  pick_label: string;
+  line: number;
+  odds?: number | null;
+  odds_display?: string;
+  opposite_odds?: number | null;
+  edge_score: number;
+  confidence: number;
+  signal_score: number;
+  reasons: string[];
+  inputs: Record<string, any>;
+  component_scores: Record<string, number>;
+  available_component_weights?: number;
+}
+
+export interface EdgeScorePayload {
+  generated_at: string;
+  refresh_label: string;
+  game_dates: string[];
+  summary: Record<string, any>;
+  recommendations: EdgeScoreRecommendation[];
+  notification: Record<string, any>;
+}

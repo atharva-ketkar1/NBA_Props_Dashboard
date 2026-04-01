@@ -1,5 +1,5 @@
 import { fetchAppJson } from './network';
-import { SimilarPlayerCandidate, SportsbookId } from '../types';
+import { EdgeScorePayload, SimilarPlayerCandidate, SportsbookId } from '../types';
 
 type BootstrapResponse = {
   playersRows: any[];
@@ -45,6 +45,8 @@ type SimilarResponse = {
 type BookPreviewResponse = {
   propsRows: any[];
 };
+
+type EdgeResponse = EdgeScorePayload;
 
 export function fetchDashboardBootstrap(sportsbook: SportsbookId) {
   return fetchAppJson<BootstrapResponse>('/api/bootstrap', {
@@ -109,4 +111,8 @@ export function fetchDashboardBookPreview(
     playerId,
     statType,
   });
+}
+
+export function fetchDashboardEdge() {
+  return fetchAppJson<EdgeResponse>('/api/edge');
 }

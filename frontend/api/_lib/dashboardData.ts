@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { getOptionalEnv, getSupabaseAdmin } from './supabaseAdmin.js';
 import {
   buildFutureDates,
@@ -6,7 +9,13 @@ import {
 } from './dashboardDate.js';
 import { rankSimilarPlayers } from '../../utils/similarPlayers.js';
 import { playerHasAnyProp } from '../../utils/propResolution.js';
-import type { Player, PlayerPropsByDate, SimilarPlayerCandidate, SportsbookId } from '../../types.js';
+import type {
+  EdgeScorePayload,
+  Player,
+  PlayerPropsByDate,
+  SimilarPlayerCandidate,
+  SportsbookId,
+} from '../../types.js';
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
 const PLAYER_PROP_AVAIL_SELECT = 'player_id, stat_type, sportsbook, game_date';
@@ -30,6 +39,7 @@ const DEFAULT_LINE_ROWS_CACHE_MS = 30_000;
 const DEFAULT_PLAYER_DETAIL_CACHE_MS = 5 * 60_000;
 const DEFAULT_ARCHIVE_CACHE_MS = 60 * 60_000;
 const DEFAULT_SIMILAR_CACHE_MS = 60_000;
+const DEFAULT_EDGE_CACHE_MS = 15_000;
 const DEFAULT_HISTORICAL_LEGACY_FALLBACK = true;
 const HISTORICAL_SOURCE_PRIORITY: Record<string, number> = {
   closing_line: 3,
@@ -59,6 +69,9 @@ declare global {
 
 const dashboardCache = globalThis.__propsmadnessDashboardCache ??= new Map();
 const dashboardInflight = globalThis.__propsmadnessDashboardInflight ??= new Map();
+const currentFilePath = fileURLToPath(import.meta.url);
+const currentDir = path.dirname(currentFilePath);
+const LOCAL_EDGE_SCORE_PATH = path.resolve(currentDir, '..', '..', '..', 'backend', 'data', 'current', 'edge_scores_top15.json');
 
 function parsePositiveInteger(rawValue: string, fallbackValue: number) {
   const parsed = Number(rawValue);
@@ -101,6 +114,7 @@ const LINE_ROWS_CACHE_MS = getServerNumberEnv('DASHBOARD_LINE_ROWS_CACHE_MS', DE
 const PLAYER_DETAIL_CACHE_MS = getServerNumberEnv('DASHBOARD_PLAYER_DETAIL_CACHE_MS', DEFAULT_PLAYER_DETAIL_CACHE_MS);
 const ARCHIVE_CACHE_MS = getServerNumberEnv('DASHBOARD_ARCHIVE_CACHE_MS', DEFAULT_ARCHIVE_CACHE_MS);
 const SIMILAR_CACHE_MS = getServerNumberEnv('DASHBOARD_SIMILAR_CACHE_MS', DEFAULT_SIMILAR_CACHE_MS);
+const EDGE_CACHE_MS = getServerNumberEnv('DASHBOARD_EDGE_CACHE_MS', DEFAULT_EDGE_CACHE_MS);
 const HISTORICAL_ODDS_LEGACY_FALLBACK = getServerBooleanEnv(
   'HISTORICAL_ODDS_LEGACY_FALLBACK',
   DEFAULT_HISTORICAL_LEGACY_FALLBACK,
@@ -112,8 +126,43 @@ function assertNoError(error: { message?: string } | null, context: string) {
   }
 }
 
+function isMissingRelationError(error: { message?: string } | null, tableName: string) {
+  const message = String(error?.message ?? '').toLowerCase();
+  const tableToken = tableName.toLowerCase();
+  return (
+    (message.includes('relation') && message.includes('does not exist') && message.includes(tableToken))
+    || (message.includes('could not find the table') && message.includes(tableToken))
+    || (message.includes('schema cache') && message.includes(tableToken))
+  );
+}
+
 function buildCacheKey(parts: Array<string | number>) {
   return parts.join('::');
+}
+
+function readLocalEdgePayloadFallback(): EdgeScorePayload | null {
+  if (!fs.existsSync(LOCAL_EDGE_SCORE_PATH)) {
+    return null;
+  }
+
+  try {
+    const rawPayload = JSON.parse(fs.readFileSync(LOCAL_EDGE_SCORE_PATH, 'utf8')) as Partial<EdgeScorePayload> | null;
+    if (!rawPayload || typeof rawPayload !== 'object') {
+      return null;
+    }
+
+    return {
+      generated_at: String(rawPayload.generated_at ?? ''),
+      refresh_label: String(rawPayload.refresh_label ?? 'local'),
+      game_dates: Array.isArray(rawPayload.game_dates) ? rawPayload.game_dates : [],
+      summary: rawPayload.summary && typeof rawPayload.summary === 'object' ? rawPayload.summary : {},
+      recommendations: Array.isArray(rawPayload.recommendations) ? rawPayload.recommendations : [],
+      notification: rawPayload.notification && typeof rawPayload.notification === 'object' ? rawPayload.notification : {},
+    } satisfies EdgeScorePayload;
+  } catch (error) {
+    console.error('[edge fallback] Could not read local edge score artifact.', error);
+    return null;
+  }
 }
 
 function getHistoricalSourcePriority(source?: string | null) {
@@ -723,6 +772,59 @@ export async function fetchArchivePayload(playerId: number, season: string) {
       return {
         gameLog: Array.isArray(gameLog) ? gameLog : [],
       };
+    },
+  );
+}
+
+export async function fetchEdgePayload(): Promise<EdgeScorePayload> {
+  return readCached(
+    buildCacheKey(['edge_scores_current', 'current']),
+    EDGE_CACHE_MS,
+    async () => {
+      const localFallback = readLocalEdgePayloadFallback();
+
+      try {
+        const supabase = getSupabaseAdmin();
+        const { data, error } = await supabase
+          .from('edge_scores_current')
+          .select('generated_at, refresh_label, game_dates, summary, top_recommendations, notification')
+          .eq('ranking_key', 'current')
+          .maybeSingle();
+
+        if (error) {
+          if (isMissingRelationError(error, 'edge_scores_current') && localFallback) {
+            return localFallback;
+          }
+          assertNoError(error, 'edge_scores_current');
+        }
+
+        if (!data && localFallback) {
+          return localFallback;
+        }
+
+        const row = (data ?? {}) as {
+          generated_at?: string | null;
+          refresh_label?: string | null;
+          game_dates?: unknown;
+          summary?: unknown;
+          top_recommendations?: unknown;
+          notification?: unknown;
+        };
+
+        return {
+          generated_at: String(row.generated_at ?? ''),
+          refresh_label: String(row.refresh_label ?? 'unknown'),
+          game_dates: Array.isArray(row.game_dates) ? row.game_dates : [],
+          summary: row.summary && typeof row.summary === 'object' ? row.summary as Record<string, any> : {},
+          recommendations: Array.isArray(row.top_recommendations) ? row.top_recommendations : [],
+          notification: row.notification && typeof row.notification === 'object' ? row.notification as Record<string, any> : {},
+        } satisfies EdgeScorePayload;
+      } catch (error) {
+        if (localFallback) {
+          return localFallback;
+        }
+        throw error;
+      }
     },
   );
 }
