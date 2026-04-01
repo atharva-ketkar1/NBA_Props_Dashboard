@@ -5,19 +5,20 @@ import { TopNav } from './TopNav';
 interface LayoutProps {
   children: React.ReactNode;
   sidebarProps?: any;
+  topNavProps?: Omit<React.ComponentProps<typeof TopNav>, 'onMenuClick'>;
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children, sidebarProps }) => {
+export const Layout: React.FC<LayoutProps> = ({ children, sidebarProps, topNavProps }) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   return (
     <div className="flex flex-col h-screen bg-bgMainFixed text-white font-sans overflow-hidden">
 
       {/* Top Navigation */}
-      <TopNav onMenuClick={() => setIsSidebarOpen(true)} />
+      <TopNav onMenuClick={() => setIsSidebarOpen(true)} {...topNavProps} />
 
       {/* Main Container - adds gap between TopNav and content, and creates the grid layout */}
-      <div className="flex flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative p-4 lg:p-4 gap-4 pb-0 items-start">
+      <div className="flex flex-1 min-h-0 overflow-y-auto overflow-x-hidden custom-scrollbar relative p-4 lg:p-4 gap-4 pb-0 items-start">
 
         {/* Sidebar */}
         {/* The Sidebar component handles its own responsive positioning (fixed on mobile, static on desktop) */}
@@ -32,8 +33,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, sidebarProps }) => {
         )}
 
         {/* Main Content */}
-        <main className="flex-1 relative w-full min-w-0 rounded-xl">
-          <div className="w-full mx-auto pb-6">
+        <main className="flex-1 min-h-0 relative w-full min-w-0 rounded-xl">
+          <div className="w-full max-w-[1600px] mx-auto pb-6">
             {children}
           </div>
         </main>

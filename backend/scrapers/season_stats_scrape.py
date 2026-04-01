@@ -94,10 +94,9 @@ class NBAStatsEngine:
             "Index": "https://stats.nba.com/stats/playerindex?Historical=0&LeagueID=00&Season=2025-26&SeasonType=Regular%20Season"
         }
 
-        # 2. Parallel Execution with Max Workers
-        # Limited to 4 workers to be "polite" to the API (reduces instant load)
+        # 2. Sequential Execution (Memory Safe)
         dfs = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future_to_url = {executor.submit(self._fetch_url, url, tag): tag for tag, url in urls_map.items()}
             for future in concurrent.futures.as_completed(future_to_url):
                 tag, df = future.result()
@@ -158,6 +157,12 @@ class NBAStatsEngine:
         main_df['AGGRESSION_SCORE'] = main_df['FGA'] + main_df['FTA'] + main_df['DRIVES']
 
         print(f"Data Fetch & Processing Complete: {time.time() - start_time:.2f} seconds")
+        
+        # 6. Explicit Memory Nullification
+        del dfs
+        import gc
+        gc.collect()
+        
         return main_df
 
 if __name__ == "__main__":

@@ -89,13 +89,27 @@ export interface PlayerStats {
 
 export interface PropLine {
   line: number;
-  over: number;
-  under: number;
+  over: number | null;
+  under: number | null;
+  implied?: number | null;
+  game_date?: string;
+  game_id?: string;
+  updated_at?: string;
 }
+
+export type SportsbookId = 'dk' | 'fd' | 'mgm' | 'cz' | 'pp';
 
 export interface PlayerProps {
   [statType: string]: {
     [sportsbook: string]: PropLine;
+  };
+}
+
+export interface PlayerPropsByDate {
+  [statType: string]: {
+    [sportsbook: string]: {
+      [gameDate: string]: PropLine;
+    };
   };
 }
 
@@ -107,6 +121,8 @@ export interface Player {
   stats: PlayerStats;
   game_log: GameLog[];
   props: PlayerProps;
+  props_by_date?: PlayerPropsByDate;
+  active_game_date?: string | null;
   historical_odds?: Record<string, any>;
   intraday_movements?: any[];
   [key: string]: any; // Allow generic injection like shot_type_analysis
@@ -176,10 +192,100 @@ export interface ShotTypeData {
 }
 
 export interface SimilarPlayerGame {
+  playerId?: number;
   date: string;
+  gameDate?: string;
   team: string;
   player: string;
-  line: number;
+  line: number | null;
   result: number;
-  diffPercent: number;
+  diff?: number | null;
+  diffPercent: number | null;
+  hit?: boolean | null;
+  similarityScore?: number;
+  lineGap?: number;
+  source?: string;
+  hasHistoricalLine?: boolean;
+}
+
+export type SimilarPlayersMode = 'prop' | 'position';
+
+export interface SimilarPlayerCandidate {
+  id: number;
+  name: string;
+  team: string;
+  position?: string;
+  currentLine: number | null;
+  currentAverage: number;
+  similarityScore: number;
+  detailLoaded: boolean;
+}
+
+export interface SimilarPlayersSummary {
+  avgDiff: number;
+  avgDiffPercent: number;
+  hitRate: number;
+  hits: number;
+  total: number;
+}
+
+export interface EdgeScoreRecommendation {
+  recommendation_key: string;
+  rank: number;
+  sportsbook_rank?: number;
+  player_id: number;
+  player_name: string;
+  player_headshot_url?: string | null;
+  team: string;
+  opponent?: string | null;
+  position?: string;
+  game_id?: string | null;
+  game_date?: string | null;
+  game_time_et?: string | null;
+  sportsbook: string;
+  sportsbook_label: string;
+  stat_type: string;
+  stat_label: string;
+  pick: 'over' | 'under';
+  pick_label: string;
+  line: number;
+  odds?: number | null;
+  odds_display?: string;
+  opposite_odds?: number | null;
+  edge_score: number;
+  confidence: number;
+  signal_score: number;
+  reasons: string[];
+  inputs: Record<string, any>;
+  component_scores: Record<string, number>;
+  available_component_weights?: number;
+}
+
+export interface EdgeScoreSportsbookBoard {
+  sportsbook: string;
+  sportsbook_label: string;
+  count: number;
+  limit: number;
+  recommendations: EdgeScoreRecommendation[];
+}
+
+export interface EdgeScoreSummary {
+  active_players?: number;
+  candidate_count?: number;
+  top_count?: number;
+  available_books?: string[];
+  sportsbook_board_limit?: number;
+  sportsbook_boards?: Record<string, EdgeScoreSportsbookBoard>;
+  duration_s?: number;
+  scoring_model?: string;
+  [key: string]: any;
+}
+
+export interface EdgeScorePayload {
+  generated_at: string;
+  refresh_label: string;
+  game_dates: string[];
+  summary: EdgeScoreSummary;
+  recommendations: EdgeScoreRecommendation[];
+  notification: Record<string, any>;
 }

@@ -1,4 +1,6 @@
 import React from 'react';
+import { SportsbookId } from '../types';
+import { ASSETS_BASE } from '../utils/config';
 
 // Represents the data structure parsed by BarChart when hovering over a game
 export interface HoveredGameData {
@@ -7,7 +9,7 @@ export interface HoveredGameData {
     y: number;
     lineValue: number;
     statKey: string;
-    activeSportsbook: string;
+    activeSportsbook: SportsbookId;
 }
 
 interface TooltipProps {
@@ -37,27 +39,33 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
     let U_ODDS = 'N/A';
     let hasHistoricalData = false;
     let isFallback = false;
+    const isPrizePicks = activeSportsbook === 'pp';
 
     // Sportsbook logo resolution for the header
     let sbLogo = '';
-    if (activeSportsbook === 'dk') sbLogo = '/assets/sportsbook_logos/draftkings.webp';
-    else if (activeSportsbook === 'fd') sbLogo = '/assets/sportsbook_logos/fanduel.webp';
+    if (activeSportsbook === 'dk') sbLogo = `/assets/sportsbook_logos/draftkings.webp`;
+    else if (activeSportsbook === 'fd') sbLogo = `/assets/sportsbook_logos/fanduel.webp`;
+    else if (activeSportsbook === 'pp') sbLogo = `/assets/sportsbook_logos/prizepicks.webp`;
 
-    // Base API URL for local dev asset resolution
-    const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-    const logoSrc = `${BASE_URL}${sbLogo}`;
+    const logoSrc = `${ASSETS_BASE}${sbLogo}`;
+
+    if (isPrizePicks) {
+        displayLine = lineValue;
+    }
 
     // Extract historical odds if available
-    if (player && player.historical_odds && game.GAME_DATE) {
+    if (!isPrizePicks && player && player.historical_odds && game.GAME_DATE) {
         // Find the record for this exact date
         const dateRecord = player.historical_odds[game.GAME_DATE];
         if (dateRecord) {
             // Find the player in that date record (by numeric or stringified ID)
             const playerRecord = dateRecord[String(player.id)] || dateRecord[player.id];
             
-            if (playerRecord && playerRecord.props && playerRecord.props.props) {
-                // The props tree is nested: playerRecord.props.props[statKey]
-                const statProps = playerRecord.props.props[statKey];
+            if (playerRecord && playerRecord.props) {
+                // Support both the legacy JSON shape (props.props[statKey])
+                // and the normalized DB shape (props[statKey]).
+                const propsTree = playerRecord.props.props || playerRecord.props;
+                const statProps = propsTree?.[statKey];
 
                 if (statProps) {
                     // Mappings from frontend abbreviation to backend database keys
@@ -260,7 +268,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                 pts: rawStat.toFixed(1),
                 rawStat,
                 img: `https://cdn.nba.com/headshots/nba/latest/260x190/${dnp?.id || 'fallback'}.png`,
-                fallbackImg: `${BASE_URL}/assets/player_headshots/${dnp?.id || 'fallback'}.png`
+                fallbackImg: `${ASSETS_BASE}/assets/player_headshots/${dnp?.id || 'fallback'}.png`
             };
         })
         .sort((a: any, b: any) => b.rawStat - a.rawStat)
@@ -300,7 +308,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                             <span className="text-white uppercase">{activeSportsbook}</span>
                         )}
                         <span className="text-white relative">
-                            CL {displayLine}
+                            {isPrizePicks ? `Line ${displayLine}` : `CL ${displayLine}`}
                             {isFallback && <span className="text-yellow-400 align-top text-[10px] ml-[1px] absolute -top-1">*</span>}
                         </span>
                         {hasHistoricalData && (
@@ -310,6 +318,11 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                             </>
                         )}
                     </div>
+                    {isPrizePicks && (
+                        <div className="text-[9px] text-gray-400 font-medium -mt-1 opacity-80">
+                            PrizePicks closing-line history unavailable in v1.
+                        </div>
+                    )}
                     {isFallback && (
                         <div className="text-[9px] text-yellow-400 font-medium -mt-1 opacity-80">
                             * Fallback Estimate

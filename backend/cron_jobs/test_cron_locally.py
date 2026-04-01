@@ -7,20 +7,21 @@ from datetime import datetime, timedelta, timezone
 # Add backend to path so imports work
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils.logging_utils import configure_logging, log_section, log_status
 from master_cron import load_state, save_state, run_pipeline_if_needed, check_closing_lines, run_intraday_if_needed, STATE_FILE, SCHEDULE_PATH
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+configure_logging()
 logger = logging.getLogger("CronSimulator")
 
 def setup_mock_environment():
-    logger.info("Setting up mock environment from existing schedule...")
+    log_section(logger, "Local cron simulation setup")
     
     # Reset state
     if os.path.exists(STATE_FILE):
         os.remove(STATE_FILE)
         
     if not os.path.exists(SCHEDULE_PATH):
-        logger.error(f"Schedule file not found at {SCHEDULE_PATH}")
+        log_status(logger, "FAIL", "Schedule file not found", path=SCHEDULE_PATH)
         return None
         
     with open(SCHEDULE_PATH, 'r') as f:
@@ -28,10 +29,10 @@ def setup_mock_environment():
         
     games = sched.get("games", [])
     if not games:
-        logger.warning("No games found in schedule.")
+        log_status(logger, "WARN", "No games found in schedule")
         return None
         
-    logger.info(f"Loaded {len(games)} games from actual schedule.")
+    log_status(logger, "OK", "Loaded schedule", games=len(games))
     
     # Just return the schedule to parse times in run_simulation
     return sched
@@ -45,7 +46,7 @@ def run_simulation():
     now = datetime.now(timezone(timedelta(hours=-5)))
     start_time = now.replace(hour=5, minute=50, second=0, microsecond=0)
     
-    logger.info(f"--- STARTING SIMULATION ---")
+    log_section(logger, "Starting local cron simulation")
     
     current_time = start_time
     end_time = now.replace(hour=23, minute=55, second=0, microsecond=0)
@@ -64,27 +65,27 @@ def run_simulation():
         
         # Priority 1
         if run_pipeline_if_needed(current_time, state, dry_run=True):
-            logger.info(f"[{time_str}] Priority 1: PIPELINE triggered.")
+            log_status(logger, "OK", "Priority 1 triggered", at=time_str)
             priority_triggered = True
             
         if not priority_triggered:
             closing_res = check_closing_lines(current_time, state, dry_run=True)
             if closing_res:
                 matchups = closing_res if isinstance(closing_res, list) else []
-                logger.info(f"[{time_str}] Priority 2: CLOSING LINES triggered for {matchups}")
+                log_status(logger, "OK", "Priority 2 triggered", at=time_str, matchups=matchups)
                 priority_triggered = True
                 
         if not priority_triggered:
             if run_intraday_if_needed(current_time, state, dry_run=True):
-                logger.info(f"[{time_str}] Priority 3: INTRADAY MOVEMENT triggered.")
+                log_status(logger, "OK", "Priority 3 triggered", at=time_str)
                 priority_triggered = True
             
         if not priority_triggered and tick % 12 == 0: # Print a heartbeat every hour
-             logger.info(f"[{time_str}] Heartbeat ... no actions triggered in this 5 minute window.")
+             log_status(logger, "INFO", "Heartbeat", at=time_str)
              
         current_time += timedelta(minutes=5)
         
-    logger.info("--- SIMULATION COMPLETE ---")
+    log_section(logger, "Simulation complete")
 
 if __name__ == "__main__":
     run_simulation()

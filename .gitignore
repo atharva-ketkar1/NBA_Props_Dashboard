@@ -3,7 +3,7 @@ backend/assets/player_headshots
 backend/assets/team_logos
 backend/data
 backend/exploration
-backend/.env
+backend/.env*
 backend/maintainence
 utils/player_matcher.py
 utils/test_matcher.py
@@ -16,11 +16,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 .env
+.env.*
 
 frontend/node_modules/
 frontend/dist/
-frontend/.env
-frontend/.env.local
+frontend/.env*
+frontend/frontend/
 frontend/npm-debug.log*
 frontend/yarn-debug.log*
 frontend/yarn-error.log*
@@ -28,13 +29,27 @@ frontend/utils/colors.txt
 frontend/utils/convert-colors.cjs
 frontend/utils/propsmadness_tokens.txt
 frontend/utils/convert_to_ts.cjs
+frontend/public/assets/player_headshots/
 
+backend_old/
 frontend_old/
 frontend.zip
+.main_local_backup/
 
 Propsmadness-Mock-UI/
 LLM_CONTEXT.md
 docs/prompts/
 docs/progress/
+docs/deployment/
+/docs/security/
+/docs/updates/2026-03-30_historical_odds_normalization.md 
 
 backend/scrapers/archive/
+/supabase/*
+/vercel.json
+sql/
+.vercel
+
+Agents.md
+backend/Agents.md
+frontend/Agents.md

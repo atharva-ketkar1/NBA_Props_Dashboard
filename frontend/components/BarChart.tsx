@@ -1,14 +1,25 @@
-import React, { useMemo, useState, useEffect } from 'react';
-import { Player, Game } from '../types';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
+import { Player, Game, SportsbookId } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
+import { ASSETS_BASE } from '../utils/config';
+import { getDashboardDate, getDashboardScheduleDates } from '../utils/dashboardDate';
+import {
+    formatOverlayAxisValue,
+    formatOverlayLegend,
+    getOverlayFilterDefinition,
+} from '../utils/filterOverlays';
+import { fetchApiJson } from '../utils/network';
+import { fetchDashboardGames } from '../utils/dashboardApi';
+
+const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
 interface BarChartProps {
     player?: Player;
     activeTab: string;
-    activeSportsbook: 'dk' | 'fd' | 'mgm' | 'cz';
+    activeSportsbook: SportsbookId;
     customLine?: number | null;
     onCustomLineChange?: (line: number | null) => void;
     activeFilterOverlay?: string | null;
@@ -32,11 +43,91 @@ const STAT_LABELS: Record<string, string> = {
     'Turnovers': 'TOV'
 };
 
+const CHART_MODE_FILTERS = new Set(['H2H', 'Home', 'Away', 'B2B']);
+
+const getGameKey = (game: any) => `${game?.GAME_ID ?? game?.GAME_DATE ?? ''}-${game?.MATCHUP ?? ''}`;
+
+const getIsHomeGame = (game: any) => String(game?.MATCHUP || '').includes('vs.');
+const getIsAwayGame = (game: any) => String(game?.MATCHUP || '').includes('@');
+
 export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
+    const chartMode = CHART_MODE_FILTERS.has(activeFilterOverlay ?? '') ? activeFilterOverlay : null;
+    const overlayDefinition = useMemo(
+        () => (chartMode ? null : getOverlayFilterDefinition(activeFilterOverlay)),
+        [activeFilterOverlay, chartMode],
+    );
+    const shouldHoldPreviousChart = Boolean(
+        USE_DB
+        && activeSeason === '25/26'
+        && player
+        && !player.detail_loaded
+        && (player.game_log?.length ?? 0) === 0
+    );
 
     // Hover State
     const [hoverData, setHoverData] = useState<HoveredGameData | null>(null);
+    const [stableChartPlayer, setStableChartPlayer] = useState<Player | undefined>(() => (
+        !shouldHoldPreviousChart && player ? player : undefined
+    ));
+    const pendingSettledPlayerRef = useRef<number | null>(null);
+    const [isChartSettling, setIsChartSettling] = useState(false);
+
+    // Mobile specific chart adaptations
+    const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth < 1024);
+    useEffect(() => {
+        const handleResize = () => setIsMobile(window.innerWidth < 1024);
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
+    useEffect(() => {
+        setHoverData(null);
+    }, [player?.id, activeTab, activeSportsbook, activeSeason, activeFilterOverlay]);
+
+    useEffect(() => {
+        if (!player) {
+            setStableChartPlayer(undefined);
+            return;
+        }
+
+        if (!shouldHoldPreviousChart) {
+            setStableChartPlayer(player);
+        }
+    }, [player, shouldHoldPreviousChart]);
+
+    useEffect(() => {
+        if (!player?.id) {
+            pendingSettledPlayerRef.current = null;
+            setIsChartSettling(false);
+            return;
+        }
+
+        if (shouldHoldPreviousChart) {
+            pendingSettledPlayerRef.current = player.id;
+            setIsChartSettling(false);
+            return;
+        }
+
+        if (pendingSettledPlayerRef.current === player.id) {
+            pendingSettledPlayerRef.current = null;
+            setIsChartSettling(true);
+
+            const timeoutId = window.setTimeout(() => {
+                setIsChartSettling(false);
+            }, 180);
+
+            return () => {
+                window.clearTimeout(timeoutId);
+            };
+        }
+
+        setIsChartSettling(false);
+    }, [player?.id, shouldHoldPreviousChart]);
+
+    const chartPlayer = shouldHoldPreviousChart
+        ? (stableChartPlayer ?? player)
+        : player;
 
     // Dragging Line State
     const [isDragging, setIsDragging] = useState(false);
@@ -46,27 +137,141 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     // Schedule State for Upcoming Game 
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
+    const scheduleCacheRef = useRef(new Map<string, Game[]>());
+    const scheduleKeyRef = useRef('');
 
     useEffect(() => {
-        const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-        fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
-            .then(res => res.json())
-            .then(data => setScheduleData(data))
-            .catch(err => console.error("Error loading schedule:", err));
-    }, []);
+        const propDates = Array.from(new Set(
+            Object.values(chartPlayer?.props_by_date ?? {}).flatMap((statEntry) =>
+                Object.values(statEntry ?? {}).flatMap((bookEntry) =>
+                    Object.keys(bookEntry ?? {}).filter((dateKey) => dateKey !== '__undated__')
+                )
+            )
+        )).sort();
+        const relevantDates = propDates.length > 0 ? propDates : Array.from(getDashboardScheduleDates());
+        const scheduleKey = relevantDates.join('|');
 
-    const { chartData, lineValue, graphAvgSecondary, seasonAvgSecondary, isRankOverlay } = useMemo(() => {
-        if (!player || !player.game_log) return { chartData: [], lineValue: 0, graphAvgSecondary: 0, seasonAvgSecondary: 0, isRankOverlay: false };
+        if (scheduleKeyRef.current === scheduleKey) {
+            return;
+        }
 
-        // 1. Get Line based on Active Sportsbook
-        const prop = player.props?.[statKey]?.[activeSportsbook];
+        const cachedSchedule = scheduleCacheRef.current.get(scheduleKey);
+        if (cachedSchedule) {
+            scheduleKeyRef.current = scheduleKey;
+            setScheduleData(cachedSchedule);
+            return;
+        }
+
+        let cancelled = false;
+
+        if (USE_DB) {
+            fetchDashboardGames(relevantDates)
+                .then(({ games }) => {
+                    if (cancelled) return;
+                    const nextGames = games ?? [];
+                    scheduleCacheRef.current.set(scheduleKey, nextGames);
+                    scheduleKeyRef.current = scheduleKey;
+                    setScheduleData(nextGames);
+                })
+                .catch((error) => {
+                    console.error('[api] games error:', error);
+                });
+        } else {
+            fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
+                .then(data => {
+                    if (cancelled) return;
+                    const nextGames = (data as Game[]).filter(g => relevantDates.includes(g.game_date));
+                    scheduleCacheRef.current.set(scheduleKey, nextGames);
+                    scheduleKeyRef.current = scheduleKey;
+                    setScheduleData(nextGames);
+                })
+                .catch(err => console.error("Error loading schedule:", err));
+        }
+
+        return () => {
+            cancelled = true;
+        };
+    }, [chartPlayer]);
+
+    const { chartData, lineValue, graphAvgSecondary, comparisonAvgSecondary, isRankOverlay, isBinaryOverlay, historicalSampleCount } = useMemo(() => {
+        if (!chartPlayer || !chartPlayer.game_log) {
+            return {
+                chartData: [],
+                lineValue: 0,
+                graphAvgSecondary: 0,
+                comparisonAvgSecondary: null,
+                isRankOverlay: false,
+                isBinaryOverlay: false,
+                historicalSampleCount: 0,
+            };
+        }
+
+        const prop = chartPlayer.props?.[statKey]?.[activeSportsbook];
         const line = prop?.line || 0;
+        const numGames = (isMobile && !isFiltersOpen) ? 12 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
+        const chronologicalSeasonGames = [...chartPlayer.game_log].sort(
+            (a: any, b: any) => new Date(a.GAME_DATE).getTime() - new Date(b.GAME_DATE).getTime(),
+        );
+        const b2bKeys = new Set<string>();
+        chronologicalSeasonGames.forEach((game: any, index: number) => {
+            if (index === 0) return;
+            const currentDate = new Date(game.GAME_DATE);
+            const previousDate = new Date(chronologicalSeasonGames[index - 1].GAME_DATE);
+            const diffDays = Math.round((currentDate.getTime() - previousDate.getTime()) / 86400000);
+            if (diffDays === 1) {
+                b2bKeys.add(getGameKey(game));
+            }
+        });
 
-        // 2. Prepare Data (Use historicalGameCount passed from App)
-        const numGames = historicalGameCount || (isFiltersOpen ? 19 : 29);
-        const log = player.game_log.slice(0, numGames).reverse();
+        const dashboardDate = getDashboardDate();
+        const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        let upcomingGame: Game | null = null;
+        let upcomingOpponent = 'TBD';
+        let upcomingMonth = fallbackMonths[Number(dashboardDate.slice(5, 7)) - 1];
+        let upcomingDay = dashboardDate.slice(8, 10);
 
-        const data: any[] = log.map(game => {
+        if (chartPlayer.team && scheduleData.length > 0) {
+            const sortedSchedule = [...scheduleData].sort((a, b) =>
+                new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+            );
+            upcomingGame = sortedSchedule.find(g =>
+                (g.home_team_tricode === chartPlayer.team || g.away_team_tricode === chartPlayer.team)
+                && (!prop?.game_date || g.game_date === prop.game_date)
+            ) || sortedSchedule.find(g => g.home_team_tricode === chartPlayer.team || g.away_team_tricode === chartPlayer.team) || null;
+
+            if (upcomingGame) {
+                upcomingOpponent = upcomingGame.home_team_tricode === chartPlayer.team ? upcomingGame.away_team_tricode : upcomingGame.home_team_tricode;
+                if (upcomingGame.game_date) {
+                    const [_, monthStr, dayStr] = upcomingGame.game_date.split('-');
+                    if (monthStr && dayStr) {
+                        upcomingMonth = fallbackMonths[parseInt(monthStr, 10) - 1];
+                        upcomingDay = dayStr;
+                    }
+                }
+            }
+        }
+
+        const matchesChartMode = (game: any) => {
+            if (!chartMode) return true;
+            if (chartMode === 'H2H') {
+                if (upcomingOpponent === 'TBD') return false;
+                const parts = String(game?.MATCHUP || '').split(' ');
+                const opponent = parts[parts.length - 1];
+                return opponent === upcomingOpponent;
+            }
+            if (chartMode === 'Home') return getIsHomeGame(game);
+            if (chartMode === 'Away') return getIsAwayGame(game);
+            if (chartMode === 'B2B') return b2bKeys.has(getGameKey(game));
+            return true;
+        };
+
+        const selectedGames = chartMode
+            ? chartPlayer.game_log.filter((game: any) => matchesChartMode(game)).slice(0, numGames)
+            : chartPlayer.game_log.slice(0, numGames);
+
+        const log = [...selectedGames].reverse();
+
+        const data: any[] = log.map((game, gameIndex) => {
             let val = game[statKey];
             if (val === undefined) {
                 if (statKey === 'PTS+REB+AST') val = (game.PTS || 0) + (game.REB || 0) + (game.AST || 0);
@@ -77,140 +282,137 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             }
 
             const parts = game.MATCHUP.split(' ');
-            const opponent = parts[parts.length - 1]; // e.g., "DEN"
+            const opponent = parts[parts.length - 1];
             const opponentId = TEAM_IDS[opponent];
-
-            // Resolve Logo URL for SVG
             const logoUrl = opponentId
-                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${opponentId}.svg`
-                : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${opponent}.svg`;
+                ? `${ASSETS_BASE}/assets/team_logos/${opponentId}.svg`
+                : `${ASSETS_BASE}/assets/team_logos/${opponent}.svg`;
 
-            // Date formatting: "YYYY-MM-DD" -> "Nov", "08"
-            const [year, monthStr, day] = game.GAME_DATE.split('-');
-            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            const month = months[parseInt(monthStr) - 1];
+            const [__, monthStr, day] = game.GAME_DATE.split('-');
+            const month = fallbackMonths[parseInt(monthStr, 10) - 1];
 
-            let secondaryVal = null;
-            if (activeFilterOverlay === 'Minutes') secondaryVal = Number(game.MIN || 0);
-            else if (activeFilterOverlay === 'USG%') secondaryVal = Number(game.USG_PCT || 0) * 100;
-            else if (activeFilterOverlay === 'FGA') secondaryVal = Number(game.FGA || 0);
-            else if (activeFilterOverlay === 'Def vs DPT') secondaryVal = game.opp_ranks?.dpt;
-            else if (activeFilterOverlay === 'Def vs DSZ') secondaryVal = game.opp_ranks?.dsz;
-            else if (activeFilterOverlay === 'Def vs DSZ2') secondaryVal = game.opp_ranks?.dsz2;
-            else if (activeFilterOverlay === 'Opp Paint Pts Allowed') secondaryVal = game.opp_ranks?.paint_allowed;
-            else if (activeFilterOverlay === 'Def vs Pull Up') secondaryVal = game.opp_ranks?.pull_up;
+            const secondaryValue = overlayDefinition?.getGameValue({
+                player: chartPlayer,
+                game,
+                gameIndex,
+                games: log,
+                upcomingGame,
+                upcomingOpponent,
+            }) ?? null;
 
             return {
                 ...game,
                 score: val,
-                secondaryValue: secondaryVal,
+                secondaryValue,
                 opponent,
                 logoUrl,
                 dateMonth: month,
-                dateDay: day
+                dateDay: day,
             };
         });
 
-        // 2b. Calculate global averages based on exact charted values
-        let seasonAvgSecondary = 0;
-        let graphAvgSecondary = 0;
-        let isRankOverlay = activeFilterOverlay?.startsWith('Def vs') || activeFilterOverlay?.startsWith('Opp');
+        const validSecondary = data
+            .map((game) => game.secondaryValue)
+            .filter((value): value is number => value !== null && value !== undefined && Number.isFinite(Number(value)))
+            .map(Number);
 
-        if (activeFilterOverlay) {
-            const validSecondary = data.filter(g => g.secondaryValue !== null && g.secondaryValue !== undefined);
-            const sumSecondary = validSecondary.reduce((acc, g) => acc + Number(g.secondaryValue), 0);
-            graphAvgSecondary = validSecondary.length > 0 ? sumSecondary / validSecondary.length : 0;
-            
-            if (!isRankOverlay) {
-                if (activeFilterOverlay === 'Minutes') seasonAvgSecondary = Number(player.stats?.MIN || 0);
-                if (activeFilterOverlay === 'USG%') seasonAvgSecondary = Number(player.stats?.USG_PCT || 0) * 100;
-                if (activeFilterOverlay === 'FGA') seasonAvgSecondary = Number(player.stats?.FGA || 0);
-            } else {
-                seasonAvgSecondary = graphAvgSecondary; // For ranks, the "season average" is just the graph average visually
-            }
-        }
+        const graphAvgSecondary = validSecondary.length > 0
+            ? validSecondary.reduce((sum, value) => sum + value, 0) / validSecondary.length
+            : 0;
 
-        // 3. Append upcoming game dynamically
-        if (activeSeason !== '24/25') {
-            let upcomingOpponent = 'TBD';
-            const today = new Date();
-            const fallbackMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            let upcomingMonth = fallbackMonths[today.getMonth()];
-            let upcomingDay = String(today.getDate()).padStart(2, '0');
+        const comparisonAvgSecondary = overlayDefinition?.getComparisonValue?.({
+            player: chartPlayer,
+            games: log,
+            upcomingGame,
+            upcomingOpponent,
+            graphAverage: graphAvgSecondary,
+        }) ?? null;
 
-            let upcomingSecondaryRank = null;
-            if (isRankOverlay) {
-                // Find dpt, dsz, etc to grab rank for the upcoming opponent (which is stored currently in the player object directly)
-                if (activeFilterOverlay === 'Def vs DPT') {
-                    if (player?.play_type_analysis) {
-                        const sortedPlays = [...player.play_type_analysis].sort((a: any, b: any) => parseInt(b.percent) - parseInt(a.percent));
-                        upcomingSecondaryRank = sortedPlays[0]?.rank || null;
-                    }
-                } else if (activeFilterOverlay === 'Def vs DSZ' || activeFilterOverlay === 'Def vs DSZ2') {
-                    if (player?.shooting_zones) {
-                        const zones = Object.entries(player.shooting_zones).map(([zone, data]: any) => ({ zone, pct: parseInt(data.percentage) })).sort((a, b) => b.pct - a.pct);
-                        const targetZone = activeFilterOverlay === 'Def vs DSZ' ? zones[0]?.zone : zones[1]?.zone;
-                        upcomingSecondaryRank = player.opp_def_zones?.[targetZone]?.rank || null;
-                    }
-                } else if (activeFilterOverlay === 'Opp Paint Pts Allowed') {
-                    upcomingSecondaryRank = player?.opp_def_zones?.paint?.rank || null;
-                } else if (activeFilterOverlay === 'Def vs Pull Up') {
-                    upcomingSecondaryRank = player?.shot_type_analysis?.opp_def?.pull_up?.rank || null;
-                }
-            }
+        const latestSeasonGame = chronologicalSeasonGames[chronologicalSeasonGames.length - 1] ?? null;
+        const latestSeasonGameDate = latestSeasonGame ? new Date(latestSeasonGame.GAME_DATE) : null;
+        const upcomingGameDate = upcomingGame?.game_date ? new Date(upcomingGame.game_date) : null;
+        const isUpcomingB2B = Boolean(
+            latestSeasonGameDate
+            && upcomingGameDate
+            && !Number.isNaN(upcomingGameDate.getTime())
+            && Math.round((upcomingGameDate.getTime() - latestSeasonGameDate.getTime()) / 86400000) === 1,
+        );
 
-            if (player.team && scheduleData.length > 0) {
-                const playerGame = scheduleData.find(g => g.home_team_tricode === player.team || g.away_team_tricode === player.team);
-                if (playerGame) {
-                    upcomingOpponent = playerGame.home_team_tricode === player.team ? playerGame.away_team_tricode : playerGame.home_team_tricode;
-                    if (playerGame.game_date) {
-                        const [y, mStr, dStr] = playerGame.game_date.split('-');
-                        if (mStr && dStr) {
-                            upcomingMonth = fallbackMonths[parseInt(mStr) - 1];
-                            upcomingDay = dStr;
-                        }
-                    }
-                }
-            }
+        const includeUpcomingGame = activeSeason !== '24/25' && (
+            !chartMode
+            || (chartMode === 'H2H' && upcomingOpponent !== 'TBD')
+            || (chartMode === 'Home' && Boolean(upcomingGame && upcomingGame.home_team_tricode === chartPlayer.team))
+            || (chartMode === 'Away' && Boolean(upcomingGame && upcomingGame.away_team_tricode === chartPlayer.team))
+            || (chartMode === 'B2B' && isUpcomingB2B)
+        );
+        const canRenderUpcomingPlaceholder = log.length > 0 || Boolean(chartPlayer.detail_loaded);
 
+        if (includeUpcomingGame && canRenderUpcomingPlaceholder) {
             const upcomingOpponentId = TEAM_IDS[upcomingOpponent];
             const upcomingLogoUrl = upcomingOpponentId
-                ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponentId}.svg`
+                ? `${ASSETS_BASE}/assets/team_logos/${upcomingOpponentId}.svg`
                 : upcomingOpponent === 'TBD'
-                    ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`
-                    : `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${upcomingOpponent}.svg`;
+                    ? `${ASSETS_BASE}/assets/team_logos/${TEAM_IDS['HOU'] || 'HOU'}.svg`
+                    : `${ASSETS_BASE}/assets/team_logos/${upcomingOpponent}.svg`;
+
+            let upcomingSecondaryValue = null;
+            if (overlayDefinition?.getUpcomingValue) {
+                upcomingSecondaryValue = overlayDefinition.getUpcomingValue({
+                    player: chartPlayer,
+                    games: log,
+                    upcomingGame,
+                    upcomingOpponent,
+                    graphAverage: graphAvgSecondary,
+                });
+            } else if (overlayDefinition?.fallbackUpcoming === 'graph_average' && validSecondary.length > 0) {
+                upcomingSecondaryValue = graphAvgSecondary;
+            }
 
             data.push({
-                score: null, // Special flag for upcoming game
-                secondaryValue: isRankOverlay && upcomingSecondaryRank ? upcomingSecondaryRank : (activeFilterOverlay ? graphAvgSecondary : null), // Use upcoming rank or connect base avg
+                score: null,
+                secondaryValue: upcomingSecondaryValue,
                 opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
                 logoUrl: upcomingLogoUrl,
                 dateMonth: upcomingMonth,
                 dateDay: upcomingDay,
-                isUpcoming: true
+                isUpcoming: true,
             });
         }
 
-        return { chartData: data, lineValue: line, graphAvgSecondary, seasonAvgSecondary, isRankOverlay: !!isRankOverlay };
-    }, [player, statKey, activeSportsbook, scheduleData, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason]);
+        return {
+            chartData: data,
+            lineValue: line,
+            graphAvgSecondary,
+            comparisonAvgSecondary,
+            isRankOverlay: overlayDefinition?.kind === 'rank',
+            isBinaryOverlay: overlayDefinition?.kind === 'binary',
+            historicalSampleCount: log.length,
+        };
+    }, [chartPlayer, statKey, activeSportsbook, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
 
     if (!player) return null;
 
     // --- Responsive SVG Layout Constants ---
-    const VIEWBOX_WIDTH = isFiltersOpen ? 700 : 1000; // Internal coordinate system width dynamcially adjusts to prevent shrinking
+    const VIEWBOX_WIDTH = isMobile ? 650 : (isFiltersOpen ? 700 : 1000); // Internal coordinate system width dynamcially adjusts to prevent shrinking
     const VIEWBOX_HEIGHT = 400; // Internal coordinate system height
     const X_START = 80;         // Left margin to leave room for Y-axis labels
     const X_END = VIEWBOX_WIDTH - 20; // Right margin
     const AVAILABLE_WIDTH = X_END - X_START;
 
-    const currentVisibleCount = historicalGameCount || (isFiltersOpen ? 19 : 29);
-    // 1. Dynamic Spacing: For <= 19 games, map length based on 20 slots. For > 19, use full count.
-    const layoutSlots = currentVisibleCount <= 19 ? 20 : chartData.length;
-    const spacing = AVAILABLE_WIDTH / layoutSlots;
-    
-    // Calculate total layout width and padding for centering
+    const baseVisibleCount = (isMobile && !isFiltersOpen) ? 14 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
+    const currentVisibleCount = historicalSampleCount > 0
+        ? Math.min(baseVisibleCount, historicalSampleCount)
+        : baseVisibleCount;
+    const visibleBarCount = Math.max(chartData.length, 1);
+    const useCompactLayout = currentVisibleCount <= 19;
+    const compactSpacingCap = isMobile ? 36 : 31;
+    const spacing = useCompactLayout
+        ? Math.min(AVAILABLE_WIDTH / visibleBarCount, compactSpacingCap)
+        : AVAILABLE_WIDTH / visibleBarCount;
+
+    // Keep short samples visually dense instead of stretching them across the full chart width.
     const totalContentWidth = chartData.length * spacing;
-    const paddingLeft = currentVisibleCount <= 19 ? (AVAILABLE_WIDTH - totalContentWidth) / 2 : 0;
+    const paddingLeft = useCompactLayout ? Math.max((AVAILABLE_WIDTH - totalContentWidth) / 2, 0) : 0;
 
     const shouldCondense = isFiltersOpen && currentVisibleCount > 19;
     const condensedLabels = new Set<number>();
@@ -222,11 +424,43 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     }
 
     // Dynamic Bar Width
-    const barWidth = Math.min(spacing * 0.85, 32);
+    const barWidth = Math.min(spacing * (isMobile ? 1.0 : 0.85), isMobile ? 40 : 32);
 
     // Dynamic Scale: Calculate max value to ensure bars don't clip the top
     const maxScore = Math.max(...chartData.map(d => Number(d.score || 0)), lineValue + 5, 10);
-    const maxSecondary = isRankOverlay ? 30 : (activeFilterOverlay ? Math.max(...chartData.map(d => Number(d.secondaryValue || 0)), 15) * 1.2 : 10);
+    const secondaryValues = chartData
+        .map((game) => game.secondaryValue)
+        .filter((value): value is number => value !== null && value !== undefined && Number.isFinite(Number(value)))
+        .map(Number);
+    const hasSecondaryOverlay = Boolean(overlayDefinition && secondaryValues.length > 0);
+
+    let minSecondary = 0;
+    let maxSecondary = 10;
+    if (hasSecondaryOverlay) {
+        if (isRankOverlay) {
+            minSecondary = 1;
+            maxSecondary = 30;
+        } else if (isBinaryOverlay) {
+            minSecondary = 0;
+            maxSecondary = 1;
+        } else {
+            let rawMin = Math.min(...secondaryValues, 0);
+            let rawMax = Math.max(...secondaryValues, 0);
+            if (rawMin === rawMax) {
+                const pad = Math.max(1, Math.abs(rawMax) * 0.15 || 1);
+                rawMin -= pad;
+                rawMax += pad;
+            } else {
+                const pad = (rawMax - rawMin) * 0.15;
+                rawMin -= pad;
+                rawMax += pad;
+                if (rawMin > 0) rawMin = 0;
+            }
+            minSecondary = rawMin;
+            maxSecondary = rawMax;
+        }
+    }
+    const secondaryRange = Math.max(maxSecondary - minSecondary, 1);
 
     // Helpers to calculate exact Y coordinates and Heights inside the SVG
     const getY = (val: number) => {
@@ -242,7 +476,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             // Invert it so #1 is at bottom, #30 is at top
             return VIEWBOX_HEIGHT - 120 - (((31 - val) / 30) * availableHeight);
         }
-        return VIEWBOX_HEIGHT - 120 - ((val / maxSecondary) * availableHeight);
+        return VIEWBOX_HEIGHT - 120 - (((val - minSecondary) / secondaryRange) * availableHeight);
     };
 
     const getBarHeight = (val: number) => {
@@ -300,10 +534,29 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     };
 
     const activeLineThreshold = customLine !== undefined && customLine !== null ? customLine : lineValue;
+    const secondaryTickValues = isRankOverlay
+        ? [30, 20, 10, 1]
+        : [minSecondary, minSecondary + (secondaryRange / 3), minSecondary + ((secondaryRange * 2) / 3), maxSecondary];
+    const historicalSecondaryPoints = hasSecondaryOverlay
+        ? chartData.flatMap((game, index) => {
+            if (game.isUpcoming || game.secondaryValue === null || game.secondaryValue === undefined) return [];
+            const columnCenter = X_START + paddingLeft + (index * spacing) + (spacing / 2);
+            return [{
+                x: columnCenter,
+                y: getSecondaryY(Number(game.secondaryValue)),
+            }];
+        })
+        : [];
+    const upcomingSecondaryPoint = hasSecondaryOverlay && chartData.length > 0 ? (() => {
+        const game = chartData[chartData.length - 1];
+        if (!game?.isUpcoming || game.secondaryValue === null || game.secondaryValue === undefined) return null;
+        const x = X_START + paddingLeft + ((chartData.length - 1) * spacing) + (spacing / 2);
+        return { x, y: getSecondaryY(Number(game.secondaryValue)) };
+    })() : null;
 
     return (
         <div
-            className={`bg-bgElevation0 w-full h-full min-h-[400px] select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col ${isDragging ? 'cursor-grabbing' : ''}`}
+            className={`bg-bgElevation0 w-full h-full min-h-[380px] sm:min-h-[450px] aspect-[4/3] lg:aspect-auto select-none relative rounded-xl shadow-2xl overflow-hidden flex flex-col ${isDragging ? 'cursor-grabbing' : ''}`}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
             onTouchEnd={handleMouseUp}
@@ -328,225 +581,206 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     <line x1="60" x2="100%" y1={getY(0)} y2={getY(0)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                     <line x1="60" x2="100%" y1={getY(maxScore / 3)} y2={getY(maxScore / 3)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                     <line x1="60" x2="100%" y1={getY((maxScore * 2) / 3)} y2={getY((maxScore * 2) / 3)} stroke={colors.borderMedium} strokeOpacity="0.4" />
-                    <line x1="60" x2={activeFilterOverlay ? "100%" : X_END} y1={getY(maxScore)} y2={getY(maxScore)} stroke={colors.borderMedium} strokeOpacity="0.4" />
+                    <line x1="60" x2={hasSecondaryOverlay ? "100%" : X_END} y1={getY(maxScore)} y2={getY(maxScore)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                 </g>
 
                 {/* Secondary Y-Axis Grid Lines & Labels (Right Side) */}
-                {activeFilterOverlay && (
+                {hasSecondaryOverlay && (
                     <g className="text-blue500 font-bold" fill="currentColor" textAnchor="start" fontSize="12">
-                        {isRankOverlay ? (
-                            <>
-                                <text x={X_END + 4} y={getSecondaryY(30)} dominantBaseline="middle">#30</text>
-                                <text x={X_END + 4} y={getSecondaryY(20)} dominantBaseline="middle">#20</text>
-                                <text x={X_END + 4} y={getSecondaryY(10)} dominantBaseline="middle">#10</text>
-                                <text x={X_END + 4} y={getSecondaryY(1)} dominantBaseline="middle">#1</text>
-                            </>
-                        ) : (
-                            <>
-                                <text x={X_END + 4} y={getSecondaryY(0)} dominantBaseline="middle">0</text>
-                                <text x={X_END + 4} y={getSecondaryY(maxSecondary / 3)} dominantBaseline="middle">{Math.round(maxSecondary / 3)}{activeFilterOverlay === 'USG%' ? '%' : ''}</text>
-                                <text x={X_END + 4} y={getSecondaryY((maxSecondary * 2) / 3)} dominantBaseline="middle">{Math.round((maxSecondary * 2) / 3)}{activeFilterOverlay === 'USG%' ? '%' : ''}</text>
-                                <text x={X_END + 4} y={getSecondaryY(maxSecondary)} dominantBaseline="middle">{Math.round(maxSecondary)}{activeFilterOverlay === 'USG%' ? '%' : ''}</text>
-                            </>
-                        )}
+                        {secondaryTickValues.map((tickValue, index) => (
+                            <text
+                                key={`${tickValue}-${index}`}
+                                x={X_END + 4}
+                                y={getSecondaryY(tickValue)}
+                                dominantBaseline="middle"
+                            >
+                                {formatOverlayAxisValue(overlayDefinition, tickValue)}
+                            </text>
+                        ))}
                     </g>
                 )}
 
+                <motion.g
+                    initial={false}
+                    animate={isChartSettling
+                        ? { opacity: [0.9, 1], y: [3, 0] }
+                        : { opacity: 1, y: 0 }}
+                    transition={{ duration: 0.18, ease: 'easeOut' }}
+                >
                 {/* 2. Map through GameLogs for Bars, Text, and Logos */}
-                <AnimatePresence>
                 {chartData.map((game, index) => {
-                    // Center the bar within its allocated spacing column
-                    const columnCenter = X_START + paddingLeft + (index * spacing) + (spacing / 2);
-                    const yPos = getY(game.score);
-                    const barHeight = getBarHeight(game.score);
-                    const isOver = game.score >= activeLineThreshold;
+                        // Center the bar within its allocated spacing column
+                        const columnCenter = X_START + paddingLeft + (index * spacing) + (spacing / 2);
+                        const yPos = getY(game.score);
+                        const barHeight = getBarHeight(game.score);
+                        const isOver = game.score >= activeLineThreshold;
 
-                    // Dynamically scale inner elements if bars get very narrow
-                    const logoSize = Math.min(barWidth * 1.2, 28);
-                    const fontSize = Math.min(barWidth * 0.6, 14);
-                    
-                    const uniqueKey = game.isUpcoming ? 'upcoming' : `${game.GAME_DATE}-${game.MATCHUP}`;
-                    const showLabel = !shouldCondense || condensedLabels.has(index);
+                        // Dynamically scale inner elements if bars get very narrow
+                        const logoSize = Math.min(barWidth * 1.2, 28);
+                        const fontSize = Math.min(barWidth * 0.6, 14);
 
-                    return (
-                        <motion.g
-                            key={uniqueKey}
-                            initial={{ opacity: 0, y: 30, x: columnCenter }}
-                            animate={{ opacity: 1, y: 0, x: columnCenter }}
-                            exit={{ opacity: 0, y: 50, transition: { duration: 0.2 } }}
-                            transition={{ duration: 0.3 }}
-                            className="group cursor-pointer"
-                            onMouseEnter={(e) => {
-                                setHoverData({
-                                    game,
-                                    x: e.clientX,
-                                    y: e.clientY,
-                                    lineValue,
-                                    statKey,
-                                    activeSportsbook
-                                });
-                            }}
-                            onMouseMove={(e) => {
-                                if (isDragging) return;
-                                if (hoverData) {
-                                    setHoverData({ ...hoverData, x: e.clientX, y: e.clientY });
-                                }
-                            }}
-                            onMouseLeave={() => {
-                                if (!isDragging) setHoverData(null)
-                            }}
-                        >
-                            {/* The Bar */}
-                            {game.isUpcoming ? (
-                                <motion.rect
-                                    initial={false}
-                                    animate={{ 
-                                        y: getY(lineValue),
-                                        height: getBarHeight(lineValue)
-                                    }}
-                                    transition={{ duration: 0.4, ease: "easeInOut" }}
-                                    x={-barWidth / 2}
-                                    width={barWidth}
-                                    rx="4"
-                                    ry="4"
-                                    fill="rgba(255, 255, 255, 0.05)"
-                                    stroke="#FFFFFF"
-                                    strokeWidth="1.5"
-                                    strokeDasharray="4 4"
-                                    className="opacity-100"
-                                >
-                                    <title>Upcoming Game</title>
-                                </motion.rect>
-                            ) : (
-                                <motion.rect
-                                    initial={false}
-                                    animate={{
-                                        y: yPos,
-                                        height: barHeight,
-                                        fill: isOver ? colors.graphBarOver : colors.graphBarUnder
-                                    }}
-                                    transition={{ duration: 0.4, ease: "easeInOut" }}
-                                    x={-barWidth / 2}
-                                    width={barWidth}
-                                    rx="4"
-                                    ry="4"
-                                    className="group-hover:brightness-110 group-hover:opacity-80"
-                                >
-                                    <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
-                                </motion.rect>
-                            )}
+                        const showLabel = !shouldCondense || condensedLabels.has(index);
 
-                            {/* Stat Value Text Inside Bar */}
-                            {!shouldCondense && (
-                                <text
-                                    x={0}
-                                    y={VIEWBOX_HEIGHT - 128}
-                                    textAnchor="middle"
-                                    fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
-                                    fontWeight="900"
-                                    fontSize={fontSize}
-                                    className="pointer-events-none drop-shadow-md transition-all duration-300"
-                                >
-                                    {game.isUpcoming ? '?' : game.score}
-                                </text>
-                            )}
+                        return (
+                            <motion.g
+                                key={`slot-${index}`}
+                                initial={false}
+                                animate={{ opacity: 1, x: columnCenter, y: 0 }}
+                                transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.8 }}
+                                className="group cursor-pointer"
+                                onMouseEnter={(e) => {
+                                    setHoverData({
+                                        game,
+                                        x: e.clientX,
+                                        y: e.clientY,
+                                        lineValue,
+                                        statKey,
+                                        activeSportsbook
+                                    });
+                                }}
+                                onMouseMove={(e) => {
+                                    if (isDragging) return;
+                                    if (hoverData) {
+                                        setHoverData({ ...hoverData, x: e.clientX, y: e.clientY });
+                                    }
+                                }}
+                                onMouseLeave={() => {
+                                    if (!isDragging) setHoverData(null)
+                                }}
+                            >
+                                {/* The Bar */}
+                                {game.isUpcoming ? (
+                                    <motion.rect
+                                        initial={false}
+                                        animate={{
+                                            y: getY(lineValue),
+                                            height: getBarHeight(lineValue)
+                                        }}
+                                        transition={{ type: 'spring', stiffness: 220, damping: 24, mass: 0.8 }}
+                                        x={-barWidth / 2}
+                                        width={barWidth}
+                                        rx="4"
+                                        ry="4"
+                                        fill="rgba(255, 255, 255, 0.05)"
+                                        stroke="#FFFFFF"
+                                        strokeWidth="1.5"
+                                        strokeDasharray="4 4"
+                                        className="opacity-100"
+                                    >
+                                        <title>Upcoming Game</title>
+                                    </motion.rect>
+                                ) : (
+                                    <motion.rect
+                                        initial={false}
+                                        animate={{
+                                            y: yPos,
+                                            height: barHeight,
+                                            fill: isOver ? colors.graphBarOver : colors.graphBarUnder
+                                        }}
+                                        transition={{ type: 'spring', stiffness: 220, damping: 24, mass: 0.8 }}
+                                        x={-barWidth / 2}
+                                        width={barWidth}
+                                        rx="4"
+                                        ry="4"
+                                        className="group-hover:brightness-110 group-hover:opacity-80"
+                                    >
+                                        <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
+                                    </motion.rect>
+                                )}
 
-                            {/* Visual Logic based on Games Count */}
-                            {!shouldCondense && (
-                                <>
-                                    {/* Team Logo */}
-                                    <image
-                                        x={-logoSize / 2}
-                                        y={VIEWBOX_HEIGHT - 114}
-                                        width={logoSize}
-                                        height={logoSize}
-                                        href={game.logoUrl}
-                                        className="transition-all duration-300"
-                                    />
-                                </>
-                            )}
+                                {/* Stat Value Text Inside Bar */}
+                                {!shouldCondense && (
+                                    <text
+                                        x={0}
+                                        y={VIEWBOX_HEIGHT - 128}
+                                        textAnchor="middle"
+                                        fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
+                                        fontWeight="900"
+                                        fontSize={fontSize}
+                                        className="pointer-events-none drop-shadow-md transition-all duration-300"
+                                    >
+                                        {game.isUpcoming ? '?' : game.score}
+                                    </text>
+                                )}
 
-                            {/* Stacked Date Label with connecting dots visualization */}
-                            {showLabel && (() => {
-                                // Logic to determine if we should show connecting dots
-                                const nextGame = chartData[index + 1];
-                                const isConnected = nextGame && nextGame.dateMonth === game.dateMonth && !game.isUpcoming && parseInt(nextGame.dateDay) - parseInt(game.dateDay) === 1;
+                                {/* Visual Logic based on Games Count */}
+                                {!shouldCondense && (
+                                    <>
+                                        {/* Team Logo */}
+                                        <image
+                                            x={-logoSize / 2}
+                                            y={VIEWBOX_HEIGHT - 114}
+                                            width={logoSize}
+                                            height={logoSize}
+                                            href={game.logoUrl}
+                                            className="transition-all duration-300"
+                                        />
+                                    </>
+                                )}
 
-                                return (
-                                    <g className="transition-all duration-300">
-                                        <text
-                                            x={0}
-                                            y={shouldCondense ? VIEWBOX_HEIGHT - 105 : VIEWBOX_HEIGHT - 75}
-                                            textAnchor="middle"
-                                        >
-                                            <tspan x={0} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
-                                                {game.dateMonth}
-                                            </tspan>
-                                            <tspan x={0} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
-                                                {game.dateDay}
-                                            </tspan>
-                                        </text>
+                                {/* Stacked Date Label with connecting dots visualization */}
+                                {showLabel && (() => {
+                                    // Logic to determine if we should show connecting dots
+                                    const nextGame = chartData[index + 1];
+                                    const isConnected = nextGame && nextGame.dateMonth === game.dateMonth && !game.isUpcoming && parseInt(nextGame.dateDay) - parseInt(game.dateDay) === 1;
 
-                                        {/* Render connecting dots exactly centered between columns */}
-                                        {!shouldCondense && isConnected && (
+                                    return (
+                                        <g className="transition-all duration-300">
                                             <text
-                                                x={spacing / 2}
-                                                y={VIEWBOX_HEIGHT - 63}
+                                                x={0}
+                                                y={shouldCondense ? VIEWBOX_HEIGHT - 105 : VIEWBOX_HEIGHT - 75}
                                                 textAnchor="middle"
-                                                fill={colors.fgSubtle}
-                                                fontSize="11"
-                                                fontWeight="700"
                                             >
-                                                ..
+                                                <tspan x={0} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
+                                                    {game.dateMonth}
+                                                </tspan>
+                                                <tspan x={0} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
+                                                    {game.dateDay}
+                                                </tspan>
                                             </text>
-                                        )}
-                                    </g>
-                                );
-                            })()}
-                        </motion.g>
-                    );
-                })}
-                </AnimatePresence>
+
+                                            {/* Render connecting dots exactly centered between columns */}
+                                            {!shouldCondense && isConnected && (
+                                                <text
+                                                    x={spacing / 2}
+                                                    y={VIEWBOX_HEIGHT - 63}
+                                                    textAnchor="middle"
+                                                    fill={colors.fgSubtle}
+                                                    fontSize="11"
+                                                    fontWeight="700"
+                                                >
+                                                    ..
+                                                </text>
+                                            )}
+                                        </g>
+                                    );
+                                })()}
+                            </motion.g>
+                        );
+                    })}
 
                 {/* Secondary Line Chart Path Overlay */}
-                {activeFilterOverlay && (
+                {hasSecondaryOverlay && (
                     <g>
                         <path
-                            d={chartData.map((d, i) => {
-                                const columnCenter = X_START + paddingLeft + (i * spacing) + (spacing / 2);
-                                const yPos = getSecondaryY(d.secondaryValue || 0);
-                                if (d.isUpcoming) {
-                                    return ''; // Handled separately
-                                }
-                                return `${i === 0 ? 'M' : 'L'} ${columnCenter} ${yPos}`;
-                            }).join(' ')}
+                            d={historicalSecondaryPoints.map((point, index) => (
+                                `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`
+                            )).join(' ')}
                             fill="none"
                             stroke={colors.blue500}
                             strokeWidth="2.5"
                             className="drop-shadow-sm transition-all duration-300"
                         />
                         {/* Connecting upcoming dotted line */}
-                        {chartData.length > 1 && (() => {
-                            const lastGameIndex = chartData.length - 2;
-                            const prevX = X_START + paddingLeft + (lastGameIndex * spacing) + (spacing / 2);
-                            const prevY = getSecondaryY(chartData[lastGameIndex].secondaryValue);
-
-                            const upcomingX = X_START + paddingLeft + ((chartData.length - 1) * spacing) + (spacing / 2);
-                            const upcomingY = getSecondaryY(chartData[chartData.length - 1].secondaryValue);
-
-                            // Skip if either value is invalid
-                            if (chartData[lastGameIndex].secondaryValue === null || chartData[lastGameIndex].secondaryValue === undefined || 
-                                chartData[chartData.length - 1].secondaryValue === null || chartData[chartData.length - 1].secondaryValue === undefined) {
-                                return null;
-                            }
-
+                        {historicalSecondaryPoints.length > 0 && upcomingSecondaryPoint && (() => {
+                            const previousPoint = historicalSecondaryPoints[historicalSecondaryPoints.length - 1];
                             return (
                                 <>
                                     <line
-                                        x1={prevX}
-                                        y1={prevY}
-                                        x2={upcomingX}
-                                        y2={upcomingY}
+                                        x1={previousPoint.x}
+                                        y1={previousPoint.y}
+                                        x2={upcomingSecondaryPoint.x}
+                                        y2={upcomingSecondaryPoint.y}
                                         fill="none"
                                         stroke="currentColor"
                                         className="text-blue500 opacity-60"
@@ -555,10 +789,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                     />
                                     {/* Cap indicator for the upcoming expected node */}
                                     <line
-                                        x1={upcomingX}
-                                        y1={upcomingY - 5}
-                                        x2={upcomingX}
-                                        y2={upcomingY + 5}
+                                        x1={upcomingSecondaryPoint.x}
+                                        y1={upcomingSecondaryPoint.y - 5}
+                                        x2={upcomingSecondaryPoint.x}
+                                        y2={upcomingSecondaryPoint.y + 5}
                                         stroke="currentColor"
                                         className="text-blue500 opacity-60"
                                         strokeWidth="2.5"
@@ -568,6 +802,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         })()}
                     </g>
                 )}
+                </motion.g>
 
                 {/* 3. The Interactive Prop Line Threshold Overlay */}
                 <g
@@ -661,9 +896,9 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
                     {/* Dragging Value Tooltip Bubble */}
                     {isDragging && (
-                        <motion.g 
-                            initial={false} 
-                            animate={{ y: propLineY - 12, x: 65 }} 
+                        <motion.g
+                            initial={false}
+                            animate={{ y: propLineY - 12, x: 65 }}
                             transition={{ duration: 0 }}
                         >
                             {/* Little triangular point connecting bubble to line */}
@@ -705,11 +940,11 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     <span className="text-fgSubtle font-bold text-[9px] tracking-widest uppercase">LINE</span>
                 </div>
 
-                {activeFilterOverlay ? (
+                {hasSecondaryOverlay && overlayDefinition ? (
                     <div className="flex items-center gap-1.5 flex-1 justify-start">
                         <div className="w-2.5 h-2.5 bg-blue500 rounded-[1px]" />
                         <span className="text-blue500 font-bold text-[9px] tracking-widest uppercase whitespace-nowrap">
-                            {activeFilterOverlay} {isRankOverlay ? `[OPP RANK: #${Math.round(graphAvgSecondary)}]` : `[GRAPH AVG: ${graphAvgSecondary.toFixed(1)}${activeFilterOverlay === 'USG%' ? '%' : ''} | SEASON AVG: ${seasonAvgSecondary.toFixed(1)}${activeFilterOverlay === 'USG%' ? '%' : ''}]`}
+                            {overlayDefinition.label} {formatOverlayLegend(overlayDefinition, graphAvgSecondary, comparisonAvgSecondary)}
                         </span>
                     </div>
                 ) : (
@@ -719,11 +954,11 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
             {/* Footer / Watermark */}
             <div className="absolute bottom-3 left-3 pointer-events-none opacity-40 z-20">
-                <span className="text-neutral600 font-medium text-[10px]">PropsMadness</span>
+                <span className="text-neutral600 font-medium text-[10px] tracking-widest uppercase">PropX</span>
             </div>
 
             {/* Hover Tooltip Overlay */}
-            <HoverTooltip data={hoverData} player={player} />
+            <HoverTooltip data={hoverData} player={chartPlayer ?? player} />
         </div>
     );
 };

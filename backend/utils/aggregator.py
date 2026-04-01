@@ -2,7 +2,106 @@ import pandas as pd
 import json
 import os
 import numpy as np
+import gc
+import logging
+import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from utils.player_matcher import PlayerMatcher
+from utils.prop_date_resolver import resolve_prop_game_date
+
+logger = logging.getLogger(__name__)
+UNDATED_PROP_KEY = '__undated__'
+
+
+def _is_retryable_players_upsert_error(error) -> bool:
+    message = str(error).lower()
+    return (
+        "statement timeout" in message
+        or "canceling statement due to statement timeout" in message
+        or "timed out" in message
+        or "connection" in message
+        or "temporarily unavailable" in message
+        or "429" in message
+        or "57014" in message
+    )
+
+# ==========================================
+# DB HELPERS
+# ==========================================
+
+def _safe_json(obj):
+    """
+    Recursively cast numpy scalar types to native Python types.
+    Supabase rejects np.float64 / np.int64 values in JSONB columns.
+    """
+    if isinstance(obj, dict):
+        return {k: _safe_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_safe_json(i) for i in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
+
+
+def upsert_players_to_db(master_data: dict):
+    """
+    Bulk-upsert player base data into the Supabase `players` table.
+    master_data is keyed by player_id (int) — iterate .values().
+    Props are NOT written here; they go through upsert_props.py.
+    Wrapped in try/except: DB failure never blocks local JSON save.
+    """
+    try:
+        from utils.supabase_client import get_supabase_client
+        sb = get_supabase_client()
+    except Exception as e:
+        logger.warning("Supabase client unavailable, skipping DB upsert: %s", e)
+        return
+
+    rows = []
+    for data in master_data.values():  # .values() — master_data is keyed by player_id
+        rows.append({
+            'id':                          data['id'],
+            'name':                        data['name'],
+            'team':                        data['team'],
+            'position':                    data.get('position'),
+            'stats':                       _safe_json(data.get('stats', {})),
+            'game_log':                    _safe_json(data.get('game_log', [])),
+            'shooting_zones':              _safe_json(data.get('shooting_zones')),
+            'assist_zones':                _safe_json(data.get('assist_zones')),
+            'opp_def_zones':               _safe_json(data.get('opp_def_zones')),
+            'opp_def_zones_positional':    _safe_json(data.get('opp_def_zones_positional')),
+            'opp_assist_zones':            _safe_json(data.get('opp_assist_zones')),
+            'opp_assist_zones_positional': _safe_json(data.get('opp_assist_zones_positional')),
+            'shot_type_analysis':          _safe_json(data.get('shot_type_analysis')),
+            'play_type_analysis':          data.get('play_type_analysis', []),  # already a list
+        })
+
+    logger.info("Upserting %d players to Supabase...", len(rows))
+
+    # Batch in smaller chunks to stay within PostgREST request size and timeout limits
+    chunk_size = 25
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                sb.table('players').upsert(chunk).execute()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                if attempt >= 3 or not _is_retryable_players_upsert_error(e):
+                    break
+                time.sleep(1.5 * attempt)
+        if last_error is not None:
+            logger.error("players upsert failed for chunk %d–%d: %s", i, i + chunk_size, last_error)
+
+    logger.info("✅ players upsert complete (%d rows).", len(rows))
 
 # ==========================================
 # 1. CONFIGURATION MAPPINGS
@@ -72,16 +171,34 @@ def load_json(path):
             return {}
     return {}
 
+
+def normalize_game_date(raw_value):
+    if not raw_value:
+        return ""
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if len(stripped) >= 10 and stripped[4] == "-" and stripped[7] == "-":
+            if len(stripped) == 10:
+                return stripped
+            try:
+                dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+                return dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            except ValueError:
+                return stripped[:10]
+    return str(raw_value)
+
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path, pp_path=None):
     print(f"   Aggregating Data...")
+    import gc
 
     # A. Load All Data
     df_stats = load_csv(stats_path)
     df_dk = load_csv(dk_path)
     df_fd = load_csv(fd_path)
+    df_pp = load_csv(pp_path) if pp_path else pd.DataFrame()
     df_logs = load_csv(logs_path)
     
     shooting_data = load_json(shooting_path)
@@ -94,7 +211,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     play_type_data = load_json(play_type_path)
     boxscores_data = load_json(boxscores_path)
 
-    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)}), PlayTypes({len(play_type_data.get('players', {}))})")
+    print(f"      Loaded: Stats({len(df_stats)}), DK({len(df_dk)}), FD({len(df_fd)}), PP({len(df_pp)}), Logs({len(df_logs)}), Shooting({len(shooting_data)}), Assists({len(assists_data)}), OppAssist({len(opp_assist_data)}), OppDef({len(opp_def_data)}), ShotTypes({len(shot_type_data)}), OppShotTypes({len(opp_shot_type_data)}), PlayTypes({len(play_type_data.get('players', {}))})")
 
     if df_stats.empty:
         print("   No stats found. Aborting.")
@@ -172,6 +289,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                             })
                     log['dnps'] = team_dnps
             logs_map[int(pid)] = player_logs
+            
+    # Free df_logs and boxscores from memory
+    del df_logs
+    del boxscores_data
+    gc.collect()
 
     # D. Map assist data from pbpstats to PLAYER_ID
     assists_by_pid = {}
@@ -209,6 +331,36 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
     # D. Build Games Map
     team_games = {}
+    active_game_date_by_team = {}
+    fallback_game_date_by_team = {}
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    sorted_games = sorted(
+        games_data,
+        key=lambda g: (normalize_game_date(g.get('game_date')), g.get('game_time_utc') or ''),
+    )
+    for g in sorted_games:
+        game_date = normalize_game_date(g.get('game_date'))
+        if not game_date:
+            continue
+        deadline_dt = None
+        deadline_str = g.get('closing_scrape_deadline')
+        if deadline_str:
+            try:
+                deadline_dt = datetime.fromisoformat(deadline_str)
+            except ValueError:
+                deadline_dt = None
+        for team in filter(None, [g.get('home_team_tricode', ''), g.get('away_team_tricode', '')]):
+            fallback_game_date_by_team.setdefault(team, game_date)
+            if (
+                team not in active_game_date_by_team
+                and deadline_dt is not None
+                and deadline_dt >= (now_et - timedelta(minutes=15))
+            ):
+                active_game_date_by_team[team] = game_date
+
+    for team, game_date in fallback_game_date_by_team.items():
+        active_game_date_by_team.setdefault(team, game_date)
+
     for g in games_data:
         home_team = g.get('home_team_tricode', '')
         away_team = g.get('away_team_tricode', '')
@@ -244,8 +396,6 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             season_stats[k] = safe_float(row.get(k, 0))
 
         # 2. Get opponent defense context
-        # Some stats rows have TEAM_ABBREVIATION as numeric 0.0 or a weird type if missing. 
-        # But we also have TEAM_ABBREVIATION in the logs or in master_data early. 
         team = str(row['TEAM_ABBREVIATION'])
         if team == '0.0' or team == '0':
             # Fallback to logs
@@ -458,8 +608,22 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                 "opp_def": opp_shot_type_def
             },
             "play_type_analysis": play_type_array,
-            "props": {}
+            "props": {},
+            "props_by_date": {}
         }
+
+    # Free df_stats and spatial/JSON objects now that master_data is fully built
+    # NOTE: del df_stats MUST be here, after the iterrows() loop above, not before it
+    del df_stats
+    del shooting_data
+    del assists_data
+    del opp_assist_data
+    del opp_def_data
+    del games_data
+    del shot_type_data
+    del opp_shot_type_data
+    del play_type_data
+    gc.collect()
 
     # E. Merge Betting Odds
     # Helper to process odds files
@@ -483,25 +647,55 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             pid = matcher.match_player(player_name, team_context, team_opts)
             
             if not pid or pid not in master_data: continue
+            canonical_team = master_data[pid]['team']
+            row_game_date, _ = resolve_prop_game_date(
+                row.get('game_date'),
+                canonical_team=canonical_team,
+                game_label=row.get('game', ''),
+                schedule_rows=sorted_games,
+                now_et=now_et,
+            )
+            active_game_date = active_game_date_by_team.get(canonical_team)
 
             # Map prop type (e.g. 'points' -> 'PTS')
             raw_prop = row.get('prop_type', '')
             clean_key = PROP_MAP.get(raw_prop, raw_prop).upper()
-            
-            # Initialize dict structure
-            if clean_key not in master_data[pid]['props']:
-                master_data[pid]['props'][clean_key] = {}
-            
-            # Add the line
-            master_data[pid]['props'][clean_key][book_name] = {
+            prop_date_key = row_game_date or UNDATED_PROP_KEY
+            prop_payload = {
                 "line": row.get('line'),
                 "over": row.get('over_odds'),
                 "under": row.get('under_odds'),
-                "implied": row.get('implied_prob', 0)
+                "implied": row.get('implied_prob', 0),
+                "game_date": row_game_date or None,
             }
+
+            # Preserve all available game dates for multi-game / future-game UI paths.
+            if clean_key not in master_data[pid]['props_by_date']:
+                master_data[pid]['props_by_date'][clean_key] = {}
+            if book_name not in master_data[pid]['props_by_date'][clean_key]:
+                master_data[pid]['props_by_date'][clean_key][book_name] = {}
+            master_data[pid]['props_by_date'][clean_key][book_name][prop_date_key] = prop_payload
+
+            # Keep a legacy flattened props view for the currently active game date.
+            should_materialize = False
+            if active_game_date:
+                should_materialize = row_game_date == active_game_date
+            elif clean_key not in master_data[pid]['props'] or book_name not in master_data[pid]['props'][clean_key]:
+                should_materialize = True
+
+            if should_materialize:
+                if clean_key not in master_data[pid]['props']:
+                    master_data[pid]['props'][clean_key] = {}
+                master_data[pid]['props'][clean_key][book_name] = prop_payload
 
     process_odds(df_dk, "dk")
     process_odds(df_fd, "fd")
+    process_odds(df_pp, "pp")
+    
+    del df_dk
+    del df_fd
+    del df_pp
+    gc.collect()
 
     # F. Filter & Save
     # Only save players who have EITHER stats OR odds (removes G-League noise)
@@ -517,6 +711,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         print(f"   Saved Master Feed ({len(final_output)} players) to {output_path}")
     except Exception as e:
         print(f"   Error saving JSON: {e}")
+
+    # --- DB Upsert (non-fatal) ---
+    # Only runs if SUPABASE_URL and SUPABASE_SERVICE_KEY are set.
+    # A failure here never blocks the local master_feed.json save above.
+    upsert_players_to_db(master_data)
 
 if __name__ == "__main__":
     # Test Run

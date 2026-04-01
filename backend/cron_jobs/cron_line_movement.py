@@ -1,10 +1,11 @@
 import os
 import logging
-from datetime import datetime, timezone, timedelta
+import time
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scrapers'))
+from utils.logging_utils import configure_logging, log_section, log_status
 
 # Reusing the existing scrape_and_shape_odds from cron_closing_lines to avoid duplication
 # but we need to import it. Since cron_closing_lines.py has the logic, let's just 
@@ -13,21 +14,116 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from cron_closing_lines import scrape_and_shape_odds
 from utils.snapshot_manager import SnapshotManager
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("CronLineMovement")
+configure_logging()
+logger = logging.getLogger("CronIntradayRefresh")
 
-def run_intraday_snapshot(label="intraday"):
-    logger.info(f"--- Running Intraday Snapshot: {label} ---")
+
+def _run_edge_score_refresh(players_data, refresh_label):
+    try:
+        from utils.edge_score import run_edge_score_refresh
+        run_edge_score_refresh(
+            refresh_label=refresh_label,
+            current_players_data=players_data,
+        )
+        return True
+    except Exception as error:
+        log_status(logger, "WARN", "Edge Score refresh failed", error=error, label=refresh_label)
+        return False
+
+
+def run_intraday_refresh(label="intraday"):
+    start_time = time.time()
+    log_section(logger, "Intraday props refresh", label=label)
     try:
         players_data = scrape_and_shape_odds(is_closing=False)
         sm = SnapshotManager()
-        success = sm.write_snapshot(label, players_data)
+        success = sm.write_snapshot(label, players_data, filter_to_active_schedule=True)
+        duration_seconds = time.time() - start_time
         if success:
-            logger.info("Intraday snapshot written successfully.")
+            log_status(
+                logger,
+                "OK",
+                "Intraday props snapshot written locally",
+                label=label,
+                players=len(players_data),
+                duration_s=f"{duration_seconds:.1f}",
+            )
+            # Upsert fresh props to Supabase (non-fatal)
+            try:
+                from utils.upsert_props import run_odds_update
+                from scrapers import fetch_odds_prizepicks as prizepicks
+                # Derive paths relative to this file — never import from run_pipeline.py
+                _data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "current")
+                pp_path = None
+                if prizepicks.prizepicks_enabled():
+                    try:
+                        prizepicks.fetch_and_write_rows(output_path=prizepicks.DEFAULT_OUTPUT_PATH)
+                        pp_path = str(prizepicks.DEFAULT_OUTPUT_PATH)
+                    except Exception as error:
+                        cached_pp_path = prizepicks.cached_output_path_if_recent(prizepicks.DEFAULT_OUTPUT_PATH)
+                        if cached_pp_path:
+                            pp_path = str(cached_pp_path)
+                            log_status(
+                                logger,
+                                "WARN",
+                                "PrizePicks refresh failed; using recent cached CSV",
+                                error=error,
+                                cached_path=pp_path,
+                            )
+                        else:
+                            log_status(logger, "WARN", "PrizePicks refresh failed", error=error)
+                props_ok = run_odds_update(
+                    dk_path=os.path.join(_data_dir, "draftkings.csv"),
+                    fd_path=os.path.join(_data_dir, "fanduel.csv"),
+                    stats_path=os.path.join(_data_dir, "season_stats.csv"),
+                    pp_path=pp_path,
+                )
+                
+                # Also upsert line movements blob to Supabase
+                from utils.upsert_market_history import upsert_line_movements_from_file
+                lm_path = os.path.join(_data_dir, "line_movements_today.json")
+                lm_ok = upsert_line_movements_from_file(lm_path)
+
+                if not props_ok or not lm_ok:
+                    _run_edge_score_refresh(players_data, label)
+                    log_status(
+                        logger,
+                        "WARN",
+                        "Intraday DB sync incomplete",
+                        label=label,
+                        players=len(players_data),
+                        props_ok=props_ok,
+                        line_movements_ok=lm_ok,
+                    )
+                    return True
+
+                log_status(logger, "OK", "Intraday DB sync complete", label=label, players=len(players_data))
+                    
+            except Exception as e:
+                _run_edge_score_refresh(players_data, label)
+                log_status(logger, "WARN", "Supabase upsert failed after snapshot success", error=e)
+                return True
+            _run_edge_score_refresh(players_data, label)
+            return True
         else:
-            logger.info("Intraday snapshot skipped (likely deduplication <30m).")
+            _run_edge_score_refresh(players_data, label)
+            log_status(
+                logger,
+                "SKIP",
+                "Intraday props snapshot skipped by dedupe",
+                label=label,
+                players=len(players_data),
+                duration_s=f"{duration_seconds:.1f}",
+            )
+            return True
     except Exception as e:
-        logger.error(f"Failed intraday snapshot: {e}")
+        log_status(logger, "FAIL", "Intraday props refresh failed", error=e)
+        return False
+
+
+def run_intraday_snapshot(label="intraday"):
+    """Backward-compatible wrapper for older imports."""
+    return run_intraday_refresh(label=label)
 
 if __name__ == "__main__":
-    run_intraday_snapshot()
+    run_intraday_refresh()

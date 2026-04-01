@@ -2,7 +2,63 @@ import requests
 import pandas as pd
 import json
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import os
+
+DASHBOARD_LOOKAHEAD_DAYS = 14
+
+
+def upsert_games_to_db(raw_data: list) -> None:
+    """Upsert today's/tomorrow's game schedule into Supabase games table.
+    Non-fatal: logs errors and continues if Supabase is unavailable.
+    """
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from utils.supabase_client import get_supabase_client
+        supabase = get_supabase_client()
+
+        rows = []
+        for g in raw_data:
+            rows.append({
+                "game_id":              g["game_id"],
+                "game_date":            g["game_date"],
+                "home_team_id":         g["home_team_id"],
+                "home_team_name":       g["home_team_name"],
+                "home_team_city":       g["home_team_city"],
+                "home_team_tricode":    g["home_team_tricode"],
+                "home_team_wins":       g.get("home_team_wins"),
+                "home_team_losses":     g.get("home_team_losses"),
+                "home_score":           g.get("home_score", 0),
+                "away_team_id":         g["away_team_id"],
+                "away_team_name":       g["away_team_name"],
+                "away_team_city":       g["away_team_city"],
+                "away_team_tricode":    g["away_team_tricode"],
+                "away_team_wins":       g.get("away_team_wins"),
+                "away_team_losses":     g.get("away_team_losses"),
+                "away_score":           g.get("away_score", 0),
+                "arena_name":           g.get("arena_name"),
+                "arena_city":           g.get("arena_city"),
+                "game_time_utc":        g.get("game_time_utc"),
+                "game_time_et":         g.get("game_time_et"),
+                "game_status":          g.get("game_status"),
+                "game_status_text":     (g.get("game_status_text") or "").strip(),
+                "is_live":              bool(g.get("is_live", False)),
+                "is_final":             bool(g.get("is_final", False)),
+                "is_scheduled":         bool(g.get("is_scheduled", True)),
+                "matchup":              g.get("matchup"),
+                "closing_scrape_deadline": g.get("closing_scrape_deadline"),
+            })
+
+        if not rows:
+            return
+
+        # Batch upsert (all games fit in one batch — max ~30 rows per day)
+        result = supabase.table("games").upsert(rows, on_conflict="game_id").execute()
+        print(f"   games upsert: {len(rows)} games written to Supabase")
+    except Exception as e:
+        print(f"   Warning: games upsert failed (non-fatal): {e}")
+
 
 def get_nba_schedule():
     """Get NBA schedule data"""
@@ -41,7 +97,7 @@ def parse_game_data(game):
         try:
             # Parse the EST time string from the API
             dt = datetime.strptime(game_time_et_raw, "%Y-%m-%dT%H:%M:%SZ")
-            dt_et = dt.replace(tzinfo=timezone(timedelta(hours=-5)))
+            dt_et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
             closing_scrape_deadline = dt_et.isoformat()
             game_time_et_display = dt.strftime("%I:%M %p ET")
             game_date = dt.strftime("%Y-%m-%d")
@@ -133,30 +189,29 @@ def parse_game_data(game):
     
     return game_data
 
-def get_dashboard_data():
-    """Get today's games from the schedule"""
+def get_dashboard_data(days_ahead: int = DASHBOARD_LOOKAHEAD_DAYS):
+    """Get upcoming games from the schedule for the dashboard window."""
     print("Fetching NBA schedule data...")
     data = get_nba_schedule()
     
-    # 1. Determine "Today" and "Tomorrow" in US Eastern Time (ET)
-    et_tz = timezone(timedelta(hours=-5))
+    # 1. Determine the dashboard schedule window in US Eastern Time (ET)
+    et_tz = ZoneInfo("America/New_York")
     today_et = datetime.now(et_tz)
-    tomorrow_et = today_et + timedelta(days=1)
-    
-    # Format matches the 'gameDate' field: "MM/DD/YYYY 00:00:00"
-    target_date_str = today_et.strftime("%m/%d/%Y 00:00:00")
-    tomorrow_date_str = tomorrow_et.strftime("%m/%d/%Y 00:00:00")
-    print(f"Looking for games on: {target_date_str} and {tomorrow_date_str}")
+    target_date_strings = [
+        (today_et + timedelta(days=offset)).strftime("%m/%d/%Y 00:00:00")
+        for offset in range(days_ahead)
+    ]
+    print(f"Looking for games from {target_date_strings[0]} through {target_date_strings[-1]}")
     
     game_dates = data.get('leagueSchedule', {}).get('gameDates', [])
     todays_games_list = []
     
-    # 2. Find the object for today's and tomorrow's date
+    # 2. Find the objects within the dashboard window
     for date_obj in game_dates:
-        if date_obj.get('gameDate') in [target_date_str, tomorrow_date_str]:
+        if date_obj.get('gameDate') in target_date_strings:
             todays_games_list.extend(date_obj.get('games', []))
             
-    print(f"Found {len(todays_games_list)} games for today and tomorrow")
+    print(f"Found {len(todays_games_list)} games in the next {days_ahead} days")
     
     all_games_data = []
     
@@ -169,64 +224,65 @@ def get_dashboard_data():
     
     return df, all_games_data
 
-# Get the data
-df, raw_data = get_dashboard_data()
+if __name__ == "__main__":
+    # Get the data
+    df, raw_data = get_dashboard_data()
 
-# Display summary
-print(f"\n{'='*80}")
-print("NBA DASHBOARD DATA SUMMARY")
-print(f"{'='*80}")
+    # Display summary
+    print(f"\n{'='*80}")
+    print("NBA DASHBOARD DATA SUMMARY")
+    print(f"{'='*80}")
 
-if not df.empty:
-    print(f"\nOverview:")
-    print(f"Total games: {len(df)}")
-    print(f"Scheduled games: {df['is_scheduled'].sum()}")
-    print(f"Live games: {df['is_live'].sum()}")
-    print(f"Final games: {df['is_final'].sum()}")
+    if not df.empty:
+        print(f"\nOverview:")
+        print(f"Total games: {len(df)}")
+        print(f"Scheduled games: {df['is_scheduled'].sum()}")
+        print(f"Live games: {df['is_live'].sum()}")
+        print(f"Final games: {df['is_final'].sum()}")
 
-    print(f"\nGames Today:")
+        print(f"\nGames Today:")
 
-    for idx, row in df.iterrows():
-        if row['is_live']:
-            status_icon = "🟢 LIVE"
-            status_info = ""
-        elif row['is_final']:
-            status_icon = "✅ FINAL"
-            status_info = ""
-        else:
-            status_icon = "⏰"
-            status_info = row['game_time_et']
-        
-        print(f"\n{status_icon} {row['matchup']} {status_info}")
-        print(f"   Game ID: {row['game_id']}")
-        print(f"   Score: {row['display_score']}")
-        print(f"   Arena: {row['arena_full']}")
-        print(f"   Status: {row['game_status_text']}")
-        
-        if row.get('home_leader_name'):
-            print(f"   Home Leader: {row['home_leader_name']} ({row['home_leader_points']} pts)")
-        if row.get('away_leader_name'):
-            print(f"   Away Leader: {row['away_leader_name']} ({row['away_leader_points']} pts)")
-else:
-    print("No games found for today.")
+        for idx, row in df.iterrows():
+            if row['is_live']:
+                status_icon = "🟢 LIVE"
+                status_info = ""
+            elif row['is_final']:
+                status_icon = "✅ FINAL"
+                status_info = ""
+            else:
+                status_icon = "⏰"
+                status_info = row['game_time_et']
+            
+            print(f"\n{status_icon} {row['matchup']} {status_info}")
+            print(f"   Game ID: {row['game_id']}")
+            print(f"   Score: {row['display_score']}")
+            print(f"   Arena: {row['arena_full']}")
+            print(f"   Status: {row['game_status_text']}")
+            
+            if row.get('home_leader_name'):
+                print(f"   Home Leader: {row['home_leader_name']} ({row['home_leader_points']} pts)")
+            if row.get('away_leader_name'):
+                print(f"   Away Leader: {row['away_leader_name']} ({row['away_leader_points']} pts)")
+    else:
+        print("No games found for today.")
 
-# Save to files
-output_path = os.path.join(os.path.dirname(__file__), '../data/current/nba_dashboard_games.json')
-schedule_path = os.path.join(os.path.dirname(__file__), '../data/current/today_schedule.json')
+    # Save to files
+    output_path = os.path.join(os.path.dirname(__file__), '../data/current/nba_dashboard_games.json')
+    schedule_path = os.path.join(os.path.dirname(__file__), '../data/current/today_schedule.json')
 
-# Ensure directory exists
-os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-with open(output_path, 'w') as f:
-    json.dump(raw_data, f, indent=2, default=str)
+    with open(output_path, 'w') as f:
+        json.dump(raw_data, f, indent=2, default=str)
 
-# Write the schedule data for the PM2 scheduler
-schedule_data = {
-    "games": raw_data
-}
-with open(schedule_path, 'w') as f:
-    json.dump(schedule_data, f, indent=2, default=str)
+    # Write the schedule data for the PM2 scheduler
+    schedule_data = {
+        "games": raw_data
+    }
+    with open(schedule_path, 'w') as f:
+        json.dump(schedule_data, f, indent=2, default=str)
 
-print(f"\nData saved to:")
-print(f"   - {output_path}")
-print(f"   - {schedule_path}")
+    print(f"\nData saved to:")
+    print(f"   - {output_path}")
+    print(f"   - {schedule_path}")

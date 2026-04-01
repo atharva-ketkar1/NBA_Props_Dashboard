@@ -1,7 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-react';
-import { Player, Game } from '../types';
+import { Player, Game, SportsbookId } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
+import { ASSETS_BASE } from '../utils/config';
+import { getSportsbookProp, playerHasSportsbookPropForDate } from '../utils/propResolution';
+import { fetchApiJson } from '../utils/network';
+import { fetchDashboardGames } from '../utils/dashboardApi';
+
+const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
 const STAT_MAP: Record<string, string> = {
     'Points': 'PTS', 'Assists': 'AST', 'Rebounds': 'REB', 'Threes': 'FG3M',
@@ -11,6 +17,20 @@ const STAT_MAP: Record<string, string> = {
     '1Q Assists': '1Q_AST', '1Q Rebounds': '1Q_REB', '1H Points': '1H_PTS',
     'Double Double': 'DD2', 'Triple Double': 'TD3'
 };
+
+type PlayerAvailabilityByDate = Record<number, Record<string, Record<string, Record<string, boolean>>>>;
+
+function playerHasAvailableSportsbookPropForDate(
+    availabilityByPlayer: PlayerAvailabilityByDate,
+    playerId: number,
+    statType: string,
+    sportsbook: SportsbookId | string,
+    gameDate?: string | null,
+) {
+    const availabilityBucket = availabilityByPlayer?.[playerId]?.[statType]?.[sportsbook] ?? {};
+    const dateKey = gameDate || '__undated__';
+    return Boolean(availabilityBucket[dateKey] || availabilityBucket.__undated__);
+}
 
 const CustomDropdown = ({ value, options, onChange, placeholder }: { value: string, options: { label: string, value: string, disabled?: boolean }[], onChange: (val: string) => void, placeholder?: string }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -66,7 +86,13 @@ interface SidebarProps {
     onClose?: () => void;
     players: Player[];
     activePlayerId?: number;
-    onSelectPlayer: (id: number) => void;
+    activeGameDate?: string | null;
+    pendingPlayerId?: number;
+    pendingGameDate?: string | null;
+    activeSportsbook?: SportsbookId;
+    propsAvailabilityByDate?: PlayerAvailabilityByDate;
+    onSelectPlayer: (id: number, gameDate?: string | null) => void;
+    onPrefetchPlayer?: (id: number, gameDate?: string | null) => void;
     activeTab?: string;
     onTabChange?: (tab: string) => void;
 }
@@ -76,7 +102,7 @@ const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-7 h-7" }: { teamId: numb
         <div className="flex flex-col items-center justify-center gap-1">
             <div className={`${sizeClass} flex items-center justify-center font-bold text-white overflow-hidden`}>
                 <ImageWithFallback
-                    src={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/team_logos/${teamId}.svg`}
+                    src={`${ASSETS_BASE}/assets/team_logos/${teamId}.svg`}
                     fallbackComponent={<span className="text-[8px]">{tricode}</span>}
                     alt={tricode}
                     className="w-full h-full object-contain"
@@ -86,27 +112,47 @@ const RealTeamLogo = ({ teamId, tricode, sizeClass = "w-7 h-7" }: { teamId: numb
     );
 };
 
-const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, statFilter: string, isActive: boolean, onClick: () => void }) => {
-    const book =
-        player.props?.[statFilter]?.['dk']
-            ? 'dk'
-            : player.props?.[statFilter]?.['fd']
-                ? 'fd'
-                : null;
-
-    const prop = book ? player.props?.[statFilter]?.[book] : null;
+const PlayerRow = ({
+    player,
+    statFilter,
+    gameDate,
+    activeSportsbook = 'dk',
+    isAvailable = false,
+    isActive,
+    isPending,
+    onClick,
+    onPrefetch,
+}: {
+    player: Player,
+    statFilter: string,
+    gameDate?: string | null,
+    activeSportsbook?: SportsbookId,
+    isAvailable?: boolean,
+    isActive: boolean,
+    isPending: boolean,
+    onClick: () => void,
+    onPrefetch?: () => void
+}) => {
+    const prefetchTimeoutRef = useRef<number | null>(null);
+    const selectedProp = getSportsbookProp(player, statFilter, activeSportsbook, gameDate);
+    const book = selectedProp?.book ?? null;
+    const prop = selectedProp?.prop ?? null;
     const hasProp = !!prop;
+    const isHydratingProp = isAvailable && !hasProp;
     const line = prop?.line;
+    const displayBook = book ?? activeSportsbook;
 
     const logoFile =
-        book === "dk"
+        displayBook === "dk"
             ? "draftkings.webp"
-            : book === "fd"
+            : displayBook === "fd"
                 ? "fanduel.webp"
+                : displayBook === "pp"
+                    ? "prizepicks.webp"
                 : null;
 
     const logoSrc = logoFile
-        ? `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/sportsbook_logos/${logoFile}`
+        ? `${ASSETS_BASE}/assets/sportsbook_logos/${logoFile}`
         : null;
     // Basic placeholder logic for color, can be enhanced later
     const isPlusYellow = true;
@@ -117,23 +163,56 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
         if (isNaN(num)) return String(val);
         return num > 0 ? `+${num}` : String(num);
     };
+    const showPricedOdds = book !== 'pp' && prop?.over !== null && prop?.over !== undefined && prop?.under !== null && prop?.under !== undefined;
+
+    useEffect(() => {
+        return () => {
+            if (prefetchTimeoutRef.current !== null) {
+                window.clearTimeout(prefetchTimeoutRef.current);
+            }
+        };
+    }, []);
+
+    const cancelPrefetch = () => {
+        if (prefetchTimeoutRef.current !== null) {
+            window.clearTimeout(prefetchTimeoutRef.current);
+            prefetchTimeoutRef.current = null;
+        }
+    };
+
+    const schedulePrefetch = () => {
+        if (!onPrefetch) {
+            return;
+        }
+
+        cancelPrefetch();
+        prefetchTimeoutRef.current = window.setTimeout(() => {
+            prefetchTimeoutRef.current = null;
+            onPrefetch();
+        }, 140);
+    };
 
     return (
         <div
             onClick={onClick}
-            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 hover:bg-bgElevation1 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isActive ? 'bg-bgElevation1' : ''}`}
+            onMouseEnter={schedulePrefetch}
+            onMouseLeave={cancelPrefetch}
+            onFocus={schedulePrefetch}
+            onBlur={cancelPrefetch}
+            aria-busy={isPending}
+            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isPending ? 'bg-bgElevation2/80' : isActive ? 'bg-bgElevation1' : 'hover:bg-bgElevation1'}`}
         >
             <div className="flex items-center gap-3">
                 <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1 flex items-center justify-center">
                     <ImageWithFallback
                         src={`https://cdn.nba.com/headshots/nba/latest/260x190/${player.id}.png`}
-                        fallbackSrc={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/assets/player_headshots/${player.id}.png`}
+                        fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/${player.id}.png`}
                         alt={player.name}
                         className="w-full h-full object-cover transform scale-125 pt-1"
                     />
                 </div>
                 <div className="flex flex-col gap-1">
-                    <span className={`text-[13px] font-bold leading-none ${isActive ? 'text-white' : 'text-gray-300 group-hover:text-white'}`}>{player.name}</span>
+                    <span className={`text-[13px] font-bold leading-none ${isPending || isActive ? 'text-white' : 'text-gray-300 group-hover:text-white'}`}>{player.name}</span>
 
                     {hasProp ? (
                         <div className="flex items-center gap-2 mt-0.5">
@@ -147,27 +226,53 @@ const PlayerRow = ({ player, statFilter, isActive, onClick }: { player: Player, 
                                 )}
                             </div>
                             <span className="text-white font-bold font-chakra text-xs">{line}</span>
-                            <div className="flex items-center gap-1">
-                                <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">O</span> <span className="text-green500 font-chakra">{formatOdds(prop?.over)}</span>
+                            {showPricedOdds ? (
+                                <div className="flex items-center gap-1">
+                                    <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
+                                        <span className="text-fgSubtle">O</span> <span className="text-green500 font-chakra">{formatOdds(prop?.over)}</span>
+                                    </div>
+                                    <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
+                                        <span className="text-fgSubtle">U</span> <span className="text-red500 font-chakra">{formatOdds(prop?.under)}</span>
+                                    </div>
                                 </div>
-                                <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
-                                    <span className="text-fgSubtle">U</span> <span className="text-red500 font-chakra">{formatOdds(prop?.under)}</span>
-                                </div>
+                            ) : (
+                                <></>
+                            )}
+                        </div>
+                    ) : isHydratingProp ? (
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <div className="w-3.5 h-3.5 rounded-[3px] overflow-hidden bg-white flex items-center justify-center">
+                                {logoSrc && (
+                                    <img
+                                        src={logoSrc}
+                                        alt={displayBook}
+                                        className="w-full h-full object-contain"
+                                    />
+                                )}
+                            </div>
+                            <span className="text-white font-bold font-chakra text-xs">...</span>
+                            <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium text-fgSubtle uppercase tracking-[0.12em]">
+                                Updating
                             </div>
                         </div>
                     ) : (
                         <div className="flex items-center gap-1.5 bg-borderMedium px-2 py-1 rounded-[4px] text-[10px] font-bold text-neutral400 border border-transparent w-fit mt-0.5">
                             <Lock className="w-2.5 h-2.5" />
-                            UNLOCK
+                            UNAVAILABLE
                         </div>
                     )}
                 </div>
             </div>
 
             {/* Plus Button / Active Indicator */}
-            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
-                {isActive ? <LockOpen className="w-3 h-3" /> : <Plus className="w-3 h-3 font-bold" strokeWidth={4} />}
+            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isPending || isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
+                {isPending ? (
+                    <div className="w-2.5 h-2.5 rounded-full border-2 border-white/40 border-t-white animate-spin" aria-hidden="true" />
+                ) : isActive ? (
+                    <LockOpen className="w-3 h-3" />
+                ) : (
+                    <Plus className="w-3 h-3 font-bold" strokeWidth={4} />
+                )}
             </button>
         </div>
     )
@@ -177,18 +282,19 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, onSelectPlayer: (id: number) => void, statFilter: string }> = ({
-    game, isExpanded, onToggle, activePlayerId, onSelectPlayer, statFilter
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: SportsbookId, propsAvailabilityByDate?: PlayerAvailabilityByDate, onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
+    game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, propsAvailabilityByDate = {}, onSelectPlayer, onPrefetchPlayer, statFilter
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
-    // We use UTC time to construct a localized Date object, then generate the short weekday
     const gameTimeObj = game.game_time_utc ? new Date(game.game_time_utc) : new Date(game.game_date + 'T23:59:59Z');
-    // For consistency with ET scheduling, checking day
-    const gameDay = gameTimeObj.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
-
-    // Clean up time string: "07:30 PM ET" -> "7:30 PM"
-    const formattedTime = game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '';
+    const hasValidGameTime = !Number.isNaN(gameTimeObj.getTime());
+    const gameDay = hasValidGameTime
+        ? gameTimeObj.toLocaleDateString(undefined, { weekday: 'short' })
+        : '';
+    const formattedTime = hasValidGameTime
+        ? gameTimeObj.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        : (game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '');
 
     return (
         <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-2 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
@@ -209,7 +315,10 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
                     <div className="flex flex-col items-center min-w-[70px] gap-0.5">
                         {game.is_live ? (
-                            <span className="text-green-500 animate-pulse text-xs font-bold">LIVE</span>
+                            <span className="flex items-center gap-1 text-green-500 text-xs font-bold">
+                                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                                LIVE
+                            </span>
                         ) : game.is_final ? (
                             <span className="text-xs text-gray-500 font-medium">FINAL</span>
                         ) : (
@@ -238,12 +347,24 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                         game.players.map(player => (
                             <div key={player.id} className="relative">
                                 {/* Selected Player Blue Line */}
-                                {player.id === activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
+                                {player.id === activePlayerId && game.game_date === activeGameDate && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-20"></div>}
+                                {player.id === pendingPlayerId && game.game_date === pendingGameDate && player.id !== activePlayerId && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500/70 z-20 animate-pulse"></div>}
                                 <PlayerRow
                                     player={player}
                                     statFilter={statFilter}
-                                    isActive={player.id === activePlayerId}
-                                    onClick={() => onSelectPlayer(player.id)}
+                                    gameDate={game.game_date}
+                                    activeSportsbook={activeSportsbook}
+                                    isAvailable={playerHasAvailableSportsbookPropForDate(
+                                        propsAvailabilityByDate,
+                                        player.id,
+                                        statFilter,
+                                        activeSportsbook ?? 'dk',
+                                        game.game_date,
+                                    )}
+                                    isActive={player.id === activePlayerId && game.game_date === activeGameDate}
+                                    isPending={player.id === pendingPlayerId && game.game_date === pendingGameDate && !(player.id === activePlayerId && game.game_date === activeGameDate)}
+                                    onClick={() => onSelectPlayer(player.id, game.game_date)}
+                                    onPrefetch={() => onPrefetchPlayer?.(player.id, game.game_date)}
                                 />
                             </div>
                         ))
@@ -260,7 +381,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 
 export const Sidebar: React.FC<SidebarProps> = ({
     isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
-    activeTab = 'Points', onTabChange = () => { }
+    activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook = 'dk', propsAvailabilityByDate = {}, activeTab = 'Points', onTabChange = () => { }, onPrefetchPlayer
 }) => {
     const statFilter = STAT_MAP[activeTab] || 'PTS';
     const [gameFilter, setGameFilter] = useState('All Games');
@@ -270,25 +391,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
     // Fetch live game data
     useEffect(() => {
-        const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-        fetch(`${apiUrl}/data/current/nba_dashboard_games.json`)
-            .then(res => res.json())
-            .then(data => {
-                const sortedGames = data.sort((a: Game, b: Game) => {
-                    return new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime();
+        if (!players.length) return;
+
+        const propDates = Array.from(new Set(
+            players.flatMap(p =>
+                Object.values(p.props_by_date ?? {}).flatMap(statEntry =>
+                    Object.values(statEntry as Record<string, Record<string, any>>).flatMap(bookEntry =>
+                        Object.keys(bookEntry).filter(k => k !== '__undated__')
+                    )
+                )
+            )
+        )).sort();
+
+        if (!propDates.length) return;
+
+        if (USE_DB) {
+            fetchDashboardGames(propDates)
+                .then(({ games }) => {
+                    const sorted = (games ?? []).sort((a: Game, b: Game) =>
+                        new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+                    );
+                    setScheduleData(sorted);
+                })
+                .catch((error) => {
+                    console.error('[api] games error:', error);
                 });
-                setScheduleData(sortedGames);
-            })
-            .catch(err => console.error("Error loading schedule:", err));
-    }, []);
+        } else {
+            fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
+                .then(data => {
+                    const sortedGames = (data as Game[])
+                        .filter(g => propDates.includes(g.game_date))
+                        .sort((a, b) =>
+                            new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+                        );
+                    setScheduleData(sortedGames);
+                })
+                .catch(err => console.error("Error loading schedule:", err));
+        }
+    }, [players]);
 
     // Dynamically generate prop options and game options
     const propOptions = useMemo(() => {
         const propSet = new Set<string>();
         players.forEach(p => {
-            if (p.props) {
-                Object.keys(p.props).forEach(key => propSet.add(key));
-            }
+            Object.keys(p.props ?? {}).forEach(key => propSet.add(key));
+            Object.keys(p.props_by_date ?? {}).forEach(key => propSet.add(key));
         });
 
         // Exact tabs from Header
@@ -347,8 +494,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 if (!isInGame) return false;
 
                 // Prop Match
-                const hasProp = p.props && p.props[statFilter];
-                if (!hasProp) return false;
+                const hasResolvedProp = playerHasSportsbookPropForDate(p, statFilter, activeSportsbook, game.game_date);
+                const hasAvailableProp = playerHasAvailableSportsbookPropForDate(
+                    propsAvailabilityByDate,
+                    p.id,
+                    statFilter,
+                    activeSportsbook,
+                    game.game_date,
+                );
+                if (!hasResolvedProp && !hasAvailableProp) return false;
 
                 // Search Match (Player Name)
                 if (searchTerm && !gameMatchesSearch) {
@@ -375,7 +529,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         }
 
         return result;
-    }, [scheduleData, players, statFilter, gameFilter, searchTerm]);
+    }, [scheduleData, players, statFilter, gameFilter, searchTerm, activeSportsbook, propsAvailabilityByDate]);
 
     const toggleGame = (gameId: string) => {
         setExpandedGames(prev => ({
@@ -392,13 +546,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 - Visuals: Dark background, border right
             */}
             <div className={`
-                fixed inset-y-0 left-0 z-[60] w-[300px] bg-bgElevation0 
+                fixed inset-y-0 left-0 z-[60] w-[300px] bg-bgElevation0 overflow-hidden
                 transform transition-transform duration-300 ease-in-out
                 ${isOpen ? 'translate-x-0' : '-translate-x-full'}
 
                 lg:static lg:inset-auto lg:translate-x-0 
                 lg:flex lg:flex-col lg:z-0
-                lg:sticky lg:top-0 lg:max-h-screen lg:self-start
+                lg:sticky lg:top-4 lg:h-[calc(100vh-5rem)] lg:self-start lg:shrink-0 lg:min-w-[300px] lg:basis-[300px]
 
                 flex flex-col gap-3 p-4
             `}>
@@ -434,7 +588,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </div>
 
                 {/* Game List */}
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar -mr-2">
+                <div className="min-h-0 flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar -mr-2">
                     {processedGames.length === 0 && (
                         <div className="text-center py-8 text-gray-600 text-xs">
                             {searchTerm ? 'No matches found.' : 'Loading games...'}
@@ -451,7 +605,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 isExpanded={!!isExpanded}
                                 onToggle={() => toggleGame(game.game_id)}
                                 activePlayerId={activePlayerId}
+                                activeGameDate={activeGameDate}
+                                pendingPlayerId={pendingPlayerId}
+                                pendingGameDate={pendingGameDate}
+                                activeSportsbook={activeSportsbook}
+                                propsAvailabilityByDate={propsAvailabilityByDate}
                                 onSelectPlayer={onSelectPlayer}
+                                onPrefetchPlayer={onPrefetchPlayer}
                                 statFilter={statFilter}
                             />
                         );

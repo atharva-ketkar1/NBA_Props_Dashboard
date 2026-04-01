@@ -7,7 +7,6 @@ from urllib3.util.retry import Retry
 
 URL = "https://stats.nba.com/stats/leaguedashteamshotlocations"
 
-# ---- PROTECTION LAYER: HEADERS ----
 HEADERS = {
     "accept": "*/*",
     "accept-encoding": "gzip, deflate, br, zstd",

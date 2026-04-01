@@ -15,6 +15,11 @@ View your app in AI Studio: https://ai.studio/apps/drive/1xAXO18YijIeSTdjjBV6NT0
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. For static-only local UI work, set the frontend `.env.local` values you need and run `npm run dev`
+3. For the full production-style stack with Vercel API routes:
+   - keep client-side `VITE_*` values in `frontend/.env.local`
+   - put server-only `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in the repository root `.env.local`, or add them to the Vercel project's Development environment
+4. `vercel dev` expects Vite to bind to `process.env.PORT`, which this project now supports
+5. If your Vercel Project Root Directory is set to `frontend`, run `vercel dev` from the repository root instead of from inside `frontend`
+6. Run the app:
    `npm run dev`

@@ -52,7 +52,7 @@ def fetch_team_assists(team_id, season="2025-26"):
     session.mount('https://', adapter)
 
     try:
-        response = session.get(proxy_url, params=params, headers=headers, timeout=45)
+        response = session.get(proxy_url, params=params, headers=headers, timeout=60)
         response.raise_for_status()
         data = response.json()
         

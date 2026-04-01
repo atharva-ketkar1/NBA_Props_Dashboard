@@ -2,6 +2,7 @@ import pandas as pd
 import requests
 import json
 import time
+import logging
 from datetime import datetime, timedelta, timezone
 from dateutil import tz
 from dotenv import load_dotenv
@@ -9,22 +10,27 @@ import os
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 # CONSTANTS
 FANDUEL_PUBLIC_ACCESS_KEY = os.getenv("FANDUEL_PUBLIC_ACCESS_KEY")
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Origin': 'https://sportsbook.fanduel.com',
+    'Referer': 'https://sportsbook.fanduel.com/',
     'x-sportsbook-region': 'OH',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     'Pragma': 'no-cache',
     'Expires': '0',
-    'Accept': 'application/json'
+    'Accept': 'application/json',
+    'Accept-Language': 'en-US,en;q=0.9'
 }
 
 def _fetch_via_proxy(url):
     """Helper clearly route request via Cloudflare Worker if set."""
     proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
     if not proxy_url:
-        print("WARNING: PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
+        logger.warning("PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
         return requests.get(url, headers=HEADERS, timeout=15)
     return requests.get(proxy_url, params={"url": url}, headers=HEADERS, timeout=15)
 
@@ -37,7 +43,7 @@ def get_nba_main_page_data():
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Error fetching NBA main page: {e}")
+        logger.error("Error fetching NBA main page: %s", e)
         return None
 
 def get_player_props(event_id, prop_tab_name):
@@ -49,7 +55,7 @@ def get_player_props(event_id, prop_tab_name):
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Error fetching props for event {event_id}: {e}")
+        logger.error("Error fetching props for event %s: %s", event_id, e)
         return None
 
 def get_all_available_tabs(event_id):
@@ -75,7 +81,7 @@ def get_all_available_tabs(event_id):
             available_tabs.append({'name': tab_name, 'title': tab_title})
         return available_tabs
     except Exception as e:
-        print(f"Error fetching tabs for event {event_id}: {e}")
+        logger.error("Error fetching tabs for event %s: %s", event_id, e)
         return []
 
 def normalize_player_name(name):
@@ -120,24 +126,37 @@ def extract_team_name(logo_url):
         # Example URL: .../teams/cleveland_cavaliers.png or .../teams/cavaliers.png
         # We try to grab the last part
         slug = logo_url.split('/')[-1].replace('.png', '').replace('_jersey', '').lower()
-        
-        # Check for direct map keys in the slug
-        for key, tricode in TEAM_MAP.items():
-            if key in slug:
-                return tricode
-                
-        # Parse slug parts (e.g., "cleveland_cavaliers" -> ["cleveland", "cavaliers"])
+
+        # Parse slug parts first so "hornets" does not get misread as "nets".
         parts = slug.split('_')
         for part in parts:
             if part in TEAM_MAP:
                 return TEAM_MAP[part]
-                
+
+        # Fall back to full-slug substring matching for non-standard formats.
+        for key, tricode in TEAM_MAP.items():
+            if key in slug:
+                return tricode
+
         return "UNK"
     except: 
         return "UNK"
 
+
+def extract_event_game_date(event):
+    for field in ('startDate', 'openDate', 'eventDate', 'startTime'):
+        raw = event.get(field, '')
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+            return dt.astimezone(tz.gettz('America/New_York')).strftime('%Y-%m-%d')
+        except Exception as e:
+            logger.warning("Could not parse %s '%s': %s", field, raw, e)
+    return ''
+
 def fetch_odds():
-    print("Starting FanDuel Odds Fetch...")
+    logger.info("[RUN] FanDuel odds fetch")
     main_page = get_nba_main_page_data()
     if not main_page: return []
 
@@ -145,14 +164,18 @@ def fetch_odds():
     attachments = main_page.get('attachments', {})
     events_data = attachments.get('events', {})
     
-    upcoming_events = [event for event in events_data.values() if not event.get("inPlay", False)]
+    upcoming_events = [
+        event for event in events_data.values()
+        if not event.get("inPlay", False)
+        and ' @ ' in event.get('name', '')  # only real matchup games
+    ]
 
     all_props = []
 
     for event in upcoming_events:
         event_id = event['eventId']
         game_name = event['name']
-        print(f"  Processing Game: {game_name}")
+        logger.debug("Processing Game: %s", game_name)
         
         tabs = get_all_available_tabs(event_id)
         for tab in tabs:
@@ -196,16 +219,18 @@ def fetch_odds():
                     "over_odds": int(over_odds),
                     "under_odds": int(under_odds),
                     "game": game_name,
-                    "game_date": event.get("startDate"),
+                    "game_date": extract_event_game_date(event),
                     "sportsbook": "fanduel"
                 }
                 all_props.append(prop_entry)
     
-    print(f"Finished. Collected {len(all_props)} props.")
+    logger.info("[OK] FanDuel odds fetch complete | props=%d", len(all_props))
     return all_props
 
 if __name__ == "__main__":
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     props = fetch_odds()
     df = pd.DataFrame(props)
     df.to_csv("fanduel_props.csv", index=False)
-    print(json.dumps(props[:2], indent=2))
+    logger.info(json.dumps(props[:2], indent=2))

@@ -1,61 +1,129 @@
-# 🔥 Catch-Up Guide: NBA Props Dashboard
+# Catch-Up Guide
 
-Welcome to the NBA Props Dashboard (Propsmadness clone) project! If you've been dropped into this repository and need to get your bearings *instantly*, start here.
+Start here if you need the fastest accurate overview of the project.
 
-## 1. What Are We Building?
-We're building a high-density, cyberpunk-themed web application that gives NBA bettors an unparalleled visual edge. Instead of dry tables, we show beautiful hit-rate bar charts, spatial shooting/assist zones, Shot Type Analysis (Catch & Shoot/Pull Ups), and combined stat comparisons (PRA - Points/Rebounds/Assists). 
+## What We Built
 
-It looks like magic on the frontend, but beneath the hood, it's driven by a rigorous, battle-tested data pipeline.
+This repo is an NBA player-props analytics dashboard backed by a scheduled data platform. The frontend is only the last mile. Most of the interesting work happens before the browser ever loads:
 
-## 2. How The Data Actually Flows (Read This First)
-The biggest mistake new devs make here is assuming the React frontend talks to a live Python backend. **It does not.** 
+- market data extraction from sportsbooks
+- stat ingestion from NBA data sources
+- player identity reconciliation
+- feature engineering for matchup context
+- historical snapshotting for line movement and closing lines
+- delivery through static JSON or Supabase
 
-1. **Python does the heavy lifting via two execution tracks:** 
-   - **The Master Pipeline**: Run `python run_pipeline.py` inside the `backend` folder. This launches roughly 13 scrapers asynchronously. It pulls NBA.com stats, shot charts, boxscores, and game logs. Because upstream services (like PBPStats) often impose **IP bans**, some of these scrapers use Cloudflare Worker proxies and NBA Stats fallbacks to bypass 403 blocks safely. It merges all of this using intense string-matching logic and spits out one giant file: `backend/data/current/master_feed.json`.
-   - **The Intraday Scheduler**: Run `python scheduler.py` on the backend. This daemon runs continuously, fetching DraftKings and FanDuel odds at set intraday intervals (11am, 1pm, etc.) and precisely capturing closing lines right before tip-off.
+## The Most Important Mental Model
 
-2. **React serves the finalized data locally:**
-   The frontend (`npm run dev`) just does a network fetch for `master_feed.json`. That is its entire "backend API." Once that JSON is in `App.tsx` state, flipping between "DraftKings" and "FanDuel", checking "Assist Zones", or swapping to "Rebounds", is entirely instantaneous because all 20,000+ data points are already loaded into browser memory.
+The frontend is not driving the backend in real time.
 
-## 3. The 3 Things You Will Likely Break First
-If you're making modifications, watch out for these landmines:
+The normal flow is:
 
-- **Adding a New Stat (e.g., Turnovers or Triple Doubles):** You must define it in the Python `aggregator.py` first so it gets appended to the JSON. Then, you *must* update `frontend/types.ts` so React knows it exists, and then add it to `Header.tsx` so the user can select it.
-- **Triggering Downstream Rate Limits:** Because we pull dense spatial data (like Opponent Assist Zones), firing the pipeline without timeouts or custom headers will get your IP banned. Rely on the incorporated proxies and do NOT remove `time.sleep()` calls indiscriminately.
-- **CSS Z-Index and Layouts:** The app uses Tailwind and expects a very specific fixed "Cockpit" viewport style that matches Propsmadness. If you add a new generic div wrapper in `App.tsx` or `Layout.tsx`, you risk breaking the flexbox alignments and chart rendering spaces. Keep formatting consistent.
+1. Python scrapers collect raw data into `backend/data/current/`
+2. `backend/utils/aggregator.py` turns that into a canonical player feed
+3. `backend/run_pipeline.py` emits `master_feed.json`
+4. `backend/cron_jobs/master_cron.py` keeps the day current with intraday and closing-line jobs
+5. React reads prebuilt data and focuses on rendering, filtering, and interaction
 
-## 4. Where to Find Specific Logic
-- I need to change how PRA is calculated → `backend/utils/aggregator.py`
-- I need to add Cloudflare forwarding endpoints to a new scraper → Model it after `backend/scrapers/assist_zones.py`
-- I need to fix how the bar chart hits/misses look → `frontend/components/BarChart.tsx`
-- I want to scrape ESPN or MGM next → Copy `fetch_odds_draftkings.py`, rename it, and plug it into `run_pipeline.py`
-- I want to see the project's recent changes → Read `docs/progress/status.md`
+If you forget that preprocessing-first model, the rest of the codebase feels more confusing than it is.
 
-## 5. Development Command Cheat Sheet
+## Where The Real Logic Lives
 
-### Run the Data Generator (Do this to update the massive stats feed)
+### Backend
+
+- `backend/run_pipeline.py`
+  - full daily ETL entry point
+- `backend/utils/aggregator.py`
+  - canonical player assembly and prop shaping
+- `backend/utils/player_matcher.py`
+  - fuzzy identity resolution across books and stat providers
+- `backend/utils/snapshot_manager.py`
+  - intraday snapshots and historical closing lines
+- `backend/cron_jobs/master_cron.py`
+  - production orchestration loop
+
+### Frontend
+
+- `frontend/App.tsx`
+  - app bootstrapping, mode switching, lazy loading, UI state
+- `frontend/components/BarChart.tsx`
+  - prop history visualization and hover inspection
+- `frontend/components/ShootingZones.tsx`
+  - player and opponent shooting context
+- `frontend/components/AssistZones.tsx`
+  - player and opponent assist distribution
+
+## Current Runtime Modes
+
+### JSON Mode
+
+- Local, simple, fast to reason about
+- Reads:
+  - `master_feed.json`
+  - `historical_odds.json`
+  - `line_movements_today.json`
+
+### Supabase Mode
+
+- Better for hosted deployments
+- Loads lighter player records first
+- Pulls heavy JSON fields lazily as the user drills in
+
+## Production Automation In One Minute
+
+`master_cron.py` runs every 5 minutes and checks three priorities in order:
+
+1. Run the full pipeline once per day after 6:00 AM ET
+2. Capture closing lines when games enter the pre-tip window
+3. Record intraday snapshots every 30 minutes
+
+It uses lock files and persisted state so concurrent runs do not collide.
+
+## What Is Fully Real vs Still In Progress
+
+### Real
+
+- Daily ETL flow
+- DraftKings and FanDuel prop ingestion
+- Fuzzy player matching
+- Spatial and play-style enrichment
+- Historical line movement and closing-line capture
+- JSON-mode frontend and Supabase-mode frontend
+
+### Still In Progress
+
+- `SimilarPlayers.tsx` is not integrated yet
+- Some analysis cards still use placeholder fallback arrays when data is missing
+
+## Good First Files To Read
+
+1. `README.md`
+2. `LLM_CONTEXT.md`
+3. `backend/run_pipeline.py`
+4. `backend/utils/aggregator.py`
+5. `backend/cron_jobs/master_cron.py`
+6. `frontend/App.tsx`
+
+## Local Commands
+
+### Build the daily feed
+
 ```bash
 cd backend
-source .venv/bin/activate # Assuming you made a venv
 python run_pipeline.py
 ```
 
-### Run the Intraday Server (Keep this running to track odds movement)
-```bash
-cd backend
-source .venv/bin/activate
-python scheduler.py
-```
+### Serve local data files
 
-### Serve the Backend Data (Leave this running in terminal tab)
 ```bash
 cd backend
 npx serve --cors -p 5000
 ```
 
-### Run the Frontend Server (Leave this running in terminal tab 2)
+### Run the frontend
+
 ```bash
 cd frontend
+npm install
 npm run dev
-# App is available at http://localhost:5173
 ```

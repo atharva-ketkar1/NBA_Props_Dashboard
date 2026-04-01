@@ -1,0 +1,7 @@
+<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Minimal geometric P/X logo matching PropX branding -->
+  <path d="M 25 20 L 25 80" stroke="#3B82F6" stroke-width="14" stroke-linecap="round" />
+  <path d="M 25 25 C 60 25 60 55 25 55" stroke="#3B82F6" stroke-width="14" stroke-linecap="round" />
+  <path d="M 45 45 L 80 80" stroke="#10B981" stroke-width="14" stroke-linecap="round" />
+  <path d="M 80 45 L 55 70" stroke="#10B981" stroke-width="14" stroke-linecap="round" />
+</svg>
