@@ -140,6 +140,41 @@ function buildCacheKey(parts: Array<string | number>) {
   return parts.join('::');
 }
 
+function getIsoTimestampMs(value?: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = Date.parse(String(value));
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function shouldPreferLocalEdgePayload(
+  localPayload: EdgeScorePayload | null,
+  remotePayload: EdgeScorePayload | null,
+) {
+  if (!localPayload) {
+    return false;
+  }
+
+  if (!remotePayload) {
+    return true;
+  }
+
+  const localTimestamp = getIsoTimestampMs(localPayload.generated_at);
+  const remoteTimestamp = getIsoTimestampMs(remotePayload.generated_at);
+
+  if (localTimestamp !== null && remoteTimestamp !== null) {
+    return localTimestamp > remoteTimestamp;
+  }
+
+  if (localTimestamp !== null && remoteTimestamp === null) {
+    return true;
+  }
+
+  return false;
+}
+
 function readLocalEdgePayloadFallback(): EdgeScorePayload | null {
   if (!fs.existsSync(LOCAL_EDGE_SCORE_PATH)) {
     return null;
@@ -811,7 +846,7 @@ export async function fetchEdgePayload(): Promise<EdgeScorePayload> {
           notification?: unknown;
         };
 
-        return {
+        const remotePayload = {
           generated_at: String(row.generated_at ?? ''),
           refresh_label: String(row.refresh_label ?? 'unknown'),
           game_dates: Array.isArray(row.game_dates) ? row.game_dates : [],
@@ -819,6 +854,12 @@ export async function fetchEdgePayload(): Promise<EdgeScorePayload> {
           recommendations: Array.isArray(row.top_recommendations) ? row.top_recommendations : [],
           notification: row.notification && typeof row.notification === 'object' ? row.notification as Record<string, any> : {},
         } satisfies EdgeScorePayload;
+
+        if (shouldPreferLocalEdgePayload(localFallback, remotePayload)) {
+          return localFallback;
+        }
+
+        return remotePayload;
       } catch (error) {
         if (localFallback) {
           return localFallback;
