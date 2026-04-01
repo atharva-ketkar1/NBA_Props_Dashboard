@@ -77,6 +77,7 @@ BOOK_LABELS = {
     "fd": "FanDuel",
     "pp": "PrizePicks",
 }
+DISCORD_ALERT_REFRESH_LABELS = {"intraday"}
 SIDE_MULTIPLIERS = {
     "over": 1.0,
     "under": -1.0,
@@ -1884,17 +1885,19 @@ def _state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -
 
 
 def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    per_book_counts: Dict[str, int] = {}
     filtered = []
     for recommendation in recommendations:
-        rank = int(recommendation.get("rank") or 0)
         signal_score = _safe_float(recommendation.get("edge_score"), 0.0) or 0.0
-        if rank <= 0:
-            continue
-        if rank > EDGE_DISCORD_MAX_RANK:
+        book = str(recommendation.get("sportsbook") or "").strip().lower()
+        if book not in SUPPORTED_BOOKS:
             continue
         if signal_score < EDGE_DISCORD_MIN_SIGNAL_SCORE:
             continue
+        if per_book_counts.get(book, 0) >= EDGE_DISCORD_PER_BOOK_LIMIT:
+            continue
         filtered.append(recommendation)
+        per_book_counts[book] = per_book_counts.get(book, 0) + 1
     return filtered
 
 
@@ -1983,11 +1986,7 @@ def _compute_notification_delta(
             send_recommendations = official_recommendations
         elif changes:
             alert_kind = "update"
-            change_keys = {change["recommendation_key"] for change in changes}
-            send_recommendations = [
-                recommendation for recommendation in official_recommendations
-                if recommendation.get("recommendation_key") in change_keys
-            ]
+            send_recommendations = official_recommendations
 
     should_send = bool(send_recommendations)
     if alert_kind == "pre_tip":
@@ -2535,7 +2534,7 @@ def _send_discord_webhook(payload: Dict[str, Any], notification_delta: Dict[str,
         "pre_tip": "Today's Best Props Final",
     }
     rules_text = (
-        f"Discord only sends official alerts for props ranked in the top {EDGE_DISCORD_MAX_RANK} "
+        f"Discord only sends official alerts for up to {EDGE_DISCORD_PER_BOOK_LIMIT} props per sportsbook "
         f"with Signal Score {_format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)}+."
     )
     title_label = title_map.get(alert_kind) or "Today's Best Props Update"
@@ -2629,6 +2628,10 @@ def _send_discord_webhook(payload: Dict[str, Any], notification_delta: Dict[str,
         }
         thumbnail_url = top_recommendation.get("player_headshot_url")
         if thumbnail_url:
+            book_embed["author"] = {
+                "name": group["sportsbook_label"],
+                "icon_url": thumbnail_url,
+            }
             book_embed["thumbnail"] = {"url": thumbnail_url}
         embeds.append(book_embed)
 
@@ -2848,6 +2851,8 @@ def run_edge_score_refresh(
         "notification": {
             "discord_configured": bool(EDGE_SCORE_DISCORD_WEBHOOK_URL),
             "should_send": bool(notification_delta.get("should_send")),
+            "delivery_allowed": refresh_label in DISCORD_ALERT_REFRESH_LABELS,
+            "delivery_scope": "intraday_only",
             "cooldown_active": bool(notification_delta.get("cooldown_active")),
             "alert_kind": notification_delta.get("alert_kind"),
             "official_candidate_count": len(official_recommendations),
@@ -2856,7 +2861,7 @@ def run_edge_score_refresh(
             "changes": notification_delta.get("changes", []),
             "removed": notification_delta.get("removed", []),
             "dedupe_rules": {
-                "top_rank_max": EDGE_DISCORD_MAX_RANK,
+                "per_book_limit": EDGE_DISCORD_PER_BOOK_LIMIT,
                 "min_signal_score": EDGE_DISCORD_MIN_SIGNAL_SCORE,
                 "new_entrant": True,
                 "best_book_changed": True,
@@ -2872,7 +2877,11 @@ def run_edge_score_refresh(
 
     discord_sent = False
     state_changed = bool(recap_result.get("state_changed"))
-    if notification_delta.get("should_send") and EDGE_SCORE_DISCORD_WEBHOOK_URL:
+    if (
+        refresh_label in DISCORD_ALERT_REFRESH_LABELS
+        and notification_delta.get("should_send")
+        and EDGE_SCORE_DISCORD_WEBHOOK_URL
+    ):
         try:
             discord_sent = _send_discord_webhook(payload, notification_delta)
         except Exception as exc:
