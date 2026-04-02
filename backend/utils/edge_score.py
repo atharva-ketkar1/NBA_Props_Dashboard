@@ -2771,6 +2771,19 @@ def _discord_book_label(recommendation: Dict[str, Any]) -> str:
     return f"{sportsbook_label} {odds_display}"
 
 
+def _discord_tracker_odds_label(recommendation: Dict[str, Any]) -> str:
+    odds_display = str(recommendation.get("odds_display") or _format_odds(recommendation.get("odds")) or "").strip()
+    sportsbook_label = str(recommendation.get("sportsbook_label") or BOOK_LABELS.get(
+        recommendation.get("sportsbook"),
+        "",
+    )).strip()
+    if recommendation.get("sportsbook") == "pp" or odds_display in {"", "-"}:
+        return "line"
+    if sportsbook_label and odds_display.lower().startswith(sportsbook_label.lower()):
+        odds_display = odds_display[len(sportsbook_label):].strip()
+    return odds_display or "line"
+
+
 def _reason_label(raw_key: Any) -> str:
     key = str(raw_key or "").strip()
     if not key:
@@ -3485,6 +3498,18 @@ def _build_discord_book_embed(
         line_text = f"{line_value:.1f}" if line_value is not None else "-"
         edge_score = _safe_float(recommendation.get("edge_score"))
         edge_text = f"{edge_score:.1f}" if edge_score is not None else "n/a"
+
+        if channel_variant == "tracker":
+            first_logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
+            stat_token = str(recommendation.get("stat_type") or stat_label or "PROP").strip().upper()
+            side_token = "O" if str(recommendation.get("pick") or "").lower() == "over" else "U"
+            odds_text = _discord_tracker_odds_label(recommendation)
+            lines.append(
+                f"**{display_rank}. [{first_logged_at}] {player_name}** — "
+                f"{stat_token} {side_token}{line_text} | {odds_text} | SS {edge_text}"
+            )
+            continue
+
         reason_prefix = ""
         change = change_lookup.get(str(recommendation.get("recommendation_key") or "").strip())
         if alert_kind == "update" and change:
@@ -3493,9 +3518,6 @@ def _build_discord_book_embed(
                 for reason in (change.get("reasons", []) or ["updated"])
             ]
             reason_prefix = f"Change: {', '.join(pretty_reasons)}\n"
-        if channel_variant == "tracker":
-            first_logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
-            reason_prefix = f"First logged: {first_logged_at}\n"
         why_summary = str(recommendation.get("why_summary") or "").strip()
         if not why_summary:
             why_summary = _discord_signal_summary(recommendation)
