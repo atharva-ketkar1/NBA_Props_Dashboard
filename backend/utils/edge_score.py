@@ -6,6 +6,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -376,16 +377,54 @@ def _results_recap_webhook_url() -> str:
     return EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL or EDGE_SCORE_DISCORD_WEBHOOK_URL
 
 
-def _post_discord_webhook(webhook_url: str, payload: Dict[str, Any]) -> bool:
+def _webhook_url_with_query(webhook_url: str, extra_query: Optional[Dict[str, str]] = None) -> str:
+    if not extra_query:
+        return webhook_url
+    split = urlsplit(webhook_url)
+    query = dict(parse_qsl(split.query, keep_blank_values=True))
+    query.update({key: value for key, value in extra_query.items() if value is not None})
+    return urlunsplit((split.scheme, split.netloc, split.path, urlencode(query), split.fragment))
+
+
+def _webhook_message_url(webhook_url: str, message_id: str) -> str:
+    split = urlsplit(webhook_url)
+    base_path = split.path.rstrip("/")
+    message_path = f"{base_path}/messages/{message_id}"
+    return urlunsplit((split.scheme, split.netloc, message_path, split.query, split.fragment))
+
+
+def _execute_discord_webhook(webhook_url: str, payload: Dict[str, Any], *, wait: bool = False) -> Optional[Dict[str, Any]]:
     if not webhook_url:
-        return False
+        return None
     response = requests.post(
-        webhook_url,
+        _webhook_url_with_query(webhook_url, {"wait": "true"} if wait else None),
         json=payload,
         timeout=10,
     )
     response.raise_for_status()
-    return True
+    if not wait:
+        return {}
+    try:
+        return response.json()
+    except ValueError:
+        return {}
+
+
+def _post_discord_webhook(webhook_url: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return _execute_discord_webhook(webhook_url, payload, wait=True)
+
+
+def _delete_discord_webhook_message(webhook_url: str, message_id: str) -> str:
+    if not webhook_url or not message_id:
+        return "missing"
+    response = requests.delete(
+        _webhook_message_url(webhook_url, message_id),
+        timeout=10,
+    )
+    if response.status_code == 404:
+        return "missing"
+    response.raise_for_status()
+    return "deleted"
 
 
 def _format_discord_timestamp(raw_value: Any) -> str:
@@ -1943,6 +1982,21 @@ def _state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -
     return snapshot
 
 
+def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    snapshot = {}
+    for recommendation in recommendations:
+        snapshot[recommendation["recommendation_key"]] = {
+            "player_name": recommendation.get("player_name"),
+            "stat_type": recommendation.get("stat_type"),
+            "pick": recommendation.get("pick"),
+            "sportsbook": recommendation.get("sportsbook"),
+            "line": recommendation.get("line"),
+            "odds": recommendation.get("odds"),
+            "first_logged_at": recommendation.get("first_logged_at"),
+        }
+    return snapshot
+
+
 def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     per_book_counts: Dict[str, int] = {}
     filtered = []
@@ -2260,19 +2314,30 @@ def _queue_results_recap_payload(
 
         for recommendation in recommendations_for_date:
             recommendation_key = recommendation.get("recommendation_key")
-            if not recommendation_key or recommendation_key in tracked:
+            if not recommendation_key:
                 continue
-            tracked[recommendation_key] = {
-                **recommendation,
-                "first_alerted_at": generated_at,
-                "first_alert_kind": alert_kind,
-            }
+            existing_recommendation = tracked.get(recommendation_key)
+            if not isinstance(existing_recommendation, dict):
+                tracked[recommendation_key] = {
+                    **recommendation,
+                    "first_alerted_at": generated_at,
+                    "first_alert_kind": alert_kind,
+                }
+                continue
+
+            if alert_kind == "tracker" and not existing_recommendation.get("first_logged_at"):
+                tracked[recommendation_key] = {
+                    **existing_recommendation,
+                    **recommendation,
+                    "first_logged_at": recommendation.get("first_logged_at") or generated_at,
+                    "first_alert_kind": "tracker",
+                }
 
         ordered_recommendations = sorted(
             tracked.values(),
             key=lambda recommendation: (
                 int(recommendation.get("rank") or 999),
-                str(recommendation.get("first_alerted_at") or ""),
+                str(recommendation.get("first_logged_at") or recommendation.get("first_alerted_at") or ""),
             ),
         )
 
@@ -2295,20 +2360,20 @@ def _compute_tracker_delta(
     generated_at: Any,
 ) -> Dict[str, Any]:
     tracker_candidates = _filter_tracker_recommendations(recommendations)
-    pending = state.get("pending_result_recaps", {})
-    if not isinstance(pending, dict):
-        pending = {}
-    existing_entry = pending.get(slate_date, {}) if slate_date else {}
+    tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
+    if not isinstance(tracker_state_by_date, dict):
+        tracker_state_by_date = {}
+    existing_entry = tracker_state_by_date.get(slate_date, {}) if slate_date else {}
     if not isinstance(existing_entry, dict):
         existing_entry = {}
-    tracked = existing_entry.get("tracked_recommendations", {})
-    if not isinstance(tracked, dict):
-        tracked = {}
+    sent_snapshot = existing_entry.get("sent_snapshot", {})
+    if not isinstance(sent_snapshot, dict):
+        sent_snapshot = {}
 
     new_recommendations = []
     for recommendation in tracker_candidates:
         recommendation_key = str(recommendation.get("recommendation_key") or "").strip()
-        if not recommendation_key or recommendation_key in tracked:
+        if not recommendation_key or recommendation_key in sent_snapshot:
             continue
         tracker_recommendation = dict(recommendation)
         tracker_recommendation["first_logged_at"] = generated_at
@@ -2319,6 +2384,7 @@ def _compute_tracker_delta(
         "new_recommendations": new_recommendations,
         "should_send": bool(new_recommendations),
         "slate_date": slate_date,
+        "current_snapshot": _tracker_state_snapshot_for_recommendations(new_recommendations),
     }
 
 
@@ -2485,10 +2551,10 @@ def _result_status_emoji(status: str) -> str:
     return "⚪"
 
 
-def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: Dict[str, Any]) -> bool:
+def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     webhook_url = _results_recap_webhook_url()
     if not webhook_url:
-        return False
+        return None
 
     summary = graded_results.get("summary", {})
     lines = []
@@ -2496,7 +2562,7 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         final_value = recommendation.get("final_value")
         final_text = f"{final_value:.1f}" if isinstance(final_value, (float, int)) else (recommendation.get("result_note") or "Void")
-        tracked_at = _format_tracker_time(recommendation.get("first_alerted_at") or recommendation.get("first_logged_at"))
+        tracked_at = _format_tracker_time(recommendation.get("first_logged_at") or recommendation.get("first_alerted_at"))
         status_emoji = _result_status_emoji(str(recommendation.get("result_status") or ""))
         lines.append(
             f"**#{display_rank} {status_emoji} {recommendation.get('player_name')}** — "
@@ -2573,6 +2639,14 @@ def _changed_books_summary(groups: List[Dict[str, Any]]) -> str:
     ) or "No changed sportsbook groups."
 
 
+def _book_labels_summary(book_keys: List[str]) -> str:
+    labels = [
+        BOOK_LABELS.get(book, str(book).title())
+        for book in sorted({str(book or "").strip().lower() for book in book_keys if str(book or "").strip()}, key=_book_sort_key)
+    ]
+    return ", ".join(labels) or "None"
+
+
 def _build_discord_book_embed(
     group: Dict[str, Any],
     *,
@@ -2631,6 +2705,7 @@ def _build_discord_alert_payload(
     alert_kind = notification_delta.get("alert_kind", "update")
     changes = notification_delta.get("changes", [])
     removed = notification_delta.get("removed", [])
+    official_recommendations = notification_delta.get("official_recommendations", [])
     grouped_books = _group_recommendations_by_sportsbook(
         recommendations,
         limit_per_book=EDGE_DISCORD_PER_BOOK_LIMIT,
@@ -2652,6 +2727,17 @@ def _build_discord_alert_payload(
         f"Up to {EDGE_DISCORD_PER_BOOK_LIMIT} props per sportsbook at Signal Score {threshold_text}+."
     )
     books_summary = _changed_books_summary(grouped_books)
+    visible_books = {
+        str(group.get("sportsbook") or "").strip().lower()
+        for group in grouped_books
+        if str(group.get("sportsbook") or "").strip()
+    }
+    official_books = {
+        str(recommendation.get("sportsbook") or "").strip().lower()
+        for recommendation in official_recommendations
+        if str(recommendation.get("sportsbook") or "").strip()
+    }
+    omitted_books = sorted(official_books - visible_books, key=_book_sort_key)
     removed_lines = [
         (
             f"{removed_item.get('player_name')} — "
@@ -2706,6 +2792,12 @@ def _build_discord_alert_payload(
                 "inline": False,
             },
         ])
+        if omitted_books:
+            summary_fields.append({
+                "name": "Unchanged books omitted",
+                "value": _book_labels_summary(omitted_books)[:1024],
+                "inline": False,
+            })
         if removed_lines:
             summary_fields.append({
                 "name": "Dropped",
@@ -2822,6 +2914,108 @@ def _build_discord_tracker_payload(
     }
 
 
+def _store_discord_message_ref(
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    channel: str,
+    message: Dict[str, Any],
+    webhook_url: str,
+    alert_kind: str,
+    sent_at: Any,
+) -> bool:
+    message_id = str((message or {}).get("id") or "").strip()
+    if not slate_date or not channel or not message_id:
+        return False
+    messages_by_date = state.get("discord_messages_by_date", {})
+    if not isinstance(messages_by_date, dict):
+        messages_by_date = {}
+    date_bucket = messages_by_date.get(slate_date, {})
+    if not isinstance(date_bucket, dict):
+        date_bucket = {}
+    channel_bucket = date_bucket.get(channel, [])
+    if not isinstance(channel_bucket, list):
+        channel_bucket = []
+    if any(str(entry.get("message_id") or "").strip() == message_id for entry in channel_bucket if isinstance(entry, dict)):
+        return False
+    channel_bucket.append({
+        "message_id": message_id,
+        "webhook_url": webhook_url,
+        "alert_kind": alert_kind,
+        "sent_at": sent_at,
+    })
+    date_bucket[channel] = channel_bucket[-60:]
+    messages_by_date[slate_date] = date_bucket
+    state["discord_messages_by_date"] = messages_by_date
+    return True
+
+
+def _cleanup_completed_discord_messages(state: Dict[str, Any]) -> Dict[str, Any]:
+    messages_by_date = state.get("discord_messages_by_date", {})
+    if not isinstance(messages_by_date, dict) or not messages_by_date:
+        return {"deleted": 0, "state_changed": False}
+
+    sent_recaps = state.get("sent_result_recaps", {})
+    if not isinstance(sent_recaps, dict) or not sent_recaps:
+        return {"deleted": 0, "state_changed": False}
+
+    today_str = get_et_now().strftime("%Y-%m-%d")
+    deleted_count = 0
+    state_changed = False
+    remaining_messages_by_date: Dict[str, Any] = {}
+
+    for slate_date, channel_map in messages_by_date.items():
+        normalized_date = _normalize_game_date(slate_date)
+        if not normalized_date:
+            continue
+        if normalized_date >= today_str or normalized_date not in sent_recaps:
+            remaining_messages_by_date[normalized_date] = channel_map
+            continue
+
+        if not isinstance(channel_map, dict):
+            continue
+
+        remaining_channel_map: Dict[str, Any] = {}
+        for channel, refs in channel_map.items():
+            if not isinstance(refs, list):
+                continue
+            default_webhook_url = (
+                EDGE_SCORE_DISCORD_WEBHOOK_URL
+                if channel == "main"
+                else EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+            )
+            remaining_refs = []
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    continue
+                message_id = str(ref.get("message_id") or "").strip()
+                webhook_url = str(ref.get("webhook_url") or default_webhook_url or "").strip()
+                if not webhook_url or not message_id:
+                    remaining_refs.append(ref)
+                    continue
+                try:
+                    delete_status = _delete_discord_webhook_message(webhook_url, message_id)
+                except Exception as exc:
+                    logger.warning("Discord message cleanup failed for %s/%s: %s", normalized_date, channel, exc)
+                    remaining_refs.append(ref)
+                    continue
+                if delete_status in {"deleted", "missing"}:
+                    deleted_count += 1
+                    state_changed = True
+                else:
+                    remaining_refs.append(ref)
+            if remaining_refs:
+                remaining_channel_map[channel] = remaining_refs
+        if remaining_channel_map:
+            remaining_messages_by_date[normalized_date] = remaining_channel_map
+        elif normalized_date in messages_by_date:
+            state_changed = True
+
+    if state_changed:
+        state["discord_messages_by_date"] = remaining_messages_by_date
+    return {"deleted": deleted_count, "state_changed": state_changed}
+
+
 def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, Any]) -> Dict[str, Any]:
     pending = state.get("pending_result_recaps", {})
     if not isinstance(pending, dict) or not pending:
@@ -2854,12 +3048,14 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             remaining_pending[normalized_date] = recap_payload
             continue
 
-        if _send_discord_results_recap(recap_payload, graded_results):
+        recap_message = _send_discord_results_recap(recap_payload, graded_results)
+        if recap_message:
             sent_at = get_et_now().isoformat()
             sent_history[normalized_date] = {
                 "sent_at": sent_at,
                 "record": _results_record_text(graded_results.get("summary", {})),
                 "graded_count": graded_results.get("summary", {}).get("graded_count", 0),
+                "message_id": str(recap_message.get("id") or "").strip(),
             }
             _write_results_recap_history({
                 "game_date": normalized_date,
@@ -2889,9 +3085,9 @@ def _send_discord_webhook(
     *,
     webhook_url: str,
     channel_variant: str,
-) -> bool:
+) -> Optional[Dict[str, Any]]:
     if not webhook_url:
-        return False
+        return None
     if channel_variant == "tracker":
         discord_payload = _build_discord_tracker_payload(payload, notification_delta)
     else:
@@ -2901,7 +3097,7 @@ def _send_discord_webhook(
             channel_variant=channel_variant,
         )
     if not discord_payload:
-        return False
+        return None
     return _post_discord_webhook(webhook_url, discord_payload)
 
 
@@ -2976,6 +3172,14 @@ def run_edge_score_refresh(
             recap_result = _process_results_recaps(master_feed, state)
         except Exception as exc:
             logger.warning("Edge Score results recap failed: %s", exc)
+        try:
+            cleanup_result = _cleanup_completed_discord_messages(state)
+            recap_result["deleted_messages"] = cleanup_result.get("deleted", 0)
+            recap_result["state_changed"] = bool(
+                recap_result.get("state_changed") or cleanup_result.get("state_changed")
+            )
+        except Exception as exc:
+            logger.warning("Discord message cleanup failed: %s", exc)
 
     schedule_context = _build_schedule_context(schedule_payload)
     overlay_props_index = _build_overlay_props_index(current_players_data)
@@ -3130,8 +3334,10 @@ def run_edge_score_refresh(
             },
         },
     }
+    # The tracker intentionally backfills from the current official daily-props board,
+    # not from hidden overflow candidates outside the surfaced alert set.
     tracker_delta = _compute_tracker_delta(
-        notification_delta.get("send_recommendations", []),
+        notification_delta.get("official_recommendations", []),
         state,
         slate_date=notification_delta.get("slate_date", ""),
         generated_at=payload["generated_at"],
@@ -3144,36 +3350,39 @@ def run_edge_score_refresh(
     discord_sent = False
     discord_main_sent = False
     discord_tracker_sent = False
+    main_message_response: Optional[Dict[str, Any]] = None
+    tracker_message_response: Optional[Dict[str, Any]] = None
     state_changed = bool(recap_result.get("state_changed"))
-    if (
-        refresh_label in DISCORD_ALERT_REFRESH_LABELS
-        and notification_delta.get("should_send")
-        and _has_discord_alert_target()
-    ):
-        if EDGE_SCORE_DISCORD_WEBHOOK_URL:
+    tracker_delta_sent_snapshot = {}
+    slate_date = notification_delta.get("slate_date") or ""
+    if refresh_label in DISCORD_ALERT_REFRESH_LABELS and _has_discord_alert_target():
+        if EDGE_SCORE_DISCORD_WEBHOOK_URL and notification_delta.get("should_send"):
             try:
-                discord_main_sent = _send_discord_webhook(
+                main_message_response = _send_discord_webhook(
                     payload,
                     notification_delta,
                     webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
                     channel_variant="main",
                 )
+                discord_main_sent = bool(main_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score webhook failed: %s", exc)
         if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and tracker_delta.get("should_send"):
             try:
-                discord_tracker_sent = _send_discord_webhook(
+                tracker_message_response = _send_discord_webhook(
                     payload,
                     tracker_delta,
                     webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
                     channel_variant="tracker",
                 )
+                discord_tracker_sent = bool(tracker_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score tracker webhook failed: %s", exc)
+        if discord_tracker_sent:
+            tracker_delta_sent_snapshot = tracker_delta.get("current_snapshot", {})
         discord_sent = bool(discord_main_sent or discord_tracker_sent)
 
-    if discord_sent:
-        slate_date = notification_delta.get("slate_date") or ""
+    if discord_main_sent:
         alert_state_by_date = state.get("discord_alert_state_by_date", {})
         if not isinstance(alert_state_by_date, dict):
             alert_state_by_date = {}
@@ -3192,19 +3401,60 @@ def run_edge_score_refresh(
         if slate_date:
             alert_state_by_date[slate_date] = date_state
             state["discord_alert_state_by_date"] = alert_state_by_date
+            state_changed = True
 
-        tracker_visible_sent = bool(discord_tracker_sent or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and discord_main_sent))
-        if tracker_visible_sent and tracker_delta.get("new_recommendations"):
-            _queue_results_recap_payload(
+        if slate_date and discord_main_sent and isinstance(main_message_response, dict):
+            if _store_discord_message_ref(
                 state,
-                tracker_delta.get("new_recommendations", []),
-                generated_at=payload["generated_at"],
-                refresh_label=refresh_label,
-                alert_kind="tracker",
-            )
+                slate_date=slate_date,
+                channel="main",
+                message=main_message_response,
+                webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
+                alert_kind=notification_delta.get("alert_kind", "update"),
+                sent_at=payload["generated_at"],
+            ):
+                state_changed = True
+
+    if discord_tracker_sent and slate_date:
+        tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
+        if not isinstance(tracker_state_by_date, dict):
+            tracker_state_by_date = {}
+        tracker_date_state = tracker_state_by_date.get(slate_date, {})
+        if not isinstance(tracker_date_state, dict):
+            tracker_date_state = {}
+        sent_snapshot = tracker_date_state.get("sent_snapshot", {})
+        if not isinstance(sent_snapshot, dict):
+            sent_snapshot = {}
+        sent_snapshot.update(tracker_delta_sent_snapshot)
+        tracker_date_state["sent_snapshot"] = sent_snapshot
+        tracker_date_state.setdefault("first_sent_at", payload["generated_at"])
+        tracker_date_state["last_sent_at"] = payload["generated_at"]
+        tracker_state_by_date[slate_date] = tracker_date_state
+        state["discord_tracker_state_by_date"] = tracker_state_by_date
+        state_changed = True
+
+    if slate_date and discord_tracker_sent and isinstance(tracker_message_response, dict):
+        if _store_discord_message_ref(
+            state,
+            slate_date=slate_date,
+            channel="tracker",
+            message=tracker_message_response,
+            webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
+            alert_kind="tracker",
+            sent_at=payload["generated_at"],
+        ):
             state_changed = True
-        elif discord_sent:
-            state_changed = True
+
+    tracker_visible_sent = bool(discord_tracker_sent or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and discord_main_sent))
+    if tracker_visible_sent and tracker_delta.get("new_recommendations"):
+        _queue_results_recap_payload(
+            state,
+            tracker_delta.get("new_recommendations", []),
+            generated_at=payload["generated_at"],
+            refresh_label=refresh_label,
+            alert_kind="tracker",
+        )
+        state_changed = True
 
     if state_changed or (not os.path.exists(EDGE_SCORE_STATE_PATH)):
         _write_json_atomic(EDGE_SCORE_STATE_PATH, state if isinstance(state, dict) else {})
@@ -3219,6 +3469,7 @@ def run_edge_score_refresh(
             top=len(top_recommendations),
             discord_sent=True,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),
+            deleted_discord_messages=recap_result.get("deleted_messages", 0),
             supabase_sync_ok=sync_ok,
         )
     else:
@@ -3230,6 +3481,7 @@ def run_edge_score_refresh(
             top=len(top_recommendations),
             discord_sent=False,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),
+            deleted_discord_messages=recap_result.get("deleted_messages", 0),
             supabase_sync_ok=sync_ok,
         )
 
