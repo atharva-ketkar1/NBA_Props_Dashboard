@@ -53,9 +53,21 @@ EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS = max(
     _env_int("EDGE_SCORE_NOTIFICATION_MIN_INTERVAL_SECONDS", 900),
 )
 EDGE_SCORE_DISCORD_WEBHOOK_URL = os.getenv("EDGE_SCORE_DISCORD_WEBHOOK_URL", "").strip()
+EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL = (
+    os.getenv("EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL", "")
+    or os.getenv("EDGE_SCORE_DISCORD_LOG_WEBHOOK_URL", "")
+).strip()
+EDGE_SCORE_DISCORD_ASSETS_BASE_URL = (
+    os.getenv("EDGE_SCORE_DISCORD_ASSETS_BASE_URL", "")
+    or os.getenv("VITE_ASSETS_URL", "")
+).strip().rstrip("/")
 EDGE_DISCORD_MIN_SIGNAL_SCORE = max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCORD_MIN_SIGNAL_SCORE", 72.5)))
 EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
 EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
+EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = max(
+    1.0,
+    min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 77.5)),
+)
 EDGE_SPORTSBOOK_BOARD_LIMIT = max(1, _env_int("EDGE_SPORTSBOOK_BOARD_LIMIT", 10))
 EDGE_DISCORD_LINE_MOVE_POINTS = max(0.25, _env_float("EDGE_SCORE_DISCORD_LINE_MOVE_POINTS", 1.0))
 EDGE_DISCORD_ODDS_MOVE_AMERICAN = max(5, _env_int("EDGE_SCORE_DISCORD_ODDS_MOVE_AMERICAN", 25))
@@ -193,6 +205,11 @@ BOOK_EMBED_COLORS = {
     "dk": 0xF97316,
     "fd": 0x2563EB,
     "pp": 0xDC2626,
+}
+SPORTSBOOK_LOGO_FILES = {
+    "dk": "draftkings.webp",
+    "fd": "fanduel.webp",
+    "pp": "prizepicks.webp",
 }
 PP_PROP_MAP = {
     "points": "PTS",
@@ -349,6 +366,48 @@ def _format_odds(raw_odds: Any) -> str:
         return "-"
     odds_int = int(round(odds))
     return f"+{odds_int}" if odds_int > 0 else str(odds_int)
+
+
+def _has_discord_alert_target() -> bool:
+    return bool(EDGE_SCORE_DISCORD_WEBHOOK_URL or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL)
+
+
+def _results_recap_webhook_url() -> str:
+    return EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL or EDGE_SCORE_DISCORD_WEBHOOK_URL
+
+
+def _post_discord_webhook(webhook_url: str, payload: Dict[str, Any]) -> bool:
+    if not webhook_url:
+        return False
+    response = requests.post(
+        webhook_url,
+        json=payload,
+        timeout=10,
+    )
+    response.raise_for_status()
+    return True
+
+
+def _format_discord_timestamp(raw_value: Any) -> str:
+    dt = _parse_dt(raw_value) or get_et_now()
+    month = dt.strftime("%b")
+    time_text = dt.strftime("%I:%M %p").lstrip("0")
+    return f"{month} {dt.day}, {dt.year} • {time_text} ET"
+
+
+def _format_tracker_time(raw_value: Any) -> str:
+    dt = _parse_dt(raw_value) or get_et_now()
+    return dt.strftime("%I:%M %p ET").lstrip("0")
+
+
+def _sportsbook_logo_url(book: Any) -> Optional[str]:
+    normalized = str(book or "").strip().lower()
+    logo_file = SPORTSBOOK_LOGO_FILES.get(normalized)
+    if not logo_file:
+        return None
+    if not EDGE_SCORE_DISCORD_ASSETS_BASE_URL.startswith("http"):
+        return None
+    return f"{EDGE_SCORE_DISCORD_ASSETS_BASE_URL}/assets/sportsbook_logos/{logo_file}"
 
 
 def _stat_value_from_stats(stats: Dict[str, Any], stat_type: str) -> Optional[float]:
@@ -1901,6 +1960,16 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
     return filtered
 
 
+def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    filtered = []
+    for recommendation in recommendations:
+        signal_score = _safe_float(recommendation.get("edge_score"), 0.0) or 0.0
+        if signal_score < EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE:
+            continue
+        filtered.append(recommendation)
+    return filtered
+
+
 def _compute_notification_delta(
     recommendations: List[Dict[str, Any]],
     state: Dict[str, Any],
@@ -1986,7 +2055,16 @@ def _compute_notification_delta(
             send_recommendations = official_recommendations
         elif changes:
             alert_kind = "update"
-            send_recommendations = official_recommendations
+            changed_keys = {
+                str(change.get("recommendation_key") or "").strip()
+                for change in changes
+                if str(change.get("recommendation_key") or "").strip()
+            }
+            send_recommendations = [
+                recommendation
+                for recommendation in official_recommendations
+                if str(recommendation.get("recommendation_key") or "").strip() in changed_keys
+            ]
 
     should_send = bool(send_recommendations)
     if alert_kind == "pre_tip":
@@ -2124,18 +2202,6 @@ def _discord_signal_summary(recommendation: Dict[str, Any]) -> str:
     return f"{deduped_snippets[0]}; {deduped_snippets[1]}; {deduped_snippets[2]}."
 
 
-def _discord_change_summary(change: Dict[str, Any]) -> str:
-    stat_label = _long_stat_label(change.get("stat_type"), change.get("stat_type"))
-    reasons = change.get("reasons", []) or ["updated"]
-    pretty_reasons = [NOTIFICATION_REASON_LABELS.get(reason, reason) for reason in reasons]
-    line_value = _safe_float(change.get("line"), 0.0) or 0.0
-    return (
-        f"#{change.get('rank')} {change.get('player_name')} — "
-        f"{stat_label} {_side_name(change.get('pick')).lower()} {line_value:.1f}: "
-        f"{', '.join(pretty_reasons)}"
-    )
-
-
 def _serialize_recommendation_for_results(recommendation: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "rank": recommendation.get("rank"),
@@ -2157,6 +2223,7 @@ def _serialize_recommendation_for_results(recommendation: Dict[str, Any]) -> Dic
         "odds": _safe_float(recommendation.get("odds")),
         "odds_display": recommendation.get("odds_display"),
         "edge_score": _safe_float(recommendation.get("edge_score")),
+        "first_logged_at": recommendation.get("first_logged_at"),
     }
 
 
@@ -2218,6 +2285,41 @@ def _queue_results_recap_payload(
         }
 
     state["pending_result_recaps"] = pending
+
+
+def _compute_tracker_delta(
+    recommendations: List[Dict[str, Any]],
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    generated_at: Any,
+) -> Dict[str, Any]:
+    tracker_candidates = _filter_tracker_recommendations(recommendations)
+    pending = state.get("pending_result_recaps", {})
+    if not isinstance(pending, dict):
+        pending = {}
+    existing_entry = pending.get(slate_date, {}) if slate_date else {}
+    if not isinstance(existing_entry, dict):
+        existing_entry = {}
+    tracked = existing_entry.get("tracked_recommendations", {})
+    if not isinstance(tracked, dict):
+        tracked = {}
+
+    new_recommendations = []
+    for recommendation in tracker_candidates:
+        recommendation_key = str(recommendation.get("recommendation_key") or "").strip()
+        if not recommendation_key or recommendation_key in tracked:
+            continue
+        tracker_recommendation = dict(recommendation)
+        tracker_recommendation["first_logged_at"] = generated_at
+        new_recommendations.append(tracker_recommendation)
+
+    return {
+        "tracker_candidates": tracker_candidates,
+        "new_recommendations": new_recommendations,
+        "should_send": bool(new_recommendations),
+        "slate_date": slate_date,
+    }
 
 
 def _write_results_recap_history(entry: Dict[str, Any]) -> None:
@@ -2373,8 +2475,19 @@ def _results_record_text(summary: Dict[str, Any]) -> str:
     return base
 
 
+def _result_status_emoji(status: str) -> str:
+    if status == "cashed":
+        return "✅"
+    if status == "lost":
+        return "❌"
+    if status == "push":
+        return "➖"
+    return "⚪"
+
+
 def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: Dict[str, Any]) -> bool:
-    if not EDGE_SCORE_DISCORD_WEBHOOK_URL:
+    webhook_url = _results_recap_webhook_url()
+    if not webhook_url:
         return False
 
     summary = graded_results.get("summary", {})
@@ -2383,18 +2496,20 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         final_value = recommendation.get("final_value")
         final_text = f"{final_value:.1f}" if isinstance(final_value, (float, int)) else (recommendation.get("result_note") or "Void")
+        tracked_at = _format_tracker_time(recommendation.get("first_alerted_at") or recommendation.get("first_logged_at"))
+        status_emoji = _result_status_emoji(str(recommendation.get("result_status") or ""))
         lines.append(
-            f"**#{display_rank} {recommendation.get('result_label')}** {recommendation.get('player_name')} — "
+            f"**#{display_rank} {status_emoji} {recommendation.get('player_name')}** — "
             f"{stat_label} {recommendation.get('pick_label')} {float(recommendation.get('line') or 0.0):.1f}\n"
-            f"Final: {final_text} | {_discord_book_label(recommendation)}"
+            f"Tracked: {tracked_at} | Final: {final_text} | {_discord_book_label(recommendation)}"
         )
 
     recap_date = _normalize_game_date(recap_payload.get("game_date"))
     discord_payload = {
-        "username": "NBA Dashboard Top Spots",
+        "username": "NBA Dashboard Prop Tracker" if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL else "NBA Dashboard Daily Props",
         "embeds": [
             {
-                "title": "Yesterday's Top Spots Results",
+                "title": "Daily Prop Tracker Results",
                 "description": "\n".join(lines)[:3800],
                 "color": 0x3B82F6,
                 "timestamp": get_et_now().isoformat(),
@@ -2409,18 +2524,22 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
                         "value": _results_record_text(summary),
                         "inline": True,
                     },
+                    {
+                        "name": "Tracked Picks",
+                        "value": str(summary.get("graded_count", 0)),
+                        "inline": True,
+                    },
+                    {
+                        "name": "Recapped",
+                        "value": _format_discord_timestamp(get_et_now().isoformat()),
+                        "inline": False,
+                    },
                 ],
             }
         ],
     }
 
-    response = requests.post(
-        EDGE_SCORE_DISCORD_WEBHOOK_URL,
-        json=discord_payload,
-        timeout=10,
-    )
-    response.raise_for_status()
-    return True
+    return _post_discord_webhook(webhook_url, discord_payload)
 
 
 def _group_recommendations_by_sportsbook(
@@ -2445,6 +2564,262 @@ def _group_recommendations_by_sportsbook(
             "recommendations": book_recommendations[:limit_per_book],
         })
     return grouped_output
+
+
+def _changed_books_summary(groups: List[Dict[str, Any]]) -> str:
+    return ", ".join(
+        f"{group['sportsbook_label']} ({group['total_count']})"
+        for group in groups
+    ) or "No changed sportsbook groups."
+
+
+def _build_discord_book_embed(
+    group: Dict[str, Any],
+    *,
+    alert_kind: str,
+    change_lookup: Dict[str, Dict[str, Any]],
+    channel_variant: str,
+) -> Dict[str, Any]:
+    book_recommendations = group["recommendations"]
+    lines = []
+    for display_rank, recommendation in enumerate(book_recommendations, start=1):
+        stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
+        reason_prefix = ""
+        change = change_lookup.get(str(recommendation.get("recommendation_key") or "").strip())
+        if alert_kind == "update" and change:
+            pretty_reasons = [
+                NOTIFICATION_REASON_LABELS.get(reason, reason)
+                for reason in (change.get("reasons", []) or ["updated"])
+            ]
+            reason_prefix = f"Change: {', '.join(pretty_reasons)}\n"
+        if channel_variant == "tracker":
+            first_logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
+            reason_prefix = f"First logged: {first_logged_at}\n"
+        lines.append(
+            f"**{display_rank}.** {recommendation['player_name']} — "
+            f"{stat_label} {recommendation['pick_label']} {recommendation['line']:.1f}\n"
+            f"{_discord_book_label(recommendation)} | Signal Score {recommendation['edge_score']:.1f}\n"
+            f"{reason_prefix}Why: {_discord_signal_summary(recommendation)}"
+        )
+
+    overflow_count = max(0, int(group.get("total_count", 0)) - len(book_recommendations))
+    if overflow_count:
+        suffix = "in this tracker batch" if channel_variant == "tracker" else "in this alert"
+        lines.append(f"`+{overflow_count} more {group['sportsbook_label']} spot(s) {suffix}`")
+
+    book_embed: Dict[str, Any] = {
+        "title": group["sportsbook_label"],
+        "description": "\n\n".join(lines)[:3800],
+        "color": BOOK_EMBED_COLORS.get(group["sportsbook"], 0x22C55E),
+    }
+    thumbnail_url = _sportsbook_logo_url(group["sportsbook"])
+    if thumbnail_url:
+        book_embed["thumbnail"] = {"url": thumbnail_url}
+    return book_embed
+
+
+def _build_discord_alert_payload(
+    payload: Dict[str, Any],
+    notification_delta: Dict[str, Any],
+    *,
+    channel_variant: str,
+) -> Optional[Dict[str, Any]]:
+    recommendations = notification_delta.get("send_recommendations", [])
+    if not recommendations:
+        return None
+
+    alert_kind = notification_delta.get("alert_kind", "update")
+    changes = notification_delta.get("changes", [])
+    removed = notification_delta.get("removed", [])
+    grouped_books = _group_recommendations_by_sportsbook(
+        recommendations,
+        limit_per_book=EDGE_DISCORD_PER_BOOK_LIMIT,
+    )
+    if not grouped_books:
+        return None
+
+    title_map = {
+        "opening": "Today's Best Props",
+        "update": "Today's Best Props Update",
+        "pre_tip": "Today's Best Props Final",
+    }
+    refresh_label_text = REFRESH_LABELS.get(
+        payload.get("refresh_label"),
+        str(payload.get("refresh_label") or "Refresh").replace("_", " ").title(),
+    )
+    threshold_text = _format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)
+    rules_text = (
+        f"Up to {EDGE_DISCORD_PER_BOOK_LIMIT} props per sportsbook at Signal Score {threshold_text}+."
+    )
+    books_summary = _changed_books_summary(grouped_books)
+    removed_lines = [
+        (
+            f"{removed_item.get('player_name')} — "
+            f"{_long_stat_label(removed_item.get('stat_type'), removed_item.get('stat_type'))} "
+            f"{_side_name(removed_item.get('pick')).lower()}"
+        )
+        for removed_item in removed[:4]
+    ]
+    summary_fields: List[Dict[str, Any]] = []
+
+    if alert_kind == "opening":
+        description = (
+            f"Posted { _format_discord_timestamp(payload.get('generated_at')) }. "
+            "Top signals are grouped by sportsbook below."
+        )
+        summary_fields.extend([
+            {
+                "name": "Why this fired",
+                "value": rules_text[:1024],
+                "inline": False,
+            },
+            {
+                "name": "Books in this alert",
+                "value": books_summary[:1024],
+                "inline": False,
+            },
+            {
+                "name": "Slate",
+                "value": ", ".join(payload.get("game_dates", [])) or "n/a",
+                "inline": True,
+            },
+            {
+                "name": "Signal Score",
+                "value": "1-99 read on how strongly the current data supports a prop.",
+                "inline": False,
+            },
+        ])
+    else:
+        description = (
+            f"Posted { _format_discord_timestamp(payload.get('generated_at')) }. "
+            "Only props with meaningful changes are listed below."
+        )
+        summary_fields.extend([
+            {
+                "name": "Why this updated",
+                "value": "Only props with a new entrant, better book, line move, or price move are shown."[:1024],
+                "inline": False,
+            },
+            {
+                "name": "Books changed",
+                "value": books_summary[:1024],
+                "inline": False,
+            },
+        ])
+        if removed_lines:
+            summary_fields.append({
+                "name": "Dropped",
+                "value": "\n".join(removed_lines)[:700],
+                "inline": False,
+            })
+
+    title_label = title_map.get(alert_kind) or "Today's Best Props Update"
+    change_lookup = {
+        str(change.get("recommendation_key") or "").strip(): change
+        for change in changes
+        if str(change.get("recommendation_key") or "").strip()
+    }
+    embeds = [
+        {
+            "title": f"{title_label} • {refresh_label_text}",
+            "description": description[:4096],
+            "color": 0x22C55E,
+            "timestamp": payload.get("generated_at"),
+            "fields": summary_fields,
+        }
+    ]
+
+    for group in grouped_books:
+        embeds.append(
+            _build_discord_book_embed(
+                group,
+                alert_kind=alert_kind,
+                change_lookup=change_lookup,
+                channel_variant=channel_variant,
+            )
+        )
+
+    username = "NBA Dashboard Daily Props"
+    return {
+        "username": username,
+        "embeds": embeds,
+    }
+
+
+def _build_discord_tracker_payload(
+    payload: Dict[str, Any],
+    tracker_delta: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    recommendations = tracker_delta.get("new_recommendations", [])
+    if not recommendations:
+        return None
+
+    grouped_books = _group_recommendations_by_sportsbook(
+        recommendations,
+        limit_per_book=max(EDGE_DISCORD_PER_BOOK_LIMIT, 1),
+    )
+    if not grouped_books:
+        return None
+
+    refresh_label_text = REFRESH_LABELS.get(
+        payload.get("refresh_label"),
+        str(payload.get("refresh_label") or "Refresh").replace("_", " ").title(),
+    )
+    books_summary = _changed_books_summary(grouped_books)
+    summary_fields: List[Dict[str, Any]] = [
+        {
+            "name": "Logged",
+            "value": _format_discord_timestamp(payload.get("generated_at")),
+            "inline": False,
+        },
+        {
+            "name": "Tracker threshold",
+            "value": f"Signal Score {_format_signal_score_threshold(EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE)}+",
+            "inline": True,
+        },
+        {
+            "name": "Slate",
+            "value": ", ".join(payload.get("game_dates", [])) or "n/a",
+            "inline": True,
+        },
+        {
+            "name": "Books in this log",
+            "value": books_summary[:1024],
+            "inline": False,
+        },
+        {
+            "name": "How this works",
+            "value": (
+                "This tracker logs a prop once when it first clears the threshold, freezes that first book/line, "
+                "and grades that exact entry in tomorrow's results recap."
+            )[:1024],
+            "inline": False,
+        },
+    ]
+
+    embeds = [
+        {
+            "title": f"Daily Prop Tracker • {refresh_label_text}",
+            "description": "Running ledger of the highest-signal props from the live daily props feed.",
+            "color": 0x3B82F6,
+            "timestamp": payload.get("generated_at"),
+            "fields": summary_fields,
+        }
+    ]
+    for group in grouped_books:
+        embeds.append(
+            _build_discord_book_embed(
+                group,
+                alert_kind="opening",
+                change_lookup={},
+                channel_variant="tracker",
+            )
+        )
+
+    return {
+        "username": "NBA Dashboard Prop Tracker",
+        "embeds": embeds,
+    }
 
 
 def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, Any]) -> Dict[str, Any]:
@@ -2508,145 +2883,26 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
     return {"sent_dates": sent_dates, "state_changed": state_changed}
 
 
-def _send_discord_webhook(payload: Dict[str, Any], notification_delta: Dict[str, Any]) -> bool:
-    if not EDGE_SCORE_DISCORD_WEBHOOK_URL:
+def _send_discord_webhook(
+    payload: Dict[str, Any],
+    notification_delta: Dict[str, Any],
+    *,
+    webhook_url: str,
+    channel_variant: str,
+) -> bool:
+    if not webhook_url:
         return False
-
-    changes = notification_delta.get("changes", [])
-    recommendations = notification_delta.get("send_recommendations", [])
-    alert_kind = notification_delta.get("alert_kind", "update")
-    change_lines = []
-    for change in changes[:6]:
-        change_lines.append(_discord_change_summary(change))
-
-    removed = notification_delta.get("removed", [])
-    removed_lines = []
-    for removed_item in removed[:4]:
-        removed_lines.append(
-            f"{removed_item.get('player_name')} — "
-            f"{_long_stat_label(removed_item.get('stat_type'), removed_item.get('stat_type'))} "
-            f"{_side_name(removed_item.get('pick')).lower()}"
+    if channel_variant == "tracker":
+        discord_payload = _build_discord_tracker_payload(payload, notification_delta)
+    else:
+        discord_payload = _build_discord_alert_payload(
+            payload,
+            notification_delta,
+            channel_variant=channel_variant,
         )
-
-    title_map = {
-        "opening": "Today's Best Props Alert",
-        "update": "Today's Best Props Update",
-        "pre_tip": "Today's Best Props Final",
-    }
-    rules_text = (
-        f"Discord only sends official alerts for up to {EDGE_DISCORD_PER_BOOK_LIMIT} props per sportsbook "
-        f"with Signal Score {_format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)}+."
-    )
-    title_label = title_map.get(alert_kind) or "Today's Best Props Update"
-    refresh_label_text = REFRESH_LABELS.get(
-        payload.get("refresh_label"),
-        str(payload.get("refresh_label") or "Refresh").replace("_", " ").title(),
-    )
-    grouped_books = _group_recommendations_by_sportsbook(
-        recommendations,
-        limit_per_book=EDGE_DISCORD_PER_BOOK_LIMIT,
-    )
-    books_summary = ", ".join(
-        f"{group['sportsbook_label']} ({group['total_count']})"
-        for group in grouped_books
-    ) or "No official sportsbook groups."
-
-    embeds = [
-        {
-            "title": f"{title_label} • {refresh_label_text}",
-            "description": "Grouped by sportsbook below so you can scan the best numbers at each book.",
-            "color": 0x22C55E,
-            "timestamp": payload.get("generated_at"),
-            "fields": [
-                {
-                    "name": "What Signal Score Means",
-                    "value": (
-                        "Signal Score is our 1-99 ranking of how much the current data supports a prop. "
-                        "It blends projection, recent form, matchup, market value, line movement, and comparable-player context. "
-                        "Higher means more signals are lining up."
-                    )[:1024],
-                    "inline": False,
-                },
-                {
-                    "name": "Why You Got This Alert",
-                    "value": rules_text[:1024],
-                    "inline": False,
-                },
-                {
-                    "name": "Sportsbooks In This Alert",
-                    "value": books_summary[:1024],
-                    "inline": False,
-                },
-                {
-                    "name": "Slate Dates",
-                    "value": ", ".join(payload.get("game_dates", [])) or "n/a",
-                    "inline": True,
-                },
-                {
-                    "name": "What Changed",
-                    "value": (
-                        "\n".join(change_lines)[:1000]
-                        if alert_kind == "update" and change_lines
-                        else (
-                            "First official alert for this slate."
-                            if alert_kind == "opening"
-                            else "Final official board before tip."
-                        )
-                    ),
-                    "inline": False,
-                },
-                {
-                    "name": "Dropped From Official Alerts",
-                    "value": "\n".join(removed_lines)[:700] if removed_lines else "None.",
-                    "inline": False,
-                },
-            ],
-        }
-    ]
-
-    for group in grouped_books:
-        book_recommendations = group["recommendations"]
-        lines = []
-        for display_rank, recommendation in enumerate(book_recommendations, start=1):
-            stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
-            lines.append(
-                f"**{display_rank}.** {recommendation['player_name']} — "
-                f"{stat_label} {recommendation['pick_label']} {recommendation['line']:.1f}\n"
-                f"{_discord_book_label(recommendation)} | Signal Score {recommendation['edge_score']:.1f}\n"
-                f"Why it ranks high: {_discord_signal_summary(recommendation)}"
-            )
-
-        overflow_count = max(0, int(group.get("total_count", 0)) - len(book_recommendations))
-        if overflow_count:
-            lines.append(f"`+{overflow_count} more official {group['sportsbook_label']} spot(s)`")
-
-        top_recommendation = book_recommendations[0] if book_recommendations else {}
-        book_embed: Dict[str, Any] = {
-            "title": group["sportsbook_label"],
-            "description": "\n\n".join(lines)[:3800],
-            "color": BOOK_EMBED_COLORS.get(group["sportsbook"], 0x22C55E),
-        }
-        thumbnail_url = top_recommendation.get("player_headshot_url")
-        if thumbnail_url:
-            book_embed["author"] = {
-                "name": group["sportsbook_label"],
-                "icon_url": thumbnail_url,
-            }
-            book_embed["thumbnail"] = {"url": thumbnail_url}
-        embeds.append(book_embed)
-
-    discord_payload = {
-        "username": "NBA Dashboard Top Spots",
-        "embeds": embeds,
-    }
-
-    response = requests.post(
-        EDGE_SCORE_DISCORD_WEBHOOK_URL,
-        json=discord_payload,
-        timeout=10,
-    )
-    response.raise_for_status()
-    return True
+    if not discord_payload:
+        return False
+    return _post_discord_webhook(webhook_url, discord_payload)
 
 
 def _is_missing_relation_error(error: Exception, table_name: str) -> bool:
@@ -2715,7 +2971,7 @@ def run_edge_score_refresh(
         master_feed = []
 
     recap_result = {"sent_dates": [], "state_changed": False}
-    if refresh_label == "pipeline" and EDGE_SCORE_DISCORD_WEBHOOK_URL:
+    if refresh_label == "pipeline" and _results_recap_webhook_url():
         try:
             recap_result = _process_results_recaps(master_feed, state)
         except Exception as exc:
@@ -2849,13 +3105,16 @@ def run_edge_score_refresh(
         },
         "recommendations": top_recommendations,
         "notification": {
-            "discord_configured": bool(EDGE_SCORE_DISCORD_WEBHOOK_URL),
+            "discord_configured": _has_discord_alert_target(),
+            "discord_main_configured": bool(EDGE_SCORE_DISCORD_WEBHOOK_URL),
+            "discord_tracker_configured": bool(EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL),
             "should_send": bool(notification_delta.get("should_send")),
             "delivery_allowed": refresh_label in DISCORD_ALERT_REFRESH_LABELS,
             "delivery_scope": "intraday_only",
             "cooldown_active": bool(notification_delta.get("cooldown_active")),
             "alert_kind": notification_delta.get("alert_kind"),
             "official_candidate_count": len(official_recommendations),
+            "tracker_min_signal_score": EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE,
             "change_count": len(notification_delta.get("changes", [])),
             "removed_count": len(notification_delta.get("removed", [])),
             "changes": notification_delta.get("changes", []),
@@ -2871,21 +3130,47 @@ def run_edge_score_refresh(
             },
         },
     }
+    tracker_delta = _compute_tracker_delta(
+        notification_delta.get("send_recommendations", []),
+        state,
+        slate_date=notification_delta.get("slate_date", ""),
+        generated_at=payload["generated_at"],
+    )
+    payload["notification"]["tracker_new_count"] = len(tracker_delta.get("new_recommendations", []))
 
     _write_json_atomic(EDGE_SCORE_PATH, payload)
     _write_history_snapshot(payload)
 
     discord_sent = False
+    discord_main_sent = False
+    discord_tracker_sent = False
     state_changed = bool(recap_result.get("state_changed"))
     if (
         refresh_label in DISCORD_ALERT_REFRESH_LABELS
         and notification_delta.get("should_send")
-        and EDGE_SCORE_DISCORD_WEBHOOK_URL
+        and _has_discord_alert_target()
     ):
-        try:
-            discord_sent = _send_discord_webhook(payload, notification_delta)
-        except Exception as exc:
-            logger.warning("Discord Edge Score webhook failed: %s", exc)
+        if EDGE_SCORE_DISCORD_WEBHOOK_URL:
+            try:
+                discord_main_sent = _send_discord_webhook(
+                    payload,
+                    notification_delta,
+                    webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
+                    channel_variant="main",
+                )
+            except Exception as exc:
+                logger.warning("Discord Edge Score webhook failed: %s", exc)
+        if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and tracker_delta.get("should_send"):
+            try:
+                discord_tracker_sent = _send_discord_webhook(
+                    payload,
+                    tracker_delta,
+                    webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
+                    channel_variant="tracker",
+                )
+            except Exception as exc:
+                logger.warning("Discord Edge Score tracker webhook failed: %s", exc)
+        discord_sent = bool(discord_main_sent or discord_tracker_sent)
 
     if discord_sent:
         slate_date = notification_delta.get("slate_date") or ""
@@ -2908,14 +3193,18 @@ def run_edge_score_refresh(
             alert_state_by_date[slate_date] = date_state
             state["discord_alert_state_by_date"] = alert_state_by_date
 
-        _queue_results_recap_payload(
-            state,
-            notification_delta.get("send_recommendations", []),
-            generated_at=payload["generated_at"],
-            refresh_label=refresh_label,
-            alert_kind=notification_delta.get("alert_kind", "update"),
-        )
-        state_changed = True
+        tracker_visible_sent = bool(discord_tracker_sent or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and discord_main_sent))
+        if tracker_visible_sent and tracker_delta.get("new_recommendations"):
+            _queue_results_recap_payload(
+                state,
+                tracker_delta.get("new_recommendations", []),
+                generated_at=payload["generated_at"],
+                refresh_label=refresh_label,
+                alert_kind="tracker",
+            )
+            state_changed = True
+        elif discord_sent:
+            state_changed = True
 
     if state_changed or (not os.path.exists(EDGE_SCORE_STATE_PATH)):
         _write_json_atomic(EDGE_SCORE_STATE_PATH, state if isinstance(state, dict) else {})
