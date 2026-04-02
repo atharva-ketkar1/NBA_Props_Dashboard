@@ -18,7 +18,7 @@ This project combines scheduled data collection, entity resolution, feature engi
 - Builds a canonical player feed with season stats, recent game logs, boxscore-derived context, and opponent matchup overlays.
 - Captures intraday line movement snapshots and near-tip closing lines.
 - Visualizes shot zones, assist zones, shot type splits, play type scoring mix, and prop hit-rate history.
-- Ranks the current slate with an explainable Signal Score that blends market numbers, recent form, matchup texture, similar-player context, and rest/back-to-back signals.
+- Ranks the current slate with an explainable Signal Score whose projection core now starts from expected minutes plus stat-specific opportunity rates, then blends in market numbers, recent form, matchup texture, similar-player context, and rest/back-to-back signals.
 - Supports two delivery modes:
   - Static JSON feed for local development and low-latency browsing
   - Supabase-backed reads for hosted deployments
@@ -85,7 +85,11 @@ Signal Score recomputes inside the same refresh owners:
 - after each intraday odds refresh
 - after each pre-tip closing refresh
 
+Its V1 projection layer is no longer just season average plus rolling box-score windows. The baseline now estimates expected minutes, applies a light game-script/blowout penalty when team context points that way, and builds stat-specific rates from opportunity proxies already in the repo such as usage and drives for points, potential assists for assists, rebound chances for rebounds, and attempt-plus-conversion for threes. Combo props sum their component rates rather than behaving like one generic historical average.
+
 If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, Discord acts as a narrower daily-props alert stream rather than mirroring every refresh. By default it sends up to 2 props per sportsbook with Signal Score 72.5+, but only on intraday refreshes. The first intraday alert for a slate sends the current grouped board, while later intraday updates only show props that actually changed because of a new entrant, better book, line move, or odds move. If `EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL` is also configured, a second tracker channel logs only the highest-signal official props that have not yet been posted to that tracker, freezes their first tracker book/line/time, and receives the next-morning graded recap. That tracker dedupe is now based on actual tracker delivery state rather than the recap queue, so adding the tracker channel mid-slate can still backfill current qualifying official-board props on the next eligible refresh. It does not reach into hidden overflow candidates that were not surfaced in the official daily Discord board. Discord sportsbook thumbnails now expect a public asset base from `EDGE_SCORE_DISCORD_ASSETS_BASE_URL`; otherwise the messages stay text-only rather than depending on brittle external logo links. The backend still grades only tracked picks, persists local artifacts first, and keeps Supabase sync best-effort.
+
+To manually verify the tracker webhook target, run `python3 test_tracker_discord.py --message "manual tracker test"` from [backend/](/Users/atharvaketkar/Desktop/NBA_Dashboard/backend). The script posts a one-off test message to the tracker webhook and prints the returned Discord `channel_id`/`message_id`.
 
 It uses a lock file plus persisted state to avoid duplicate runs and stale overlap.
 

@@ -67,7 +67,7 @@ EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
 EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
 EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = max(
     1.0,
-    min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 77.5)),
+    min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 72.5)),
 )
 EDGE_SPORTSBOOK_BOARD_LIMIT = max(1, _env_int("EDGE_SPORTSBOOK_BOARD_LIMIT", 10))
 EDGE_DISCORD_LINE_MOVE_POINTS = max(0.25, _env_float("EDGE_SCORE_DISCORD_LINE_MOVE_POINTS", 1.0))
@@ -605,6 +605,491 @@ def _weighted_average(pairs: List[Tuple[Optional[float], float]]) -> Optional[fl
     if denominator <= 0:
         return None
     return numerator / denominator
+
+
+def _safe_divide(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+    if numerator is None or denominator is None or abs(denominator) < 1e-9:
+        return None
+    return numerator / denominator
+
+
+def _normalize_fraction(raw_value: Any) -> Optional[float]:
+    value = _safe_float(raw_value)
+    if value is None:
+        return None
+    if value > 1.5:
+        value /= 100.0
+    return _clamp(value, 0.0, 2.0)
+
+
+def _clamp_optional(value: Optional[float], low: float, high: float) -> Optional[float]:
+    if value is None:
+        return None
+    return _clamp(value, low, high)
+
+
+def _average_log_metric(
+    logs: List[Dict[str, Any]],
+    key: str,
+    limit: int,
+    *,
+    percent: bool = False,
+) -> Optional[float]:
+    values: List[Optional[float]] = []
+    for game in logs[:limit]:
+        raw_value = game.get(key)
+        value = _normalize_fraction(raw_value) if percent else _safe_float(raw_value)
+        if value is not None:
+            values.append(value)
+    return _average(values)
+
+
+def _sum_log_metric(logs: List[Dict[str, Any]], key: str, limit: int) -> Optional[float]:
+    total = 0.0
+    seen = False
+    for game in logs[:limit]:
+        value = _safe_float(game.get(key))
+        if value is None:
+            continue
+        total += value
+        seen = True
+    return total if seen else None
+
+
+def _sum_log_minutes(logs: List[Dict[str, Any]], limit: int) -> Optional[float]:
+    total = 0.0
+    seen = False
+    for game in logs[:limit]:
+        minutes = _safe_float(game.get("MIN"))
+        if minutes is None or minutes <= 0:
+            continue
+        total += minutes
+        seen = True
+    return total if seen else None
+
+
+def _paired_metric_sums(
+    logs: List[Dict[str, Any]],
+    numerator_key: str,
+    denominator_key: str,
+    limit: int,
+) -> Tuple[Optional[float], Optional[float]]:
+    numerator_total = 0.0
+    denominator_total = 0.0
+    seen = False
+    for game in logs[:limit]:
+        numerator_value = _safe_float(game.get(numerator_key))
+        denominator_value = _safe_float(game.get(denominator_key))
+        if numerator_value is None or denominator_value is None or denominator_value <= 0:
+            continue
+        numerator_total += numerator_value
+        denominator_total += denominator_value
+        seen = True
+    if not seen:
+        return None, None
+    return numerator_total, denominator_total
+
+
+def _metric_rate_from_logs(logs: List[Dict[str, Any]], key: str, limit: int) -> Optional[float]:
+    numerator_total, denominator_total = _paired_metric_sums(logs, key, "MIN", limit)
+    return _safe_divide(numerator_total, denominator_total)
+
+
+def _stat_rate_from_logs(logs: List[Dict[str, Any]], stat_type: str, limit: int) -> Optional[float]:
+    numerator = 0.0
+    denominator = 0.0
+    seen = False
+    for game in logs[:limit]:
+        stat_value = _stat_value_from_game(game, stat_type)
+        minutes = _safe_float(game.get("MIN"))
+        if stat_value is None or minutes is None or minutes <= 0:
+            continue
+        numerator += stat_value
+        denominator += minutes
+        seen = True
+    if not seen:
+        return None
+    return _safe_divide(numerator, denominator)
+
+
+def _win_pct(wins: Any, losses: Any) -> Optional[float]:
+    wins_value = _safe_float(wins)
+    losses_value = _safe_float(losses)
+    if wins_value is None or losses_value is None:
+        return None
+    games_played = wins_value + losses_value
+    if games_played <= 0:
+        return None
+    return wins_value / games_played
+
+
+def _resolve_entry_game_team_context(entry: Dict[str, Any]) -> Dict[str, Any]:
+    game = entry.get("game_context")
+    if not isinstance(game, dict):
+        return {}
+
+    team = str(entry.get("team") or "").strip().upper()
+    home_team = str(game.get("home_team_tricode") or "").strip().upper()
+    away_team = str(game.get("away_team_tricode") or "").strip().upper()
+    if team == home_team:
+        return {
+            "is_home": True,
+            "team_win_pct": _win_pct(game.get("home_team_wins"), game.get("home_team_losses")),
+            "opponent_win_pct": _win_pct(game.get("away_team_wins"), game.get("away_team_losses")),
+            "current_score_differential": _safe_float(game.get("score_differential")),
+            "is_live": bool(game.get("is_live")),
+            "game_status": game.get("game_status"),
+        }
+    if team == away_team:
+        return {
+            "is_home": False,
+            "team_win_pct": _win_pct(game.get("away_team_wins"), game.get("away_team_losses")),
+            "opponent_win_pct": _win_pct(game.get("home_team_wins"), game.get("home_team_losses")),
+            "current_score_differential": _safe_float(game.get("score_differential")),
+            "is_live": bool(game.get("is_live")),
+            "game_status": game.get("game_status"),
+        }
+    return {}
+
+
+def _legacy_projection_baseline(
+    season_avg: Optional[float],
+    recent10_avg: Optional[float],
+    recent5_avg: Optional[float],
+    season_minutes: Optional[float],
+    recent_minutes: Optional[float],
+) -> Optional[float]:
+    minute_delta_ratio = None
+    if season_minutes and recent_minutes:
+        minute_delta_ratio = (recent_minutes - season_minutes) / max(season_minutes, 1.0)
+
+    baseline_projection = _weighted_average([
+        (season_avg, 0.48),
+        (recent10_avg, 0.32),
+        (recent5_avg, 0.20),
+    ])
+    if baseline_projection is not None and minute_delta_ratio is not None:
+        baseline_projection += baseline_projection * _clamp(minute_delta_ratio, -0.20, 0.20) * 0.18
+    return baseline_projection
+
+
+def _compute_expected_minutes_context(entry: Dict[str, Any], logs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    player = entry.get("player") if isinstance(entry, dict) else {}
+    stats = player.get("stats") if isinstance(player, dict) and isinstance(player.get("stats"), dict) else {}
+    season_minutes = _safe_float(stats.get("MIN"))
+    recent_5_minutes = _average([_safe_float(game.get("MIN")) for game in logs[:5]])
+    recent_10_minutes = _average([_safe_float(game.get("MIN")) for game in logs[:10]])
+    minutes_baseline = _weighted_average([
+        (season_minutes, 0.48),
+        (recent_10_minutes, 0.32),
+        (recent_5_minutes, 0.20),
+    ])
+
+    game_team_context = _resolve_entry_game_team_context(entry)
+    team_win_pct = _safe_float(game_team_context.get("team_win_pct"))
+    opponent_win_pct = _safe_float(game_team_context.get("opponent_win_pct"))
+    win_pct_gap = None
+    if team_win_pct is not None and opponent_win_pct is not None:
+        win_pct_gap = abs(team_win_pct - opponent_win_pct)
+
+    competitive_minutes: List[float] = []
+    blowout_minutes: List[float] = []
+    for game in logs[:25]:
+        minutes = _safe_float(game.get("MIN"))
+        margin = _safe_float(game.get("margin"))
+        if minutes is None or minutes <= 0 or margin is None:
+            continue
+        if abs(margin) >= 15:
+            blowout_minutes.append(minutes)
+        elif abs(margin) <= 8:
+            competitive_minutes.append(minutes)
+
+    competitive_avg = _average(competitive_minutes)
+    blowout_avg = _average(blowout_minutes)
+    historical_adjustment_ratio = None
+    if (
+        competitive_avg is not None
+        and competitive_avg > 0
+        and blowout_avg is not None
+        and len(competitive_minutes) >= 5
+        and len(blowout_minutes) >= 3
+    ):
+        historical_adjustment_ratio = (blowout_avg - competitive_avg) / competitive_avg
+
+    blowout_risk = 0.0
+    if win_pct_gap is not None:
+        blowout_risk = _clamp((win_pct_gap - 0.08) / 0.28, 0.0, 1.0)
+
+    live_score_differential = _safe_float(game_team_context.get("current_score_differential"))
+    if game_team_context.get("is_live") and live_score_differential is not None:
+        blowout_risk = max(blowout_risk, _clamp((abs(live_score_differential) - 10.0) / 12.0, 0.0, 1.0))
+
+    generic_adjustment_ratio = None
+    role_minutes = minutes_baseline or recent_10_minutes or season_minutes or recent_5_minutes
+    if blowout_risk > 0 and role_minutes is not None:
+        if role_minutes >= 34.0:
+            generic_adjustment_ratio = -0.04
+        elif role_minutes >= 28.0:
+            generic_adjustment_ratio = -0.025
+
+    raw_adjustment_ratio = _weighted_average([
+        (historical_adjustment_ratio, 0.70),
+        (generic_adjustment_ratio, 0.30),
+    ])
+    minutes_adjustment_ratio = None
+    if raw_adjustment_ratio is not None and blowout_risk > 0:
+        minutes_adjustment_ratio = _clamp(raw_adjustment_ratio * blowout_risk, -0.12, 0.03)
+
+    expected_minutes = minutes_baseline
+    if expected_minutes is not None and minutes_adjustment_ratio is not None:
+        expected_minutes *= (1.0 + minutes_adjustment_ratio)
+    if expected_minutes is not None:
+        expected_minutes = _clamp(expected_minutes, 4.0, 42.0)
+
+    return {
+        "expected_minutes": expected_minutes,
+        "season_minutes": season_minutes,
+        "recent_5_minutes": recent_5_minutes,
+        "recent_10_minutes": recent_10_minutes,
+        "minutes_baseline": minutes_baseline,
+        "minutes_adjustment_ratio": minutes_adjustment_ratio,
+        "blowout_risk": blowout_risk if blowout_risk > 0 else None,
+        "team_win_pct": team_win_pct,
+        "opponent_win_pct": opponent_win_pct,
+        "competitive_minutes_avg": competitive_avg,
+        "blowout_minutes_avg": blowout_avg,
+        "blowout_sample_size": len(blowout_minutes),
+        "competitive_sample_size": len(competitive_minutes),
+    }
+
+
+def _estimate_stat_rate_context(player: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Dict[str, Any]:
+    stats = player.get("stats") if isinstance(player.get("stats"), dict) else {}
+    season_minutes = _safe_float(stats.get("MIN"))
+    season_stat = _stat_value_from_stats(stats, stat_type)
+    season_rate = _safe_divide(season_stat, season_minutes)
+    recent_10_rate = _stat_rate_from_logs(logs, stat_type, 10)
+    recent_5_rate = _stat_rate_from_logs(logs, stat_type, 5)
+    base_rate = _weighted_average([
+        (season_rate, 0.48),
+        (recent_10_rate, 0.32),
+        (recent_5_rate, 0.20),
+    ])
+
+    profile = STAT_PROFILES.get(stat_type, {})
+    component_rates: Dict[str, Any] = {}
+    expected_rate = base_rate
+    rate_model = "per_minute_blend"
+
+    if stat_type in {"PTS+REB+AST", "PTS+REB", "PTS+AST", "REB+AST"}:
+        component_rate_total = 0.0
+        components_available = 0
+        for component_stat, _ in (profile.get("components") or {}).items():
+            component_context = _estimate_stat_rate_context(player, logs, component_stat)
+            component_rates[component_stat] = component_context.get("details", {})
+            component_rate = _safe_float(component_context.get("expected_rate"))
+            if component_rate is not None:
+                component_rate_total += component_rate
+                components_available += 1
+        component_rate_projection = component_rate_total if components_available > 0 else None
+        expected_rate = _weighted_average([
+            (component_rate_projection, 0.85),
+            (base_rate, 0.15),
+        ])
+        rate_model = "component_sum"
+    elif stat_type == "PTS":
+        season_usage = _normalize_fraction(stats.get("USG_PCT"))
+        recent_10_usage = _average_log_metric(logs, "USG_PCT", 10, percent=True)
+        recent_5_usage = _average_log_metric(logs, "USG_PCT", 5, percent=True)
+        expected_usage = _weighted_average([
+            (season_usage, 0.42),
+            (recent_10_usage, 0.35),
+            (recent_5_usage, 0.23),
+        ])
+
+        season_drive_rate = _safe_divide(_safe_float(stats.get("DRIVES")), season_minutes)
+        recent_10_drive_rate = _metric_rate_from_logs(logs, "DRIVES", 10)
+        recent_5_drive_rate = _metric_rate_from_logs(logs, "DRIVES", 5)
+        expected_drive_rate = _weighted_average([
+            (season_drive_rate, 0.45),
+            (recent_10_drive_rate, 0.35),
+            (recent_5_drive_rate, 0.20),
+        ])
+
+        recent_10_ts = _average_log_metric(logs, "TS_PCT", 10, percent=True)
+        usage_shift = None
+        if expected_usage is not None and season_usage is not None and season_usage > 0:
+            usage_shift = (expected_usage - season_usage) / max(season_usage, 0.12)
+        drive_shift = None
+        if expected_drive_rate is not None and season_drive_rate is not None and season_drive_rate > 0:
+            drive_shift = (expected_drive_rate - season_drive_rate) / max(season_drive_rate, 0.05)
+
+        opportunity_rate = base_rate
+        if opportunity_rate is not None:
+            if usage_shift is not None:
+                opportunity_rate *= 1.0 + (_clamp(usage_shift, -0.30, 0.30) * 0.22)
+            if drive_shift is not None:
+                opportunity_rate *= 1.0 + (_clamp(drive_shift, -0.30, 0.30) * 0.14)
+            if recent_10_ts is not None:
+                opportunity_rate *= 1.0 + (_clamp((recent_10_ts - 0.57) / 0.12, -0.10, 0.10) * 0.10)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.60),
+            (opportunity_rate, 0.40),
+        ])
+        rate_model = "usage_drive_rate"
+        component_rates = {
+            "season_usage": _round(season_usage, 3),
+            "recent_10_usage": _round(recent_10_usage, 3),
+            "recent_5_usage": _round(recent_5_usage, 3),
+            "expected_usage": _round(expected_usage, 3),
+            "season_drive_rate": _round(season_drive_rate, 3),
+            "recent_10_drive_rate": _round(recent_10_drive_rate, 3),
+            "recent_5_drive_rate": _round(recent_5_drive_rate, 3),
+            "expected_drive_rate": _round(expected_drive_rate, 3),
+            "recent_10_ts_pct": _round(recent_10_ts, 3),
+        }
+    elif stat_type == "AST":
+        season_potential_rate = _safe_divide(_safe_float(stats.get("POTENTIAL_AST")), season_minutes)
+        recent_10_potential_rate = _metric_rate_from_logs(logs, "POTENTIAL_AST", 10)
+        recent_5_potential_rate = _metric_rate_from_logs(logs, "POTENTIAL_AST", 5)
+        expected_potential_rate = _weighted_average([
+            (season_potential_rate, 0.45),
+            (recent_10_potential_rate, 0.33),
+            (recent_5_potential_rate, 0.22),
+        ])
+
+        season_conversion = _clamp_optional(_safe_divide(season_stat, _safe_float(stats.get("POTENTIAL_AST"))), 0.10, 0.65)
+        recent_10_ast_total, recent_10_potential_total = _paired_metric_sums(logs, "AST", "POTENTIAL_AST", 10)
+        recent_5_ast_total, recent_5_potential_total = _paired_metric_sums(logs, "AST", "POTENTIAL_AST", 5)
+        recent_10_conversion = _clamp_optional(_safe_divide(recent_10_ast_total, recent_10_potential_total), 0.10, 0.65)
+        recent_5_conversion = _clamp_optional(_safe_divide(recent_5_ast_total, recent_5_potential_total), 0.10, 0.65)
+        expected_conversion = _weighted_average([
+            (season_conversion, 0.45),
+            (recent_10_conversion, 0.35),
+            (recent_5_conversion, 0.20),
+        ])
+
+        opportunity_rate = None
+        if expected_potential_rate is not None and expected_conversion is not None:
+            opportunity_rate = expected_potential_rate * _clamp(expected_conversion, 0.05, 0.55)
+
+        recent_drive_pass_rate = _metric_rate_from_logs(logs, "DRIVE_PASSES", 10)
+        if opportunity_rate is not None and recent_drive_pass_rate is not None:
+            opportunity_rate *= 1.0 + (_clamp((recent_drive_pass_rate - 0.10) / 0.10, -0.10, 0.10) * 0.08)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.35),
+            (opportunity_rate, 0.65),
+        ])
+        rate_model = "potential_assists"
+        component_rates = {
+            "season_potential_rate": _round(season_potential_rate, 3),
+            "recent_10_potential_rate": _round(recent_10_potential_rate, 3),
+            "recent_5_potential_rate": _round(recent_5_potential_rate, 3),
+            "expected_potential_rate": _round(expected_potential_rate, 3),
+            "season_conversion": _round(season_conversion, 3),
+            "recent_10_conversion": _round(recent_10_conversion, 3),
+            "recent_5_conversion": _round(recent_5_conversion, 3),
+            "expected_conversion": _round(expected_conversion, 3),
+        }
+    elif stat_type == "REB":
+        season_chance_rate = _safe_divide(_safe_float(stats.get("REB_CHANCES")), season_minutes)
+        recent_10_chance_rate = _metric_rate_from_logs(logs, "REB_CHANCES", 10)
+        recent_5_chance_rate = _metric_rate_from_logs(logs, "REB_CHANCES", 5)
+        expected_chance_rate = _weighted_average([
+            (season_chance_rate, 0.45),
+            (recent_10_chance_rate, 0.33),
+            (recent_5_chance_rate, 0.22),
+        ])
+
+        season_conversion = _clamp_optional(_safe_divide(season_stat, _safe_float(stats.get("REB_CHANCES"))), 0.10, 0.75)
+        recent_10_reb_total, recent_10_chances_total = _paired_metric_sums(logs, "REB", "REB_CHANCES", 10)
+        recent_5_reb_total, recent_5_chances_total = _paired_metric_sums(logs, "REB", "REB_CHANCES", 5)
+        recent_10_conversion = _clamp_optional(_safe_divide(recent_10_reb_total, recent_10_chances_total), 0.10, 0.75)
+        recent_5_conversion = _clamp_optional(_safe_divide(recent_5_reb_total, recent_5_chances_total), 0.10, 0.75)
+        expected_conversion = _weighted_average([
+            (season_conversion, 0.45),
+            (recent_10_conversion, 0.35),
+            (recent_5_conversion, 0.20),
+        ])
+
+        opportunity_rate = None
+        if expected_chance_rate is not None and expected_conversion is not None:
+            opportunity_rate = expected_chance_rate * _clamp(expected_conversion, 0.08, 0.55)
+
+        recent_reb_pct = _average_log_metric(logs, "REB_PCT", 10, percent=True)
+        if opportunity_rate is not None and recent_reb_pct is not None:
+            opportunity_rate *= 1.0 + (_clamp((recent_reb_pct - 0.15) / 0.10, -0.10, 0.10) * 0.08)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.30),
+            (opportunity_rate, 0.70),
+        ])
+        rate_model = "rebound_chances"
+        component_rates = {
+            "season_rebound_chance_rate": _round(season_chance_rate, 3),
+            "recent_10_rebound_chance_rate": _round(recent_10_chance_rate, 3),
+            "recent_5_rebound_chance_rate": _round(recent_5_chance_rate, 3),
+            "expected_rebound_chance_rate": _round(expected_chance_rate, 3),
+            "season_conversion": _round(season_conversion, 3),
+            "recent_10_conversion": _round(recent_10_conversion, 3),
+            "recent_5_conversion": _round(recent_5_conversion, 3),
+            "expected_conversion": _round(expected_conversion, 3),
+        }
+    elif stat_type == "FG3M":
+        season_attempt_rate = _safe_divide(_safe_float(stats.get("FG3A")), season_minutes)
+        recent_10_attempt_rate = _metric_rate_from_logs(logs, "FG3A", 10)
+        recent_5_attempt_rate = _metric_rate_from_logs(logs, "FG3A", 5)
+        expected_attempt_rate = _weighted_average([
+            (season_attempt_rate, 0.45),
+            (recent_10_attempt_rate, 0.33),
+            (recent_5_attempt_rate, 0.22),
+        ])
+
+        season_conversion = _clamp_optional(_normalize_fraction(stats.get("FG3_PCT")), 0.15, 0.60)
+        recent_10_fg3m_total, recent_10_fg3a_total = _paired_metric_sums(logs, "FG3M", "FG3A", 10)
+        recent_5_fg3m_total, recent_5_fg3a_total = _paired_metric_sums(logs, "FG3M", "FG3A", 5)
+        recent_10_conversion = _clamp_optional(_safe_divide(recent_10_fg3m_total, recent_10_fg3a_total), 0.15, 0.60)
+        recent_5_conversion = _clamp_optional(_safe_divide(recent_5_fg3m_total, recent_5_fg3a_total), 0.15, 0.60)
+        expected_conversion = _weighted_average([
+            (season_conversion, 0.42),
+            (recent_10_conversion, 0.35),
+            (recent_5_conversion, 0.23),
+        ])
+
+        opportunity_rate = None
+        if expected_attempt_rate is not None and expected_conversion is not None:
+            opportunity_rate = expected_attempt_rate * _clamp(expected_conversion, 0.08, 0.60)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.25),
+            (opportunity_rate, 0.75),
+        ])
+        rate_model = "three_point_volume"
+        component_rates = {
+            "season_attempt_rate": _round(season_attempt_rate, 3),
+            "recent_10_attempt_rate": _round(recent_10_attempt_rate, 3),
+            "recent_5_attempt_rate": _round(recent_5_attempt_rate, 3),
+            "expected_attempt_rate": _round(expected_attempt_rate, 3),
+            "season_conversion": _round(season_conversion, 3),
+            "recent_10_conversion": _round(recent_10_conversion, 3),
+            "recent_5_conversion": _round(recent_5_conversion, 3),
+            "expected_conversion": _round(expected_conversion, 3),
+        }
+
+    return {
+        "expected_rate": expected_rate,
+        "details": {
+            "rate_model": rate_model,
+            "season_rate": _round(season_rate, 3),
+            "recent_10_rate": _round(recent_10_rate, 3),
+            "recent_5_rate": _round(recent_5_rate, 3),
+            "base_rate": _round(base_rate, 3),
+            "expected_rate": _round(expected_rate, 3),
+            "components": component_rates,
+        },
+    }
 
 
 def _build_schedule_context(schedule_payload: Any) -> Dict[str, Any]:
@@ -1268,7 +1753,8 @@ def _compute_recent_form_context(player: Dict[str, Any], stat_type: str, line: f
     }
 
 
-def _compute_projection_context(player: Dict[str, Any], stat_type: str, line: float, side: str) -> Dict[str, Any]:
+def _compute_projection_context(entry: Dict[str, Any], stat_type: str, line: float, side: str) -> Dict[str, Any]:
+    player = entry.get("player") if isinstance(entry, dict) else {}
     profile = STAT_PROFILES.get(stat_type, {})
     scale = profile.get("scale", 5.0)
     season_avg = _stat_value_from_stats(player.get("stats", {}), stat_type)
@@ -1277,21 +1763,29 @@ def _compute_projection_context(player: Dict[str, Any], stat_type: str, line: fl
     recent5_avg = _average(values[:5])
     recent10_avg = _average(values[:10])
 
-    season_minutes = _safe_float((player.get("stats") or {}).get("MIN"))
-    recent_minutes = _average([
-        _safe_float(game.get("MIN")) for game in logs[:5]
-    ])
-    minute_delta_ratio = None
-    if season_minutes and recent_minutes:
-        minute_delta_ratio = (recent_minutes - season_minutes) / max(season_minutes, 1.0)
+    minutes_context = _compute_expected_minutes_context(entry, logs)
+    expected_minutes = _safe_float(minutes_context.get("expected_minutes"))
+    season_minutes = _safe_float(minutes_context.get("season_minutes"))
+    recent_minutes = _safe_float(minutes_context.get("recent_5_minutes"))
+    rate_context = _estimate_stat_rate_context(player, logs, stat_type)
+    expected_rate = _safe_float(rate_context.get("expected_rate"))
 
+    opportunity_projection = None
+    if expected_minutes is not None and expected_rate is not None:
+        opportunity_projection = expected_minutes * expected_rate
+
+    legacy_projection = _legacy_projection_baseline(
+        season_avg,
+        recent10_avg,
+        recent5_avg,
+        season_minutes,
+        recent_minutes,
+    )
     baseline_projection = _weighted_average([
-        (season_avg, 0.48),
-        (recent10_avg, 0.32),
-        (recent5_avg, 0.20),
+        (opportunity_projection, 0.78),
+        (legacy_projection, 0.22),
     ])
-    if baseline_projection is not None and minute_delta_ratio is not None:
-        baseline_projection += baseline_projection * _clamp(minute_delta_ratio, -0.20, 0.20) * 0.18
+    projection_method = "opportunity_v1" if opportunity_projection is not None else "legacy_average"
 
     projection_gap = None if baseline_projection is None else SIDE_MULTIPLIERS[side] * (baseline_projection - line)
     score = _normalize_score_by_scale(projection_gap, scale)
@@ -1301,13 +1795,30 @@ def _compute_projection_context(player: Dict[str, Any], stat_type: str, line: fl
         "score": score if available else 0.0,
         "raw_score": score if available else 0.0,
         "details": {
+            "model_type": projection_method,
             "season_avg": _round(season_avg),
             "recent_5_avg": _round(recent5_avg),
             "recent_10_avg": _round(recent10_avg),
             "recent_minutes": _round(recent_minutes),
             "season_minutes": _round(season_minutes),
+            "expected_minutes": _round(expected_minutes),
+            "expected_rate": _round(expected_rate, 3),
+            "opportunity_projection": _round(opportunity_projection),
+            "legacy_projection": _round(legacy_projection),
             "baseline_projection": _round(baseline_projection),
             "projection_gap": _round(projection_gap),
+            "minutes_context": {
+                "minutes_baseline": _round(minutes_context.get("minutes_baseline")),
+                "minutes_adjustment_ratio": _round(minutes_context.get("minutes_adjustment_ratio"), 3),
+                "blowout_risk": _round(minutes_context.get("blowout_risk"), 3),
+                "team_win_pct": _round(minutes_context.get("team_win_pct"), 3),
+                "opponent_win_pct": _round(minutes_context.get("opponent_win_pct"), 3),
+                "competitive_minutes_avg": _round(minutes_context.get("competitive_minutes_avg")),
+                "blowout_minutes_avg": _round(minutes_context.get("blowout_minutes_avg")),
+                "competitive_sample_size": minutes_context.get("competitive_sample_size"),
+                "blowout_sample_size": minutes_context.get("blowout_sample_size"),
+            },
+            "rate_context": rate_context.get("details", {}),
         },
     }
 
@@ -1734,12 +2245,22 @@ def _build_reason_strings(
     components: Dict[str, Dict[str, Any]],
 ) -> List[str]:
     reasons = []
+    profile = STAT_PROFILES.get(stat_type, {})
     projection_details = components["projection"]["details"]
     projection_gap = projection_details.get("projection_gap")
     if projection_gap is not None:
         direction_word = "above" if projection_gap >= 0 else "below"
+        model_label = "Opportunity-based baseline" if projection_details.get("model_type") == "opportunity_v1" else "Baseline projection"
         reasons.append(
-            f"Baseline projection sits {abs(projection_gap):.1f} {direction_word} the line."
+            f"{model_label} sits {abs(projection_gap):.1f} {direction_word} the line."
+        )
+
+    expected_minutes = _safe_float(projection_details.get("expected_minutes"))
+    expected_rate = _safe_float(projection_details.get("expected_rate"))
+    if expected_minutes is not None and expected_rate is not None:
+        rate_label = str(profile.get("display") or stat_type).lower()
+        reasons.append(
+            f"Expected role is about {expected_minutes:.1f} minutes at {expected_rate:.2f} {rate_label} per minute."
         )
 
     recent_details = components["recent_form"]["details"]
@@ -1806,7 +2327,7 @@ def _build_candidate(
     opponent = entry.get("opponent")
 
     components = {
-        "projection": _compute_projection_context(player, stat_type, line, side),
+        "projection": _compute_projection_context(entry, stat_type, line, side),
         "recent_form": _compute_recent_form_context(player, stat_type, line, side),
         "matchup": _compute_matchup_context(player, stat_type, side),
         "market": _compute_market_context(market_selection, side),
@@ -2202,29 +2723,41 @@ def _discord_book_label(recommendation: Dict[str, Any]) -> str:
 def _discord_signal_summary(recommendation: Dict[str, Any]) -> str:
     inputs = recommendation.get("inputs", {})
     side = str(recommendation.get("pick") or "").lower()
+    projection_details = inputs.get("projection", {}) or {}
+    projection_model = str(projection_details.get("model_type") or "")
 
     snippets: List[str] = []
     line = _safe_float(recommendation.get("line"))
-    baseline_projection = _safe_float(inputs.get("projection", {}).get("baseline_projection"))
-    projection_gap = _safe_float(inputs.get("projection", {}).get("projection_gap"))
+    baseline_projection = _safe_float(projection_details.get("baseline_projection"))
+    projection_gap = _safe_float(projection_details.get("projection_gap"))
+    expected_minutes = _safe_float(projection_details.get("expected_minutes"))
     projection_delta = None
     if baseline_projection is not None and line is not None:
         projection_delta = baseline_projection - line
     elif projection_gap is not None and side in SIDE_MULTIPLIERS:
         projection_delta = projection_gap * SIDE_MULTIPLIERS[side]
 
-    if projection_delta is not None and abs(projection_delta) >= 0.5:
+    projection_label = "opportunity-based baseline" if projection_model == "opportunity_v1" else "baseline projection"
+
+    if projection_delta is not None and abs(projection_delta) >= 0.5 and expected_minutes is not None:
         direction = "above" if projection_delta >= 0 else "below"
-        snippets.append(f"baseline projection sits {abs(projection_delta):.1f} {direction} the line")
+        snippets.append(
+            f"expected role is about {expected_minutes:.1f} minutes and the {projection_label} sits {abs(projection_delta):.1f} {direction} the line"
+        )
+    elif projection_delta is not None and abs(projection_delta) >= 0.5:
+        direction = "above" if projection_delta >= 0 else "below"
+        snippets.append(
+            f"{projection_label} sits {abs(projection_delta):.1f} {direction} the line"
+        )
 
     recent_avg = _safe_float(inputs.get("recent_form", {}).get("averages", {}).get("last_10"))
     recent_hit_rate = _safe_float(inputs.get("recent_form", {}).get("hit_rates", {}).get("last_10"))
     if recent_avg is not None and recent_hit_rate is not None and recent_hit_rate >= 55:
         snippets.append(
-            f"last 10 average is {recent_avg:.1f} with a {recent_hit_rate:.0f}% {_side_name(side).lower()} hit rate"
+            f"recent form helps too: last 10 average is {recent_avg:.1f} with a {recent_hit_rate:.0f}% {_side_name(side).lower()} hit rate"
         )
     elif recent_hit_rate is not None and recent_hit_rate >= 55:
-        snippets.append(f"last 10 {_side_name(side).lower()} hit rate is {recent_hit_rate:.0f}%")
+        snippets.append(f"recent form helps too: last 10 {_side_name(side).lower()} hit rate is {recent_hit_rate:.0f}%")
 
     chosen_book = recommendation.get("sportsbook_label") or BOOK_LABELS.get(recommendation.get("sportsbook"))
     line_delta = _safe_float(inputs.get("market", {}).get("line_delta_vs_consensus"))
@@ -3241,6 +3774,7 @@ def run_edge_score_refresh(
             "game_date": game_date,
             "game_time_et": game.get("game_time_et"),
             "opponent": schedule_context["opponent_by_team"].get(team),
+            "game_context": game,
         })
 
     style_cache = {
