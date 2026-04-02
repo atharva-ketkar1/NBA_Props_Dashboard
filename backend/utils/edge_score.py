@@ -3164,7 +3164,35 @@ def _tracker_running_recommendations(
     if not isinstance(sent_snapshot, dict):
         sent_snapshot = {}
 
-    merged_snapshot = dict(sent_snapshot)
+    pending_recaps = state.get("pending_result_recaps", {})
+    if not isinstance(pending_recaps, dict):
+        pending_recaps = {}
+    pending_entry = pending_recaps.get(slate_date, {}) if slate_date else {}
+    if not isinstance(pending_entry, dict):
+        pending_entry = {}
+    pending_tracked = pending_entry.get("tracked_recommendations", {})
+    if not isinstance(pending_tracked, dict):
+        pending_tracked = {}
+    pending_snapshot = _tracker_state_snapshot_for_recommendations([
+        recommendation
+        for recommendation in pending_tracked.values()
+        if isinstance(recommendation, dict)
+    ])
+    candidate_snapshot = _tracker_state_snapshot_for_recommendations(
+        tracker_delta.get("tracker_candidates", [])
+    )
+
+    merged_snapshot = {}
+    for recommendation_key, existing_recommendation in sent_snapshot.items():
+        key = str(recommendation_key or "").strip()
+        if not key or not isinstance(existing_recommendation, dict):
+            continue
+        merged_snapshot[key] = {
+            **pending_snapshot.get(key, {}),
+            **candidate_snapshot.get(key, {}),
+            **existing_recommendation,
+            "recommendation_key": key,
+        }
     merged_snapshot.update(_tracker_state_snapshot_for_recommendations(tracker_delta.get("new_recommendations", [])))
     recommendations = list(merged_snapshot.values())
     first_sent_at = existing_entry.get("first_sent_at") or existing_entry.get("last_sent_at")
@@ -3450,8 +3478,13 @@ def _build_discord_book_embed(
     book_recommendations = group["recommendations"]
     lines = []
     for display_rank, recommendation in enumerate(book_recommendations, start=1):
+        player_name = recommendation.get("player_name") or "Unknown Player"
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         pick_label = recommendation.get("pick_label") or _side_name(str(recommendation.get("pick") or "").lower())
+        line_value = _safe_float(recommendation.get("line"))
+        line_text = f"{line_value:.1f}" if line_value is not None else "-"
+        edge_score = _safe_float(recommendation.get("edge_score"))
+        edge_text = f"{edge_score:.1f}" if edge_score is not None else "n/a"
         reason_prefix = ""
         change = change_lookup.get(str(recommendation.get("recommendation_key") or "").strip())
         if alert_kind == "update" and change:
@@ -3467,9 +3500,9 @@ def _build_discord_book_embed(
         if not why_summary:
             why_summary = _discord_signal_summary(recommendation)
         lines.append(
-            f"**{display_rank}.** {recommendation['player_name']} — "
-            f"{stat_label} {pick_label} {recommendation['line']:.1f}\n"
-            f"{_discord_book_label(recommendation)} | Signal Score {recommendation['edge_score']:.1f}\n"
+            f"**{display_rank}.** {player_name} — "
+            f"{stat_label} {pick_label} {line_text}\n"
+            f"{_discord_book_label(recommendation)} | Signal Score {edge_text}\n"
             f"{reason_prefix}Why: {why_summary}"
         )
 
