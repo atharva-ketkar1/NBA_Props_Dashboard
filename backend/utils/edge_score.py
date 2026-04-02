@@ -2698,6 +2698,18 @@ RESULT_STATUS_LABELS = {
     "void": "Void",
 }
 
+REASON_LABELS = {
+    "restricted_area": "rim",
+    "paint": "paint",
+    "mid_range": "mid-range",
+    "left_corner": "left corner",
+    "right_corner": "right corner",
+    "top_key": "above the break",
+    "catch_and_shoot": "catch-and-shoot",
+    "pull_up": "pull-up",
+    "less_than_10_ft": "inside 10 feet",
+}
+
 
 def _long_stat_label(stat_type: Any, fallback: Any = None) -> str:
     normalized = str(stat_type or "").strip().upper()
@@ -2720,68 +2732,244 @@ def _discord_book_label(recommendation: Dict[str, Any]) -> str:
     return f"{sportsbook_label} {odds_display}"
 
 
-def _discord_signal_summary(recommendation: Dict[str, Any]) -> str:
-    inputs = recommendation.get("inputs", {})
+def _reason_label(raw_key: Any) -> str:
+    key = str(raw_key or "").strip()
+    if not key:
+        return "this area"
+    return REASON_LABELS.get(key, key.replace("_", " "))
+
+
+def _top_weight_detail(weights: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(weights, dict):
+        return None
+    best_entry = None
+    for raw_key, entry in weights.items():
+        if not isinstance(entry, dict):
+            continue
+        player_pct = _safe_float(entry.get("player_pct") or entry.get("percentage"))
+        opp_rank = _safe_float(entry.get("opp_rank") or entry.get("rank"))
+        if player_pct is None or player_pct <= 0:
+            continue
+        candidate = {
+            "key": str(raw_key),
+            "label": _reason_label(raw_key),
+            "player_pct": player_pct,
+            "opp_rank": opp_rank,
+        }
+        if best_entry is None or player_pct > best_entry["player_pct"]:
+            best_entry = candidate
+    return best_entry
+
+
+def _component_reason_snippet(recommendation: Dict[str, Any], component_name: str) -> Optional[str]:
+    stat_type = str(recommendation.get("stat_type") or "")
     side = str(recommendation.get("pick") or "").lower()
-    projection_details = inputs.get("projection", {}) or {}
-    projection_model = str(projection_details.get("model_type") or "")
-
-    snippets: List[str] = []
     line = _safe_float(recommendation.get("line"))
-    baseline_projection = _safe_float(projection_details.get("baseline_projection"))
-    projection_gap = _safe_float(projection_details.get("projection_gap"))
-    expected_minutes = _safe_float(projection_details.get("expected_minutes"))
-    projection_delta = None
-    if baseline_projection is not None and line is not None:
-        projection_delta = baseline_projection - line
-    elif projection_gap is not None and side in SIDE_MULTIPLIERS:
-        projection_delta = projection_gap * SIDE_MULTIPLIERS[side]
+    inputs = recommendation.get("inputs", {}) or {}
 
-    projection_label = "opportunity-based baseline" if projection_model == "opportunity_v1" else "baseline projection"
+    if component_name == "projection":
+        projection = inputs.get("projection", {}) or {}
+        baseline_projection = _safe_float(projection.get("baseline_projection"))
+        expected_minutes = _safe_float(projection.get("expected_minutes"))
+        expected_rate = _safe_float(projection.get("expected_rate"))
+        rate_context = projection.get("rate_context", {}) or {}
+        rate_model = str(rate_context.get("rate_model") or "")
+        components = rate_context.get("components", {}) or {}
+        if baseline_projection is None or line is None:
+            return None
+        direction = "above" if baseline_projection >= line else "below"
+        if stat_type == "PTS" and rate_model == "usage_drive_rate":
+            expected_usage = _safe_float(components.get("expected_usage"))
+            expected_drive_rate = _safe_float(components.get("expected_drive_rate"))
+            if expected_minutes is not None and expected_usage is not None and expected_drive_rate is not None:
+                return (
+                    f"usage ({expected_usage * 100:.1f}%) and drive volume ({expected_drive_rate:.2f}/min) "
+                    f"point to about {expected_minutes:.1f} minutes and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if stat_type == "AST" and rate_model == "potential_assists":
+            potential_rate = _safe_float(components.get("expected_potential_rate"))
+            if expected_minutes is not None and potential_rate is not None:
+                return (
+                    f"potential assists are supporting about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if stat_type == "REB" and rate_model == "rebound_chances":
+            chance_rate = _safe_float(components.get("expected_rebound_chance_rate"))
+            if expected_minutes is not None and chance_rate is not None:
+                return (
+                    f"rebound chances are supporting about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if stat_type == "FG3M" and rate_model == "three_point_volume":
+            attempt_rate = _safe_float(components.get("expected_attempt_rate"))
+            if expected_minutes is not None and attempt_rate is not None:
+                return (
+                    f"3-point volume ({attempt_rate:.2f} attempts/min) supports about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if rate_model == "component_sum" and isinstance(components, dict):
+            component_names = [
+                _long_stat_label(component_stat).lower()
+                for component_stat, component_detail in components.items()
+                if _safe_float((component_detail or {}).get("expected_rate")) is not None
+            ][:2]
+            if component_names and expected_minutes is not None:
+                joined = " and ".join(component_names)
+                return (
+                    f"{joined} are carrying about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if expected_minutes is not None and expected_rate is not None:
+            rate_label = _long_stat_label(stat_type).lower()
+            return (
+                f"expected role is about {expected_minutes:.1f} minutes at {expected_rate:.2f} {rate_label} per minute, "
+                f"which puts the baseline {direction} {line:.1f}"
+            )
+        return f"baseline projection still lands {direction} the line"
 
-    if projection_delta is not None and abs(projection_delta) >= 0.5 and expected_minutes is not None:
-        direction = "above" if projection_delta >= 0 else "below"
-        snippets.append(
-            f"expected role is about {expected_minutes:.1f} minutes and the {projection_label} sits {abs(projection_delta):.1f} {direction} the line"
+    if component_name == "recent_form":
+        recent_form = inputs.get("recent_form", {}) or {}
+        averages = recent_form.get("averages", {}) or {}
+        hit_rates = recent_form.get("hit_rates", {}) or {}
+        recent_10_avg = _safe_float(averages.get("last_10"))
+        recent_5_avg = _safe_float(averages.get("last_5"))
+        recent_10_hit_rate = _safe_float(hit_rates.get("last_10"))
+        trend = _safe_float(recent_form.get("trend"))
+        if recent_10_avg is not None and recent_10_hit_rate is not None and line is not None and recent_10_hit_rate >= 65:
+            return (
+                f"last 10 is averaging {recent_10_avg:.1f} against a {line:.1f} line "
+                f"with a {recent_10_hit_rate:.0f}% {_side_name(side).lower()} hit rate"
+            )
+        if recent_5_avg is not None and recent_10_avg is not None and trend is not None:
+            if side == "over" and trend > 0.4:
+                return f"recent form is rising too: last 5 is {recent_5_avg:.1f} versus {recent_10_avg:.1f} over the last 10"
+            if side == "under" and trend < -0.4:
+                return f"recent form is cooling too: last 5 is {recent_5_avg:.1f} versus {recent_10_avg:.1f} over the last 10"
+        return None
+
+    if component_name == "matchup":
+        matchup = inputs.get("matchup", {}) or {}
+        focus = (STAT_PROFILES.get(stat_type) or {}).get("focus")
+        if focus == "points":
+            shot_leader = _top_weight_detail((matchup.get("shot_type") or {}).get("weights"))
+            play_leader = _top_weight_detail((matchup.get("play_type") or {}).get("weights"))
+            zone_leader = _top_weight_detail((matchup.get("shooting_zones") or {}).get("weights"))
+            leader = shot_leader or play_leader or zone_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"{leader['label']} volume ({leader['player_pct']:.0f}%) lines up with an opponent rank of {leader['opp_rank']:.0f} there"
+        if focus == "assists":
+            assist_leader = _top_weight_detail((matchup.get("assist_zones") or {}).get("weights"))
+            play_leader = _top_weight_detail((matchup.get("play_type") or {}).get("weights"))
+            leader = assist_leader or play_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"assist creation leans through {leader['label']} ({leader['player_pct']:.0f}%), where the opponent ranks {leader['opp_rank']:.0f}"
+        if focus == "rebounds":
+            paint_rank = _safe_float(matchup.get("paint_rank"))
+            if paint_rank is not None:
+                return f"the interior matchup is notable here too, with the opponent ranking {paint_rank:.0f} in the paint"
+        if focus == "threes":
+            zone_leader = _top_weight_detail((matchup.get("three_zones") or {}).get("weights"))
+            shot_leader = _top_weight_detail((matchup.get("shot_type") or {}).get("weights"))
+            leader = zone_leader or shot_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"{leader['label']} 3-point volume ({leader['player_pct']:.0f}%) lines up with an opponent rank of {leader['opp_rank']:.0f}"
+        if focus == "combo":
+            assist_leader = _top_weight_detail((matchup.get("assist_zones") or {}).get("weights"))
+            shot_leader = _top_weight_detail((matchup.get("shot_type") or {}).get("weights"))
+            play_leader = _top_weight_detail((matchup.get("play_type") or {}).get("weights"))
+            leader = assist_leader or shot_leader or play_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"the matchup fits this combo through {leader['label']} usage ({leader['player_pct']:.0f}%) and an opponent rank of {leader['opp_rank']:.0f}"
+        return None
+
+    if component_name == "market":
+        market = inputs.get("market", {}) or {}
+        line_delta = _safe_float(market.get("line_delta_vs_consensus"))
+        price_delta = _safe_float(market.get("price_delta"))
+        chosen_book = recommendation.get("sportsbook_label") or BOOK_LABELS.get(recommendation.get("sportsbook"))
+        if line_delta is not None and line_delta >= 0.25:
+            return f"{chosen_book} is hanging a line that is {line_delta:.1f} better than consensus"
+        if price_delta is not None and price_delta >= 0.015:
+            return f"{chosen_book} is also offering a friendlier price than the market average"
+        return None
+
+    if component_name == "line_movement":
+        movement = inputs.get("line_movement", {}) or {}
+        line_change = _safe_float(movement.get("favorable_line_change"))
+        price_change = _safe_float(movement.get("favorable_price_change"))
+        if line_change is not None and line_change >= 0.5:
+            return f"the market has already moved {line_change:.1f} points toward the {_side_name(side).lower()}"
+        if price_change is not None and price_change >= 0.02:
+            return f"the price has already moved toward this {_side_name(side).lower()} side"
+        return None
+
+    if component_name == "similar_players":
+        similar = inputs.get("similar_players", {}) or {}
+        comp_sample = int(_safe_float(similar.get("sample_size"), 0.0) or 0)
+        average_gap = _safe_float(similar.get("average_gap_vs_line"))
+        directional_gap = None
+        if average_gap is not None:
+            directional_gap = average_gap if side == "over" else -average_gap
+        if comp_sample >= 3 and directional_gap is not None and directional_gap >= 0.2:
+            if side == "over":
+                return f"{comp_sample} similar-player comps cleared their lines by {directional_gap:.1f} on average"
+            return f"{comp_sample} similar-player comps stayed {directional_gap:.1f} below their lines on average"
+        return None
+
+    if component_name == "head_to_head":
+        h2h = inputs.get("head_to_head", {}) or {}
+        sample_size = int(_safe_float(h2h.get("sample_size"), 0.0) or 0)
+        average = _safe_float(h2h.get("average"))
+        if sample_size >= 2 and average is not None and line is not None:
+            direction = "above" if average >= line else "below"
+            return f"in {sample_size} recent meetings, this matchup has averaged {average:.1f}, which is {direction} the line"
+        return None
+
+    if component_name == "back_to_back":
+        b2b = inputs.get("back_to_back", {}) or {}
+        if b2b.get("current_is_b2b"):
+            delta = _safe_float(b2b.get("delta_vs_overall"))
+            if delta is not None:
+                direction = "up" if delta >= 0 else "down"
+                return f"back-to-back history matters here too, with this stat trending {direction} by {abs(delta):.1f}"
+            return "back-to-back context is part of the read here"
+        return None
+
+    return None
+
+
+def _discord_signal_summary(recommendation: Dict[str, Any]) -> str:
+    component_scores = recommendation.get("component_scores", {}) or {}
+    ranked_components = [
+        component_name
+        for component_name, score in sorted(
+            component_scores.items(),
+            key=lambda item: item[1],
+            reverse=True,
         )
-    elif projection_delta is not None and abs(projection_delta) >= 0.5:
-        direction = "above" if projection_delta >= 0 else "below"
-        snippets.append(
-            f"{projection_label} sits {abs(projection_delta):.1f} {direction} the line"
-        )
-
-    recent_avg = _safe_float(inputs.get("recent_form", {}).get("averages", {}).get("last_10"))
-    recent_hit_rate = _safe_float(inputs.get("recent_form", {}).get("hit_rates", {}).get("last_10"))
-    if recent_avg is not None and recent_hit_rate is not None and recent_hit_rate >= 55:
-        snippets.append(
-            f"recent form helps too: last 10 average is {recent_avg:.1f} with a {recent_hit_rate:.0f}% {_side_name(side).lower()} hit rate"
-        )
-    elif recent_hit_rate is not None and recent_hit_rate >= 55:
-        snippets.append(f"recent form helps too: last 10 {_side_name(side).lower()} hit rate is {recent_hit_rate:.0f}%")
-
-    chosen_book = recommendation.get("sportsbook_label") or BOOK_LABELS.get(recommendation.get("sportsbook"))
-    line_delta = _safe_float(inputs.get("market", {}).get("line_delta_vs_consensus"))
-    if line_delta is not None and abs(line_delta) >= 0.25:
-        snippets.append(f"{chosen_book} is {abs(line_delta):.1f} better than consensus")
-
-    average_gap = _safe_float(inputs.get("similar_players", {}).get("average_gap_vs_line"))
-    comp_sample = int(_safe_float(inputs.get("similar_players", {}).get("sample_size"), 0.0) or 0)
-    if comp_sample >= 3 and average_gap is not None:
-        direction = "above" if average_gap >= 0 else "below"
-        snippets.append(f"{comp_sample} similar-player comps averaged {abs(average_gap):.1f} {direction} their lines")
-
-    line_change = _safe_float(inputs.get("line_movement", {}).get("favorable_line_change"))
-    if line_change is not None and abs(line_change) >= 0.25:
-        snippets.append(f"market moved {abs(line_change):.1f} points toward the {_side_name(side).lower()}")
+        if _safe_float(score, 0.0) is not None and (_safe_float(score, 0.0) or 0.0) > 0.04
+    ]
 
     deduped_snippets: List[str] = []
-    for snippet in snippets:
-        if snippet not in deduped_snippets:
+    for component_name in ranked_components:
+        snippet = _component_reason_snippet(recommendation, component_name)
+        if snippet and snippet not in deduped_snippets:
             deduped_snippets.append(snippet)
+        if len(deduped_snippets) >= 3:
+            break
+
+    if not deduped_snippets:
+        fallback_projection = _component_reason_snippet(recommendation, "projection")
+        fallback_market = _component_reason_snippet(recommendation, "market")
+        fallback_recent = _component_reason_snippet(recommendation, "recent_form")
+        for snippet in (fallback_projection, fallback_market, fallback_recent):
+            if snippet and snippet not in deduped_snippets:
+                deduped_snippets.append(snippet)
+            if len(deduped_snippets) >= 3:
+                break
 
     if not deduped_snippets:
         return "projection, form, and matchup data are generally aligned."
-    deduped_snippets = deduped_snippets[:3]
     if len(deduped_snippets) == 1:
         return f"{deduped_snippets[0]}."
     if len(deduped_snippets) == 2:
