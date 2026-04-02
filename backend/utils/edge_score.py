@@ -461,7 +461,9 @@ def _format_discord_timestamp(raw_value: Any) -> str:
 
 
 def _format_tracker_time(raw_value: Any) -> str:
-    dt = _parse_dt(raw_value) or get_et_now()
+    dt = _parse_dt(raw_value)
+    if dt is None:
+        return "Unknown ET"
     return dt.strftime("%I:%M %p ET").lstrip("0")
 
 
@@ -3165,6 +3167,10 @@ def _tracker_running_recommendations(
     merged_snapshot = dict(sent_snapshot)
     merged_snapshot.update(_tracker_state_snapshot_for_recommendations(tracker_delta.get("new_recommendations", [])))
     recommendations = list(merged_snapshot.values())
+    first_sent_at = existing_entry.get("first_sent_at") or existing_entry.get("last_sent_at")
+    for recommendation in recommendations:
+        if isinstance(recommendation, dict) and not recommendation.get("first_logged_at") and first_sent_at:
+            recommendation["first_logged_at"] = first_sent_at
     recommendations.sort(
         key=lambda recommendation: (
             str(recommendation.get("first_logged_at") or ""),
@@ -3707,6 +3713,36 @@ def _build_discord_tracker_payload(
     }
 
 
+def _recommendation_game_ids(recommendations: Any) -> List[str]:
+    game_ids: List[str] = []
+    seen_ids = set()
+    if not isinstance(recommendations, list):
+        return game_ids
+    for recommendation in recommendations:
+        if not isinstance(recommendation, dict):
+            continue
+        game_id = str(recommendation.get("game_id") or "").strip()
+        if not game_id or game_id in seen_ids:
+            continue
+        seen_ids.add(game_id)
+        game_ids.append(game_id)
+    return game_ids
+
+
+def _normalize_ref_game_ids(raw_game_ids: Any) -> List[str]:
+    normalized_ids = []
+    seen_ids = set()
+    if not isinstance(raw_game_ids, list):
+        return normalized_ids
+    for raw_game_id in raw_game_ids:
+        game_id = str(raw_game_id or "").strip()
+        if not game_id or game_id in seen_ids:
+            continue
+        seen_ids.add(game_id)
+        normalized_ids.append(game_id)
+    return normalized_ids
+
+
 def _store_discord_message_ref(
     state: Dict[str, Any],
     *,
@@ -3716,10 +3752,12 @@ def _store_discord_message_ref(
     webhook_url: str,
     alert_kind: str,
     sent_at: Any,
+    game_ids: Optional[List[str]] = None,
 ) -> bool:
     message_id = str((message or {}).get("id") or "").strip()
     if not slate_date or not channel or not message_id:
         return False
+    normalized_game_ids = _normalize_ref_game_ids(game_ids or [])
     messages_by_date = state.get("discord_messages_by_date", {})
     if not isinstance(messages_by_date, dict):
         messages_by_date = {}
@@ -3729,18 +3767,65 @@ def _store_discord_message_ref(
     channel_bucket = date_bucket.get(channel, [])
     if not isinstance(channel_bucket, list):
         channel_bucket = []
-    if any(str(entry.get("message_id") or "").strip() == message_id for entry in channel_bucket if isinstance(entry, dict)):
-        return False
-    channel_bucket.append({
-        "message_id": message_id,
-        "webhook_url": webhook_url,
-        "alert_kind": alert_kind,
-        "sent_at": sent_at,
-    })
+    updated_bucket = []
+    state_changed = False
+    current_ref_found = False
+
+    for ref in channel_bucket:
+        if not isinstance(ref, dict):
+            state_changed = True
+            continue
+        ref_message_id = str(ref.get("message_id") or "").strip()
+        if channel == "tracker" and ref_message_id and ref_message_id != message_id:
+            ref_webhook_url = str(ref.get("webhook_url") or webhook_url or "").strip()
+            try:
+                delete_status = _delete_discord_webhook_message(ref_webhook_url, ref_message_id)
+                if delete_status in {"deleted", "missing"}:
+                    state_changed = True
+                    continue
+            except Exception as exc:
+                logger.warning("Discord tracker message dedupe failed for %s/%s: %s", slate_date, ref_message_id, exc)
+        if ref_message_id != message_id:
+            updated_bucket.append(ref)
+            continue
+        if current_ref_found:
+            state_changed = True
+            continue
+
+        current_ref_found = True
+        existing_game_ids = _normalize_ref_game_ids(ref.get("game_ids", []))
+        merged_game_ids = _normalize_ref_game_ids([*existing_game_ids, *normalized_game_ids])
+        if merged_game_ids != existing_game_ids:
+            ref["game_ids"] = merged_game_ids
+            state_changed = True
+        if webhook_url and not str(ref.get("webhook_url") or "").strip():
+            ref["webhook_url"] = webhook_url
+            state_changed = True
+        if alert_kind and str(ref.get("alert_kind") or "").strip() != alert_kind:
+            ref["alert_kind"] = alert_kind
+            state_changed = True
+        if sent_at and str(ref.get("sent_at") or "").strip() != str(sent_at):
+            ref["sent_at"] = sent_at
+            state_changed = True
+        updated_bucket.append(ref)
+
+    if not current_ref_found:
+        new_ref = {
+            "message_id": message_id,
+            "webhook_url": webhook_url,
+            "alert_kind": alert_kind,
+            "sent_at": sent_at,
+        }
+        if normalized_game_ids:
+            new_ref["game_ids"] = normalized_game_ids
+        updated_bucket.append(new_ref)
+        state_changed = True
+
+    channel_bucket = updated_bucket
     date_bucket[channel] = channel_bucket[-60:]
     messages_by_date[slate_date] = date_bucket
     state["discord_messages_by_date"] = messages_by_date
-    return True
+    return state_changed
 
 
 def _latest_discord_message_ref(
@@ -3766,16 +3851,99 @@ def _latest_discord_message_ref(
     return None
 
 
-def _cleanup_completed_discord_messages(state: Dict[str, Any]) -> Dict[str, Any]:
+def _completed_schedule_game_ids(schedule_payload: Any) -> set:
+    if isinstance(schedule_payload, dict):
+        games = schedule_payload.get("games", [])
+    elif isinstance(schedule_payload, list):
+        games = schedule_payload
+    else:
+        games = []
+
+    completed_game_ids = set()
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        game_id = str(game.get("game_id") or "").strip()
+        if not game_id:
+            continue
+        game_status = int(_safe_float(game.get("game_status"), 0.0) or 0.0)
+        if bool(game.get("is_final")) or game_status >= 3:
+            completed_game_ids.add(game_id)
+    return completed_game_ids
+
+
+def _should_cleanup_main_message_ref(
+    ref: Dict[str, Any],
+    *,
+    slate_date: str,
+    today_str: str,
+    completed_game_ids: set,
+) -> bool:
+    if slate_date < today_str:
+        return True
+    ref_game_ids = _normalize_ref_game_ids(ref.get("game_ids", []))
+    return bool(ref_game_ids) and all(game_id in completed_game_ids for game_id in ref_game_ids)
+
+
+def _cleanup_sent_result_recap_messages(
+    state: Dict[str, Any],
+    *,
+    sent_recaps: Dict[str, Any],
+    latest_recap_date_to_keep: str,
+) -> Dict[str, Any]:
+    if not isinstance(sent_recaps, dict) or not sent_recaps:
+        return {"deleted": 0, "state_changed": False, "sent_recaps": {}}
+
+    deleted_count = 0
+    state_changed = False
+    remaining_recaps: Dict[str, Any] = {}
+
+    for raw_date, recap_ref in sent_recaps.items():
+        normalized_date = _normalize_game_date(raw_date)
+        if not normalized_date or not isinstance(recap_ref, dict):
+            state_changed = True
+            continue
+        if normalized_date >= latest_recap_date_to_keep:
+            remaining_recaps[normalized_date] = recap_ref
+            continue
+
+        message_id = str(recap_ref.get("message_id") or "").strip()
+        webhook_url = str(recap_ref.get("webhook_url") or _results_recap_webhook_url() or "").strip()
+        if not message_id or not webhook_url:
+            state_changed = True
+            continue
+
+        try:
+            delete_status = _delete_discord_webhook_message(webhook_url, message_id)
+        except Exception as exc:
+            logger.warning("Discord recap cleanup failed for %s: %s", normalized_date, exc)
+            remaining_recaps[normalized_date] = recap_ref
+            continue
+
+        if delete_status in {"deleted", "missing"}:
+            deleted_count += 1
+            state_changed = True
+        else:
+            remaining_recaps[normalized_date] = recap_ref
+
+    if state_changed:
+        state["sent_result_recaps"] = remaining_recaps
+    return {"deleted": deleted_count, "state_changed": state_changed, "sent_recaps": remaining_recaps}
+
+
+def _cleanup_completed_discord_messages(state: Dict[str, Any], schedule_payload: Optional[Any] = None) -> Dict[str, Any]:
     messages_by_date = state.get("discord_messages_by_date", {})
     if not isinstance(messages_by_date, dict) or not messages_by_date:
-        return {"deleted": 0, "state_changed": False}
+        messages_by_date = {}
 
     sent_recaps = state.get("sent_result_recaps", {})
-    if not isinstance(sent_recaps, dict) or not sent_recaps:
-        return {"deleted": 0, "state_changed": False}
+    if not isinstance(sent_recaps, dict):
+        sent_recaps = {}
 
-    today_str = get_et_now().strftime("%Y-%m-%d")
+    now = get_et_now()
+    today_str = now.strftime("%Y-%m-%d")
+    latest_recap_date_to_keep = (now.date() - timedelta(days=1)).isoformat()
+    completed_game_ids = _completed_schedule_game_ids(schedule_payload)
     deleted_count = 0
     state_changed = False
     remaining_messages_by_date: Dict[str, Any] = {}
@@ -3784,30 +3952,56 @@ def _cleanup_completed_discord_messages(state: Dict[str, Any]) -> Dict[str, Any]
         normalized_date = _normalize_game_date(slate_date)
         if not normalized_date:
             continue
-        if normalized_date >= today_str or normalized_date not in sent_recaps:
-            remaining_messages_by_date[normalized_date] = channel_map
-            continue
-
         if not isinstance(channel_map, dict):
+            state_changed = True
             continue
 
         remaining_channel_map: Dict[str, Any] = {}
         for channel, refs in channel_map.items():
             if not isinstance(refs, list):
+                state_changed = True
                 continue
             default_webhook_url = (
                 EDGE_SCORE_DISCORD_WEBHOOK_URL
                 if channel == "main"
                 else EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
             )
+            latest_tracker_message_id = ""
+            if channel == "tracker" and not (normalized_date < today_str and normalized_date in sent_recaps):
+                for ref in reversed(refs):
+                    if isinstance(ref, dict) and str(ref.get("message_id") or "").strip():
+                        latest_tracker_message_id = str(ref.get("message_id") or "").strip()
+                        break
             remaining_refs = []
             for ref in refs:
                 if not isinstance(ref, dict):
+                    state_changed = True
                     continue
                 message_id = str(ref.get("message_id") or "").strip()
                 webhook_url = str(ref.get("webhook_url") or default_webhook_url or "").strip()
-                if not webhook_url or not message_id:
+                should_delete_ref = False
+                if channel == "main":
+                    should_delete_ref = _should_cleanup_main_message_ref(
+                        ref,
+                        slate_date=normalized_date,
+                        today_str=today_str,
+                        completed_game_ids=completed_game_ids,
+                    )
+                elif channel == "tracker":
+                    should_delete_ref = (
+                        (normalized_date < today_str and normalized_date in sent_recaps)
+                        or (
+                            bool(latest_tracker_message_id)
+                            and message_id
+                            and message_id != latest_tracker_message_id
+                        )
+                    )
+
+                if not should_delete_ref:
                     remaining_refs.append(ref)
+                    continue
+                if not webhook_url or not message_id:
+                    state_changed = True
                     continue
                 try:
                     delete_status = _delete_discord_webhook_message(webhook_url, message_id)
@@ -3827,6 +4021,13 @@ def _cleanup_completed_discord_messages(state: Dict[str, Any]) -> Dict[str, Any]
         elif normalized_date in messages_by_date:
             state_changed = True
 
+    recap_cleanup = _cleanup_sent_result_recap_messages(
+        state,
+        sent_recaps=sent_recaps,
+        latest_recap_date_to_keep=latest_recap_date_to_keep,
+    )
+    deleted_count += int(recap_cleanup.get("deleted", 0) or 0)
+    state_changed = bool(state_changed or recap_cleanup.get("state_changed"))
     if state_changed:
         state["discord_messages_by_date"] = remaining_messages_by_date
     return {"deleted": deleted_count, "state_changed": state_changed}
@@ -3872,6 +4073,7 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
                 "record": _results_record_text(graded_results.get("summary", {})),
                 "graded_count": graded_results.get("summary", {}).get("graded_count", 0),
                 "message_id": str(recap_message.get("id") or "").strip(),
+                "webhook_url": _results_recap_webhook_url(),
             }
             _write_results_recap_history({
                 "game_date": normalized_date,
@@ -3902,6 +4104,7 @@ def _send_discord_webhook(
     webhook_url: str,
     channel_variant: str,
     existing_message_id: Optional[str] = None,
+    existing_message_webhook_url: Optional[str] = None,
     running_recommendations: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not webhook_url:
@@ -3921,7 +4124,8 @@ def _send_discord_webhook(
     if not discord_payload:
         return None
     if existing_message_id and channel_variant == "tracker":
-        edited = _edit_discord_webhook_message(webhook_url, existing_message_id, discord_payload)
+        edit_webhook_url = str(existing_message_webhook_url or webhook_url or "").strip()
+        edited = _edit_discord_webhook_message(edit_webhook_url, existing_message_id, discord_payload)
         if edited is not None:
             return edited
     return _post_discord_webhook(webhook_url, discord_payload)
@@ -3998,14 +4202,14 @@ def run_edge_score_refresh(
             recap_result = _process_results_recaps(master_feed, state)
         except Exception as exc:
             logger.warning("Edge Score results recap failed: %s", exc)
-        try:
-            cleanup_result = _cleanup_completed_discord_messages(state)
-            recap_result["deleted_messages"] = cleanup_result.get("deleted", 0)
-            recap_result["state_changed"] = bool(
-                recap_result.get("state_changed") or cleanup_result.get("state_changed")
-            )
-        except Exception as exc:
-            logger.warning("Discord message cleanup failed: %s", exc)
+    try:
+        cleanup_result = _cleanup_completed_discord_messages(state, schedule_payload=schedule_payload)
+        recap_result["deleted_messages"] = cleanup_result.get("deleted", 0)
+        recap_result["state_changed"] = bool(
+            recap_result.get("state_changed") or cleanup_result.get("state_changed")
+        )
+    except Exception as exc:
+        logger.warning("Discord message cleanup failed: %s", exc)
 
     schedule_context = _build_schedule_context(schedule_payload)
     overlay_props_index = _build_overlay_props_index(current_players_data)
@@ -4192,6 +4396,14 @@ def run_edge_score_refresh(
         slate_date=slate_date,
         channel="tracker",
     )
+    tracker_existing_message_id = str((tracker_message_ref or {}).get("message_id") or "").strip() or None
+    tracker_existing_webhook_url = str((tracker_message_ref or {}).get("webhook_url") or "").strip() or None
+    tracker_message_missing = bool(
+        EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+        and slate_date
+        and tracker_running_recommendations
+        and not tracker_existing_message_id
+    )
     if refresh_label in DISCORD_ALERT_REFRESH_LABELS and _has_discord_alert_target():
         if EDGE_SCORE_DISCORD_WEBHOOK_URL and notification_delta.get("should_send"):
             try:
@@ -4204,14 +4416,17 @@ def run_edge_score_refresh(
                 discord_main_sent = bool(main_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score webhook failed: %s", exc)
-        if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and tracker_delta.get("should_send"):
+        if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and (
+            tracker_delta.get("should_send") or tracker_message_missing
+        ):
             try:
                 tracker_message_response = _send_discord_webhook(
                     payload,
                     tracker_delta,
                     webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
                     channel_variant="tracker",
-                    existing_message_id=str((tracker_message_ref or {}).get("message_id") or "").strip() or None,
+                    existing_message_id=tracker_existing_message_id,
+                    existing_message_webhook_url=tracker_existing_webhook_url,
                     running_recommendations=tracker_running_recommendations,
                 )
                 discord_tracker_sent = bool(tracker_message_response)
@@ -4251,6 +4466,7 @@ def run_edge_score_refresh(
                 webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
                 alert_kind=notification_delta.get("alert_kind", "update"),
                 sent_at=payload["generated_at"],
+                game_ids=_recommendation_game_ids(notification_delta.get("send_recommendations", [])),
             ):
                 state_changed = True
 
@@ -4281,6 +4497,7 @@ def run_edge_score_refresh(
             webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
             alert_kind="tracker",
             sent_at=payload["generated_at"],
+            game_ids=_recommendation_game_ids(tracker_running_recommendations),
         ):
             state_changed = True
 
