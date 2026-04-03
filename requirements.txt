@@ -119,3 +119,11 @@ python-dotenv
 apscheduler
 psutil
 supabase
+
+# Prop modeling / backtesting
+catboost
+joblib
+lightgbm
+scikit-learn
+shap
+xgboost
