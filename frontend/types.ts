@@ -170,7 +170,41 @@ export interface Game {
   away_leader_points: number;
   away_leader_rebounds: number;
   away_leader_assists: number;
+  has_injury_report?: boolean;
+  injury_teams?: Record<string, TeamInjuryReport>;
+  injury_source?: string | null;
+  injury_report_timestamp_et?: string | null;
+  injury_source_generated_at?: string | null;
+  injury_updated_at?: string | null;
   [key: string]: any;
+}
+
+export interface InjuryReportPlayer {
+  player_name?: string | null;
+  report_player_name?: string | null;
+  current_status?: string | null;
+  reason?: string | null;
+}
+
+export interface TeamInjuryReport {
+  team_tricode: string;
+  team_name?: string | null;
+  report_status?: string | null;
+  report_timestamp_et?: string | null;
+  source_generated_at?: string | null;
+  updated_at?: string | null;
+  players: InjuryReportPlayer[];
+}
+
+export interface TeammateInjuryCard {
+  playerId: number | null;
+  playerName: string;
+  displayName: string;
+  currentStatus: string | null;
+  reportStatus: string | null;
+  reason: string | null;
+  statImpact: number | null;
+  impactSampleLabel: string | null;
 }
 
 // --- Legacy / UI Specific Types (can be deprecated or adapted) ---

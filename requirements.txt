@@ -118,6 +118,7 @@ tls-client
 python-dotenv
 apscheduler
 psutil
+pypdf
 supabase
 
 # Prop modeling / backtesting

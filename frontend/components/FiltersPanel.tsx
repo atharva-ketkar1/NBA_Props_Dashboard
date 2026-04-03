@@ -1,30 +1,126 @@
 import React from 'react';
-import { X, HelpCircle, Lock, ChevronRight, ChevronUp } from 'lucide-react';
+import { X, HelpCircle, Lock, ChevronUp } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
 import { isOverlayFilterSupported } from '../utils/filterOverlays';
+import { Player, TeamInjuryReport, TeammateInjuryCard } from '../types';
 
 interface FiltersPanelProps {
     isOpen: boolean;
     onClose: () => void;
     activeFilter: string | null;
     onFilterChange: (filter: string | null) => void;
-    player?: any;
+    player?: Player | null;
+    teammateInjuryCards?: TeammateInjuryCard[];
+    teamInjuryReport?: TeamInjuryReport | null;
     gameCount: number;
     onGameCountChange: (count: number) => void;
     activeSeason?: string;
     onSeasonChange?: (s: string) => void;
 }
 
-export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, activeFilter, onFilterChange, player, gameCount, onGameCountChange, activeSeason, onSeasonChange }) => {
+const TEAMMATE_STATUS_META: Record<string, { badge: string; badgeClass: string; textClass: string; label: string }> = {
+    Out: {
+        badge: 'OUT',
+        badgeClass: 'bg-red500 text-white',
+        textClass: 'text-red500',
+        label: 'Out',
+    },
+    Questionable: {
+        badge: 'QUES',
+        badgeClass: 'bg-[#CA8A04] text-white',
+        textClass: 'text-[#CA8A04]',
+        label: 'Questionable',
+    },
+    Doubtful: {
+        badge: 'DOUBT',
+        badgeClass: 'bg-[#CA8A04] text-white',
+        textClass: 'text-[#CA8A04]',
+        label: 'Doubtful',
+    },
+    Probable: {
+        badge: 'PROB',
+        badgeClass: 'bg-[#14532D] text-white',
+        textClass: 'text-green500',
+        label: 'Probable',
+    },
+    Available: {
+        badge: '',
+        badgeClass: '',
+        textClass: 'text-green500',
+        label: 'Available',
+    },
+};
+
+function getTeammateStatusMeta(status?: string | null, reportStatus?: string | null) {
+    const cleanStatus = String(status ?? '').trim();
+    if (cleanStatus && TEAMMATE_STATUS_META[cleanStatus]) {
+        return TEAMMATE_STATUS_META[cleanStatus];
+    }
+
+    if (reportStatus === 'not_submitted') {
+        return {
+            badge: '',
+            badgeClass: '',
+            textClass: 'text-fgSubtle',
+            label: 'No report',
+        };
+    }
+
+    return {
+        badge: '',
+        badgeClass: '',
+        textClass: 'text-fgSubtle',
+        label: cleanStatus || 'No report',
+    };
+}
+
+function getInitials(name?: string | null) {
+    const parts = String(name ?? '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) {
+        return 'NA';
+    }
+    if (parts.length === 1) {
+        return parts[0].slice(0, 2).toUpperCase();
+    }
+    return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
+
+function getTeammateImpactMeta(statImpact?: number | null) {
+    if (statImpact === null || statImpact === undefined || !Number.isFinite(statImpact)) {
+        return {
+            label: '0.0',
+            className: 'text-fgSubtle',
+        };
+    }
+
+    return {
+        label: statImpact > 0 ? `+${statImpact.toFixed(1)}` : statImpact.toFixed(1),
+        className: statImpact > 0
+            ? 'text-green500'
+            : statImpact < 0
+                ? 'text-red500'
+                : 'text-fgSubtle',
+    };
+}
+
+export const FiltersPanel: React.FC<FiltersPanelProps> = ({
+    isOpen,
+    onClose,
+    activeFilter,
+    onFilterChange,
+    player,
+    teammateInjuryCards = [],
+    teamInjuryReport = null,
+    gameCount,
+    onGameCountChange,
+    activeSeason,
+    onSeasonChange,
+}) => {
     const [activeTab, setActiveTab] = React.useState('Suggested');
     const [isSuggestedExpanded, setIsSuggestedExpanded] = React.useState(false);
 
     if (!isOpen) return null;
-
-    // We'll hardcode the UI as requested, mimicking the SSOT image.
-    // The only functional part is the 'Minutes' pill toggling activeFilter State.
-
 
     // Helper to format rank colors
     const getRankColor = (rank: number | undefined | null) => {
@@ -257,73 +353,68 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({ isOpen, onClose, act
                             <div className="flex items-center justify-between">
                                 <span className="text-white text-sm font-semibold">Teammates</span>
                                 <button className="bg-bgElevation1 border border-borderMedium/50 text-fgSubtle text-xs font-medium px-2 py-1 rounded-md flex items-center gap-1 hover:text-white">
-                                    All <span className="font-normal">=</span>
+                                    {teamInjuryReport?.report_status === 'submitted' ? 'All' : 'No report'}
+                                    <span className="font-normal">=</span>
                                 </button>
                             </div>
 
                             <div className="flex items-center gap-2 relative overflow-x-auto no-scrollbar pb-2">
-                                {/* Card 1 */}
-                                <div className="bg-bgElevation1 border border-borderMedium/40 rounded-lg p-1.5 w-[66px] shrink-0 flex flex-col items-center relative">
-                                    <div className="relative w-8 h-8 flex-shrink-0">
-                                        <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
-                                            <ImageWithFallback
-                                                src="https://cdn.nba.com/headshots/nba/latest/260x190/1642275.png"
-                                                fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/1642275.png`}
-                                                alt="J. Walsh"
-                                                className="w-full h-full object-cover transform scale-125 pt-1.5"
-                                            />
-                                        </div>
-                                        <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-red500 text-[8px] font-bold text-white px-1 py-[1px] leading-tight rounded-sm border border-bgElevation1 whitespace-nowrap z-10 w-fit pointer-events-none">
-                                            + OUT
-                                        </div>
-                                    </div>
-                                    <span className="text-white text-[10px] font-semibold tracking-wide truncate w-full text-center mt-2.5">
-                                        J. Walsh
-                                    </span>
-                                    <span className="text-green500 text-[11px] font-bold mt-0.5">
-                                        +3.9
-                                    </span>
-                                </div>
+                                {teammateInjuryCards.length > 0 ? teammateInjuryCards.map((teammate) => {
+                                    const statusMeta = getTeammateStatusMeta(teammate.currentStatus, teammate.reportStatus);
+                                    const impactMeta = getTeammateImpactMeta(teammate.statImpact);
+                                    const tooltipText = [
+                                        teammate.playerName,
+                                        statusMeta.label,
+                                        teammate.impactSampleLabel ? `Impact ${impactMeta.label}` : null,
+                                        teammate.impactSampleLabel,
+                                        teammate.reason,
+                                    ].filter(Boolean).join(' - ');
+                                    const headshotSrc = teammate.playerId
+                                        ? `https://cdn.nba.com/headshots/nba/latest/260x190/${teammate.playerId}.png`
+                                        : '';
+                                    const fallbackSrc = teammate.playerId
+                                        ? `${ASSETS_BASE}/assets/player_headshots/${teammate.playerId}.png`
+                                        : undefined;
 
-                                {/* Card 2 */}
-                                <div className="bg-bgElevation1 border border-borderMedium/40 rounded-lg p-1.5 w-[66px] shrink-0 flex flex-col items-center relative gap-0">
-                                    <div className="relative w-8 h-8 flex-shrink-0 mb-[7px]">
-                                        <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
-                                            <ImageWithFallback
-                                                src="https://cdn.nba.com/headshots/nba/latest/260x190/1628401.png"
-                                                fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/1628401.png`}
-                                                alt="D. White"
-                                                className="w-full h-full object-cover transform scale-125 pt-1.5"
-                                            />
+                                    return (
+                                        <div
+                                            key={`${teammate.playerId ?? teammate.playerName}-${teammate.currentStatus ?? 'na'}`}
+                                            className="bg-bgElevation1 border border-borderMedium/40 rounded-lg p-1.5 w-[66px] shrink-0 flex flex-col items-center relative"
+                                            title={tooltipText}
+                                        >
+                                            <div className="relative w-8 h-8 flex-shrink-0">
+                                                <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
+                                                    <ImageWithFallback
+                                                        src={headshotSrc || undefined}
+                                                        fallbackSrc={fallbackSrc}
+                                                        fallbackComponent={
+                                                            <div className="w-full h-full flex items-center justify-center bg-bgElevation2 text-[10px] font-bold text-fgSubtle">
+                                                                {getInitials(teammate.playerName)}
+                                                            </div>
+                                                        }
+                                                        alt={teammate.playerName}
+                                                        className="w-full h-full object-cover transform scale-125 pt-1.5"
+                                                    />
+                                                </div>
+                                                {statusMeta.badge ? (
+                                                    <div className={`absolute -bottom-1 left-1/2 -translate-x-1/2 ${statusMeta.badgeClass} text-[8px] font-bold px-1 py-[1px] leading-tight rounded-sm border border-bgElevation1 whitespace-nowrap z-10 w-fit pointer-events-none`}>
+                                                        + {statusMeta.badge}
+                                                    </div>
+                                                ) : null}
+                                            </div>
+                                            <span className="text-white text-[10px] font-semibold tracking-wide truncate w-full text-center mt-2.5">
+                                                {teammate.displayName}
+                                            </span>
+                                            <span className={`${impactMeta.className} text-[11px] font-bold mt-0.5 truncate w-full text-center px-0.5`}>
+                                                {impactMeta.label}
+                                            </span>
                                         </div>
+                                    );
+                                }) : (
+                                    <div className="text-fgSubtle text-xs py-2">
+                                        No teammates available.
                                     </div>
-                                    <span className="text-white text-[10px] font-semibold tracking-wide truncate w-full text-center">
-                                        D. White
-                                    </span>
-                                    <span className="text-green500 text-[11px] font-bold mt-0.5">
-                                        +6.1
-                                    </span>
-                                </div>
-
-                                {/* Card 3 */}
-                                <div className="bg-bgElevation1 border border-borderMedium/40 rounded-lg p-1.5 w-[66px] shrink-0 flex flex-col items-center relative gap-0">
-                                    <div className="relative w-8 h-8 flex-shrink-0 mb-[7px]">
-                                        <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
-                                            <ImageWithFallback
-                                                src="https://cdn.nba.com/headshots/nba/latest/260x190/1630202.png"
-                                                fallbackSrc={`${ASSETS_BASE}/assets/player_headshots/1630202.png`}
-                                                alt="P. Pritchard"
-                                                className="w-full h-full object-cover transform scale-125 pt-1.5"
-                                            />
-                                        </div>
-                                    </div>
-                                    <span className="text-white text-[10px] font-semibold tracking-wide truncate w-full text-center">
-                                        P. Pritchard
-                                    </span>
-                                    <span className="text-red500 text-[11px] font-bold mt-0.5">
-                                        -12.4
-                                    </span>
-                                </div>
+                                )}
                             </div>
                         </div>
                     </>
