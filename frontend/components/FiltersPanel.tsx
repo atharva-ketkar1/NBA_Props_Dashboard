@@ -225,6 +225,25 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         };
     }, [isTeammateModalOpen]);
 
+    // Must be above the early return to comply with React rules of hooks
+    const teammateModalStyle = React.useMemo<React.CSSProperties>(() => {
+        const viewportWidth = teammateModalViewport.width;
+        const viewportHeight = teammateModalViewport.height;
+        const viewportAspect = viewportWidth / viewportHeight;
+        const modalHeight = Math.min(viewportHeight * 0.82, 820);
+        const modalAspect = Math.min(Math.max(viewportAspect * 0.82, 0.76), 0.98);
+        const modalWidth = Math.min(
+            viewportWidth * 0.94,
+            modalHeight * modalAspect,
+            780,
+        );
+
+        return {
+            width: `${Math.round(modalWidth)}px`,
+            maxHeight: `${Math.round(modalHeight)}px`,
+        };
+    }, [teammateModalViewport.height, teammateModalViewport.width]);
+
     if (!isOpen) return null;
 
     // Helper to format rank colors
@@ -405,23 +424,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         );
     };
 
-    const teammateModalStyle = React.useMemo<React.CSSProperties>(() => {
-        const viewportWidth = teammateModalViewport.width;
-        const viewportHeight = teammateModalViewport.height;
-        const viewportAspect = viewportWidth / viewportHeight;
-        const modalHeight = Math.min(viewportHeight * 0.82, 820);
-        const modalAspect = Math.min(Math.max(viewportAspect * 0.82, 0.76), 0.98);
-        const modalWidth = Math.min(
-            viewportWidth * 0.94,
-            modalHeight * modalAspect,
-            780,
-        );
-
-        return {
-            width: `${Math.round(modalWidth)}px`,
-            maxHeight: `${Math.round(modalHeight)}px`,
-        };
-    }, [teammateModalViewport.height, teammateModalViewport.width]);
+    // teammateModalStyle is defined above the early return (rules of hooks)
 
     const teammateModal = (isTeammateModalOpen && typeof document !== 'undefined')
         ? createPortal(
