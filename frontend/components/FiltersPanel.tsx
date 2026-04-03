@@ -144,6 +144,14 @@ function formatOneDecimalValue(value?: number | null) {
     return Number(value).toFixed(1);
 }
 
+function getPreviewTeammateStatusPriority(currentStatus?: string | null) {
+    const cleanStatus = String(currentStatus ?? '').trim();
+    if (cleanStatus === 'Out') return 0;
+    if (cleanStatus === 'Doubtful') return 1;
+    if (cleanStatus === 'Questionable') return 2;
+    return 3;
+}
+
 function getTeammateModalViewportSize() {
     if (typeof window === 'undefined') {
         return { width: 1280, height: 900 };
@@ -176,10 +184,22 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     const [isSuggestedExpanded, setIsSuggestedExpanded] = React.useState(false);
     const [isTeammateModalOpen, setIsTeammateModalOpen] = React.useState(false);
     const [teammateModalViewport, setTeammateModalViewport] = React.useState(getTeammateModalViewportSize);
-    const teammatePreviewCards = React.useMemo(
-        () => teammateInjuryCards.slice(0, TEAMMATE_PREVIEW_LIMIT),
-        [teammateInjuryCards],
-    );
+    const teammatePreviewCards = React.useMemo(() => {
+        const prominentCards = teammateInjuryCards.slice(0, TEAMMATE_PREVIEW_LIMIT);
+        return [...prominentCards].sort((left, right) => {
+            const leftStatusRank = getPreviewTeammateStatusPriority(left.currentStatus);
+            const rightStatusRank = getPreviewTeammateStatusPriority(right.currentStatus);
+            if (leftStatusRank !== rightStatusRank) {
+                return leftStatusRank - rightStatusRank;
+            }
+
+            if (right.prominenceScore !== left.prominenceScore) {
+                return right.prominenceScore - left.prominenceScore;
+            }
+
+            return left.playerName.localeCompare(right.playerName);
+        });
+    }, [teammateInjuryCards]);
     const teamLogoUrl = React.useMemo(() => {
         const teamTricode = String(player?.team ?? teamInjuryReport?.team_tricode ?? '').trim().toUpperCase();
         if (!teamTricode) {

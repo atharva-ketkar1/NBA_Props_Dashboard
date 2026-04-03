@@ -328,18 +328,6 @@ function getDefaultTeammateFilterMode(currentStatus?: string | null): TeammateFi
   return 'with';
 }
 
-function getTeammateStatusPriority(currentStatus?: string | null) {
-  const statusPriority: Record<string, number> = {
-    Out: 0,
-    Doubtful: 1,
-    Questionable: 2,
-    Probable: 3,
-    Available: 4,
-  };
-
-  return statusPriority[String(currentStatus ?? '').trim()] ?? 5;
-}
-
 function calculateTeammateStatImpact(
   selectedPlayer: Player,
   teammatePlayer: Player | null,
@@ -557,12 +545,6 @@ function buildTeammateInjuryCards(
   });
 
   return cards.sort((left, right) => {
-    const leftStatusRank = getTeammateStatusPriority(left.currentStatus);
-    const rightStatusRank = getTeammateStatusPriority(right.currentStatus);
-    if (leftStatusRank !== rightStatusRank) {
-      return leftStatusRank - rightStatusRank;
-    }
-
     if (right.prominenceScore !== left.prominenceScore) {
       return right.prominenceScore - left.prominenceScore;
     }
@@ -1395,6 +1377,10 @@ function App() {
           playerName: teammate.playerName,
           mode: teammate.defaultFilterMode,
         };
+      }
+
+      if (current?.mode !== teammate.defaultFilterMode) {
+        return null;
       }
 
       return {
