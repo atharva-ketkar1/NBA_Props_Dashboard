@@ -144,6 +144,17 @@ function formatOneDecimalValue(value?: number | null) {
     return Number(value).toFixed(1);
 }
 
+function getTeammateModalViewportSize() {
+    if (typeof window === 'undefined') {
+        return { width: 1280, height: 900 };
+    }
+
+    return {
+        width: Math.max(360, window.innerWidth || 1280),
+        height: Math.max(480, window.innerHeight || 900),
+    };
+}
+
 export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     isOpen,
     onClose,
@@ -164,6 +175,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     const [activeTab, setActiveTab] = React.useState('Suggested');
     const [isSuggestedExpanded, setIsSuggestedExpanded] = React.useState(false);
     const [isTeammateModalOpen, setIsTeammateModalOpen] = React.useState(false);
+    const [teammateModalViewport, setTeammateModalViewport] = React.useState(getTeammateModalViewportSize);
     const teammatePreviewCards = React.useMemo(
         () => teammateInjuryCards.slice(0, TEAMMATE_PREVIEW_LIMIT),
         [teammateInjuryCards],
@@ -193,16 +205,23 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
             return undefined;
         }
 
+        setTeammateModalViewport(getTeammateModalViewportSize());
+
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key === 'Escape') {
                 setIsTeammateModalOpen(false);
             }
         };
+        const handleResize = () => {
+            setTeammateModalViewport(getTeammateModalViewportSize());
+        };
 
         document.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('resize', handleResize);
 
         return () => {
             document.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('resize', handleResize);
         };
     }, [isTeammateModalOpen]);
 
@@ -386,6 +405,24 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         );
     };
 
+    const teammateModalStyle = React.useMemo<React.CSSProperties>(() => {
+        const viewportWidth = teammateModalViewport.width;
+        const viewportHeight = teammateModalViewport.height;
+        const viewportAspect = viewportWidth / viewportHeight;
+        const modalHeight = Math.min(viewportHeight * 0.82, 820);
+        const modalAspect = Math.min(Math.max(viewportAspect * 0.82, 0.76), 0.98);
+        const modalWidth = Math.min(
+            viewportWidth * 0.94,
+            modalHeight * modalAspect,
+            780,
+        );
+
+        return {
+            width: `${Math.round(modalWidth)}px`,
+            maxHeight: `${Math.round(modalHeight)}px`,
+        };
+    }, [teammateModalViewport.height, teammateModalViewport.width]);
+
     const teammateModal = (isTeammateModalOpen && typeof document !== 'undefined')
         ? createPortal(
             <div
@@ -394,11 +431,12 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                 onClick={() => setIsTeammateModalOpen(false)}
             >
                 <div
-                    className="mx-3 flex max-h-[88vh] w-full max-w-[960px] flex-col overflow-hidden rounded-xl border border-borderMedium/50 bg-[#0B0B0B] shadow-2xl"
+                    className="mx-3 flex w-full flex-col overflow-hidden rounded-xl border border-borderMedium/50 bg-[#0B0B0B] shadow-2xl"
+                    style={teammateModalStyle}
                     onClick={(event) => event.stopPropagation()}
                 >
                     <div className="flex shrink-0 items-center justify-between border-b border-borderMedium/40 px-5 py-4">
-                        <h3 className="text-[20px] font-semibold tracking-[-0.03em] text-white sm:text-[28px]">
+                        <h3 className="text-[18px] font-semibold tracking-[-0.03em] text-white sm:text-[22px]">
                             Filter by Teammate
                         </h3>
                         <button
@@ -414,10 +452,10 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     <div className="shrink-0 border-b border-borderMedium/40 bg-bgElevation1/20 px-4 py-4">
                         <div className="flex items-center justify-between rounded-[16px] border border-[#37586A] bg-[#0E1113] px-4 py-3">
                             <div className="flex min-w-0 items-center gap-3">
-                                <span className="shrink-0 text-[16px] font-medium tracking-[-0.04em] text-[#8D8D8D] sm:text-[24px]">
+                                <span className="shrink-0 text-[14px] font-medium tracking-[-0.04em] text-[#8D8D8D] sm:text-[18px]">
                                     {activeSeason ?? '25/26'}
                                 </span>
-                                <span className="truncate text-[16px] font-semibold tracking-[-0.04em] text-white sm:text-[24px]">
+                                <span className="truncate text-[14px] font-semibold tracking-[-0.04em] text-white sm:text-[18px]">
                                     {teamInjuryReport?.team_name ?? player?.team ?? 'Team'}
                                 </span>
                                 {teamLogoUrl ? (
@@ -432,7 +470,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                         </div>
                     </div>
 
-                    <div className="grid shrink-0 grid-cols-[88px_minmax(0,1fr)_48px_56px_56px] border-b border-borderMedium/40 bg-bgElevation1/40 px-4 py-3 text-[14px] font-semibold tracking-[-0.04em] text-[#8D8D8D] sm:grid-cols-[132px_minmax(0,1fr)_96px_96px_96px] sm:text-[24px]">
+                    <div className="grid shrink-0 grid-cols-[88px_minmax(0,1fr)_48px_56px_56px] border-b border-borderMedium/40 bg-bgElevation1/40 px-4 py-3 text-[12px] font-semibold tracking-[-0.04em] text-[#8D8D8D] sm:grid-cols-[132px_minmax(0,1fr)_72px_72px_72px] sm:text-[15px]">
                         <div className="flex items-center gap-5 pl-1 sm:gap-8 sm:pl-2">
                             <span>W</span>
                             <span>W/O</span>
@@ -458,7 +496,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                             return (
                                 <div
                                     key={`teammate-modal-${teammate.playerId ?? teammate.playerName}`}
-                                    className="grid grid-cols-[88px_minmax(0,1fr)_48px_56px_56px] items-center px-4 py-3 sm:grid-cols-[132px_minmax(0,1fr)_96px_96px_96px]"
+                                    className="grid grid-cols-[88px_minmax(0,1fr)_48px_56px_56px] items-center px-4 py-3 sm:grid-cols-[132px_minmax(0,1fr)_72px_72px_72px]"
                                 >
                                     <div className="flex items-center gap-2">
                                         <button
@@ -480,21 +518,21 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                     </div>
 
                                     <div className="flex min-w-0 items-center gap-3 sm:gap-4">
-                                        {renderTeammateAvatar(teammate, 'w-10 h-10 sm:w-[72px] sm:h-[72px]')}
+                                        {renderTeammateAvatar(teammate, 'w-10 h-10 sm:w-14 sm:h-14')}
                                         <div className="min-w-0">
-                                            <div className="truncate text-[14px] font-semibold tracking-[-0.04em] text-white sm:text-[23px]">
+                                            <div className="truncate text-[14px] font-semibold tracking-[-0.04em] text-white sm:text-[16px]">
                                                 {teammate.displayName}
                                             </div>
                                         </div>
                                     </div>
 
-                                    <div className="text-center text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:text-[22px]">
+                                    <div className="text-center text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:text-[15px]">
                                         {teammate.position ?? '-'}
                                     </div>
-                                    <div className="text-center text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:text-[22px]">
+                                    <div className="text-center text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:text-[15px]">
                                         {formatOneDecimalValue(teammate.minutesPerGame)}
                                     </div>
-                                    <div className="pr-1 text-right text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:pr-4 sm:text-[22px]">
+                                    <div className="pr-1 text-right text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:pr-4 sm:text-[15px]">
                                         {formatOneDecimalValue(teammate.statPerGame)}
                                     </div>
                                 </div>
