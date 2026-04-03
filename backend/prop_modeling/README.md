@@ -26,6 +26,12 @@ That writes:
 backend/prop_modeling/generated/prop_training_dataset.csv
 ```
 
+`build_prop_dataset.py` also reads archived spreads/totals from:
+
+```text
+backend/data/archive/action_network_odds/
+```
+
 ## What the first dataset contains
 
 Each row is one `player_id + game_date + stat_type + sportsbook + side + line`
@@ -33,6 +39,8 @@ example with:
 
 - final hit/miss/push label
 - market fields such as line, odds, implied probability, consensus line
+- game-market fields such as spread, total, team totals, implied team totals,
+  and favorite/underdog context from Action Network
 - rolling player-form fields computed only from games before that game date
 - usage/opportunity-rate fields from prior game logs
 - rest/home-away context
@@ -46,9 +54,12 @@ point-in-time snapshots of those feature families for each slate.
 If we train old rows using today's `master_feed.json`, that would leak future
 information into past examples and make the backtest look better than reality.
 
-So v1 starts with safe rolling game-log + market features only. Once we archive
-daily point-in-time snapshots for zone/style/opponent context, we can add those
-groups to `feature_schema.py` and run a proper ablation study:
+So v1 starts with safe rolling game-log + market + Action Network game-context
+features only. Older rows will have blank Action Network columns until the new
+Priority 4 archive builds up enough history.
+
+Once we archive daily point-in-time snapshots for zone/style/opponent context,
+we can add those groups to `feature_schema.py` and run a proper ablation study:
 
 - baseline model
 - baseline + zone/matchup features

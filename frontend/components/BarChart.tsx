@@ -44,11 +44,61 @@ const STAT_LABELS: Record<string, string> = {
 };
 
 const CHART_MODE_FILTERS = new Set(['H2H', 'Home', 'Away', 'B2B']);
+const ACTION_NETWORK_ODDS_PATH = '/data/current/action_network_odds.json';
 
 const getGameKey = (game: any) => `${game?.GAME_ID ?? game?.GAME_DATE ?? ''}-${game?.MATCHUP ?? ''}`;
 
 const getIsHomeGame = (game: any) => String(game?.MATCHUP || '').includes('vs.');
 const getIsAwayGame = (game: any) => String(game?.MATCHUP || '').includes('@');
+
+const getScheduleMarketKey = (game: any) => {
+    const gameDate = String(game?.game_date ?? '').trim();
+    const awayTeam = String(game?.away_team_tricode ?? '').trim().toUpperCase();
+    const homeTeam = String(game?.home_team_tricode ?? '').trim().toUpperCase();
+    if (!gameDate || !awayTeam || !homeTeam) return null;
+    return `${gameDate}:${awayTeam}@${homeTeam}`;
+};
+
+const mergeActionNetworkMarkets = (
+    scheduleRows: Game[],
+    oddsRows?: Game[] | null,
+) => {
+    if (!Array.isArray(oddsRows) || !oddsRows.length) {
+        return scheduleRows;
+    }
+
+    const oddsByGameId = new Map<string, Game>();
+    const oddsByMatchup = new Map<string, Game>();
+
+    oddsRows.forEach((game) => {
+        const gameId = String(game?.game_id ?? '').trim();
+        if (gameId) {
+            oddsByGameId.set(gameId, game);
+        }
+
+        const matchupKey = getScheduleMarketKey(game);
+        if (matchupKey) {
+            oddsByMatchup.set(matchupKey, game);
+        }
+    });
+
+    return scheduleRows.map((game) => {
+        const gameId = String(game?.game_id ?? '').trim();
+        const matchupKey = getScheduleMarketKey(game);
+        const marketGame = (gameId ? oddsByGameId.get(gameId) : null)
+            ?? (matchupKey ? oddsByMatchup.get(matchupKey) : null);
+
+        if (!marketGame) {
+            return game;
+        }
+
+        return {
+            ...game,
+            has_action_network_markets: marketGame.has_action_network_markets ?? Boolean(marketGame.markets),
+            markets: marketGame.markets ?? game.markets,
+        };
+    });
+};
 
 export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
@@ -163,12 +213,17 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         }
 
         let cancelled = false;
+        const actionOddsPromise = fetchApiJson<{ games?: Game[] }>(ACTION_NETWORK_ODDS_PATH)
+            .catch(() => ({ games: [] }));
 
         if (USE_DB) {
-            fetchDashboardGames(relevantDates)
-                .then(({ games }) => {
+            Promise.all([
+                fetchDashboardGames(relevantDates),
+                actionOddsPromise,
+            ])
+                .then(([{ games }, actionOdds]) => {
                     if (cancelled) return;
-                    const nextGames = games ?? [];
+                    const nextGames = mergeActionNetworkMarkets(games ?? [], actionOdds?.games ?? []);
                     scheduleCacheRef.current.set(scheduleKey, nextGames);
                     scheduleKeyRef.current = scheduleKey;
                     setScheduleData(nextGames);
@@ -177,10 +232,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     console.error('[api] games error:', error);
                 });
         } else {
-            fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
-                .then(data => {
+            Promise.all([
+                fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json'),
+                actionOddsPromise,
+            ])
+                .then(([data, actionOdds]) => {
                     if (cancelled) return;
-                    const nextGames = (data as Game[]).filter(g => relevantDates.includes(g.game_date));
+                    const filteredGames = (data as Game[]).filter(g => relevantDates.includes(g.game_date));
+                    const nextGames = mergeActionNetworkMarkets(filteredGames, actionOdds?.games ?? []);
                     scheduleCacheRef.current.set(scheduleKey, nextGames);
                     scheduleKeyRef.current = scheduleKey;
                     setScheduleData(nextGames);
@@ -369,9 +428,18 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             }
 
             data.push({
+                GAME_DATE: upcomingGame?.game_date ?? dashboardDate,
+                GAME_ID: upcomingGame?.game_id ?? `upcoming-${dashboardDate}-${chartPlayer.team}-${upcomingOpponent}`,
+                MATCHUP: upcomingGame?.matchup
+                    ?? `${chartPlayer.team} vs. ${upcomingOpponent}`,
+                away_team_tricode: upcomingGame?.away_team_tricode ?? null,
+                game_time_et: upcomingGame?.game_time_et ?? null,
+                has_action_network_markets: upcomingGame?.has_action_network_markets ?? false,
+                home_team_tricode: upcomingGame?.home_team_tricode ?? null,
+                markets: upcomingGame?.markets ?? {},
                 score: null,
                 secondaryValue: upcomingSecondaryValue,
-                opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
+                opponent: upcomingOpponent,
                 logoUrl: upcomingLogoUrl,
                 dateMonth: upcomingMonth,
                 dateDay: upcomingDay,

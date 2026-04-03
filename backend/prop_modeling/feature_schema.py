@@ -17,6 +17,7 @@ DEFAULT_GAMELOG_PATHS = [
 ]
 DEFAULT_HISTORICAL_ODDS_PATH = BACKEND_DIR / "data" / "archive" / "historical_odds.json"
 DEFAULT_PRIZEPICKS_ARCHIVE_DIR = BACKEND_DIR / "data" / "archive" / "prizepicks"
+DEFAULT_ACTION_NETWORK_ARCHIVE_DIR = BACKEND_DIR / "data" / "archive" / "action_network_odds"
 
 STAT_COLUMNS = {
     "PTS": ["PTS"],
@@ -120,10 +121,31 @@ CORE_USAGE_FEATURES = [
     "recent10_fg3a_rate",
 ]
 
+GAME_MARKET_FEATURES = [
+    "game_total_line",
+    "team_spread_line",
+    "team_is_favorite",
+    "spread_abs",
+    "team_moneyline_odds",
+    "team_moneyline_implied_prob",
+    "opponent_moneyline_odds",
+    "opponent_moneyline_implied_prob",
+    "team_total_line",
+    "opponent_team_total_line",
+    "team_implied_total",
+    "opponent_implied_total",
+    "team_prop_line_share_of_team_total",
+    "prop_line_share_of_game_total",
+    "side_team_spread_signal",
+    "side_game_total_signal",
+    "side_team_implied_total_signal",
+]
+
 FEATURE_GROUPS = {
     "market": CORE_MARKET_FEATURES,
     "player_form": CORE_PLAYER_FORM_FEATURES,
     "usage": CORE_USAGE_FEATURES,
+    "game_market": GAME_MARKET_FEATURES,
     # These are placeholders for the next iteration once we archive historical
     # point-in-time snapshots for each feature family.
     "zones": [],
@@ -134,6 +156,7 @@ ALL_FEATURE_COLUMNS = [
     *CORE_MARKET_FEATURES,
     *CORE_PLAYER_FORM_FEATURES,
     *CORE_USAGE_FEATURES,
+    *GAME_MARKET_FEATURES,
 ]
 
 MODEL_FEATURE_COLUMNS = [

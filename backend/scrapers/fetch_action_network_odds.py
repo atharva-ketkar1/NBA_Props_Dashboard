@@ -21,6 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CURRENT_OUTPUT_PATH = BASE_DIR / "data" / "current" / "action_network_odds.json"
 ARCHIVE_DIR = BASE_DIR / "data" / "archive" / "action_network_odds"
 DEFAULT_SCHEDULE_PATH = BASE_DIR / "data" / "current" / "today_schedule.json"
+DEFAULT_MIN_REFRESH_INTERVAL_SECONDS = 3600
 
 ACTION_NETWORK_SCOREBOARD_URL = "https://api.actionnetwork.com/web/v2/scoreboard/nba"
 DEFAULT_BOOK_IDS = [
@@ -687,6 +688,49 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2)
 
 
+def _load_existing_payload(output_path: Path) -> Optional[Dict[str, Any]]:
+    if not output_path.exists():
+        return None
+    try:
+        with output_path.open("r") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        logger.warning("Unable to load existing Action Network artifact %s: %s", output_path, exc)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_existing_payload_fresh(
+    payload: Dict[str, Any],
+    *,
+    query_date: str,
+    min_refresh_interval_seconds: int,
+    now: Optional[datetime] = None,
+) -> bool:
+    if min_refresh_interval_seconds <= 0:
+        return False
+
+    expected_query_date = datetime.strptime(query_date, "%Y%m%d").date().isoformat()
+    if str(payload.get("query_date") or "").strip() != expected_query_date:
+        return False
+
+    generated_at = str(payload.get("generated_at") or "").strip()
+    if not generated_at:
+        return False
+
+    try:
+        generated_dt = datetime.fromisoformat(generated_at)
+    except ValueError:
+        return False
+
+    if generated_dt.tzinfo is None:
+        generated_dt = generated_dt.replace(tzinfo=ET_ZONE)
+
+    now = now or get_et_now()
+    age_seconds = (now - generated_dt.astimezone(ET_ZONE)).total_seconds()
+    return age_seconds < min_refresh_interval_seconds
+
+
 def _games_fingerprint(games: List[Dict[str, Any]]) -> str:
     serialized = json.dumps(games or [], sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
@@ -736,6 +780,56 @@ def write_current_and_archive(
     }
     _write_json(archive_path, archive_payload)
     return True
+
+
+def refresh_action_network_odds_if_needed(
+    *,
+    query_date: Optional[str] = None,
+    days_ahead: int = 0,
+    book_ids: Optional[List[str]] = None,
+    output_path: Path = CURRENT_OUTPUT_PATH,
+    archive_dir: Path = ARCHIVE_DIR,
+    schedule_path: Path = DEFAULT_SCHEDULE_PATH,
+    min_refresh_interval_seconds: int = DEFAULT_MIN_REFRESH_INTERVAL_SECONDS,
+) -> Dict[str, Any]:
+    resolved_query_date = resolve_query_date(query_date, days_ahead=days_ahead)
+    existing_payload = _load_existing_payload(output_path)
+
+    if existing_payload and _is_existing_payload_fresh(
+        existing_payload,
+        query_date=resolved_query_date,
+        min_refresh_interval_seconds=min_refresh_interval_seconds,
+    ):
+        logger.debug(
+            "[SKIP] Action Network odds fetch skipped; recent artifact is still fresh | "
+            "date=%s output=%s",
+            existing_payload.get("query_date"),
+            output_path,
+        )
+        return {
+            "payload": existing_payload,
+            "refreshed": False,
+            "output_path": str(output_path),
+            "archive_updated": False,
+        }
+
+    payload = fetch_action_network_odds(
+        query_date=resolved_query_date,
+        book_ids=book_ids,
+        schedule_path=schedule_path,
+    )
+    archive_updated = write_current_and_archive(
+        payload,
+        output_path=output_path,
+        archive_dir=archive_dir,
+        archive_enabled=True,
+    )
+    return {
+        "payload": payload,
+        "refreshed": True,
+        "output_path": str(output_path),
+        "archive_updated": archive_updated,
+    }
 
 
 def main() -> int:

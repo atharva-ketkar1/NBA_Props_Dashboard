@@ -177,6 +177,7 @@ def run_schedule():
     return f"Schedule: {len(df)} games"
 
 
+
 def run_shooting_zones():
     logger.info("Starting Shooting Zones...")
     data = shooting_zones.get_shooting_zones_data()

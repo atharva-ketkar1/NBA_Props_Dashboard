@@ -25,10 +25,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from feature_schema import (
     DATASET_COLUMNS,
+    DEFAULT_ACTION_NETWORK_ARCHIVE_DIR,
     DEFAULT_DATASET_PATH,
     DEFAULT_GAMELOG_PATHS,
     DEFAULT_HISTORICAL_ODDS_PATH,
     DEFAULT_PRIZEPICKS_ARCHIVE_DIR,
+    GAME_MARKET_FEATURES,
     GENERATED_DIR,
     STAT_COLUMNS,
 )
@@ -40,6 +42,26 @@ SIDE_MULTIPLIERS = {
 }
 
 SUPPORTED_SIDE_KEYS = ("over", "under")
+
+ACTION_NETWORK_BOOK_ID_BY_SPORTSBOOK = {
+    "draftkings": "15",
+    "fanduel": "30",
+}
+
+ACTION_NETWORK_FALLBACK_BOOK_IDS = [
+    "15",
+    "30",
+    "4556",
+    "4557",
+    "4559",
+    "4560",
+    "4562",
+    "4561",
+    "4558",
+    "79",
+    "2988",
+    "75",
+]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -63,6 +85,11 @@ def _parse_args() -> argparse.Namespace:
         help="Directory of archived PrizePicks daily JSON snapshots.",
     )
     parser.add_argument(
+        "--action-network-archive-dir",
+        default=str(DEFAULT_ACTION_NETWORK_ARCHIVE_DIR),
+        help="Directory of archived Action Network spread/total snapshots.",
+    )
+    parser.add_argument(
         "--output-csv",
         default=str(DEFAULT_DATASET_PATH),
         help="Destination CSV path.",
@@ -82,6 +109,16 @@ def _parse_date(value: Any) -> Optional[date]:
         return None
     try:
         return datetime.strptime(raw_value[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
     except ValueError:
         return None
 
@@ -173,6 +210,10 @@ def _parse_matchup(matchup: Any, team: str) -> Tuple[Optional[str], Optional[int
         return opponent.strip() or None, 0
 
     return None, None
+
+
+def _normalize_team(value: Any) -> str:
+    return str(value or "").strip().upper()
 
 
 def _extract_metric(row: Dict[str, Any], metric_name: str) -> Optional[float]:
@@ -391,6 +432,203 @@ def _build_base_row(
     }
 
 
+def _empty_game_market_features() -> Dict[str, Any]:
+    return {column: None for column in GAME_MARKET_FEATURES}
+
+
+def _pick_action_network_book_market(markets: Any, sportsbook: str) -> Dict[str, Any]:
+    if not isinstance(markets, dict):
+        return {}
+
+    sportsbook_key = str(sportsbook or "").strip().lower()
+    preferred_ids = []
+    preferred_book_id = ACTION_NETWORK_BOOK_ID_BY_SPORTSBOOK.get(sportsbook_key)
+    if preferred_book_id:
+        preferred_ids.append(preferred_book_id)
+    preferred_ids.extend(ACTION_NETWORK_FALLBACK_BOOK_IDS)
+
+    seen_ids = set()
+    for book_id in [*preferred_ids, *sorted(str(key) for key in markets.keys())]:
+        book_id = str(book_id).strip()
+        if not book_id or book_id in seen_ids:
+            continue
+        seen_ids.add(book_id)
+        book_market = markets.get(book_id)
+        if isinstance(book_market, dict):
+            return book_market
+    return {}
+
+
+def _derive_implied_totals(
+    team_spread_line: Optional[float],
+    game_total_line: Optional[float],
+    team_total_line: Optional[float],
+    opponent_team_total_line: Optional[float],
+) -> Tuple[Optional[float], Optional[float]]:
+    team_implied_total = team_total_line
+    opponent_implied_total = opponent_team_total_line
+
+    if (
+        team_implied_total is None
+        and team_spread_line is not None
+        and game_total_line is not None
+    ):
+        team_implied_total = (game_total_line - team_spread_line) / 2.0
+
+    if (
+        opponent_implied_total is None
+        and team_spread_line is not None
+        and game_total_line is not None
+    ):
+        opponent_implied_total = (game_total_line + team_spread_line) / 2.0
+
+    return team_implied_total, opponent_implied_total
+
+
+def _build_game_market_features(
+    *,
+    action_game: Optional[Dict[str, Any]],
+    team: str,
+    sportsbook: str,
+    side: str,
+    line: float,
+) -> Dict[str, Any]:
+    features = _empty_game_market_features()
+    if not isinstance(action_game, dict):
+        return features
+
+    team = _normalize_team(team)
+    home_team = _normalize_team(action_game.get("home_team_tricode"))
+    away_team = _normalize_team(action_game.get("away_team_tricode"))
+    if not team or team not in {home_team, away_team}:
+        return features
+
+    team_side = "home" if team == home_team else "away"
+    opponent_side = "away" if team_side == "home" else "home"
+    opponent_team = away_team if team_side == "home" else home_team
+    book_market = _pick_action_network_book_market(action_game.get("markets"), sportsbook)
+
+    spread_market = book_market.get("spread") if isinstance(book_market.get("spread"), dict) else {}
+    moneyline_market = (
+        book_market.get("moneyline") if isinstance(book_market.get("moneyline"), dict) else {}
+    )
+    total_market = book_market.get("total") if isinstance(book_market.get("total"), dict) else {}
+    team_total_market = (
+        book_market.get("team_total") if isinstance(book_market.get("team_total"), dict) else {}
+    )
+
+    team_spread_line = _safe_float((spread_market.get(team_side) or {}).get("line"))
+    game_total_line = _safe_float(total_market.get("line"))
+    team_moneyline_odds = _safe_float((moneyline_market.get(team_side) or {}).get("odds"))
+    opponent_moneyline_odds = _safe_float((moneyline_market.get(opponent_side) or {}).get("odds"))
+    team_total_line = _safe_float((team_total_market.get(team) or {}).get("line"))
+    opponent_team_total_line = _safe_float((team_total_market.get(opponent_team) or {}).get("line"))
+    team_implied_total, opponent_implied_total = _derive_implied_totals(
+        team_spread_line,
+        game_total_line,
+        team_total_line,
+        opponent_team_total_line,
+    )
+
+    side_multiplier = SIDE_MULTIPLIERS[side]
+    return {
+        "game_total_line": _round_optional(game_total_line),
+        "team_spread_line": _round_optional(team_spread_line),
+        "team_is_favorite": (
+            None if team_spread_line is None else 1 if team_spread_line < 0 else 0
+        ),
+        "spread_abs": _round_optional(
+            None if team_spread_line is None else abs(team_spread_line)
+        ),
+        "team_moneyline_odds": _round_optional(team_moneyline_odds),
+        "team_moneyline_implied_prob": _round_optional(
+            _american_to_implied(team_moneyline_odds)
+        ),
+        "opponent_moneyline_odds": _round_optional(opponent_moneyline_odds),
+        "opponent_moneyline_implied_prob": _round_optional(
+            _american_to_implied(opponent_moneyline_odds)
+        ),
+        "team_total_line": _round_optional(team_total_line),
+        "opponent_team_total_line": _round_optional(opponent_team_total_line),
+        "team_implied_total": _round_optional(team_implied_total),
+        "opponent_implied_total": _round_optional(opponent_implied_total),
+        "team_prop_line_share_of_team_total": _round_optional(
+            None
+            if team_implied_total is None or team_implied_total <= 0
+            else line / team_implied_total
+        ),
+        "prop_line_share_of_game_total": _round_optional(
+            None if game_total_line is None or game_total_line <= 0 else line / game_total_line
+        ),
+        "side_team_spread_signal": _round_optional(
+            None if team_spread_line is None else side_multiplier * (-team_spread_line)
+        ),
+        "side_game_total_signal": _round_optional(
+            None if game_total_line is None else side_multiplier * game_total_line
+        ),
+        "side_team_implied_total_signal": _round_optional(
+            None
+            if team_implied_total is None
+            else side_multiplier * team_implied_total
+        ),
+    }
+
+
+def _build_action_network_index(
+    action_network_archive_dir: Path,
+) -> Dict[Tuple[str, date], Dict[str, Any]]:
+    if not action_network_archive_dir.exists():
+        return {}
+
+    game_index: Dict[Tuple[str, date], Dict[str, Any]] = {}
+    capture_times: Dict[Tuple[str, date], Optional[datetime]] = {}
+
+    for path in sorted(action_network_archive_dir.glob("*.json")):
+        fallback_date = _parse_date(path.stem)
+        if fallback_date is None:
+            continue
+        with path.open() as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            continue
+
+        snapshots = payload.get("snapshots") if isinstance(payload.get("snapshots"), list) else []
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict):
+                continue
+            captured_at = _parse_datetime(snapshot.get("captured_at"))
+            games = snapshot.get("games") if isinstance(snapshot.get("games"), list) else []
+
+            for game in games:
+                if not isinstance(game, dict):
+                    continue
+                game_id = str(game.get("game_id") or "").strip()
+                game_date = _parse_date(game.get("game_date")) or fallback_date
+                if not game_id or game_date is None:
+                    continue
+
+                deadline_at = (
+                    _parse_datetime(game.get("closing_scrape_deadline"))
+                    or _parse_datetime(game.get("game_time_utc"))
+                )
+                if captured_at is not None and deadline_at is not None and captured_at > deadline_at:
+                    continue
+
+                key = (game_id, game_date)
+                previous_capture = capture_times.get(key)
+                if (
+                    previous_capture is not None
+                    and captured_at is not None
+                    and captured_at <= previous_capture
+                ):
+                    continue
+
+                game_index[key] = game
+                capture_times[key] = captured_at or previous_capture
+
+    return game_index
+
+
 def _consensus_for_book_map(book_map: Dict[str, Any]) -> Tuple[Optional[float], int]:
     lines = []
     for raw_book_payload in book_map.values():
@@ -512,9 +750,11 @@ def build_dataset(
     gamelog_paths: Sequence[Path],
     historical_odds_path: Path,
     prizepicks_archive_dir: Path,
+    action_network_archive_dir: Path,
     min_prior_games: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     histories, exact_rows = _build_history_index(gamelog_paths)
+    action_network_games = _build_action_network_index(action_network_archive_dir)
     examples = list(_iter_historical_book_examples(historical_odds_path))
     examples.extend(_iter_prizepicks_examples(prizepicks_archive_dir))
 
@@ -525,6 +765,7 @@ def build_dataset(
         "skipped_missing_final": 0,
         "skipped_no_prior_history": 0,
         "skipped_too_few_prior_games": 0,
+        "rows_with_action_network": 0,
         "push_rows": 0,
     }
 
@@ -561,13 +802,14 @@ def build_dataset(
         if current_is_home is not None:
             prior_features["is_home"] = current_is_home
 
+        game_id = str(example.get("game_id") or current_game_row.get("GAME_ID") or "").strip() or None
         row = _build_base_row(
             game_date=game_date,
             player_id=player_id,
             player_name=example["player_name"],
             team=example["team"],
             opponent=context.get("opponent"),
-            game_id=example.get("game_id") or current_game_row.get("GAME_ID"),
+            game_id=game_id,
             stat_type=example["stat_type"],
             sportsbook=example["sportsbook"],
             side=example["side"],
@@ -579,6 +821,16 @@ def build_dataset(
             prior_features=prior_features,
             current_game_row=current_game_row,
         )
+        game_market_features = _build_game_market_features(
+            action_game=action_network_games.get((game_id, game_date)) if game_id else None,
+            team=example["team"],
+            sportsbook=example["sportsbook"],
+            side=example["side"],
+            line=example["line"],
+        )
+        row.update(game_market_features)
+        if game_market_features.get("game_total_line") is not None:
+            stats["rows_with_action_network"] += 1
         if row["result_status"] == "push":
             stats["push_rows"] += 1
         output_rows.append(row)
@@ -605,6 +857,7 @@ def main() -> int:
         gamelog_paths=gamelog_paths,
         historical_odds_path=Path(args.historical_odds_json),
         prizepicks_archive_dir=Path(args.prizepicks_archive_dir),
+        action_network_archive_dir=Path(args.action_network_archive_dir),
         min_prior_games=max(0, args.min_prior_games),
     )
     _write_dataset(output_csv, rows)
@@ -612,6 +865,7 @@ def main() -> int:
     print(f"wrote_rows={stats['written_rows']}")
     print(f"candidate_examples={stats['candidate_examples']}")
     print(f"push_rows={stats['push_rows']}")
+    print(f"rows_with_action_network={stats['rows_with_action_network']}")
     print(f"skipped_missing_final={stats['skipped_missing_final']}")
     print(f"skipped_no_prior_history={stats['skipped_no_prior_history']}")
     print(f"skipped_too_few_prior_games={stats['skipped_too_few_prior_games']}")
