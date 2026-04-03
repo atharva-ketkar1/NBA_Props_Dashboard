@@ -200,11 +200,28 @@ export interface TeammateInjuryCard {
   playerId: number | null;
   playerName: string;
   displayName: string;
+  position: string | null;
   currentStatus: string | null;
   reportStatus: string | null;
   reason: string | null;
+  minutesPerGame: number | null;
+  statPerGame: number | null;
   statImpact: number | null;
   impactSampleLabel: string | null;
+  activeGameIds: string[];
+  defaultFilterMode: TeammateFilterMode;
+  prominenceScore: number;
+}
+
+export type TeammateFilterMode = 'with' | 'without';
+
+export interface ActiveTeammateFilter {
+  playerId: number | null;
+  playerName: string;
+  displayName: string;
+  currentStatus: string | null;
+  mode: TeammateFilterMode;
+  activeGameIds: string[];
 }
 
 // --- Legacy / UI Specific Types (can be deprecated or adapted) ---

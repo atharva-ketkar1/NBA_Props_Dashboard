@@ -1,9 +1,17 @@
 import React from 'react';
-import { X, HelpCircle, Lock, ChevronUp } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { ChevronDown, ChevronUp, HelpCircle, Lock, Minus, Plus, X } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
+import { TEAM_IDS } from '../constants';
 import { isOverlayFilterSupported } from '../utils/filterOverlays';
-import { Player, TeamInjuryReport, TeammateInjuryCard } from '../types';
+import {
+    ActiveTeammateFilter,
+    Player,
+    TeamInjuryReport,
+    TeammateFilterMode,
+    TeammateInjuryCard,
+} from '../types';
 
 interface FiltersPanelProps {
     isOpen: boolean;
@@ -13,11 +21,17 @@ interface FiltersPanelProps {
     player?: Player | null;
     teammateInjuryCards?: TeammateInjuryCard[];
     teamInjuryReport?: TeamInjuryReport | null;
+    selectedTeammateFilter?: ActiveTeammateFilter | null;
+    teammateStatLabel?: string;
+    onPreviewTeammateToggle?: (teammate: TeammateInjuryCard) => void;
+    onTeammateModeSelect?: (teammate: TeammateInjuryCard, mode: TeammateFilterMode) => void;
     gameCount: number;
     onGameCountChange: (count: number) => void;
     activeSeason?: string;
     onSeasonChange?: (s: string) => void;
 }
+
+const TEAMMATE_PREVIEW_LIMIT = 10;
 
 const TEAMMATE_STATUS_META: Record<string, { badge: string; badgeClass: string; textClass: string; label: string }> = {
     Out: {
@@ -104,6 +118,32 @@ function getTeammateImpactMeta(statImpact?: number | null) {
     };
 }
 
+function getTeammateSelectionKey(playerId: number | null, playerName: string) {
+    return playerId !== null
+        ? `id:${playerId}`
+        : `name:${String(playerName ?? '').trim().toLowerCase()}`;
+}
+
+function teammateCardMatchesSelection(
+    teammate: TeammateInjuryCard,
+    selection?: ActiveTeammateFilter | null,
+) {
+    if (!selection) {
+        return false;
+    }
+
+    return getTeammateSelectionKey(teammate.playerId, teammate.playerName)
+        === getTeammateSelectionKey(selection.playerId, selection.playerName);
+}
+
+function formatOneDecimalValue(value?: number | null) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+        return '0.0';
+    }
+
+    return Number(value).toFixed(1);
+}
+
 export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     isOpen,
     onClose,
@@ -112,6 +152,10 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     player,
     teammateInjuryCards = [],
     teamInjuryReport = null,
+    selectedTeammateFilter = null,
+    teammateStatLabel = 'PTS',
+    onPreviewTeammateToggle,
+    onTeammateModeSelect,
     gameCount,
     onGameCountChange,
     activeSeason,
@@ -119,6 +163,48 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
 }) => {
     const [activeTab, setActiveTab] = React.useState('Suggested');
     const [isSuggestedExpanded, setIsSuggestedExpanded] = React.useState(false);
+    const [isTeammateModalOpen, setIsTeammateModalOpen] = React.useState(false);
+    const teammatePreviewCards = React.useMemo(
+        () => teammateInjuryCards.slice(0, TEAMMATE_PREVIEW_LIMIT),
+        [teammateInjuryCards],
+    );
+    const teamLogoUrl = React.useMemo(() => {
+        const teamTricode = String(player?.team ?? teamInjuryReport?.team_tricode ?? '').trim().toUpperCase();
+        if (!teamTricode) {
+            return null;
+        }
+
+        const teamId = TEAM_IDS[teamTricode];
+        if (teamId) {
+            return `${ASSETS_BASE}/assets/team_logos/${teamId}.svg`;
+        }
+
+        return `${ASSETS_BASE}/assets/team_logos/${teamTricode}.svg`;
+    }, [player?.team, teamInjuryReport?.team_tricode]);
+
+    React.useEffect(() => {
+        if (!isOpen) {
+            setIsTeammateModalOpen(false);
+        }
+    }, [isOpen]);
+
+    React.useEffect(() => {
+        if (!isTeammateModalOpen) {
+            return undefined;
+        }
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setIsTeammateModalOpen(false);
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [isTeammateModalOpen]);
 
     if (!isOpen) return null;
 
@@ -215,7 +301,220 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         );
     };
 
+    const renderTeammateBadge = (teammate: TeammateInjuryCard) => {
+        const statusMeta = getTeammateStatusMeta(teammate.currentStatus, teammate.reportStatus);
+        if (!statusMeta.badge) {
+            return null;
+        }
+
+        return (
+            <div className={`absolute -bottom-1 left-1/2 -translate-x-1/2 ${statusMeta.badgeClass} text-[8px] font-bold px-1 py-[1px] leading-tight rounded-sm border border-bgElevation1 whitespace-nowrap z-10 w-fit pointer-events-none`}>
+                + {statusMeta.badge}
+            </div>
+        );
+    };
+
+    const renderTeammateAvatar = (teammate: TeammateInjuryCard, sizeClass = 'w-8 h-8') => {
+        const headshotSrc = teammate.playerId
+            ? `https://cdn.nba.com/headshots/nba/latest/260x190/${teammate.playerId}.png`
+            : '';
+        const fallbackSrc = teammate.playerId
+            ? `${ASSETS_BASE}/assets/player_headshots/${teammate.playerId}.png`
+            : undefined;
+
+        return (
+            <div className={`relative ${sizeClass} flex-shrink-0`}>
+                <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
+                    <ImageWithFallback
+                        src={headshotSrc || undefined}
+                        fallbackSrc={fallbackSrc}
+                        fallbackComponent={
+                            <div className="w-full h-full flex items-center justify-center bg-bgElevation2 text-[10px] font-bold text-fgSubtle">
+                                {getInitials(teammate.playerName)}
+                            </div>
+                        }
+                        alt={teammate.playerName}
+                        className="w-full h-full object-cover transform scale-125 pt-1.5"
+                    />
+                </div>
+                {renderTeammateBadge(teammate)}
+            </div>
+        );
+    };
+
+    const renderPreviewTeammateCard = (teammate: TeammateInjuryCard) => {
+        const isSelected = teammateCardMatchesSelection(teammate, selectedTeammateFilter);
+        const isWithMode = selectedTeammateFilter?.mode === 'with';
+        const impactMeta = getTeammateImpactMeta(teammate.statImpact);
+        const statusMeta = getTeammateStatusMeta(teammate.currentStatus, teammate.reportStatus);
+        const cardStateLabel = isSelected
+            ? (isWithMode ? 'WITH' : 'W/O')
+            : impactMeta.label;
+        const cardStateClass = isSelected
+            ? (isWithMode ? 'text-green500' : 'text-red500')
+            : impactMeta.className;
+        const cardShellClass = isSelected
+            ? (isWithMode
+                ? 'bg-[#071A10] border-green500/70 shadow-[0_0_0_1px_rgba(34,197,94,0.12)]'
+                : 'bg-[#1B0B0D] border-red500/70 shadow-[0_0_0_1px_rgba(239,68,68,0.12)]')
+            : 'bg-bgElevation1 border-borderMedium/40 hover:border-borderMedium/70 hover:bg-bgElevation2';
+        const tooltipText = [
+            teammate.playerName,
+            statusMeta.label,
+            isSelected ? `Filter ${cardStateLabel}` : `Impact ${impactMeta.label}`,
+            teammate.impactSampleLabel,
+            teammate.reason,
+        ].filter(Boolean).join(' - ');
+
+        return (
+            <button
+                key={`${teammate.playerId ?? teammate.playerName}-${teammate.currentStatus ?? 'na'}`}
+                type="button"
+                onClick={() => onPreviewTeammateToggle?.(teammate)}
+                aria-label={`Toggle teammate filter for ${teammate.playerName}`}
+                className={`${cardShellClass} border rounded-lg p-1.5 w-[66px] shrink-0 flex flex-col items-center relative transition-colors`}
+                title={tooltipText}
+            >
+                {renderTeammateAvatar(teammate)}
+                <span className="text-white text-[10px] font-semibold tracking-wide truncate w-full text-center mt-2.5">
+                    {teammate.displayName}
+                </span>
+                <span className={`${cardStateClass} text-[11px] font-bold mt-0.5 truncate w-full text-center px-0.5`}>
+                    {cardStateLabel}
+                </span>
+            </button>
+        );
+    };
+
+    const teammateModal = (isTeammateModalOpen && typeof document !== 'undefined')
+        ? createPortal(
+            <div
+                className="fixed inset-0 z-[220] flex items-center justify-center"
+                style={{ background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(4px)' }}
+                onClick={() => setIsTeammateModalOpen(false)}
+            >
+                <div
+                    className="mx-3 flex max-h-[88vh] w-full max-w-[960px] flex-col overflow-hidden rounded-xl border border-borderMedium/50 bg-[#0B0B0B] shadow-2xl"
+                    onClick={(event) => event.stopPropagation()}
+                >
+                    <div className="flex shrink-0 items-center justify-between border-b border-borderMedium/40 px-5 py-4">
+                        <h3 className="text-[20px] font-semibold tracking-[-0.03em] text-white sm:text-[28px]">
+                            Filter by Teammate
+                        </h3>
+                        <button
+                            type="button"
+                            onClick={() => setIsTeammateModalOpen(false)}
+                            aria-label="Close teammate filter modal"
+                            className="text-[#575757] transition-colors hover:text-white"
+                        >
+                            <X className="w-8 h-8" strokeWidth={2.2} />
+                        </button>
+                    </div>
+
+                    <div className="shrink-0 border-b border-borderMedium/40 bg-bgElevation1/20 px-4 py-4">
+                        <div className="flex items-center justify-between rounded-[16px] border border-[#37586A] bg-[#0E1113] px-4 py-3">
+                            <div className="flex min-w-0 items-center gap-3">
+                                <span className="shrink-0 text-[16px] font-medium tracking-[-0.04em] text-[#8D8D8D] sm:text-[24px]">
+                                    {activeSeason ?? '25/26'}
+                                </span>
+                                <span className="truncate text-[16px] font-semibold tracking-[-0.04em] text-white sm:text-[24px]">
+                                    {teamInjuryReport?.team_name ?? player?.team ?? 'Team'}
+                                </span>
+                                {teamLogoUrl ? (
+                                    <img
+                                        src={teamLogoUrl}
+                                        alt={teamInjuryReport?.team_name ?? player?.team ?? 'Team'}
+                                        className="h-7 w-7 shrink-0 object-contain"
+                                    />
+                                ) : null}
+                            </div>
+                            <ChevronDown className="h-6 w-6 shrink-0 text-[#575757]" />
+                        </div>
+                    </div>
+
+                    <div className="grid shrink-0 grid-cols-[88px_minmax(0,1fr)_48px_56px_56px] border-b border-borderMedium/40 bg-bgElevation1/40 px-4 py-3 text-[14px] font-semibold tracking-[-0.04em] text-[#8D8D8D] sm:grid-cols-[132px_minmax(0,1fr)_96px_96px_96px] sm:text-[24px]">
+                        <div className="flex items-center gap-5 pl-1 sm:gap-8 sm:pl-2">
+                            <span>W</span>
+                            <span>W/O</span>
+                        </div>
+                        <div>PLAYER</div>
+                        <div className="text-center">POS</div>
+                        <div className="text-center">MIN</div>
+                        <div className="text-right pr-4">{teammateStatLabel}</div>
+                    </div>
+
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                        {teammateInjuryCards.map((teammate) => {
+                            const isSelected = teammateCardMatchesSelection(teammate, selectedTeammateFilter);
+                            const isWithSelected = isSelected && selectedTeammateFilter?.mode === 'with';
+                            const isWithoutSelected = isSelected && selectedTeammateFilter?.mode === 'without';
+                            const withButtonClass = isWithSelected
+                                ? 'border-green500/80 bg-[#071A10] text-green500'
+                                : 'border-borderMedium/60 bg-transparent text-[#575757] hover:border-green500/70 hover:text-green500';
+                            const withoutButtonClass = isWithoutSelected
+                                ? 'border-red500/80 bg-[#1B0B0D] text-red500'
+                                : 'border-borderMedium/60 bg-transparent text-[#575757] hover:border-red500/70 hover:text-red500';
+
+                            return (
+                                <div
+                                    key={`teammate-modal-${teammate.playerId ?? teammate.playerName}`}
+                                    className="grid grid-cols-[88px_minmax(0,1fr)_48px_56px_56px] items-center px-4 py-3 sm:grid-cols-[132px_minmax(0,1fr)_96px_96px_96px]"
+                                >
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => onTeammateModeSelect?.(teammate, 'with')}
+                                            aria-label={`Show games with ${teammate.playerName}`}
+                                            className={`${withButtonClass} flex h-8 w-10 items-center justify-center rounded-[6px] border transition-colors sm:h-10 sm:w-[60px]`}
+                                        >
+                                            <Plus className="h-4 w-4 sm:h-5 sm:w-5" strokeWidth={2.4} />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => onTeammateModeSelect?.(teammate, 'without')}
+                                            aria-label={`Show games without ${teammate.playerName}`}
+                                            className={`${withoutButtonClass} flex h-8 w-10 items-center justify-center rounded-[6px] border transition-colors sm:h-10 sm:w-[60px]`}
+                                        >
+                                            <Minus className="h-4 w-4 sm:h-5 sm:w-5" strokeWidth={2.4} />
+                                        </button>
+                                    </div>
+
+                                    <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+                                        {renderTeammateAvatar(teammate, 'w-10 h-10 sm:w-[72px] sm:h-[72px]')}
+                                        <div className="min-w-0">
+                                            <div className="truncate text-[14px] font-semibold tracking-[-0.04em] text-white sm:text-[23px]">
+                                                {teammate.displayName}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="text-center text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:text-[22px]">
+                                        {teammate.position ?? '-'}
+                                    </div>
+                                    <div className="text-center text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:text-[22px]">
+                                        {formatOneDecimalValue(teammate.minutesPerGame)}
+                                    </div>
+                                    <div className="pr-1 text-right text-[14px] font-semibold tracking-[-0.04em] text-[#C8C8C8] sm:pr-4 sm:text-[22px]">
+                                        {formatOneDecimalValue(teammate.statPerGame)}
+                                    </div>
+                                </div>
+                            );
+                        })}
+
+                        {!teammateInjuryCards.length ? (
+                            <div className="px-5 py-10 text-center text-sm text-fgSubtle">
+                                No teammates available.
+                            </div>
+                        ) : null}
+                    </div>
+                </div>
+            </div>,
+            document.body,
+        )
+        : null;
+
     return (
+        <>
         <div className="w-[320px] bg-bgElevation0 border-l border-borderMedium/40 flex flex-col h-full overflow-y-auto shrink-0 shadow-[-10px_0_30px_rgba(0,0,0,0.5)] z-40">
             {/* Header */}
             <div className="flex items-center justify-between px-3 py-2.5 border-b border-borderMedium/40 shrink-0">
@@ -223,7 +522,12 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     <h2 className="text-white font-semibold text-base">Filters</h2>
                     <HelpCircle className="w-4 h-4 text-borderMuted" />
                 </div>
-                <button onClick={onClose} className="text-borderMuted hover:text-white transition-colors">
+                <button
+                    type="button"
+                    onClick={onClose}
+                    aria-label="Close filters panel"
+                    className="text-borderMuted hover:text-white transition-colors"
+                >
                     <X className="w-4.5 h-4.5" />
                 </button>
             </div>
@@ -352,65 +656,25 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                         <div className="flex flex-col gap-2 mt-1 border-t border-borderMedium/40 pt-2">
                             <div className="flex items-center justify-between">
                                 <span className="text-white text-sm font-semibold">Teammates</span>
-                                <button className="bg-bgElevation1 border border-borderMedium/50 text-fgSubtle text-xs font-medium px-2 py-1 rounded-md flex items-center gap-1 hover:text-white">
-                                    {teamInjuryReport?.report_status === 'submitted' ? 'All' : 'No report'}
+                                <button
+                                    type="button"
+                                    onClick={() => teammateInjuryCards.length > 0 && setIsTeammateModalOpen(true)}
+                                    disabled={teammateInjuryCards.length === 0}
+                                    aria-label="Open all teammates"
+                                    className={`bg-bgElevation1 border border-borderMedium/50 text-xs font-medium px-2 py-1 rounded-md flex items-center gap-1 transition-colors ${teammateInjuryCards.length > 0
+                                        ? 'text-fgSubtle hover:text-white'
+                                        : 'text-fgSubtle/40 cursor-not-allowed'
+                                        }`}
+                                >
+                                    All
                                     <span className="font-normal">=</span>
                                 </button>
                             </div>
 
                             <div className="flex items-center gap-2 relative overflow-x-auto no-scrollbar pb-2">
-                                {teammateInjuryCards.length > 0 ? teammateInjuryCards.map((teammate) => {
-                                    const statusMeta = getTeammateStatusMeta(teammate.currentStatus, teammate.reportStatus);
-                                    const impactMeta = getTeammateImpactMeta(teammate.statImpact);
-                                    const tooltipText = [
-                                        teammate.playerName,
-                                        statusMeta.label,
-                                        teammate.impactSampleLabel ? `Impact ${impactMeta.label}` : null,
-                                        teammate.impactSampleLabel,
-                                        teammate.reason,
-                                    ].filter(Boolean).join(' - ');
-                                    const headshotSrc = teammate.playerId
-                                        ? `https://cdn.nba.com/headshots/nba/latest/260x190/${teammate.playerId}.png`
-                                        : '';
-                                    const fallbackSrc = teammate.playerId
-                                        ? `${ASSETS_BASE}/assets/player_headshots/${teammate.playerId}.png`
-                                        : undefined;
-
-                                    return (
-                                        <div
-                                            key={`${teammate.playerId ?? teammate.playerName}-${teammate.currentStatus ?? 'na'}`}
-                                            className="bg-bgElevation1 border border-borderMedium/40 rounded-lg p-1.5 w-[66px] shrink-0 flex flex-col items-center relative"
-                                            title={tooltipText}
-                                        >
-                                            <div className="relative w-8 h-8 flex-shrink-0">
-                                                <div className="w-full h-full rounded-full overflow-hidden bg-bgElevation2 border border-borderMedium/40">
-                                                    <ImageWithFallback
-                                                        src={headshotSrc || undefined}
-                                                        fallbackSrc={fallbackSrc}
-                                                        fallbackComponent={
-                                                            <div className="w-full h-full flex items-center justify-center bg-bgElevation2 text-[10px] font-bold text-fgSubtle">
-                                                                {getInitials(teammate.playerName)}
-                                                            </div>
-                                                        }
-                                                        alt={teammate.playerName}
-                                                        className="w-full h-full object-cover transform scale-125 pt-1.5"
-                                                    />
-                                                </div>
-                                                {statusMeta.badge ? (
-                                                    <div className={`absolute -bottom-1 left-1/2 -translate-x-1/2 ${statusMeta.badgeClass} text-[8px] font-bold px-1 py-[1px] leading-tight rounded-sm border border-bgElevation1 whitespace-nowrap z-10 w-fit pointer-events-none`}>
-                                                        + {statusMeta.badge}
-                                                    </div>
-                                                ) : null}
-                                            </div>
-                                            <span className="text-white text-[10px] font-semibold tracking-wide truncate w-full text-center mt-2.5">
-                                                {teammate.displayName}
-                                            </span>
-                                            <span className={`${impactMeta.className} text-[11px] font-bold mt-0.5 truncate w-full text-center px-0.5`}>
-                                                {impactMeta.label}
-                                            </span>
-                                        </div>
-                                    );
-                                }) : (
+                                {teammatePreviewCards.length > 0 ? teammatePreviewCards.map((teammate) => (
+                                    renderPreviewTeammateCard(teammate)
+                                )) : (
                                     <div className="text-fgSubtle text-xs py-2">
                                         No teammates available.
                                     </div>
@@ -508,6 +772,8 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     </div>
                 )}
             </div>
-        </div >
+        </div>
+        {teammateModal}
+        </>
     );
 };

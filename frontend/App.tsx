@@ -1,4 +1,4 @@
-import React, { startTransition, useState, useEffect, useMemo, useRef } from 'react';
+import React, { startTransition, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { Header } from './components/Header';
 import { BarChart } from './components/BarChart';
@@ -10,6 +10,7 @@ import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
 import {
+  ActiveTeammateFilter,
   EdgeScorePayload,
   EdgeScoreRecommendation,
   Player,
@@ -17,6 +18,7 @@ import {
   SimilarPlayerCandidate,
   SportsbookId,
   TeamInjuryReport,
+  TeammateFilterMode,
   TeammateInjuryCard,
 } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
@@ -286,6 +288,46 @@ function getStatValueFromGameLog(game: Record<string, any>, statKey: string) {
   return null;
 }
 
+function getStatValueFromSeasonStats(stats: Record<string, any>, statKey: string) {
+  const directValue = stats?.[statKey];
+  if (directValue !== undefined && directValue !== null && directValue !== '') {
+    const parsedDirectValue = Number(directValue);
+    return Number.isFinite(parsedDirectValue) ? parsedDirectValue : null;
+  }
+
+  if (statKey === 'FAN') {
+    const fantasyValue = Number(stats?.FANTASY_PTS);
+    return Number.isFinite(fantasyValue) ? fantasyValue : null;
+  }
+
+  if (statKey === 'PTS+REB+AST') {
+    return Number(stats?.PTS || 0) + Number(stats?.REB || 0) + Number(stats?.AST || 0);
+  }
+  if (statKey === 'PTS+REB') {
+    return Number(stats?.PTS || 0) + Number(stats?.REB || 0);
+  }
+  if (statKey === 'PTS+AST') {
+    return Number(stats?.PTS || 0) + Number(stats?.AST || 0);
+  }
+  if (statKey === 'REB+AST') {
+    return Number(stats?.REB || 0) + Number(stats?.AST || 0);
+  }
+  if (statKey === 'STL+BLK') {
+    return Number(stats?.STL || 0) + Number(stats?.BLK || 0);
+  }
+
+  return null;
+}
+
+function getDefaultTeammateFilterMode(currentStatus?: string | null): TeammateFilterMode {
+  const cleanStatus = String(currentStatus ?? '').trim();
+  if (cleanStatus === 'Out' || cleanStatus === 'Doubtful' || cleanStatus === 'Questionable') {
+    return 'without';
+  }
+
+  return 'with';
+}
+
 function calculateTeammateStatImpact(
   selectedPlayer: Player,
   teammatePlayer: Player | null,
@@ -296,6 +338,7 @@ function calculateTeammateStatImpact(
     return {
       statImpact: null,
       impactSampleLabel: null,
+      activeGameIds: [],
     };
   }
 
@@ -306,8 +349,7 @@ function calculateTeammateStatImpact(
       const teamAbbreviation = String(game?.TEAM_ABBREVIATION ?? selectedTeam).trim();
       return !selectedTeam || teamAbbreviation === selectedTeam;
     });
-  const teammateActiveGameIds = new Set(
-    teammatePlayer.game_log
+  const teammateActiveGameIds = teammatePlayer.game_log
       .filter((game) => {
         const teammateTeam = String(game?.TEAM_ABBREVIATION ?? teammatePlayer.team ?? '').trim();
         const gameId = String(game?.GAME_ID ?? '').trim();
@@ -317,8 +359,8 @@ function calculateTeammateStatImpact(
           && (!selectedTeam || teammateTeam === selectedTeam)
         );
       })
-      .map((game) => String(game.GAME_ID).trim()),
-  );
+      .map((game) => String(game.GAME_ID).trim());
+  const teammateActiveGameIdSet = new Set(teammateActiveGameIds);
 
   let teammateOnSum = 0;
   let teammateOnCount = 0;
@@ -332,7 +374,7 @@ function calculateTeammateStatImpact(
       return;
     }
 
-    if (teammateActiveGameIds.has(gameId)) {
+    if (teammateActiveGameIdSet.has(gameId)) {
       teammateOnSum += statValue;
       teammateOnCount += 1;
     } else {
@@ -345,6 +387,7 @@ function calculateTeammateStatImpact(
     return {
       statImpact: null,
       impactSampleLabel: `On ${teammateOnCount} / Off ${teammateOffCount}`,
+      activeGameIds: teammateActiveGameIds,
     };
   }
 
@@ -354,6 +397,7 @@ function calculateTeammateStatImpact(
   return {
     statImpact: teammateOffAvg - teammateOnAvg,
     impactSampleLabel: `On ${teammateOnCount} / Off ${teammateOffCount}`,
+    activeGameIds: teammateActiveGameIds,
   };
 }
 
@@ -444,17 +488,32 @@ function buildTeammateInjuryCards(
         statKey,
         gameCount,
       );
+      const minutesPerGame = Number(teamPlayer?.stats?.MIN);
+      const statPerGame = getStatValueFromSeasonStats(teamPlayer?.stats ?? {}, statKey);
+      const safeMinutesPerGame = Number.isFinite(minutesPerGame) ? minutesPerGame : null;
+      const safeStatPerGame = statPerGame !== null && Number.isFinite(statPerGame) ? statPerGame : null;
+      const currentStatus = reportPlayer?.current_status ?? (submittedReport ? 'Available' : null);
 
       seenNameKeys.add(nameKey);
       cards.push({
         playerId: teamPlayer.id ?? null,
         playerName: teamPlayer.name,
         displayName: formatCompactPlayerName(teamPlayer.name),
-        currentStatus: reportPlayer?.current_status ?? (submittedReport ? 'Available' : null),
+        position: teamPlayer.position ?? teamPlayer?.stats?.POSITION ?? null,
+        currentStatus,
         reportStatus: teamInjuryReport?.report_status ?? null,
         reason: reportPlayer?.reason ?? null,
+        minutesPerGame: safeMinutesPerGame,
+        statPerGame: safeStatPerGame,
         statImpact: teammateImpact.statImpact,
         impactSampleLabel: teammateImpact.impactSampleLabel,
+        activeGameIds: teammateImpact.activeGameIds,
+        defaultFilterMode: getDefaultTeammateFilterMode(currentStatus),
+        prominenceScore: (
+          Number(safeMinutesPerGame ?? 0) * 1.5
+          + Number(safeStatPerGame ?? 0)
+          + Math.abs(Number(teammateImpact.statImpact ?? 0)) * 0.2
+        ),
       });
     });
 
@@ -466,34 +525,46 @@ function buildTeammateInjuryCards(
     }
 
     seenNameKeys.add(nameKey);
+    const currentStatus = reportPlayer?.current_status ?? (submittedReport ? 'Available' : null);
     cards.push({
       playerId: null,
       playerName,
       displayName: formatCompactPlayerName(playerName),
-      currentStatus: reportPlayer?.current_status ?? (submittedReport ? 'Available' : null),
+      position: null,
+      currentStatus,
       reportStatus: teamInjuryReport?.report_status ?? null,
       reason: reportPlayer?.reason ?? null,
+      minutesPerGame: null,
+      statPerGame: null,
       statImpact: null,
       impactSampleLabel: null,
+      activeGameIds: [],
+      defaultFilterMode: getDefaultTeammateFilterMode(currentStatus),
+      prominenceScore: 0,
     });
   });
 
-  const statusPriority: Record<string, number> = {
-    Out: 0,
-    Doubtful: 1,
-    Questionable: 2,
-    Probable: 3,
-    Available: 4,
-  };
-
   return cards.sort((left, right) => {
-    const leftRank = statusPriority[String(left.currentStatus ?? '')] ?? 5;
-    const rightRank = statusPriority[String(right.currentStatus ?? '')] ?? 5;
-    if (leftRank !== rightRank) {
-      return leftRank - rightRank;
+    if (right.prominenceScore !== left.prominenceScore) {
+      return right.prominenceScore - left.prominenceScore;
     }
     return left.playerName.localeCompare(right.playerName);
   });
+}
+
+function teammateSelectionMatches(
+  selection: { playerId: number | null; playerName: string } | null,
+  card: TeammateInjuryCard,
+) {
+  if (!selection) {
+    return false;
+  }
+
+  if (selection.playerId !== null && card.playerId !== null) {
+    return selection.playerId === card.playerId;
+  }
+
+  return normalizePersonName(selection.playerName) === normalizePersonName(card.playerName);
 }
 
 function resolveSlateOpponent(
@@ -565,6 +636,11 @@ function App() {
   const [currentSlateTeams, setCurrentSlateTeams] = useState<string[]>([]);
   const [slateOpponentByTeamDate, setSlateOpponentByTeamDate] = useState<SlateOpponentByTeamDate>({});
   const [teamInjuryByTeamDate, setTeamInjuryByTeamDate] = useState<TeamInjuryReportByTeamDate>({});
+  const [selectedTeammateFilter, setSelectedTeammateFilter] = useState<{
+    playerId: number | null;
+    playerName: string;
+    mode: TeammateFilterMode;
+  } | null>(null);
   const [gameStatusById, setGameStatusById] = useState<Record<string, { is_live: boolean; is_final: boolean }>>({});
   const [similarCandidatesByProp, setSimilarCandidatesByProp] = useState<SimilarPlayerCandidate[]>([]);
   const [similarCandidatesByPosition, setSimilarCandidatesByPosition] = useState<SimilarPlayerCandidate[]>([]);
@@ -1136,6 +1212,7 @@ function App() {
     setSelectedPlayerId(id);
     setSelectedGameDate(nextGameDate);
     setCustomLineValue(null);
+    setSelectedTeammateFilter(null);
 
     if (!needsDetailLoad && !needsArchiveLoad) {
       setPendingSelection(null);
@@ -1268,6 +1345,69 @@ function App() {
     activeStatKey,
     effectiveFilterGameCount,
   ]);
+
+  const displayActiveTeammateFilter = useMemo<ActiveTeammateFilter | null>(() => {
+    if (!selectedTeammateFilter) {
+      return null;
+    }
+
+    const card = displayTeammateInjuryCards.find((teammate) => (
+      teammateSelectionMatches(selectedTeammateFilter, teammate)
+    ));
+
+    if (!card) {
+      return null;
+    }
+
+    return {
+      playerId: card.playerId,
+      playerName: card.playerName,
+      displayName: card.displayName,
+      currentStatus: card.currentStatus,
+      mode: selectedTeammateFilter.mode,
+      activeGameIds: card.activeGameIds,
+    };
+  }, [displayTeammateInjuryCards, selectedTeammateFilter]);
+
+  const handlePreviewTeammateToggle = useCallback((teammate: TeammateInjuryCard) => {
+    setSelectedTeammateFilter((current) => {
+      if (!teammateSelectionMatches(current, teammate)) {
+        return {
+          playerId: teammate.playerId,
+          playerName: teammate.playerName,
+          mode: teammate.defaultFilterMode,
+        };
+      }
+
+      return {
+        playerId: teammate.playerId,
+        playerName: teammate.playerName,
+        mode: current?.mode === 'with' ? 'without' : 'with',
+      };
+    });
+  }, []);
+
+  const handleTeammateModeSelect = useCallback((
+    teammate: TeammateInjuryCard,
+    mode: TeammateFilterMode,
+  ) => {
+    setSelectedTeammateFilter((current) => {
+      if (teammateSelectionMatches(current, teammate) && current?.mode === mode) {
+        return null;
+      }
+
+      return {
+        playerId: teammate.playerId,
+        playerName: teammate.playerName,
+        mode,
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    setSelectedTeammateFilter(null);
+  }, [displayPlayer?.id, displayPlayer?.team, resolvedSelectedGameDate, activeSeason]);
+
   const activeEdgeRecommendationKey = useMemo(() => {
     if (!displayPlayer || !edgePayload?.recommendations?.length) {
       return null;
@@ -1679,6 +1819,7 @@ function App() {
                 customLine={customLineValue}
                 onCustomLineChange={setCustomLineValue}
                 activeFilterOverlay={activeFilter}
+                activeTeammateFilter={displayActiveTeammateFilter}
                 isFiltersOpen={isFiltersOpen}
                 historicalGameCount={appliedHistoricalGameCount}
                 activeSeason={activeSeason}
@@ -1697,6 +1838,10 @@ function App() {
                 player={displayPlayer}
                 teammateInjuryCards={displayTeammateInjuryCards}
                 teamInjuryReport={displayTeamInjuryReport}
+                selectedTeammateFilter={displayActiveTeammateFilter}
+                teammateStatLabel={activeStatKey}
+                onPreviewTeammateToggle={handlePreviewTeammateToggle}
+                onTeammateModeSelect={handleTeammateModeSelect}
                 gameCount={effectiveFilterGameCount}
                 onGameCountChange={(count) => {
                   const maxGameCount = maxAvailableHistoricalGames || count;

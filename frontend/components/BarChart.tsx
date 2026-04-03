@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { Player, Game, SportsbookId } from '../types';
+import { ActiveTeammateFilter, Player, Game, SportsbookId } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
@@ -23,6 +23,7 @@ interface BarChartProps {
     customLine?: number | null;
     onCustomLineChange?: (line: number | null) => void;
     activeFilterOverlay?: string | null;
+    activeTeammateFilter?: ActiveTeammateFilter | null;
     isFiltersOpen?: boolean;
     historicalGameCount?: number;
     activeSeason?: string;
@@ -100,7 +101,7 @@ const mergeActionNetworkMarkets = (
     });
 };
 
-export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason }) => {
+export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, activeTeammateFilter, isFiltersOpen, historicalGameCount, activeSeason }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
     const chartMode = CHART_MODE_FILTERS.has(activeFilterOverlay ?? '') ? activeFilterOverlay : null;
     const overlayDefinition = useMemo(
@@ -133,7 +134,16 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     useEffect(() => {
         setHoverData(null);
-    }, [player?.id, activeTab, activeSportsbook, activeSeason, activeFilterOverlay]);
+    }, [
+        player?.id,
+        activeTab,
+        activeSportsbook,
+        activeSeason,
+        activeFilterOverlay,
+        activeTeammateFilter?.playerId,
+        activeTeammateFilter?.playerName,
+        activeTeammateFilter?.mode,
+    ]);
 
     useEffect(() => {
         if (!player) {
@@ -323,10 +333,24 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             if (chartMode === 'B2B') return b2bKeys.has(getGameKey(game));
             return true;
         };
+        const teammateGameIds = new Set(
+            activeTeammateFilter?.activeGameIds ?? [],
+        );
+        const matchesTeammateMode = (game: any) => {
+            if (!activeTeammateFilter) return true;
+            const gameId = String(game?.GAME_ID ?? '').trim();
+            const teammateWasActive = gameId ? teammateGameIds.has(gameId) : false;
+            return activeTeammateFilter.mode === 'with'
+                ? teammateWasActive
+                : !teammateWasActive;
+        };
+        const teammateFilteredGames = activeTeammateFilter
+            ? chartPlayer.game_log.filter((game: any) => matchesTeammateMode(game))
+            : chartPlayer.game_log;
 
         const selectedGames = chartMode
-            ? chartPlayer.game_log.filter((game: any) => matchesChartMode(game)).slice(0, numGames)
-            : chartPlayer.game_log.slice(0, numGames);
+            ? teammateFilteredGames.filter((game: any) => matchesChartMode(game)).slice(0, numGames)
+            : teammateFilteredGames.slice(0, numGames);
 
         const log = [...selectedGames].reverse();
 
@@ -456,7 +480,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             isBinaryOverlay: overlayDefinition?.kind === 'binary',
             historicalSampleCount: log.length,
         };
-    }, [chartPlayer, statKey, activeSportsbook, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
+    }, [chartPlayer, statKey, activeSportsbook, activeTeammateFilter, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
 
     if (!player) return null;
 
