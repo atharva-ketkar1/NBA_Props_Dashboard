@@ -196,6 +196,7 @@ export interface SimilarPlayerGame {
   date: string;
   gameDate?: string;
   team: string;
+  opponent?: string | null;
   player: string;
   line: number | null;
   result: number;

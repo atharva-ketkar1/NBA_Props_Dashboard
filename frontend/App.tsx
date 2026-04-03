@@ -135,6 +135,7 @@ function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
 }
 
 type PlayerPropAvailabilityByDate = Record<number, Record<string, Record<string, Record<string, boolean>>>>;
+type SlateOpponentByTeamDate = Record<string, string>;
 
 function buildAvailabilityByDateMap(rows: any[]): PlayerPropAvailabilityByDate {
   const availabilityMap: PlayerPropAvailabilityByDate = {};
@@ -208,6 +209,38 @@ function buildGameStatusById(games: any[]) {
   ) as Record<string, { is_live: boolean; is_final: boolean }>;
 }
 
+function buildSlateOpponentByTeamDate(games: any[]) {
+  const opponentMap: SlateOpponentByTeamDate = {};
+
+  for (const game of games ?? []) {
+    const gameDate = String(game?.game_date ?? '').trim();
+    const homeTeam = String(game?.home_team_tricode ?? '').trim();
+    const awayTeam = String(game?.away_team_tricode ?? '').trim();
+
+    if (!gameDate || !homeTeam || !awayTeam) {
+      continue;
+    }
+
+    opponentMap[`${gameDate}:${homeTeam}`] = awayTeam;
+    opponentMap[`${gameDate}:${awayTeam}`] = homeTeam;
+  }
+
+  return opponentMap;
+}
+
+function resolveSlateOpponent(
+  player: Player | null | undefined,
+  selectedGameDate: string | null,
+  opponentByTeamDate: SlateOpponentByTeamDate,
+) {
+  if (!player?.team) {
+    return null;
+  }
+
+  const gameDate = selectedGameDate ?? player.active_game_date ?? getDashboardDate();
+  return opponentByTeamDate[`${gameDate}:${player.team}`] ?? null;
+}
+
 function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
   if (!players.length || !(propsRows ?? []).length) {
     return players;
@@ -262,6 +295,7 @@ function App() {
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>('graph');
   const [currentSlateTeams, setCurrentSlateTeams] = useState<string[]>([]);
+  const [slateOpponentByTeamDate, setSlateOpponentByTeamDate] = useState<SlateOpponentByTeamDate>({});
   const [gameStatusById, setGameStatusById] = useState<Record<string, { is_live: boolean; is_final: boolean }>>({});
   const [similarCandidatesByProp, setSimilarCandidatesByProp] = useState<SimilarPlayerCandidate[]>([]);
   const [similarCandidatesByPosition, setSimilarCandidatesByPosition] = useState<SimilarPlayerCandidate[]>([]);
@@ -480,6 +514,7 @@ function App() {
           if (cancelled) return;
 
           const nextGameStatusById = buildGameStatusById(snapshot.gamesRows ?? []);
+          const nextOpponentByTeamDate = buildSlateOpponentByTeamDate(snapshot.gamesRows ?? []);
           const mergedFeed = mergeFeedFromDB(
             snapshot.playersRows ?? [],
             snapshot.propsRows ?? [],
@@ -488,6 +523,7 @@ function App() {
           const availabilityMap = buildAvailabilityByDateMap(snapshot.availabilityRows ?? []);
           const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+          setSlateOpponentByTeamDate((prev) => ({ ...prev, ...nextOpponentByTeamDate }));
           setGameStatusById((prev) => ({ ...prev, ...nextGameStatusById }));
           setPropsAvailabilityByDate(prev => mergeAvailabilityMaps(prev, availabilityMap));
 
@@ -596,12 +632,14 @@ function App() {
       ])
         .then(([masterFeed, historicalOdds, lineMovements, games, edgeSnapshot]) => {
           const today = getDashboardDate();
+          const nextGames = Array.isArray(games) ? games : [];
           const nextGameStatusById = buildGameStatusById(Array.isArray(games) ? games : []);
-          const slateTeams = Array.from(new Set((Array.isArray(games) ? games : [])
+          const slateTeams = Array.from(new Set(nextGames
             .filter((g: any) => g?.game_date === today)
             .flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode])
             .filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+          setSlateOpponentByTeamDate(buildSlateOpponentByTeamDate(nextGames));
           setGameStatusById(nextGameStatusById);
           const enhancedFeed = (Array.isArray(masterFeed) ? masterFeed : []).map((player: Player) => ({
             ...materializePlayerForGameDate({
@@ -666,7 +704,9 @@ function App() {
 
         if ((hotSnapshot.gamesRows ?? []).length > 0) {
           const nextGameStatusById = buildGameStatusById(hotSnapshot.gamesRows ?? []);
+          const nextOpponentByTeamDate = buildSlateOpponentByTeamDate(hotSnapshot.gamesRows ?? []);
           setGameStatusById((prev) => ({ ...prev, ...nextGameStatusById }));
+          setSlateOpponentByTeamDate((prev) => ({ ...prev, ...nextOpponentByTeamDate }));
           setRawData(prev => prev.map((player) => ({
             ...player,
             game_status_by_id: {
@@ -907,6 +947,9 @@ function App() {
     }
     return materializedPlayer;
   }, [currentPlayer, resolvedSelectedGameDate, activeSeason, archiveGameLogs]);
+  const displayPlayerOpponent = useMemo(() => (
+    resolveSlateOpponent(displayPlayer, resolvedSelectedGameDate, slateOpponentByTeamDate)
+  ), [displayPlayer, resolvedSelectedGameDate, slateOpponentByTeamDate]);
   const displayPlayerAvailability = useMemo(() => {
     if (!displayPlayer) {
       return {};
@@ -1338,6 +1381,7 @@ function App() {
                 activeTab={activeTab}
                 activeSportsbook={activeSportsbook}
                 activeSeason={activeSeason}
+                targetOpponent={displayPlayerOpponent}
                 isLoadingCandidates={shouldShowSimilarLoading}
                 similarCandidatesByProp={readySimilarCandidatesByProp}
                 similarCandidatesByPosition={readySimilarCandidatesByPosition}
@@ -1416,6 +1460,7 @@ function App() {
                     activeTab={activeTab}
                     activeSportsbook={activeSportsbook}
                     activeSeason={activeSeason}
+                    targetOpponent={displayPlayerOpponent}
                     isLoadingCandidates={shouldShowSimilarLoading}
                     similarCandidatesByProp={readySimilarCandidatesByProp}
                     similarCandidatesByPosition={readySimilarCandidatesByPosition}

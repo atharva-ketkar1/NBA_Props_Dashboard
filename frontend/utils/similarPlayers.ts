@@ -609,6 +609,14 @@ function formatShortDate(gameDate?: string | null) {
   return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed);
 }
 
+function getGameOpponent(game: Record<string, any> | null | undefined) {
+  const matchup = String(game?.MATCHUP ?? '').trim();
+  if (!matchup) return null;
+
+  const tokens = matchup.split(/\s+/).filter(Boolean);
+  return String(tokens[tokens.length - 1] ?? '').trim().toUpperCase() || null;
+}
+
 function getHistoricalLine(
   player: Player,
   gameDate: string | undefined,
@@ -851,6 +859,7 @@ export function buildSimilarPlayersDataset({
   candidates,
   activeTab,
   activeSportsbook,
+  targetOpponent,
   rowLimit = 18,
 }: {
   player?: Player | null;
@@ -858,6 +867,7 @@ export function buildSimilarPlayersDataset({
   candidates: SimilarPlayerCandidate[];
   activeTab: string;
   activeSportsbook: SupportedSportsbook;
+  targetOpponent?: string | null;
   rowLimit?: number;
 }): SimilarPlayersDataset {
   if (!player) {
@@ -880,6 +890,7 @@ export function buildSimilarPlayersDataset({
     : null;
   const currentLine = toNumber(activeProp?.prop?.line);
   const lineWindow = getLineWindow(currentLine);
+  const normalizedTargetOpponent = String(targetOpponent ?? '').trim().toUpperCase() || null;
   const playerMap = new Map((players ?? []).map((entry) => [entry.id, entry]));
   const loadedCandidates = candidates.filter((candidate) => {
     const fullPlayer = playerMap.get(candidate.id);
@@ -894,7 +905,11 @@ export function buildSimilarPlayersDataset({
       return [];
     }
 
-    const rows = fullPlayer.game_log
+    const matchedGames = normalizedTargetOpponent
+      ? fullPlayer.game_log.filter((game) => getGameOpponent(game) === normalizedTargetOpponent)
+      : fullPlayer.game_log;
+
+    const rows = matchedGames
       .map((game) => {
         const historicalLine = getHistoricalLine(fullPlayer, game?.GAME_DATE, context.propKey!, activeSportsbook);
         const result = getHistoricalGameValue(game, context.propKey!);
@@ -907,7 +922,8 @@ export function buildSimilarPlayersDataset({
           playerId: candidate.id,
           date: formatShortDate(game?.GAME_DATE),
           gameDate: game?.GAME_DATE,
-          team: fullPlayer.team,
+          team: String(game?.TEAM_ABBREVIATION ?? fullPlayer.team ?? ''),
+          opponent: getGameOpponent(game),
           player: fullPlayer.name,
           line,
           result,
@@ -996,7 +1012,11 @@ export function buildSimilarPlayersDataset({
     loadedCandidateCount: loadedCandidates.length,
     totalCandidateCount,
     hasPendingCandidates,
-    candidateNames: candidates.slice(0, 3).map((candidate) => candidate.name),
+    candidateNames: (
+      sortedRows.length
+        ? Array.from(new Set(sortedRows.map((row) => row.player)))
+        : candidates.map((candidate) => candidate.name)
+    ).slice(0, 3),
     statLabel: context.label,
   };
 }
