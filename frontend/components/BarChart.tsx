@@ -143,6 +143,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         activeTeammateFilter?.playerId,
         activeTeammateFilter?.playerName,
         activeTeammateFilter?.mode,
+        activeTeammateFilter?.isImpactLoading,
     ]);
 
     useEffect(() => {
@@ -335,14 +336,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             activeTeammateFilter?.activeGameIds ?? [],
         );
         const matchesTeammateMode = (game: any) => {
-            if (!activeTeammateFilter) return true;
+            if (!activeTeammateFilter || activeTeammateFilter.isImpactLoading) return true;
             const gameId = String(game?.GAME_ID ?? '').trim();
             const teammateWasActive = gameId ? teammateGameIds.has(gameId) : false;
             return activeTeammateFilter.mode === 'with'
                 ? teammateWasActive
                 : !teammateWasActive;
         };
-        const teammateFilteredGames = activeTeammateFilter
+        const teammateFilteredGames = activeTeammateFilter && !activeTeammateFilter.isImpactLoading
             ? chartPlayer.game_log.filter((game: any) => matchesTeammateMode(game))
             : chartPlayer.game_log;
 

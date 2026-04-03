@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronUp, HelpCircle, Lock, Minus, Plus, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, HelpCircle, LoaderCircle, Lock, Minus, Plus, X } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
 import { TEAM_IDS } from '../constants';
@@ -403,6 +403,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     const renderPreviewTeammateCard = (teammate: TeammateInjuryCard) => {
         const isSelected = teammateCardMatchesSelection(teammate, selectedTeammateFilter);
         const isWithMode = selectedTeammateFilter?.mode === 'with';
+        const isImpactLoading = teammate.isImpactLoading && !isSelected;
         const impactMeta = getTeammateImpactMeta(teammate.statImpact);
         const statusMeta = getTeammateStatusMeta(teammate.currentStatus, teammate.reportStatus);
         const cardStateLabel = isSelected
@@ -437,9 +438,16 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                 <span className="text-white text-[11px] font-semibold tracking-wide truncate w-full text-center mt-2">
                     {teammate.displayName}
                 </span>
-                <span className={`${cardStateClass} text-[12px] font-bold mt-0.5 truncate w-full text-center px-0.5`}>
-                    {cardStateLabel}
-                </span>
+                {isImpactLoading ? (
+                    <LoaderCircle
+                        className="mt-1 h-3 w-3 animate-spin text-fgSubtle"
+                        aria-label={`Loading ${teammate.playerName} impact`}
+                    />
+                ) : (
+                    <span className={`${cardStateClass} text-[12px] font-bold mt-0.5 truncate w-full text-center px-0.5`}>
+                        {cardStateLabel}
+                    </span>
+                )}
             </button>
         );
     };

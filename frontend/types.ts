@@ -208,6 +208,7 @@ export interface TeammateInjuryCard {
   statPerGame: number | null;
   statImpact: number | null;
   impactSampleLabel: string | null;
+  isImpactLoading: boolean;
   activeGameIds: string[];
   defaultFilterMode: TeammateFilterMode;
   prominenceScore: number;
@@ -222,6 +223,7 @@ export interface ActiveTeammateFilter {
   currentStatus: string | null;
   mode: TeammateFilterMode;
   activeGameIds: string[];
+  isImpactLoading: boolean;
 }
 
 // --- Legacy / UI Specific Types (can be deprecated or adapted) ---

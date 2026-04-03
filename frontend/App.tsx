@@ -455,6 +455,7 @@ function buildTeammateInjuryCards(
   teamInjuryReport: TeamInjuryReport | null,
   statKey: string,
   gameCount: number,
+  activeSeason: string,
 ) {
   if (!selectedPlayer?.team) {
     return [];
@@ -493,6 +494,7 @@ function buildTeammateInjuryCards(
       const safeMinutesPerGame = Number.isFinite(minutesPerGame) ? minutesPerGame : null;
       const safeStatPerGame = statPerGame !== null && Number.isFinite(statPerGame) ? statPerGame : null;
       const currentStatus = reportPlayer?.current_status ?? (submittedReport ? 'Available' : null);
+      const isImpactLoading = activeSeason === '25/26' && teamPlayer.detail_loaded === false;
 
       seenNameKeys.add(nameKey);
       cards.push({
@@ -507,6 +509,7 @@ function buildTeammateInjuryCards(
         statPerGame: safeStatPerGame,
         statImpact: teammateImpact.statImpact,
         impactSampleLabel: teammateImpact.impactSampleLabel,
+        isImpactLoading,
         activeGameIds: teammateImpact.activeGameIds,
         defaultFilterMode: getDefaultTeammateFilterMode(currentStatus),
         prominenceScore: (
@@ -538,6 +541,7 @@ function buildTeammateInjuryCards(
       statPerGame: null,
       statImpact: null,
       impactSampleLabel: null,
+      isImpactLoading: false,
       activeGameIds: [],
       defaultFilterMode: getDefaultTeammateFilterMode(currentStatus),
       prominenceScore: 0,
@@ -1337,6 +1341,7 @@ function App() {
       displayTeamInjuryReport,
       activeStatKey,
       effectiveFilterGameCount,
+      activeSeason,
     )
   ), [
     displayPlayer,
@@ -1344,6 +1349,7 @@ function App() {
     displayTeamInjuryReport,
     activeStatKey,
     effectiveFilterGameCount,
+    activeSeason,
   ]);
 
   const displayActiveTeammateFilter = useMemo<ActiveTeammateFilter | null>(() => {
@@ -1366,6 +1372,7 @@ function App() {
       currentStatus: card.currentStatus,
       mode: selectedTeammateFilter.mode,
       activeGameIds: card.activeGameIds,
+      isImpactLoading: card.isImpactLoading,
     };
   }, [displayTeammateInjuryCards, selectedTeammateFilter]);
 
