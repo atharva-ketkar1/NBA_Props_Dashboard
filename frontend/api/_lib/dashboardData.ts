@@ -27,6 +27,7 @@ const HISTORICAL_PLAYER_PROP_SELECT = 'game_date, stat_type, sportsbook, line, o
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
 const SLATE_SELECT = 'game_id, game_date, home_team_tricode, away_team_tricode, is_live, is_final';
+const GAME_MARKETS_SELECT = 'game_id, has_action_network_markets, markets, source, source_query_date, source_generated_at, updated_at';
 const PAGE_SIZE = 1000;
 const MAX_UPCOMING_PROP_DAYS = 2;
 const DEFAULT_BOOTSTRAP_PROP_DAYS = MAX_UPCOMING_PROP_DAYS;
@@ -487,6 +488,61 @@ async function fetchGamesForDates(dates: string[], selectClause = '*') {
   );
 }
 
+async function fetchGameMarketsForDates(dates: string[]) {
+  const normalizedDates = Array.from(new Set((dates ?? []).filter(Boolean))).sort();
+  if (!normalizedDates.length) {
+    return [];
+  }
+
+  return readCached(
+    buildCacheKey(['game_markets_current', GAME_MARKETS_SELECT, normalizedDates.join(',')]),
+    GAMES_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase
+        .from('game_markets_current')
+        .select(GAME_MARKETS_SELECT)
+        .in('game_date', normalizedDates);
+
+      if (error && isMissingRelationError(error, 'game_markets_current')) {
+        return [];
+      }
+
+      assertNoError(error, 'game_markets_current');
+      return data ?? [];
+    },
+  );
+}
+
+function mergeGamesWithMarkets(gamesRows: any[], marketRows: any[]) {
+  if (!Array.isArray(gamesRows) || !gamesRows.length) {
+    return gamesRows ?? [];
+  }
+
+  const marketsByGameId = new Map(
+    (marketRows ?? [])
+      .filter((row: any) => row?.game_id)
+      .map((row: any) => [String(row.game_id), row]),
+  );
+
+  return gamesRows.map((game: any) => {
+    const marketRow = marketsByGameId.get(String(game?.game_id ?? ''));
+    if (!marketRow) {
+      return game;
+    }
+
+    return {
+      ...game,
+      has_action_network_markets: marketRow.has_action_network_markets ?? Boolean(marketRow.markets),
+      markets: marketRow.markets ?? {},
+      market_source: marketRow.source ?? null,
+      market_source_generated_at: marketRow.source_generated_at ?? null,
+      market_source_query_date: marketRow.source_query_date ?? null,
+      market_updated_at: marketRow.updated_at ?? null,
+    };
+  });
+}
+
 async function fetchAllHistoricalPlayerPropsForPlayer(playerId: number) {
   return readCached(
     buildCacheKey(['historical_player_props', playerId]),
@@ -554,7 +610,7 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
   const fastRefreshDates = getFastRefreshDates(null);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [playersRows, propsRows, availabilityRows, lineRows, gamesRows] = await Promise.all([
+  const [playersRows, propsRows, availabilityRows, lineRows, gamesRows, gameMarketsRows] = await Promise.all([
     fetchPlayers(PLAYER_BASE_SELECT),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT, activeSportsbook),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_AVAIL_SELECT),
@@ -562,6 +618,7 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
       ? fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements')
       : Promise.resolve([]),
     fetchGamesForDates([today], SLATE_SELECT),
+    fetchGameMarketsForDates([today]),
   ]);
 
   return {
@@ -571,7 +628,7 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
     })),
     propsRows,
     availabilityRows,
-    gamesRows: gamesRows ?? [],
+    gamesRows: mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),
     lineRows: lineRows ?? [],
     lineVersion: serializeLineMovementVersion(lineRows ?? []),
   };
@@ -585,7 +642,7 @@ export async function fetchHotPayload(
   const activeDates = getFastRefreshDates(selectedDate);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [propsRows, availabilityRows, lineMetaRows, gamesRows] = await Promise.all([
+  const [propsRows, availabilityRows, lineMetaRows, gamesRows, gameMarketsRows] = await Promise.all([
     fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_SELECT, activeSportsbook),
     fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_AVAIL_SELECT),
     includeLineMovements
@@ -597,7 +654,10 @@ export async function fetchHotPayload(
       )
       : Promise.resolve([]),
     fetchGamesForDates(activeDates, SLATE_SELECT),
+    fetchGameMarketsForDates(activeDates),
   ]);
+
+  const mergedGamesRows = mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []);
 
   const nextVersion = serializeLineMovementVersion(lineMetaRows ?? []);
 
@@ -605,7 +665,7 @@ export async function fetchHotPayload(
     return {
       propsRows,
       availabilityRows,
-      gamesRows,
+      gamesRows: mergedGamesRows,
       lineVersion: currentLineVersion,
     };
   }
@@ -614,7 +674,7 @@ export async function fetchHotPayload(
     return {
       propsRows,
       availabilityRows,
-      gamesRows,
+      gamesRows: mergedGamesRows,
       lineVersion: nextVersion,
     };
   }
@@ -629,15 +689,20 @@ export async function fetchHotPayload(
   return {
     propsRows,
     availabilityRows,
-    gamesRows,
+    gamesRows: mergedGamesRows,
     lineVersion: nextVersion,
     lineRows: lineRows ?? [],
   };
 }
 
 export async function fetchGamesPayload(dates: string[]) {
+  const [gamesRows, gameMarketsRows] = await Promise.all([
+    fetchGamesForDates(dates),
+    fetchGameMarketsForDates(dates),
+  ]);
+
   return {
-    games: await fetchGamesForDates(dates),
+    games: mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),
   };
 }
 

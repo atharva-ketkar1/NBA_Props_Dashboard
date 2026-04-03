@@ -74,6 +74,15 @@ EDGE_DISCORD_LINE_MOVE_POINTS = max(0.25, _env_float("EDGE_SCORE_DISCORD_LINE_MO
 EDGE_DISCORD_ODDS_MOVE_AMERICAN = max(5, _env_int("EDGE_SCORE_DISCORD_ODDS_MOVE_AMERICAN", 25))
 EDGE_DISCORD_SCORE_DELTA = max(1.0, _env_float("EDGE_SCORE_DISCORD_SCORE_DELTA", 6.0))
 EDGE_DISCORD_RANK_DELTA = max(1, _env_int("EDGE_SCORE_DISCORD_RANK_DELTA", 4))
+EDGE_DISCORD_HTTP_MAX_ATTEMPTS = max(1, _env_int("EDGE_SCORE_DISCORD_HTTP_MAX_ATTEMPTS", 5))
+EDGE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS = max(
+    0.25,
+    _env_float("EDGE_SCORE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS", 1.5),
+)
+EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = max(
+    0.25,
+    _env_float("EDGE_SCORE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS", 30.0),
+)
 UNDATED_PROP_KEY = "__undated__"
 
 SUPPORTED_BOOKS = {"dk", "fd", "pp"}
@@ -393,13 +402,57 @@ def _webhook_message_url(webhook_url: str, message_id: str) -> str:
     return urlunsplit((split.scheme, split.netloc, message_path, split.query, split.fragment))
 
 
+def _discord_retry_after_seconds(response: requests.Response) -> float:
+    retry_after = _safe_float(response.headers.get("Retry-After"))
+    if retry_after is not None and retry_after > 0:
+        return min(retry_after, EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS)
+
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if isinstance(body, dict):
+        retry_after = _safe_float(body.get("retry_after"))
+        if retry_after is not None and retry_after > 0:
+            return min(retry_after, EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS)
+
+    return EDGE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS
+
+
+def _discord_webhook_request(method: str, url: str, *, payload: Optional[Dict[str, Any]] = None) -> requests.Response:
+    last_response: Optional[requests.Response] = None
+    for attempt_index in range(EDGE_DISCORD_HTTP_MAX_ATTEMPTS):
+        response = requests.request(method, url, json=payload, timeout=10)
+        if response.status_code != 429:
+            return response
+
+        last_response = response
+        if attempt_index >= EDGE_DISCORD_HTTP_MAX_ATTEMPTS - 1:
+            break
+
+        sleep_seconds = _discord_retry_after_seconds(response)
+        logger.warning(
+            "Discord webhook rate limited; retrying | method=%s path=%s sleep_s=%.3f attempt=%s/%s",
+            method,
+            urlsplit(url).path,
+            sleep_seconds,
+            attempt_index + 1,
+            EDGE_DISCORD_HTTP_MAX_ATTEMPTS,
+        )
+        time.sleep(sleep_seconds)
+
+    if last_response is not None:
+        return last_response
+    return requests.request(method, url, json=payload, timeout=10)
+
+
 def _execute_discord_webhook(webhook_url: str, payload: Dict[str, Any], *, wait: bool = False) -> Optional[Dict[str, Any]]:
     if not webhook_url:
         return None
-    response = requests.post(
+    response = _discord_webhook_request(
+        "POST",
         _webhook_url_with_query(webhook_url, {"wait": "true"} if wait else None),
-        json=payload,
-        timeout=10,
+        payload=payload,
     )
     response.raise_for_status()
     if not wait:
@@ -426,10 +479,10 @@ def _edit_discord_webhook_message(
         for key, value in payload.items()
         if key not in {"username", "avatar_url"}
     }
-    response = requests.patch(
+    response = _discord_webhook_request(
+        "PATCH",
         _webhook_message_url(webhook_url, message_id),
-        json=edit_payload,
-        timeout=10,
+        payload=edit_payload,
     )
     if response.status_code == 404:
         return None
@@ -443,9 +496,9 @@ def _edit_discord_webhook_message(
 def _delete_discord_webhook_message(webhook_url: str, message_id: str) -> str:
     if not webhook_url or not message_id:
         return "missing"
-    response = requests.delete(
+    response = _discord_webhook_request(
+        "DELETE",
         _webhook_message_url(webhook_url, message_id),
-        timeout=10,
     )
     if response.status_code == 404:
         return "missing"
@@ -3831,15 +3884,6 @@ def _store_discord_message_ref(
             state_changed = True
             continue
         ref_message_id = str(ref.get("message_id") or "").strip()
-        if channel == "tracker" and ref_message_id and ref_message_id != message_id:
-            ref_webhook_url = str(ref.get("webhook_url") or webhook_url or "").strip()
-            try:
-                delete_status = _delete_discord_webhook_message(ref_webhook_url, ref_message_id)
-                if delete_status in {"deleted", "missing"}:
-                    state_changed = True
-                    continue
-            except Exception as exc:
-                logger.warning("Discord tracker message dedupe failed for %s/%s: %s", slate_date, ref_message_id, exc)
         if ref_message_id != message_id:
             updated_bucket.append(ref)
             continue
@@ -3940,64 +3984,13 @@ def _should_cleanup_main_message_ref(
     return bool(ref_game_ids) and all(game_id in completed_game_ids for game_id in ref_game_ids)
 
 
-def _cleanup_sent_result_recap_messages(
-    state: Dict[str, Any],
-    *,
-    sent_recaps: Dict[str, Any],
-    latest_recap_date_to_keep: str,
-) -> Dict[str, Any]:
-    if not isinstance(sent_recaps, dict) or not sent_recaps:
-        return {"deleted": 0, "state_changed": False, "sent_recaps": {}}
-
-    deleted_count = 0
-    state_changed = False
-    remaining_recaps: Dict[str, Any] = {}
-
-    for raw_date, recap_ref in sent_recaps.items():
-        normalized_date = _normalize_game_date(raw_date)
-        if not normalized_date or not isinstance(recap_ref, dict):
-            state_changed = True
-            continue
-        if normalized_date >= latest_recap_date_to_keep:
-            remaining_recaps[normalized_date] = recap_ref
-            continue
-
-        message_id = str(recap_ref.get("message_id") or "").strip()
-        webhook_url = str(recap_ref.get("webhook_url") or _results_recap_webhook_url() or "").strip()
-        if not message_id or not webhook_url:
-            state_changed = True
-            continue
-
-        try:
-            delete_status = _delete_discord_webhook_message(webhook_url, message_id)
-        except Exception as exc:
-            logger.warning("Discord recap cleanup failed for %s: %s", normalized_date, exc)
-            remaining_recaps[normalized_date] = recap_ref
-            continue
-
-        if delete_status in {"deleted", "missing"}:
-            deleted_count += 1
-            state_changed = True
-        else:
-            remaining_recaps[normalized_date] = recap_ref
-
-    if state_changed:
-        state["sent_result_recaps"] = remaining_recaps
-    return {"deleted": deleted_count, "state_changed": state_changed, "sent_recaps": remaining_recaps}
-
-
 def _cleanup_completed_discord_messages(state: Dict[str, Any], schedule_payload: Optional[Any] = None) -> Dict[str, Any]:
     messages_by_date = state.get("discord_messages_by_date", {})
     if not isinstance(messages_by_date, dict) or not messages_by_date:
         messages_by_date = {}
 
-    sent_recaps = state.get("sent_result_recaps", {})
-    if not isinstance(sent_recaps, dict):
-        sent_recaps = {}
-
     now = get_et_now()
     today_str = now.strftime("%Y-%m-%d")
-    latest_recap_date_to_keep = (now.date() - timedelta(days=1)).isoformat()
     completed_game_ids = _completed_schedule_game_ids(schedule_payload)
     deleted_count = 0
     state_changed = False
@@ -4016,17 +4009,15 @@ def _cleanup_completed_discord_messages(state: Dict[str, Any], schedule_payload:
             if not isinstance(refs, list):
                 state_changed = True
                 continue
-            default_webhook_url = (
-                EDGE_SCORE_DISCORD_WEBHOOK_URL
-                if channel == "main"
-                else EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
-            )
-            latest_tracker_message_id = ""
-            if channel == "tracker" and not (normalized_date < today_str and normalized_date in sent_recaps):
-                for ref in reversed(refs):
-                    if isinstance(ref, dict) and str(ref.get("message_id") or "").strip():
-                        latest_tracker_message_id = str(ref.get("message_id") or "").strip()
-                        break
+            if channel != "main":
+                remaining_channel_map[channel] = [
+                    ref for ref in refs if isinstance(ref, dict)
+                ]
+                if len(remaining_channel_map[channel]) != len(refs):
+                    state_changed = True
+                continue
+
+            default_webhook_url = EDGE_SCORE_DISCORD_WEBHOOK_URL
             remaining_refs = []
             for ref in refs:
                 if not isinstance(ref, dict):
@@ -4034,23 +4025,12 @@ def _cleanup_completed_discord_messages(state: Dict[str, Any], schedule_payload:
                     continue
                 message_id = str(ref.get("message_id") or "").strip()
                 webhook_url = str(ref.get("webhook_url") or default_webhook_url or "").strip()
-                should_delete_ref = False
-                if channel == "main":
-                    should_delete_ref = _should_cleanup_main_message_ref(
-                        ref,
-                        slate_date=normalized_date,
-                        today_str=today_str,
-                        completed_game_ids=completed_game_ids,
-                    )
-                elif channel == "tracker":
-                    should_delete_ref = (
-                        (normalized_date < today_str and normalized_date in sent_recaps)
-                        or (
-                            bool(latest_tracker_message_id)
-                            and message_id
-                            and message_id != latest_tracker_message_id
-                        )
-                    )
+                should_delete_ref = _should_cleanup_main_message_ref(
+                    ref,
+                    slate_date=normalized_date,
+                    today_str=today_str,
+                    completed_game_ids=completed_game_ids,
+                )
 
                 if not should_delete_ref:
                     remaining_refs.append(ref)
@@ -4075,14 +4055,6 @@ def _cleanup_completed_discord_messages(state: Dict[str, Any], schedule_payload:
             remaining_messages_by_date[normalized_date] = remaining_channel_map
         elif normalized_date in messages_by_date:
             state_changed = True
-
-    recap_cleanup = _cleanup_sent_result_recap_messages(
-        state,
-        sent_recaps=sent_recaps,
-        latest_recap_date_to_keep=latest_recap_date_to_keep,
-    )
-    deleted_count += int(recap_cleanup.get("deleted", 0) or 0)
-    state_changed = bool(state_changed or recap_cleanup.get("state_changed"))
     if state_changed:
         state["discord_messages_by_date"] = remaining_messages_by_date
     return {"deleted": deleted_count, "state_changed": state_changed}
