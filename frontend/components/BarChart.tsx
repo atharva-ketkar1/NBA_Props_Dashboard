@@ -223,17 +223,12 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         }
 
         let cancelled = false;
-        const actionOddsPromise = fetchApiJson<{ games?: Game[] }>(ACTION_NETWORK_ODDS_PATH)
-            .catch(() => ({ games: [] }));
 
         if (USE_DB) {
-            Promise.all([
-                fetchDashboardGames(relevantDates),
-                actionOddsPromise,
-            ])
-                .then(([{ games }, actionOdds]) => {
+            fetchDashboardGames(relevantDates)
+                .then(({ games }) => {
                     if (cancelled) return;
-                    const nextGames = mergeActionNetworkMarkets(games ?? [], actionOdds?.games ?? []);
+                    const nextGames = games ?? [];
                     scheduleCacheRef.current.set(scheduleKey, nextGames);
                     scheduleKeyRef.current = scheduleKey;
                     setScheduleData(nextGames);
@@ -242,6 +237,9 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     console.error('[api] games error:', error);
                 });
         } else {
+            const actionOddsPromise = fetchApiJson<{ games?: Game[] }>(ACTION_NETWORK_ODDS_PATH)
+                .catch(() => ({ games: [] }));
+
             Promise.all([
                 fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json'),
                 actionOddsPromise,

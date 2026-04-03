@@ -289,7 +289,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         label,
         rank,
         customRank,
-        className = 'px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px]',
+        className = 'px-2.5 py-1.5 rounded-[6px] text-[12px]',
     }: {
         filterId: string;
         label: string;
@@ -305,7 +305,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                 key={`${filterId}-${label}`}
                 onClick={() => isSupported && onFilterChange(isActive ? null : filterId)}
                 disabled={!isSupported}
-                className={`${className} font-medium flex items-center gap-1 transition-colors border ${isActive
+                className={`${className} font-medium flex items-center gap-1.5 transition-colors border ${isActive
                     ? 'bg-blue500 text-white border-transparent'
                     : isSupported
                         ? 'bg-bgElevation1 text-[#D4D4D4] border-borderMedium/50 hover:bg-bgElevation2 hover:text-white'
@@ -391,14 +391,14 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                 type="button"
                 onClick={() => onPreviewTeammateToggle?.(teammate)}
                 aria-label={`Toggle teammate filter for ${teammate.playerName}`}
-                className={`${cardShellClass} border rounded-lg p-1.5 w-[66px] shrink-0 flex flex-col items-center relative transition-colors`}
+                className={`${cardShellClass} border rounded-xl p-2 w-[76px] shrink-0 flex flex-col items-center relative transition-colors`}
                 title={tooltipText}
             >
-                {renderTeammateAvatar(teammate)}
-                <span className="text-white text-[10px] font-semibold tracking-wide truncate w-full text-center mt-2.5">
+                {renderTeammateAvatar(teammate, 'w-11 h-11')}
+                <span className="text-white text-[11px] font-semibold tracking-wide truncate w-full text-center mt-2">
                     {teammate.displayName}
                 </span>
-                <span className={`${cardStateClass} text-[11px] font-bold mt-0.5 truncate w-full text-center px-0.5`}>
+                <span className={`${cardStateClass} text-[12px] font-bold mt-0.5 truncate w-full text-center px-0.5`}>
                     {cardStateLabel}
                 </span>
             </button>
@@ -553,11 +553,11 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
 
     return (
         <>
-        <div className="w-[320px] bg-bgElevation0 border-l border-borderMedium/40 flex flex-col h-full overflow-y-auto shrink-0 shadow-[-10px_0_30px_rgba(0,0,0,0.5)] z-40">
+        <div className="w-[320px] bg-bgElevation0 border-l border-borderMedium/40 flex flex-col h-full shrink-0 shadow-[-10px_0_30px_rgba(0,0,0,0.5)] z-40">
             {/* Header */}
-            <div className="flex items-center justify-between px-3 py-2.5 border-b border-borderMedium/40 shrink-0">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-borderMedium/40 shrink-0">
                 <div className="flex items-center gap-2">
-                    <h2 className="text-white font-semibold text-base">Filters</h2>
+                    <h2 className="text-white font-semibold text-[15px]">Filters</h2>
                     <HelpCircle className="w-4 h-4 text-borderMuted" />
                 </div>
                 <button
@@ -566,15 +566,16 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     aria-label="Close filters panel"
                     className="text-borderMuted hover:text-white transition-colors"
                 >
-                    <X className="w-4.5 h-4.5" />
+                    <X className="w-5 h-5" />
                 </button>
             </div>
 
-            <div className="p-3 flex flex-col gap-2">
+            <div className="flex-1 overflow-y-auto">
+            <div className="px-4 pt-3 pb-3 flex flex-col gap-3">
                 {/* Season & Games Toggles */}
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-2.5">
                     <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[50px]">Season</span>
+                        <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[56px]">Season</span>
                         <div className="flex bg-bgElevation1 rounded-md border border-borderMedium/40 p-0.5 flex-1 ml-2">
                             {['23/24', '24/25', '25/26', 'All'].map(s => {
                                 const isActive = s === (activeSeason || '25/26');
@@ -583,7 +584,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                     <button
                                         key={s}
                                         onClick={() => isClickable && onSeasonChange && onSeasonChange(s)}
-                                        className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : isClickable ? 'text-fgSubtle hover:text-white cursor-pointer' : 'text-fgSubtle/30 cursor-not-allowed'}`}
+                                        className={`flex-1 py-1.5 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : isClickable ? 'text-fgSubtle hover:text-white cursor-pointer' : 'text-fgSubtle/30 cursor-not-allowed'}`}
                                     >
                                         {s}
                                     </button>
@@ -593,7 +594,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     </div>
 
                     <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[50px]">Games</span>
+                        <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[56px]">Games</span>
                         <div className="flex items-center gap-2 flex-1 ml-2">
                             <div className="flex bg-bgElevation1 rounded-md border border-borderMedium/40 p-0.5 flex-1">
                                 {['10', '20', 'Max'].map(g => {
@@ -611,29 +612,29 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                         <button
                                             key={g}
                                             onClick={handleClick}
-                                            className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : 'text-fgSubtle hover:text-white'}`}
+                                            className={`flex-1 py-1.5 text-xs font-medium rounded transition-colors ${isActive ? 'bg-blue500 text-white shadow-sm' : 'text-fgSubtle hover:text-white'}`}
                                         >
                                             {g}
                                         </button>
                                     );
                                 })}
                             </div>
-                            <div className="flex items-center justify-between bg-bgElevation2 border border-borderMedium/50 rounded-md px-2 py-1 shrink-0 w-[70px]">
-                                <span onClick={() => onGameCountChange(Math.max(1, gameCount - 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1 py-0.5">-</span>
+                            <div className="flex items-center justify-between bg-bgElevation2 border border-borderMedium/50 rounded-md px-2 py-1.5 shrink-0 w-[72px]">
+                                <span onClick={() => onGameCountChange(Math.max(1, gameCount - 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1">-</span>
                                 <span className="text-white text-xs font-medium">{gameCount}</span>
-                                <span onClick={() => onGameCountChange(Math.min(player?.game_log?.length || 82, gameCount + 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1 py-0.5">+</span>
+                                <span onClick={() => onGameCountChange(Math.min(player?.game_log?.length || 82, gameCount + 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1">+</span>
                             </div>
                             <Lock className="w-4 h-4 text-borderMuted" />
                         </div>
                     </div>
                 </div>
 
-                <div className="flex items-center justify-between border-b border-borderMedium/40 mt-1 pb-0">
+                <div className="flex items-center justify-between border-b border-borderMedium/40 pb-0 gap-1">
                     {['Suggested', 'Opp Rankings', 'Splits', 'Stats'].map(t => (
                         <button
                             key={t}
                             onClick={() => setActiveTab(t)}
-                            className={`pb-1 text-[11px] font-semibold tracking-wide ${t === activeTab ? 'text-[#F5F5F5] border-b-2 border-blue500' : 'text-[#A3A3A3] hover:text-[#F5F5F5] border-b-2 border-transparent transition-colors'}`}
+                            className={`pb-2 text-[11px] font-semibold tracking-wide ${t === activeTab ? 'text-[#F5F5F5] border-b-2 border-blue500' : 'text-[#A3A3A3] hover:text-[#F5F5F5] border-b-2 border-transparent transition-colors'}`}
                         >
                             {t}
                         </button>
@@ -643,7 +644,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                 {activeTab === 'Suggested' ? (
                     <>
                         {/* Suggested Tab Content - Pills */}
-                        <div className="flex flex-wrap gap-1 mt-1">
+                        <div className="flex flex-wrap gap-1.5 mt-1.5">
                             {[
                                 { filterId: 'Minutes', label: 'Minutes' },
                                 { filterId: 'Def vs Position (PTS)', label: 'Def vs Position (PTS)' },
@@ -660,7 +661,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                             {!isSuggestedExpanded ? (
                                 <button
                                     onClick={() => setIsSuggestedExpanded(true)}
-                                    className="px-2 py-1.5 lg:py-1 rounded-full text-[12px] lg:text-[11px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3">
+                                    className="px-2.5 py-1.5 rounded-full text-[12px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3">
                                     +7 more
                                 </button>
                             ) : (
@@ -683,23 +684,23 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                     )}
                                     <button
                                         onClick={() => setIsSuggestedExpanded(false)}
-                                        className="p-1.5 rounded-full text-[13px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3 flex items-center justify-center w-[24px] h-[24px] mt-0.5 ml-1">
+                                        className="p-1.5 rounded-full text-[13px] font-medium transition-colors border bg-bgElevation2 text-[#A3A3A3] border-borderMedium/50 hover:text-white hover:bg-bgElevation3 flex items-center justify-center w-6 h-6 ml-0.5">
                                         <ChevronUp className="w-4 h-4" />
                                     </button>
                                 </>
                             )}
                         </div>
 
-                        {/* Teammates Section (Mirrored from PropsMadness Layout) */}
-                        <div className="flex flex-col gap-2 mt-1 border-t border-borderMedium/40 pt-2">
+                        {/* Teammates Section */}
+                        <div className="flex flex-col gap-3 mt-2 border-t border-borderMedium/40 pt-4">
                             <div className="flex items-center justify-between">
-                                <span className="text-white text-sm font-semibold">Teammates</span>
+                                <span className="text-white text-[14px] font-semibold tracking-[-0.01em]">Teammates</span>
                                 <button
                                     type="button"
                                     onClick={() => teammateInjuryCards.length > 0 && setIsTeammateModalOpen(true)}
                                     disabled={teammateInjuryCards.length === 0}
                                     aria-label="Open all teammates"
-                                    className={`bg-bgElevation1 border border-borderMedium/50 text-xs font-medium px-2 py-1 rounded-md flex items-center gap-1 transition-colors ${teammateInjuryCards.length > 0
+                                    className={`bg-bgElevation1 border border-borderMedium/50 text-xs font-medium px-2.5 py-1 rounded-md flex items-center gap-1 transition-colors ${teammateInjuryCards.length > 0
                                         ? 'text-fgSubtle hover:text-white'
                                         : 'text-fgSubtle/40 cursor-not-allowed'
                                         }`}
@@ -709,11 +710,11 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                 </button>
                             </div>
 
-                            <div className="flex items-center gap-2 relative overflow-x-auto no-scrollbar pb-2">
+                            <div className="flex items-center gap-2.5 relative overflow-x-auto no-scrollbar pb-3">
                                 {teammatePreviewCards.length > 0 ? teammatePreviewCards.map((teammate) => (
                                     renderPreviewTeammateCard(teammate)
                                 )) : (
-                                    <div className="text-fgSubtle text-xs py-2">
+                                    <div className="text-fgSubtle text-xs py-4">
                                         No teammates available.
                                     </div>
                                 )}
@@ -809,6 +810,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                         </div>
                     </div>
                 )}
+            </div>
             </div>
         </div>
         {teammateModal}
