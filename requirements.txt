@@ -123,6 +123,7 @@ supabase
 
 # Prop modeling / backtesting
 catboost
+scipy
 joblib
 lightgbm
 scikit-learn

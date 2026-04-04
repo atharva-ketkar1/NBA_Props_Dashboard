@@ -105,11 +105,12 @@ SIDE_MULTIPLIERS = {
     "under": -1.0,
 }
 COMPONENT_WEIGHTS = {
-    "projection": 0.34,
-    "recent_form": 0.18,
-    "matchup": 0.16,
-    "market": 0.12,
-    "line_movement": 0.07,
+    "projection": 0.19,
+    "recent_form": 0.15,
+    "matchup": 0.13,
+    "market": 0.09,
+    "ml_regression": 0.25,
+    "line_movement": 0.06,
     "similar_players": 0.07,
     "head_to_head": 0.04,
     "back_to_back": 0.02,
@@ -1767,6 +1768,50 @@ def _compute_matchup_context(player: Dict[str, Any], stat_type: str, side: str) 
     }
 
 
+_ml_predictor = None
+
+def _compute_ml_regression_context(player: Dict[str, Any], opponent: str, stat_type: str, line: float, side: str) -> Dict[str, Any]:
+    global _ml_predictor
+    if _ml_predictor is None:
+        from utils.ml_inference import get_ml_predictor
+        _ml_predictor = get_ml_predictor()
+    
+    logs = _extract_logs(player)
+    if not logs:
+        return {"available": False, "score": 0.0, "details": {}}
+    
+    player_info = {
+        "player_id": player.get("id"),
+        "player_name": player.get("name"),
+        "team": player.get("team"),
+        "opponent_abbrev": opponent,
+        "position": player.get("position"),
+    }
+    
+    res = _ml_predictor.predict(player_info, logs, stat_type)
+    if not res:
+        return {"available": False, "score": 0.0, "details": {}}
+         
+    prob = _ml_predictor.hit_probability(res["prediction"], res["std_dev"], line, side)
+    
+    # map probability (0.0 to 1.0) to score (-1.0 to 1.0)
+    # A probability of >0.5 leans towards 1.0. A probability <0.5 leans towards -1.0.
+    # Score = (prob - 0.5) * 2.0
+    # To prevent extremeness, we cap it between -1.0 and 1.0 which is natural.
+    score = (prob - 0.5) * 2.0
+    
+    return {
+        "available": True,
+        "raw_score": _clamp(score, -1.0, 1.0),
+        "score": _clamp(score, -1.0, 1.0),
+        "details": {
+            "prediction_val": round(res["prediction"], 2),
+            "hit_probability": round(prob * 100.0, 1),
+            "std_dev": round(res["std_dev"], 2),
+        }
+    }
+
+
 def _compute_recent_form_context(player: Dict[str, Any], stat_type: str, line: float, side: str) -> Dict[str, Any]:
     profile = STAT_PROFILES.get(stat_type, {})
     scale = profile.get("scale", 5.0)
@@ -2412,6 +2457,7 @@ def _build_candidate(
         "recent_form": _compute_recent_form_context(player, stat_type, line, side),
         "matchup": _compute_matchup_context(player, stat_type, side),
         "market": _compute_market_context(market_selection, side),
+        "ml_regression": _compute_ml_regression_context(player, opponent, stat_type, line, side),
         "line_movement": _compute_line_movement_context(
             line_lookup,
             player_id=player_id,

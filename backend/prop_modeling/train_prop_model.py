@@ -1,4 +1,4 @@
-"""Train a first-pass CatBoost prop model with date-based holdout backtests."""
+"""Train CatBoost prop models with walk-forward CV and optional unified cross-stat model."""
 
 from __future__ import annotations
 
@@ -8,8 +8,10 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
 from feature_schema import (
@@ -90,7 +92,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--feature-groups",
         nargs="*",
-        default=["market", "player_form", "usage"],
+        default=["market", "player_form", "usage", "momentum", "consistency"],
         choices=sorted(FEATURE_GROUPS.keys()),
         help="Feature groups to include in this experiment.",
     )
@@ -100,6 +102,30 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_TOP_K_VALUES,
         help="K values used for holdout top-K hit-rate/ROI summaries.",
+    )
+    parser.add_argument(
+        "--unified",
+        action="store_true",
+        default=False,
+        help="Train a single unified model across all stat types instead of per-stat models.",
+    )
+    parser.add_argument(
+        "--walk-forward",
+        action="store_true",
+        default=False,
+        help="Use walk-forward expanding-window CV instead of fixed holdout.",
+    )
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        default=False,
+        help="Apply isotonic calibration to predicted probabilities.",
+    )
+    parser.add_argument(
+        "--walk-forward-min-train-dates",
+        type=int,
+        default=3,
+        help="Minimum training dates before first walk-forward test fold.",
     )
     return parser.parse_args()
 
@@ -132,7 +158,7 @@ def _load_dataset(dataset_csv: Path) -> pd.DataFrame:
 def _prepare_feature_frame(df: pd.DataFrame, feature_columns: Sequence[str]) -> pd.DataFrame:
     X = df.loc[:, feature_columns].copy()
     for column_name in feature_columns:
-        if column_name in CATEGORICAL_FEATURE_COLUMNS:
+        if column_name in CATEGORICAL_FEATURE_COLUMNS or column_name == "stat_type":
             X[column_name] = X[column_name].fillna("UNKNOWN").astype(str)
         else:
             X[column_name] = pd.to_numeric(X[column_name], errors="coerce")
@@ -159,6 +185,31 @@ def _date_holdout_split(
     if train_df.empty or test_df.empty:
         return None
     return train_df, test_df, split_date.date().isoformat()
+
+
+def _walk_forward_splits(
+    df: pd.DataFrame,
+    *,
+    min_train_dates: int,
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, str]]:
+    """Generate expanding-window walk-forward splits.
+
+    Each fold uses all dates before a test date as training,
+    and a single date as the test set.
+    """
+    unique_dates = sorted(df["game_date"].dt.date.unique())
+    splits = []
+
+    for test_idx in range(min_train_dates, len(unique_dates)):
+        test_date = unique_dates[test_idx]
+        split_date = pd.Timestamp(test_date)
+        train_df = df[df["game_date"] < split_date].copy()
+        test_df = df[df["game_date"] == split_date].copy()
+        if train_df.empty or test_df.empty:
+            continue
+        splits.append((train_df, test_df, test_date.isoformat()))
+
+    return splits
 
 
 def _safe_metric(value: Any) -> Optional[float]:
@@ -215,26 +266,53 @@ def _topk_metrics(
     return metrics
 
 
-def _fit_stat_model(
-    stat_df: pd.DataFrame,
-    *,
+def _compute_metrics(
+    y_test: np.ndarray,
+    test_probs: np.ndarray,
+    test_df: pd.DataFrame,
+    top_k_values: Sequence[int],
     stat_type: str,
+    split_date: str,
+    train_rows: int,
+    test_rows: int,
+    train_dates: int,
+    test_dates: int,
+    y_train_mean: float,
+    best_iteration: int,
+) -> Dict[str, Any]:
+    label_values = y_test
+
+    auc_value = None
+    if len(set(label_values.tolist())) == 2:
+        auc_value = roc_auc_score(label_values, test_probs)
+
+    return {
+        "stat_type": stat_type,
+        "split_date": split_date,
+        "train_rows": train_rows,
+        "test_rows": test_rows,
+        "train_dates": train_dates,
+        "test_dates": test_dates,
+        "positive_rate_train": _safe_metric(y_train_mean),
+        "positive_rate_test": _safe_metric(float(y_test.mean())),
+        "auc": _safe_metric(auc_value),
+        "brier": _safe_metric(brier_score_loss(label_values, test_probs)),
+        "log_loss": _safe_metric(log_loss(label_values, test_probs, labels=[0, 1])),
+        "accuracy_at_0_5": _safe_metric(accuracy_score(label_values, test_probs >= 0.5)),
+        "topk": _topk_metrics(test_df, test_probs, top_k_values),
+        "best_iteration": best_iteration,
+    }
+
+
+def _fit_single_split(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
     feature_columns: Sequence[str],
     cat_feature_indices: Sequence[int],
     args: argparse.Namespace,
-) -> Optional[Dict[str, Any]]:
-    split = _date_holdout_split(
-        stat_df,
-        test_date_count=args.test_date_count,
-        min_train_dates=args.min_train_dates,
-    )
-    if split is None:
-        return None
-
-    train_df, test_df, split_date = split
-    if len(train_df) < args.min_train_rows:
-        return None
-
+) -> Tuple[CatBoostClassifier, np.ndarray, np.ndarray]:
+    """Train a CatBoost model on one train/test split and return model + predictions."""
     X_train = _prepare_feature_frame(train_df, feature_columns)
     X_test = _prepare_feature_frame(test_df, feature_columns)
     y_train = train_df[MODEL_TARGET_COLUMN].astype(int)
@@ -262,28 +340,57 @@ def _fit_stat_model(
     )
 
     test_probs = model.predict_proba(test_pool)[:, 1]
-    label_values = y_test.to_numpy()
 
-    auc_value = None
-    if len(set(label_values.tolist())) == 2:
-        auc_value = roc_auc_score(label_values, test_probs)
+    if args.calibrate and len(y_test) > 10:
+        try:
+            calibrated = CalibratedClassifierCV(model, method="isotonic", cv="prefit")
+            calibrated.fit(X_test, y_test)
+            test_probs = calibrated.predict_proba(X_test)[:, 1]
+        except Exception:
+            pass
 
-    metrics = {
-        "stat_type": stat_type,
-        "split_date": split_date,
-        "train_rows": int(len(train_df)),
-        "test_rows": int(len(test_df)),
-        "train_dates": int(train_df["game_date"].dt.date.nunique()),
-        "test_dates": int(test_df["game_date"].dt.date.nunique()),
-        "positive_rate_train": _safe_metric(y_train.mean()),
-        "positive_rate_test": _safe_metric(y_test.mean()),
-        "auc": _safe_metric(auc_value),
-        "brier": _safe_metric(brier_score_loss(label_values, test_probs)),
-        "log_loss": _safe_metric(log_loss(label_values, test_probs, labels=[0, 1])),
-        "accuracy_at_0_5": _safe_metric(accuracy_score(label_values, test_probs >= 0.5)),
-        "topk": _topk_metrics(test_df, test_probs, args.top_k),
-        "best_iteration": int(model.get_best_iteration() or args.iterations),
-    }
+    return model, test_probs, y_test.to_numpy()
+
+
+def _fit_stat_model(
+    stat_df: pd.DataFrame,
+    *,
+    stat_type: str,
+    feature_columns: Sequence[str],
+    cat_feature_indices: Sequence[int],
+    args: argparse.Namespace,
+) -> Optional[Dict[str, Any]]:
+    split = _date_holdout_split(
+        stat_df,
+        test_date_count=args.test_date_count,
+        min_train_dates=args.min_train_dates,
+    )
+    if split is None:
+        return None
+
+    train_df, test_df, split_date = split
+    if len(train_df) < args.min_train_rows:
+        return None
+
+    model, test_probs, label_values = _fit_single_split(
+        train_df, test_df,
+        feature_columns=feature_columns,
+        cat_feature_indices=cat_feature_indices,
+        args=args,
+    )
+
+    y_train = train_df[MODEL_TARGET_COLUMN].astype(int)
+    metrics = _compute_metrics(
+        label_values, test_probs, test_df, args.top_k,
+        stat_type=stat_type,
+        split_date=split_date,
+        train_rows=int(len(train_df)),
+        test_rows=int(len(test_df)),
+        train_dates=int(train_df["game_date"].dt.date.nunique()),
+        test_dates=int(test_df["game_date"].dt.date.nunique()),
+        y_train_mean=float(y_train.mean()),
+        best_iteration=int(model.get_best_iteration() or args.iterations),
+    )
 
     return {
         "model": model,
@@ -296,16 +403,108 @@ def _fit_stat_model(
     }
 
 
+def _walk_forward_eval(
+    df: pd.DataFrame,
+    *,
+    stat_type: str,
+    feature_columns: Sequence[str],
+    cat_feature_indices: Sequence[int],
+    args: argparse.Namespace,
+) -> Optional[Dict[str, Any]]:
+    """Run walk-forward expanding-window cross-validation."""
+    splits = _walk_forward_splits(
+        df,
+        min_train_dates=args.walk_forward_min_train_dates,
+    )
+    if not splits:
+        return None
+
+    all_test_probs = []
+    all_labels = []
+    all_test_dfs = []
+    fold_metrics = []
+    final_model = None
+
+    for train_df, test_df, split_date in splits:
+        if len(train_df) < args.min_train_rows:
+            continue
+
+        model, test_probs, labels = _fit_single_split(
+            train_df, test_df,
+            feature_columns=feature_columns,
+            cat_feature_indices=cat_feature_indices,
+            args=args,
+        )
+        final_model = model
+        all_test_probs.extend(test_probs.tolist())
+        all_labels.extend(labels.tolist())
+        all_test_dfs.append(test_df)
+
+        y_train = train_df[MODEL_TARGET_COLUMN].astype(int)
+        fold_metric = _compute_metrics(
+            labels, test_probs, test_df, args.top_k,
+            stat_type=stat_type,
+            split_date=split_date,
+            train_rows=int(len(train_df)),
+            test_rows=int(len(test_df)),
+            train_dates=int(train_df["game_date"].dt.date.nunique()),
+            test_dates=1,
+            y_train_mean=float(y_train.mean()),
+            best_iteration=int(model.get_best_iteration() or args.iterations),
+        )
+        fold_metrics.append(fold_metric)
+
+    if not all_labels or final_model is None:
+        return None
+
+    all_test_probs_arr = np.array(all_test_probs)
+    all_labels_arr = np.array(all_labels)
+    combined_test_df = pd.concat(all_test_dfs, ignore_index=True)
+
+    auc_value = None
+    if len(set(all_labels)) == 2:
+        auc_value = roc_auc_score(all_labels_arr, all_test_probs_arr)
+
+    aggregate_metrics = {
+        "stat_type": stat_type,
+        "method": "walk_forward",
+        "num_folds": len(fold_metrics),
+        "total_test_rows": len(all_labels),
+        "auc": _safe_metric(auc_value),
+        "brier": _safe_metric(brier_score_loss(all_labels_arr, all_test_probs_arr)),
+        "log_loss": _safe_metric(log_loss(all_labels_arr, all_test_probs_arr, labels=[0, 1])),
+        "accuracy_at_0_5": _safe_metric(accuracy_score(all_labels_arr, all_test_probs_arr >= 0.5)),
+        "topk": _topk_metrics(combined_test_df, all_test_probs_arr, args.top_k),
+        "per_fold_auc": [f.get("auc") for f in fold_metrics],
+    }
+
+    return {
+        "model": final_model,
+        "metrics": aggregate_metrics,
+        "feature_columns": list(feature_columns),
+        "cat_feature_columns": [
+            feature_columns[index]
+            for index in cat_feature_indices
+        ],
+        "fold_metrics": fold_metrics,
+    }
+
+
 def _train_all_stats(df: pd.DataFrame, args: argparse.Namespace) -> Dict[str, Any]:
     feature_columns = [
         column_name
         for column_name in _selected_feature_columns(args.feature_groups)
         if column_name in df.columns
     ]
+
+    # For unified model, add stat_type as a categorical feature
+    if args.unified and "stat_type" not in feature_columns:
+        feature_columns = ["stat_type"] + feature_columns
+
     cat_feature_indices = [
         index
         for index, column_name in enumerate(feature_columns)
-        if column_name in CATEGORICAL_FEATURE_COLUMNS
+        if column_name in CATEGORICAL_FEATURE_COLUMNS or column_name == "stat_type"
     ]
 
     model_dir = Path(args.model_dir)
@@ -330,52 +529,137 @@ def _train_all_stats(df: pd.DataFrame, args: argparse.Namespace) -> Dict[str, An
             "min_train_dates": args.min_train_dates,
             "min_train_rows": args.min_train_rows,
             "top_k": args.top_k,
+            "unified": args.unified,
+            "walk_forward": args.walk_forward,
+            "calibrate": args.calibrate,
         },
         "stat_models": {},
     }
 
-    for stat_type in sorted(df["stat_type"].dropna().unique()):
-        stat_df = df[df["stat_type"] == stat_type].copy()
-        fit_result = _fit_stat_model(
-            stat_df,
-            stat_type=stat_type,
-            feature_columns=feature_columns,
-            cat_feature_indices=cat_feature_indices,
-            args=args,
-        )
+    if args.unified:
+        # Train one model across all stat types
+        print(f"UNIFIED MODEL: {len(df)} rows, {df['stat_type'].nunique()} stat types")
+
+        if args.walk_forward:
+            fit_result = _walk_forward_eval(
+                df,
+                stat_type="unified",
+                feature_columns=feature_columns,
+                cat_feature_indices=cat_feature_indices,
+                args=args,
+            )
+        else:
+            fit_result = _fit_stat_model(
+                df,
+                stat_type="unified",
+                feature_columns=feature_columns,
+                cat_feature_indices=cat_feature_indices,
+                args=args,
+            )
+
         if fit_result is None:
-            print(f"SKIP {stat_type}: not enough date/row history")
-            continue
+            print("SKIP unified: not enough data")
+        else:
+            model_path = model_dir / "unified.cbm"
+            metadata_path = model_dir / "unified.metadata.json"
+            fit_result["model"].save_model(str(model_path))
 
-        stat_slug = _stat_model_slug(stat_type)
-        model_path = model_dir / f"{stat_slug}.cbm"
-        metadata_path = model_dir / f"{stat_slug}.metadata.json"
+            metadata = {
+                "stat_type": "unified",
+                "model_path": str(model_path.resolve()),
+                "feature_columns": fit_result["feature_columns"],
+                "cat_feature_columns": fit_result["cat_feature_columns"],
+                "metrics": fit_result["metrics"],
+            }
+            metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
 
-        fit_result["model"].save_model(str(model_path))
-        metadata = {
-            "stat_type": stat_type,
-            "model_path": str(model_path.resolve()),
-            "feature_columns": fit_result["feature_columns"],
-            "cat_feature_columns": fit_result["cat_feature_columns"],
-            "metrics": fit_result["metrics"],
-        }
-        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
+            manifest["stat_models"]["unified"] = {
+                "model_path": str(model_path.resolve()),
+                "metadata_path": str(metadata_path.resolve()),
+                "metrics": fit_result["metrics"],
+            }
 
-        manifest["stat_models"][stat_type] = {
-            "model_path": str(model_path.resolve()),
-            "metadata_path": str(metadata_path.resolve()),
-            "metrics": fit_result["metrics"],
-        }
+            metrics = fit_result["metrics"]
+            print(
+                f"unified: "
+                f"auc={metrics.get('auc')} "
+                f"brier={metrics.get('brier')} "
+                f"logloss={metrics.get('log_loss')} "
+                f"acc={metrics.get('accuracy_at_0_5')} "
+                f"top5_roi={metrics.get('topk', {}).get('top_5', {}).get('avg_daily_roi_per_bet')}"
+            )
 
-        metrics = fit_result["metrics"]
-        print(
-            f"{stat_type}: "
-            f"auc={metrics['auc']} "
-            f"brier={metrics['brier']} "
-            f"logloss={metrics['log_loss']} "
-            f"acc={metrics['accuracy_at_0_5']} "
-            f"top5_roi={metrics['topk'].get('top_5', {}).get('avg_daily_roi_per_bet')}"
-        )
+            # Export feature importances
+            try:
+                importances = fit_result["model"].get_feature_importance()
+                importance_pairs = sorted(
+                    zip(feature_columns, importances),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+                importance_path = model_dir / "unified.feature_importance.json"
+                importance_path.write_text(json.dumps(
+                    [{"feature": name, "importance": round(float(imp), 4)} for name, imp in importance_pairs],
+                    indent=2,
+                ))
+                print(f"  top features: {[f'{n}={round(i, 2)}' for n, i in importance_pairs[:10]]}")
+            except Exception as exc:
+                print(f"  feature importance export failed: {exc}")
+    else:
+        # Train per-stat models (original behavior)
+        for stat_type in sorted(df["stat_type"].dropna().unique()):
+            stat_df = df[df["stat_type"] == stat_type].copy()
+
+            if args.walk_forward:
+                fit_result = _walk_forward_eval(
+                    stat_df,
+                    stat_type=stat_type,
+                    feature_columns=feature_columns,
+                    cat_feature_indices=cat_feature_indices,
+                    args=args,
+                )
+            else:
+                fit_result = _fit_stat_model(
+                    stat_df,
+                    stat_type=stat_type,
+                    feature_columns=feature_columns,
+                    cat_feature_indices=cat_feature_indices,
+                    args=args,
+                )
+
+            if fit_result is None:
+                print(f"SKIP {stat_type}: not enough date/row history")
+                continue
+
+            stat_slug = _stat_model_slug(stat_type)
+            model_path = model_dir / f"{stat_slug}.cbm"
+            metadata_path = model_dir / f"{stat_slug}.metadata.json"
+
+            fit_result["model"].save_model(str(model_path))
+            metadata = {
+                "stat_type": stat_type,
+                "model_path": str(model_path.resolve()),
+                "feature_columns": fit_result["feature_columns"],
+                "cat_feature_columns": fit_result["cat_feature_columns"],
+                "metrics": fit_result["metrics"],
+            }
+            metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
+
+            manifest["stat_models"][stat_type] = {
+                "model_path": str(model_path.resolve()),
+                "metadata_path": str(metadata_path.resolve()),
+                "metrics": fit_result["metrics"],
+            }
+
+            metrics = fit_result["metrics"]
+            print(
+                f"{stat_type}: "
+                f"auc={metrics.get('auc')} "
+                f"brier={metrics.get('brier')} "
+                f"logloss={metrics.get('log_loss')} "
+                f"acc={metrics.get('accuracy_at_0_5')} "
+                f"top5_roi={metrics.get('topk', {}).get('top_5', {}).get('avg_daily_roi_per_bet')}"
+            )
 
     manifest_path = model_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))

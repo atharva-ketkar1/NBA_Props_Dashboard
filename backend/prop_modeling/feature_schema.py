@@ -121,6 +121,23 @@ CORE_USAGE_FEATURES = [
     "recent10_fg3a_rate",
 ]
 
+MOMENTUM_FEATURES = [
+    "recent3_stat_avg",
+    "momentum_5v20",
+    "momentum_3v10",
+    "side_recent3_gap_vs_line",
+]
+
+CONSISTENCY_FEATURES = [
+    "z_score_season_vs_line",
+    "z_score_recent5_vs_line",
+    "recent5_cv",
+    "recent10_cv",
+    "recent5_miss_streak",
+    "minutes_trend_5v20",
+    "minutes_cv_recent5",
+]
+
 GAME_MARKET_FEATURES = [
     "game_total_line",
     "team_spread_line",
@@ -145,6 +162,8 @@ FEATURE_GROUPS = {
     "market": CORE_MARKET_FEATURES,
     "player_form": CORE_PLAYER_FORM_FEATURES,
     "usage": CORE_USAGE_FEATURES,
+    "momentum": MOMENTUM_FEATURES,
+    "consistency": CONSISTENCY_FEATURES,
     "game_market": GAME_MARKET_FEATURES,
     # These are placeholders for the next iteration once we archive historical
     # point-in-time snapshots for each feature family.
@@ -156,6 +175,8 @@ ALL_FEATURE_COLUMNS = [
     *CORE_MARKET_FEATURES,
     *CORE_PLAYER_FORM_FEATURES,
     *CORE_USAGE_FEATURES,
+    *MOMENTUM_FEATURES,
+    *CONSISTENCY_FEATURES,
     *GAME_MARKET_FEATURES,
 ]
 

@@ -297,16 +297,77 @@ def _build_rolling_features(
     days_rest = (target_date - final_prior_date).days if final_prior_date else None
 
     season_values = [_sum_stat(row, stat_type) for row in prior_rows]
+    recent3_values = season_values[-3:]
     recent5_values = season_values[-5:]
     recent10_values = season_values[-10:]
     recent20_values = season_values[-20:]
 
     side_multiplier = SIDE_MULTIPLIERS[side]
     season_avg = _mean(season_values)
+    recent3_avg = _mean(recent3_values)
     recent5_avg = _mean(recent5_values)
     recent10_avg = _mean(recent10_values)
     recent20_avg = _mean(recent20_values)
     season_std = _std(season_values)
+    recent5_std = _std(recent5_values)
+    recent10_std = _std(recent10_values)
+
+    # Momentum features
+    momentum_5v20 = (
+        None if recent5_avg is None or recent20_avg is None
+        else recent5_avg - recent20_avg
+    )
+    momentum_3v10 = (
+        None if recent3_avg is None or recent10_avg is None
+        else recent3_avg - recent10_avg
+    )
+
+    # Z-score features
+    z_score_season = (
+        None if season_avg is None or season_std is None or season_std < 0.01
+        else (season_avg - line) / season_std
+    )
+    z_score_recent5 = (
+        None if recent5_avg is None or recent5_std is None or recent5_std < 0.01
+        else (recent5_avg - line) / recent5_std
+    )
+
+    # Coefficient of variation
+    recent5_cv = (
+        None if recent5_avg is None or recent5_std is None or abs(recent5_avg) < 0.01
+        else recent5_std / abs(recent5_avg)
+    )
+    recent10_cv = (
+        None if recent10_avg is None or recent10_std is None or abs(recent10_avg) < 0.01
+        else recent10_std / abs(recent10_avg)
+    )
+
+    # Miss streak in last 5 games
+    recent5_miss_streak = 0
+    for value in reversed(recent5_values):
+        if value is None:
+            break
+        if side == "over" and value <= line:
+            recent5_miss_streak += 1
+        elif side == "under" and value >= line:
+            recent5_miss_streak += 1
+        else:
+            break
+
+    # Minutes stability features
+    recent5_min = [_extract_metric(row, "MIN") for row in prior_rows[-5:]]
+    recent20_min = [_extract_metric(row, "MIN") for row in prior_rows[-20:]]
+    recent5_min_avg = _mean(recent5_min)
+    recent20_min_avg = _mean(recent20_min)
+    recent5_min_std = _std(recent5_min)
+    minutes_trend_5v20 = (
+        None if recent5_min_avg is None or recent20_min_avg is None
+        else recent5_min_avg - recent20_min_avg
+    )
+    minutes_cv_recent5 = (
+        None if recent5_min_avg is None or recent5_min_std is None or abs(recent5_min_avg) < 0.01
+        else recent5_min_std / abs(recent5_min_avg)
+    )
 
     features = {
         "prior_games": len(prior_rows),
@@ -334,7 +395,7 @@ def _build_rolling_features(
         "recent10_side_hit_rate": _round_optional(_side_hit_rate(recent10_values, line, side)),
         "recent20_side_hit_rate": _round_optional(_side_hit_rate(recent20_values, line, side)),
         "season_minutes_avg": _round_optional(_mean([_extract_metric(row, "MIN") for row in prior_rows])),
-        "recent5_minutes_avg": _round_optional(_mean([_extract_metric(row, "MIN") for row in prior_rows[-5:]])),
+        "recent5_minutes_avg": _round_optional(recent5_min_avg),
         "recent10_minutes_avg": _round_optional(_mean([_extract_metric(row, "MIN") for row in prior_rows[-10:]])),
         "season_usage_pct_avg": _round_optional(_mean([_extract_metric(row, "USG_PCT") for row in prior_rows])),
         "recent10_usage_pct_avg": _round_optional(_mean([_extract_metric(row, "USG_PCT") for row in prior_rows[-10:]])),
@@ -352,6 +413,21 @@ def _build_rolling_features(
         "recent10_drive_rate": _round_optional(_mean([_metric_rate(row, "DRIVES") for row in prior_rows[-10:]])),
         "season_fg3a_rate": _round_optional(_mean([_metric_rate(row, "FG3A") for row in prior_rows])),
         "recent10_fg3a_rate": _round_optional(_mean([_metric_rate(row, "FG3A") for row in prior_rows[-10:]])),
+        # Momentum features
+        "recent3_stat_avg": _round_optional(recent3_avg),
+        "momentum_5v20": _round_optional(momentum_5v20),
+        "momentum_3v10": _round_optional(momentum_3v10),
+        "side_recent3_gap_vs_line": _round_optional(
+            None if recent3_avg is None else side_multiplier * (recent3_avg - line),
+        ),
+        # Consistency features
+        "z_score_season_vs_line": _round_optional(z_score_season),
+        "z_score_recent5_vs_line": _round_optional(z_score_recent5),
+        "recent5_cv": _round_optional(recent5_cv),
+        "recent10_cv": _round_optional(recent10_cv),
+        "recent5_miss_streak": recent5_miss_streak,
+        "minutes_trend_5v20": _round_optional(minutes_trend_5v20),
+        "minutes_cv_recent5": _round_optional(minutes_cv_recent5),
     }
 
     context = {
