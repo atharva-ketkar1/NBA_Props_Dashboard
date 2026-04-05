@@ -1771,15 +1771,29 @@ def _compute_matchup_context(player: Dict[str, Any], stat_type: str, side: str) 
 _ml_predictor = None
 
 def _compute_ml_regression_context(player: Dict[str, Any], opponent: str, stat_type: str, line: float, side: str) -> Dict[str, Any]:
+    """
+    Compute the ML regression component score for a player/stat/line/side combination.
+
+    Consumes quantile outputs (q25, q50, q75) from the predictor when available,
+    falling back to the legacy (prediction + std_dev) interface if the predictor
+    has not yet been updated to emit quantiles.
+
+    The quantile spread is used to derive p_over via a simple linear interpolation
+    across the [q25, q75] interval, which avoids the Gaussian assumption of the old
+    norm.cdf approach and is robust to skewed distributions.
+
+    p_over is exposed in the returned details dict so it flows through to the
+    candidate output and can be used by the edge score boost logic.
+    """
     global _ml_predictor
     if _ml_predictor is None:
         from utils.ml_inference import get_ml_predictor
         _ml_predictor = get_ml_predictor()
-    
+
     logs = _extract_logs(player)
     if not logs:
-        return {"available": False, "score": 0.0, "details": {}}
-    
+        return {"available": False, "score": 0.0, "p_over": None, "details": {}}
+
     player_info = {
         "player_id": player.get("id"),
         "player_name": player.get("name"),
@@ -1787,28 +1801,79 @@ def _compute_ml_regression_context(player: Dict[str, Any], opponent: str, stat_t
         "opponent_abbrev": opponent,
         "position": player.get("position"),
     }
-    
+
     res = _ml_predictor.predict(player_info, logs, stat_type)
     if not res:
-        return {"available": False, "score": 0.0, "details": {}}
-         
-    prob = _ml_predictor.hit_probability(res["prediction"], res["std_dev"], line, side)
-    
-    # map probability (0.0 to 1.0) to score (-1.0 to 1.0)
-    # A probability of >0.5 leans towards 1.0. A probability <0.5 leans towards -1.0.
-    # Score = (prob - 0.5) * 2.0
-    # To prevent extremeness, we cap it between -1.0 and 1.0 which is natural.
-    score = (prob - 0.5) * 2.0
-    
+        return {"available": False, "score": 0.0, "p_over": None, "details": {}}
+
+    # ── Quantile path (preferred) ────────────────────────────────────────────
+    q25 = _safe_float(res.get("q25"))
+    q50 = _safe_float(res.get("q50"))
+    q75 = _safe_float(res.get("q75"))
+
+    if q25 is not None and q50 is not None and q75 is not None:
+        # Linear interpolation across [q25, q75] to estimate p_over.
+        # - line <= q25  → ~75% of outcomes are above  → p_over ≈ 0.75
+        # - line == q50  → 50% of outcomes are above   → p_over = 0.50
+        # - line >= q75  → ~25% of outcomes are above  → p_over ≈ 0.25
+        # We clamp to [0.10, 0.90] to avoid extreme scores from extrapolation.
+        iqr = q75 - q25
+        if iqr > 1e-6:
+            # Fraction of the IQR that the line sits above q25
+            frac = _clamp((line - q25) / iqr, 0.0, 1.0)
+            # frac=0 → line is at/below q25 → p_over=0.75; frac=1 → p_over=0.25
+            p_over = _clamp(0.75 - frac * 0.50, 0.10, 0.90)
+        else:
+            # Zero-width IQR (degenerate prediction) — fall back to median comparison
+            p_over = 0.60 if q50 > line else 0.40
+
+        prediction_val = q50
+        spread = round(q75 - q25, 2)
+        details = {
+            "prediction_val": round(q50, 2),
+            "q25": round(q25, 2),
+            "q50": round(q50, 2),
+            "q75": round(q75, 2),
+            "quantile_spread": spread,
+            "hit_probability": round(p_over * 100.0, 1),
+            "p_over": round(p_over, 4),
+            "calibration": "quantile_iqr",
+        }
+
+    # ── Legacy path (std_dev / Gaussian fallback) ────────────────────────────
+    else:
+        prediction_val = _safe_float(res.get("prediction"))
+        std_dev = _safe_float(res.get("std_dev"))
+        if prediction_val is None:
+            return {"available": False, "score": 0.0, "p_over": None, "details": {}}
+
+        p_over = _ml_predictor.hit_probability(prediction_val, std_dev, line, "over")
+        p_over = _clamp(p_over, 0.10, 0.90)
+        details = {
+            "prediction_val": round(prediction_val, 2),
+            "hit_probability": round(p_over * 100.0, 1),
+            "p_over": round(p_over, 4),
+            "std_dev": round(std_dev, 2) if std_dev is not None else None,
+            "calibration": "gaussian_legacy",
+        }
+
+    # ── Score mapping: p_over → [-1, 1] ─────────────────────────────────────
+    # p_over > 0.5 leans towards +1.0 (over signal)
+    # p_over < 0.5 leans towards -1.0 (under signal)
+    # We use the requested side to orient the score correctly.
+    if side == "over":
+        prob_for_side = p_over
+    else:
+        prob_for_side = 1.0 - p_over
+
+    score = _clamp((prob_for_side - 0.5) * 2.0, -1.0, 1.0)
+
     return {
         "available": True,
-        "raw_score": _clamp(score, -1.0, 1.0),
-        "score": _clamp(score, -1.0, 1.0),
-        "details": {
-            "prediction_val": round(res["prediction"], 2),
-            "hit_probability": round(prob * 100.0, 1),
-            "std_dev": round(res["std_dev"], 2),
-        }
+        "raw_score": score,
+        "score": score,
+        "p_over": round(p_over, 4),
+        "details": details,
     }
 
 
@@ -2486,6 +2551,30 @@ def _build_candidate(
 
     available_weight = _component_available_weight(components)
     confidence = round((available_weight / TOTAL_COMPONENT_WEIGHT) * 100.0, 1) if TOTAL_COMPONENT_WEIGHT else 0.0
+
+    # ── ML p_over soft boost ─────────────────────────────────────────────────
+    # When the ML model has high directional conviction (p_over >= 0.60 for an
+    # over pick, or p_over <= 0.40 for an under pick) we apply a small additive
+    # boost to the weighted score before it is converted to an edge_score.
+    # The boost is intentionally modest (+0.04 max) so it cannot override weak
+    # signals from other components — it only amplifies already-strong edges.
+    # We also apply a soft penalty (-0.03) when the ML model disagrees with
+    # the pick direction, to discount edges where the ML and other signals diverge.
+    p_over = _safe_float(components["ml_regression"].get("p_over"))
+    ml_boost = 0.0
+    if p_over is not None and components["ml_regression"].get("available"):
+        if side == "over":
+            if p_over >= 0.60:
+                ml_boost = _clamp((p_over - 0.60) / 0.30 * 0.04, 0.0, 0.04)
+            elif p_over <= 0.40:
+                ml_boost = _clamp((p_over - 0.40) / 0.30 * 0.03, -0.03, 0.0)
+        else:  # under
+            p_under = 1.0 - p_over
+            if p_under >= 0.60:
+                ml_boost = _clamp((p_under - 0.60) / 0.30 * 0.04, 0.0, 0.04)
+            elif p_under <= 0.40:
+                ml_boost = _clamp((p_under - 0.40) / 0.30 * 0.03, -0.03, 0.0)
+    weighted_score = _clamp(weighted_score + ml_boost, -1.0, 1.0)
     confidence_multiplier = 0.85 + (min(confidence, 100.0) / 100.0) * 0.15
     edge_score = round(_clamp(50.0 + (weighted_score * 45.0 * confidence_multiplier), 1.0, 99.0), 1)
 
@@ -2515,12 +2604,15 @@ def _build_candidate(
         "edge_score": edge_score,
         "confidence": confidence,
         "signal_score": round(weighted_score, 3),
+        "ml_p_over": p_over,
+        "ml_boost_applied": round(ml_boost, 4) if ml_boost != 0.0 else None,
         "reasons": reasons,
         "inputs": {
             "projection": components["projection"]["details"],
             "recent_form": components["recent_form"]["details"],
             "matchup": components["matchup"]["details"],
             "market": components["market"]["details"],
+            "ml_regression": components["ml_regression"]["details"],
             "line_movement": components["line_movement"]["details"],
             "similar_players": components["similar_players"]["details"],
             "head_to_head": components["head_to_head"]["details"],
@@ -3084,6 +3176,26 @@ def _component_reason_snippet(recommendation: Dict[str, Any], component_name: st
                 direction = "up" if delta >= 0 else "down"
                 return f"back-to-back history matters here too, with this stat trending {direction} by {abs(delta):.1f}"
             return "back-to-back context is part of the read here"
+        return None
+
+    if component_name == "ml_regression":
+        ml = inputs.get("ml_regression", {}) or {}
+        p_over_val = _safe_float(ml.get("p_over"))
+        prediction_val = _safe_float(ml.get("prediction_val"))
+        hit_prob = _safe_float(ml.get("hit_probability"))
+        if p_over_val is None or prediction_val is None or hit_prob is None:
+            return None
+        if side == "over" and p_over_val >= 0.60:
+            return (
+                f"the regression model projects {prediction_val:.1f} with a "
+                f"{hit_prob:.0f}% over probability"
+            )
+        if side == "under" and p_over_val <= 0.40:
+            under_prob = round((1.0 - p_over_val) * 100.0, 0)
+            return (
+                f"the regression model projects {prediction_val:.1f} with a "
+                f"{under_prob:.0f}% under probability"
+            )
         return None
 
     return None

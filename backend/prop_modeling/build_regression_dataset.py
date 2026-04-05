@@ -96,6 +96,8 @@ REGRESSION_DATASET_COLUMNS = [
     "opp_def_rating",            # opponent season defensive rating
     "recent5_avg_game_margin",   # avg margin of player's last 5 games (blowout flag)
     "recent5_blowout_flag",      # 1 if avg abs margin > 15 in last 5 games
+    # ── NEW v2: Injury Reports ────────────────────────────────────────────────
+    "star_teammate_out_flag",    # 1 if a >23% usage teammate logged 0 minutes or DNP
 ]
 
 DEFAULT_REGRESSION_DATASET_PATH = GENERATED_DIR / "regression_training_dataset.csv"
@@ -210,6 +212,7 @@ class EnrichmentData:
                         if team not in self.team_season_stats:
                             self.team_season_stats[team] = row
             print(f"  season_stats: {len(self.season_stats)} players, {len(self.team_season_stats)} teams, {len(self.player_id_to_name)} named")
+
 
     def get_opp_def_ranks(self, opp_abbrev: Optional[str]) -> Dict[str, Optional[float]]:
         """Return defensive ranks for the opponent team."""
@@ -512,6 +515,7 @@ def _build_regression_row(
     min_prior: int,
     min_minutes: float,
     enrichment: EnrichmentData,
+    star_out_dict: Dict[Tuple[str, date], int],
 ) -> Optional[Dict[str, Any]]:
     target_date, target_row = player_history[game_idx]
     target_mins = _safe_float(target_row.get("MIN"))
@@ -676,6 +680,7 @@ def _build_regression_row(
         **team_ctx,
         "recent5_avg_game_margin": _r(avg_margin),
         "recent5_blowout_flag": blowout_flag,
+        "star_teammate_out_flag": star_out_dict.get((team, target_date), 0),
     }
 
 
@@ -696,6 +701,47 @@ def build_regression_dataset(
     player_index = _build_player_index(all_rows)
     print(f"  {len(player_index):,} unique players")
 
+    print("Pre-computing dynamic Star Teammate absences...")
+    from collections import defaultdict
+    games_by_date_team = defaultdict(list)
+    for gd, pid, row in all_rows:
+        t = str(row.get("TEAM_ABBREVIATION") or "").strip()
+        if t:
+            games_by_date_team[(gd, t)].append((pid, row))
+
+    player_state = {}
+    star_out_dict = {}
+    all_dates = sorted(list(set(gd for gd, _, _ in all_rows)))
+    
+    for current_date in all_dates:
+        teams_playing = set(t for (d, t) in games_by_date_team.keys() if d == current_date)
+        for team in teams_playing:
+            expected_stars = set()
+            for pid, pstate in player_state.items():
+                if pstate['team'] == team and (current_date - pstate['last_date']).days < 30:
+                    hist = pstate['usg_history'][-10:]
+                    if len(hist) >= 5 and (sum(hist) / len(hist)) >= 23.0:
+                        expected_stars.add(pid)
+            
+            actual_players = set()
+            for pid, row in games_by_date_team[(current_date, team)]:
+                mins = _safe_float(row.get("MIN"))
+                if mins and mins > 0:
+                    actual_players.add(pid)
+                    
+            missing_stars = expected_stars - actual_players
+            star_out_dict[(team, current_date)] = 1 if missing_stars else 0
+            
+            for pid, row in games_by_date_team[(current_date, team)]:
+                if pid not in player_state:
+                    player_state[pid] = {'team': team, 'last_date': current_date, 'usg_history': []}
+                usg = _safe_float(row.get("USG_PCT"))
+                if usg is not None:
+                    player_state[pid]['usg_history'].append(usg)
+                player_state[pid]['team'] = team
+                player_state[pid]['last_date'] = current_date
+    print(f"  Flagged {sum(star_out_dict.values()):,} games with missing stars")
+
     output_rows: List[Dict[str, Any]] = []
     stats = {"total_candidates": 0, "written_rows": 0,
              "skipped_too_few_prior": 0, "skipped_low_minutes": 0, "skipped_missing_stat": 0}
@@ -709,6 +755,7 @@ def build_regression_dataset(
                     min_prior=min_prior_games,
                     min_minutes=min_minutes,
                     enrichment=enrichment,
+                    star_out_dict=star_out_dict,
                 )
                 if row is None:
                     if game_idx < min_prior_games:

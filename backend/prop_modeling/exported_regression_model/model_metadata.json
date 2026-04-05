@@ -1,7 +1,12 @@
 {
-  "desc": "CatBoost Baseline (v3)",
-  "features": [
-    "stat_type",
+  "model_type": "per_stat_multiquantile",
+  "quantile_alphas": [
+    0.25,
+    0.5,
+    0.75
+  ],
+  "target": "actual_stat_value",
+  "feature_columns": [
     "player_id",
     "team",
     "opponent",
@@ -70,13 +75,99 @@
     "team_pace",
     "opp_def_rating",
     "recent5_avg_game_margin",
-    "recent5_blowout_flag"
+    "recent5_blowout_flag",
+    "star_teammate_out_flag",
+    "momentum_diff_5v20",
+    "momentum_diff_3v10",
+    "expected_possessions",
+    "predicted_minutes"
   ],
   "cat_features": [
-    "stat_type",
     "player_id",
     "team",
     "opponent"
   ],
-  "target": "actual_value"
+  "engineered_features": [
+    "momentum_diff_5v20",
+    "momentum_diff_3v10",
+    "expected_possessions",
+    "predicted_minutes"
+  ],
+  "model_files": {
+    "AST": "model_AST.cbm",
+    "BLK": "model_BLK.cbm",
+    "FG3M": "model_FG3M.cbm",
+    "PTS": "model_PTS.cbm",
+    "PTS+AST": "model_PTS_AST.cbm",
+    "PTS+REB": "model_PTS_REB.cbm",
+    "PTS+REB+AST": "model_PTS_REB_AST.cbm",
+    "REB": "model_REB.cbm",
+    "REB+AST": "model_REB_AST.cbm",
+    "STL": "model_STL.cbm",
+    "STL+BLK": "model_STL_BLK.cbm"
+  },
+  "cv_results": {
+    "mean_mae": 2.7875,
+    "mean_rmse": 4.3783,
+    "mean_r2": 0.7705,
+    "n_folds": 4
+  },
+  "per_stat_test_metrics": {
+    "AST": {
+      "mae": 1.4456,
+      "rmse": 1.9652,
+      "r2": 0.4569
+    },
+    "BLK": {
+      "mae": 0.449,
+      "rmse": 0.8037,
+      "r2": 0.0582
+    },
+    "FG3M": {
+      "mae": 0.9124,
+      "rmse": 1.3025,
+      "r2": 0.273
+    },
+    "PTS": {
+      "mae": 4.6988,
+      "rmse": 6.0938,
+      "r2": 0.4381
+    },
+    "PTS+AST": {
+      "mae": 5.0782,
+      "rmse": 6.5836,
+      "r2": 0.5102
+    },
+    "PTS+REB": {
+      "mae": 5.461,
+      "rmse": 7.0449,
+      "r2": 0.4639
+    },
+    "PTS+REB+AST": {
+      "mae": 5.8896,
+      "rmse": 7.5724,
+      "r2": 0.5135
+    },
+    "REB": {
+      "mae": 1.871,
+      "rmse": 2.4558,
+      "r2": 0.4243
+    },
+    "REB+AST": {
+      "mae": 2.5587,
+      "rmse": 3.3418,
+      "r2": 0.4547
+    },
+    "STL": {
+      "mae": 0.73,
+      "rmse": 0.9988,
+      "r2": 0.0126
+    },
+    "STL+BLK": {
+      "mae": 0.928,
+      "rmse": 1.2354,
+      "r2": 0.11
+    }
+  },
+  "usage": "Load the per-stat .cbm for the relevant stat_type. model.predict(pool) returns shape (n, 3): [q25, q50, q75]. Pass q25/q50/q75 to edge_score.py which derives p_over via IQR interpolation. Call check_feature_drift() with feature_drift_baseline.json before prediction to detect stale or out-of-distribution feature values."
 }

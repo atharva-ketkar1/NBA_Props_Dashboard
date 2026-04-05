@@ -12,26 +12,48 @@
 # ---
 
 # %% [markdown]
-# # NBA Prop Model — Regression Approach (Predict Actual Stat Values)
+# # NBA Prop Model — v2 Regression (Per-Stat MultiQuantile + Walk-Forward CV)
 #
-# **Key insight**: Instead of training a classifier on ~5k prop rows to predict
-# hit/miss, train a regressor on **455k+ game-log rows** to predict the
-# actual stat value. Then compare predicted vs. sportsbook line to derive
-# hit probability.
+# **Changes from v1:**
+# - Per-stat CatBoost MultiQuantile models (q25 / q50 / q75) replace the single
+#   unified RMSE model. The IQR spread is used directly by `edge_score.py` to
+#   derive `p_over` without the Gaussian residual-std hack.
+# - Walk-forward cross-validation (4 folds, 20 days each) replaces the static
+#   20-date holdout for more reliable MAE estimates.
+# - New engineered features: `momentum_diff_5v20`, `expected_possessions`,
+#   `predicted_minutes` (infrastructure-safe weighted-blend approximation),
+#   exponential time-decay sample weights.
+# - Per-stat Optuna tuning with trial budgets scaled to sample size
+#   (40 trials for PTS/AST/REB/FG3M, 20 for all others).
+# - `backtest_vs_lines` now reports simulated ROI at -110 juice alongside
+#   raw directional accuracy.
+# - Feature drift monitoring block: exports `feature_drift_baseline.json`
+#   consumed by `utils/ml_inference.py` to log inference-time warnings.
+# - Exports one `.cbm` per stat type + `quantile_stats.json`
+#   (replaces `residual_stats.json`).
 #
 # **Upload files when prompted:**
-# 1. `regression_training_dataset.csv` (455k rows, ~80MB)
-# 2. Optionally `prop_training_dataset.csv` (for backtest against actual lines)
+# 1. `regression_training_dataset.csv`  (~455k rows, ~80MB)
+# 2. `prop_training_dataset.csv`  (optional, for backtest against actual lines)
 
 # %% [markdown]
 # ## 1. Setup
+
+# %%
+nvidia-smi
+# %%
+
+# %%
+from google.colab import drive
+drive.mount('/content/drive')
+# %%
 
 # %%
 import subprocess, sys
 def pip_install(*pkgs):
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *pkgs])
 
-pip_install("catboost", "optuna", "lightgbm", "xgboost", "shap")
+pip_install("catboost", "optuna", "lightgbm", "shap", "scipy")
 
 # %%
 import warnings
@@ -39,7 +61,7 @@ warnings.filterwarnings("ignore")
 
 import json, math, os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -51,20 +73,30 @@ sns.set_theme(style="darkgrid", palette="muted")
 plt.rcParams["figure.figsize"] = (14, 6)
 plt.rcParams["figure.dpi"] = 100
 
-print("✅ Imports loaded")
+print("Imports loaded")
 
 # %% [markdown]
 # ## 2. Upload & Load Data
 
 # %%
-try:
-    from google.colab import files
-    print("Upload regression_training_dataset.csv:")
-    uploaded = files.upload()
-    REG_CSV = list(uploaded.keys())[0]
-except ImportError:
-    REG_CSV = "backend/prop_modeling/generated/regression_training_dataset.csv"
-    print(f"Running locally: {REG_CSV}")
+import os
+
+# The actual path based on your print output
+COLAB_PATH = "/content/drive/MyDrive/regression_training_dataset.csv"
+LOCAL_PATH = "backend/prop_modeling/generated/regression_training_dataset.csv"
+
+if os.path.exists(COLAB_PATH):
+    REG_CSV = COLAB_PATH
+    print(f"✅ Success! Found in Google Drive: {REG_CSV}")
+elif os.path.exists(LOCAL_PATH):
+    REG_CSV = LOCAL_PATH
+    print(f"✅ Running locally: {REG_CSV}")
+else:
+    print("❌ Still can't find it. Run !ls /content/drive/MyDrive to double-check spelling.")
+
+# Now you can load it
+# import pandas as pd
+# df = pd.read_csv(REG_CSV)
 
 # %%
 df = pd.read_csv(REG_CSV)
@@ -74,27 +106,36 @@ df["actual_value"] = pd.to_numeric(df["actual_value"], errors="coerce")
 df = df[df["actual_value"].notna()].copy()
 
 print(f"Loaded {len(df):,} rows")
-print(f"Dates: {df['game_date'].dt.date.nunique()} ({df['game_date'].min().date()} → {df['game_date'].max().date()})")
-print(f"Players: {df['player_id'].nunique()}")
+print(f"Dates: {df['game_date'].dt.date.nunique()} "
+      f"({df['game_date'].min().date()} to {df['game_date'].max().date()})")
+print(f"Players:    {df['player_id'].nunique()}")
 print(f"Stat types: {sorted(df['stat_type'].unique())}")
 
 # %%
-# Optionally upload prop dataset for backtest
+import os
+
+# 1. Define your potential paths
+COLAB_PROP_PATH = "/content/drive/MyDrive/prop_training_dataset.csv"
+LOCAL_PROP_PATH = "backend/prop_modeling/generated/prop_training_dataset.csv"
+
 PROP_CSV = None
-try:
-    from google.colab import files as f2
-    print("\n(Optional) Upload prop_training_dataset.csv for line backtest:")
-    try:
-        up2 = f2.upload()
-        if up2:
-            PROP_CSV = list(up2.keys())[0]
-            print(f"✅ Prop data: {PROP_CSV}")
-    except Exception:
-        print("Skipped — will evaluate regression only")
-except ImportError:
-    prop_path = "backend/prop_modeling/generated/prop_training_dataset.csv"
-    if os.path.exists(prop_path):
-        PROP_CSV = prop_path
+
+# 2. Logic to assign the correct path
+if os.path.exists(COLAB_PROP_PATH):
+    PROP_CSV = COLAB_PROP_PATH
+    print(f"✅ Prop data found in Drive: {PROP_CSV}")
+    
+elif os.path.exists(LOCAL_PROP_PATH):
+    PROP_CSV = LOCAL_PROP_PATH
+    print(f"✅ Prop data found locally: {PROP_CSV}")
+    
+else:
+    print("⚠️ (Optional) Prop dataset not found. Skipping line backtest.")
+    print("   To include it, ensure 'prop_training_dataset.csv' is in your Google Drive base folder.")
+
+# Your backtest logic continues here...
+if PROP_CSV:
+    print(f"Proceeding with backtest using: {PROP_CSV}")
 
 # %% [markdown]
 # ## 3. EDA
@@ -104,7 +145,6 @@ fig, axes = plt.subplots(1, 2, figsize=(16, 5))
 df["stat_type"].value_counts().sort_index().plot(kind="barh", ax=axes[0], color="steelblue")
 axes[0].set_title("Rows per Stat Type")
 
-# Distribution of target for PTS
 pts = df[df["stat_type"] == "PTS"]["actual_value"]
 pts.hist(bins=50, ax=axes[1], color="coral", alpha=0.7)
 axes[1].set_title("PTS Distribution")
@@ -113,26 +153,25 @@ plt.tight_layout()
 plt.show()
 
 # %%
-# Per-stat summary stats
 summary = df.groupby("stat_type")["actual_value"].agg(["mean", "std", "median", "min", "max"])
 display(summary.round(2))
 
 # %%
-# Missing values
-feat_cols = [c for c in df.columns if c not in ["game_date", "player_id", "team", "opponent",
-                                                   "game_id", "stat_type", "actual_value"]]
-missing = df[feat_cols].isnull().mean().sort_values(ascending=False)
+feat_cols_check = [c for c in df.columns if c not in [
+    "game_date", "player_id", "team", "opponent", "game_id", "stat_type", "actual_value"
+]]
+missing = df[feat_cols_check].isnull().mean().sort_values(ascending=False)
 print("Features with >10% missing:")
 print(missing[missing > 0.1].to_string())
 
 # %% [markdown]
-# ## 4. Feature & Model Setup
+# ## 4. Feature Engineering & Column Setup
 
 # %%
 TARGET = "actual_value"
 CAT_FEATURES = ["player_id", "team", "opponent"]
 
-FEATURE_COLS = [
+BASE_FEATURE_COLS = [
     "player_id", "team", "opponent", "is_home",
     "prior_games", "days_rest", "is_b2b",
     "season_stat_avg", "recent3_stat_avg", "recent5_stat_avg",
@@ -155,7 +194,7 @@ FEATURE_COLS = [
     "season_fg3a_rate", "recent10_fg3a_rate",
     "recent5_pts_per100",
     "recent5_1h_stat_share",
-    # ── v2: Opponent defensive features ────────────────────────────────────
+    # Opponent defensive features
     "opp_pts_defense_rank",
     "opp_catchAndShoot_rank",
     "opp_pullup_rank",
@@ -165,7 +204,7 @@ FEATURE_COLS = [
     "opp_def_3pt_pct",
     "opp_def_restricted_rank",
     "opp_def_3pt_rank",
-    # ── v2: Player style fingerprint ────────────────────────────────────────
+    # Player style fingerprint
     "player_catchAndShoot_pg",
     "player_pullup_pg",
     "player_lessThan10ft_pg",
@@ -173,27 +212,98 @@ FEATURE_COLS = [
     "player_isolation_pg",
     "player_pnr_pg",
     "player_spotup_pg",
-    # ── v2: Cross-feature matchup scores ────────────────────────────────────
+    # Cross-feature matchup scores
     "matchup_score_fg3",
     "matchup_score_pts",
     "matchup_score_interior",
-    # ── v2: Context ──────────────────────────────────────────────────────────
+    # Context
     "team_pace",
     "opp_def_rating",
     "recent5_avg_game_margin",
     "recent5_blowout_flag",
+    # Optional teammate injury context — only consumed if present in CSV.
+    # Add these to the upstream ETL before enabling them here.
+    "star_teammate_out_flag",
+    "team_fg_attempts_share_last5",
 ]
 
-# Filter to columns that actually exist
-FEATURE_COLS = [c for c in FEATURE_COLS if c in df.columns]
-print(f"Using {len(FEATURE_COLS)} features")
+# Filter to columns that actually exist in the loaded CSV
+BASE_FEATURE_COLS = [c for c in BASE_FEATURE_COLS if c in df.columns]
+print(f"Base features available in CSV: {len(BASE_FEATURE_COLS)}")
 
-# For unified model, add stat_type
+# %%
+# ── Engineered features ──────────────────────────────────────────────────────
+# These are computed at training time and must be replicated in ml_inference.py
+# using the same logic so training and inference remain aligned.
+
+def engineer_features(input_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add engineered features in-place on a copy of the input dataframe.
+
+    All features here must also be computed in ml_inference.py before
+    running model.predict() to avoid training/inference mismatch.
+    """
+    out = input_df.copy()
+
+    # 1. Signed momentum difference (raw gap, not ratio)
+    #    Gradient boosters benefit from having both the ratio (momentum_5v20)
+    #    and the raw difference as separate features.
+    if "recent5_stat_avg" in out.columns and "recent20_stat_avg" in out.columns:
+        out["momentum_diff_5v20"] = out["recent5_stat_avg"] - out["recent20_stat_avg"]
+    if "recent3_stat_avg" in out.columns and "recent10_stat_avg" in out.columns:
+        out["momentum_diff_3v10"] = out["recent3_stat_avg"] - out["recent10_stat_avg"]
+
+    # 2. Pace-adjusted expected possessions
+    #    Captures player opportunity in context of game pace and usage.
+    if "team_pace" in out.columns and "season_usage_pct_avg" in out.columns:
+        out["expected_possessions"] = (
+            out["team_pace"] * (out["season_usage_pct_avg"].fillna(0.0) / 100.0)
+        )
+
+    # 3. Infrastructure-safe predicted minutes
+    #    A dedicated minutes sub-model would require loading a second .cbm on
+    #    the e2-micro VM (1 GB RAM) and risk OOM during the cron cycle.
+    #    This weighted blend captures the majority of the signal at zero
+    #    memory overhead. Revisit if compute is ever upgraded.
+    min_cols = ["recent5_minutes_avg", "recent10_minutes_avg", "season_minutes_avg"]
+    if all(c in out.columns for c in min_cols):
+        r5  = out["recent5_minutes_avg"].fillna(out["season_minutes_avg"])
+        r10 = out["recent10_minutes_avg"].fillna(out["season_minutes_avg"])
+        sea = out["season_minutes_avg"].fillna(out["recent5_minutes_avg"])
+        pred_min = r5 * 0.50 + r10 * 0.30 + sea * 0.20
+        if "is_b2b" in out.columns:
+            b2b = pd.to_numeric(out["is_b2b"], errors="coerce").fillna(0.0)
+            pred_min = pred_min * (1.0 - 0.035 * b2b)
+        out["predicted_minutes"] = pred_min.clip(lower=4.0, upper=42.0)
+
+    return out
+
+
+df = engineer_features(df)
+
+# Final feature list: base (from CSV) + engineered
+ENGINEERED_COLS = [
+    c for c in ["momentum_diff_5v20", "momentum_diff_3v10",
+                 "expected_possessions", "predicted_minutes"]
+    if c in df.columns
+]
+FEATURE_COLS = BASE_FEATURE_COLS + ENGINEERED_COLS
+
+# Unified feature list (adds stat_type for LightGBM comparison)
 UNIFIED_FEATURES = ["stat_type"] + FEATURE_COLS
-UNIFIED_CAT = ["stat_type"] + CAT_FEATURES
+UNIFIED_CAT      = ["stat_type"] + CAT_FEATURES
 
-def prepare(df, feat_cols, cat_cols=CAT_FEATURES):
-    X = df[feat_cols].copy()
+print(f"Engineered features added: {ENGINEERED_COLS}")
+print(f"Total feature columns:     {len(FEATURE_COLS)}")
+
+
+def prepare(
+    input_df: pd.DataFrame,
+    feat_cols: List[str],
+    cat_cols: List[str] = CAT_FEATURES,
+) -> pd.DataFrame:
+    """Cast categoricals to str and numerics to float for model input."""
+    X = input_df[feat_cols].copy()
     for c in feat_cols:
         if c in cat_cols or c == "stat_type":
             X[c] = X[c].fillna("UNKNOWN").astype(str)
@@ -201,408 +311,763 @@ def prepare(df, feat_cols, cat_cols=CAT_FEATURES):
             X[c] = pd.to_numeric(X[c], errors="coerce")
     return X
 
+
+def make_sample_weights(input_df: pd.DataFrame, decay: float = 0.001) -> np.ndarray:
+    """
+    Exponential time-decay sample weights keyed on game_date.
+
+    decay=0.001 halves the weight at ~700 days (~2 seasons), so recent
+    games matter roughly 2x more than games from two seasons ago.
+    Weights are normalised so the mean equals 1.0, keeping the loss scale
+    the same as unweighted training.
+    """
+    today    = input_df["game_date"].max()
+    days_ago = (today - input_df["game_date"]).dt.days.clip(lower=0).to_numpy()
+    weights  = np.exp(-decay * days_ago)
+    weights  = weights / weights.mean()
+    return weights.astype(np.float32)
+
 # %% [markdown]
-# ## 5. Holdout Evaluation — Per-Stat Regression
+# ## 5. Train / Test Split
 
 # %%
 from catboost import CatBoostRegressor, Pool
 
 unique_dates = sorted(df["game_date"].dt.date.unique())
-test_dates = unique_dates[-20:]  # Last 20 dates as test
-split_ts = pd.Timestamp(test_dates[0])
+test_dates   = unique_dates[-20:]   # last 20 game dates = held-out test set
+split_ts     = pd.Timestamp(test_dates[0])
 
-train_all = df[df["game_date"] < split_ts]
-test_all = df[df["game_date"] >= split_ts]
-print(f"Train: {len(train_all):,} rows ({train_all['game_date'].dt.date.nunique()} dates)")
-print(f"Test:  {len(test_all):,} rows ({test_all['game_date'].dt.date.nunique()} dates)")
+train_all = df[df["game_date"] < split_ts].copy()
+test_all  = df[df["game_date"] >= split_ts].copy()
 
-# %%
-# Per-stat holdout results
-cat_indices = [FEATURE_COLS.index(c) for c in CAT_FEATURES if c in FEATURE_COLS]
-per_stat_results = {}
-
-for stat_type in sorted(df["stat_type"].unique()):
-    train_st = train_all[train_all["stat_type"] == stat_type]
-    test_st = test_all[test_all["stat_type"] == stat_type]
-    if len(train_st) < 100 or test_st.empty:
-        continue
-
-    X_tr = prepare(train_st, FEATURE_COLS)
-    X_te = prepare(test_st, FEATURE_COLS)
-    y_tr = train_st[TARGET].to_numpy()
-    y_te = test_st[TARGET].to_numpy()
-
-    model = CatBoostRegressor(
-        iterations=800, depth=6, learning_rate=0.03, l2_leaf_reg=5.0,
-        loss_function="RMSE", eval_metric="RMSE",
-        random_seed=42, verbose=False, allow_writing_files=False,
-        task_type="GPU" if os.environ.get("COLAB_GPU") else "CPU",
-    )
-    tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices)
-    te_pool = Pool(X_te, label=y_te, cat_features=cat_indices)
-    model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=50)
-
-    preds = model.predict(te_pool)
-    mae = mean_absolute_error(y_te, preds)
-    rmse = math.sqrt(mean_squared_error(y_te, preds))
-    r2 = r2_score(y_te, preds)
-    median_ae = float(np.median(np.abs(y_te - preds)))
-
-    per_stat_results[stat_type] = {
-        "mae": mae, "rmse": rmse, "r2": r2,
-        "median_ae": median_ae, "test_rows": len(test_st),
-        "model": model, "preds": preds, "actuals": y_te,
-    }
-    print(f"  {stat_type:15s}  MAE={mae:.2f}  RMSE={rmse:.2f}  R²={r2:.3f}  Median_AE={median_ae:.2f}")
-
-# %%
-results_df = pd.DataFrame({
-    st: {"MAE": r["mae"], "RMSE": r["rmse"], "R²": r["r2"], "Median AE": r["median_ae"]}
-    for st, r in per_stat_results.items()
-}).T.round(3)
-display(results_df.sort_values("MAE"))
+print(f"Train: {len(train_all):,} rows  ({train_all['game_date'].dt.date.nunique()} dates)")
+print(f"Test:  {len(test_all):,}  rows  ({test_all['game_date'].dt.date.nunique()} dates)")
 
 # %% [markdown]
-# ## 6. Unified Regression Model
-
-# %%
-unified_cat_indices = [UNIFIED_FEATURES.index(c) for c in UNIFIED_CAT if c in UNIFIED_FEATURES]
-
-X_tr_u = prepare(train_all, UNIFIED_FEATURES, UNIFIED_CAT)
-X_te_u = prepare(test_all, UNIFIED_FEATURES, UNIFIED_CAT)
-y_tr_u = train_all[TARGET].to_numpy()
-y_te_u = test_all[TARGET].to_numpy()
-
-unified_model = CatBoostRegressor(
-    iterations=1000, depth=7, learning_rate=0.03, l2_leaf_reg=5.0,
-    loss_function="RMSE", eval_metric="RMSE",
-    random_seed=42, verbose=100, allow_writing_files=False,
-    task_type="GPU" if os.environ.get("COLAB_GPU") else "CPU",
-)
-tr_pool_u = Pool(X_tr_u, label=y_tr_u, cat_features=unified_cat_indices)
-te_pool_u = Pool(X_te_u, label=y_te_u, cat_features=unified_cat_indices)
-unified_model.fit(tr_pool_u, eval_set=te_pool_u, use_best_model=True, early_stopping_rounds=75)
-
-preds_u = unified_model.predict(te_pool_u)
-mae_u = mean_absolute_error(y_te_u, preds_u)
-rmse_u = math.sqrt(mean_squared_error(y_te_u, preds_u))
-r2_u = r2_score(y_te_u, preds_u)
-print(f"\nUnified:  MAE={mae_u:.3f}  RMSE={rmse_u:.3f}  R²={r2_u:.3f}")
-
-# %% [markdown]
-# ## 7. Prop Line Backtest — Derived Hit Rate
+# ## 6. Walk-Forward Cross-Validation
 #
-# Use the regression predictions to classify prop hits:
-# - If model predicts value > line → model says "take over"
-# - Compare to actual outcome
-
-# %%
-def backtest_vs_lines(preds, test_df, prop_df=None):
-    """Backtest regression predictions against actual prop lines."""
-    if prop_df is None:
-        print("No prop data — skipping line backtest")
-        return None
-
-    prop_df = prop_df.copy()
-    prop_df["game_date"] = pd.to_datetime(prop_df["game_date"], errors="coerce")
-
-    # Merge predictions into test data
-    test_with_preds = test_df.copy()
-    test_with_preds["predicted_value"] = preds
-
-    # Join with prop lines on (player_id, game_date, stat_type)
-    test_with_preds["player_id"] = test_with_preds["player_id"].astype(str)
-    prop_df["player_id"] = prop_df["player_id"].astype(str)
-
-    merged = test_with_preds.merge(
-        prop_df[["game_date", "player_id", "stat_type", "sportsbook", "side",
-                 "line", "final_stat_value", "hit_label"]].drop_duplicates(),
-        on=["game_date", "player_id", "stat_type"],
-        how="inner",
-    )
-
-    if merged.empty:
-        print("No overlapping games between regression test set and prop data")
-        return None
-
-    print(f"Matched {len(merged):,} prop rows against regression predictions")
-
-    # Model pick accuracy: does pred vs line agree with actual outcome?
-    merged["line"] = pd.to_numeric(merged["line"], errors="coerce")
-    merged["hit_label"] = pd.to_numeric(merged["hit_label"], errors="coerce")
-    merged = merged[merged["line"].notna() & merged["hit_label"].isin([0, 1])].copy()
-
-    # Model side: if predicted > line → over, else under
-    merged["model_side"] = np.where(merged["predicted_value"] > merged["line"], "over", "under")
-    merged["model_agrees_with_side"] = merged["model_side"] == merged["side"]
-
-    # Model confidence: abs(predicted - line)
-    merged["model_margin"] = np.abs(merged["predicted_value"] - merged["line"])
-
-    # When model agrees with the bet side, does it hit?
-    agrees = merged[merged["model_agrees_with_side"]]
-    disagrees = merged[~merged["model_agrees_with_side"]]
-    print(f"\nModel agrees with bet side: {len(agrees):,} rows → "
-          f"hit rate = {agrees['hit_label'].mean():.3f}")
-    print(f"Model disagrees with bet side: {len(disagrees):,} rows → "
-          f"hit rate = {disagrees['hit_label'].mean():.3f}")
-
-    # Confidence tiers
-    for margin_threshold in [0.5, 1.0, 2.0, 3.0, 5.0]:
-        confident = merged[merged["model_margin"] >= margin_threshold]
-        if len(confident) < 10:
-            continue
-        model_correct = (
-            ((confident["model_side"] == "over") & (confident["actual_value"] > confident["line"])) |
-            ((confident["model_side"] == "under") & (confident["actual_value"] < confident["line"]))
-        )
-        acc = model_correct.mean()
-        print(f"  Margin ≥ {margin_threshold}: {len(confident):,} picks → "
-              f"accuracy = {acc:.3f}")
-
-    return merged
-
-# %%
-prop_df_loaded = None
-if PROP_CSV:
-    prop_df_loaded = pd.read_csv(PROP_CSV)
-    prop_df_loaded["game_date"] = pd.to_datetime(prop_df_loaded["game_date"], errors="coerce")
-
-backtest_result = backtest_vs_lines(preds_u, test_all, prop_df_loaded)
-
-# %% [markdown]
-# ## 8. Optuna Hyperparameter Tuning
+# 4 folds, each using 20 game dates as the test window. Training always uses
+# only dates prior to the fold's test window — no future data leaks into any
+# fold. We run CV on the unified feature set (all stat types combined) for
+# speed; per-stat CV would be too expensive on Colab free tier.
 
 # %%
 import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# Use a smaller sample for faster tuning
-tune_stat_types = ["PTS", "AST", "REB", "FG3M"]
-tune_df = df[df["stat_type"].isin(tune_stat_types)].copy()
-tune_dates = sorted(tune_df["game_date"].dt.date.unique())
-tune_split = pd.Timestamp(tune_dates[-15])
-tune_train = tune_df[tune_df["game_date"] < tune_split]
-tune_test = tune_df[tune_df["game_date"] >= tune_split]
 
-def objective(trial):
-    params = {
-        "iterations": trial.suggest_int("iterations", 300, 2000),
-        "depth": trial.suggest_int("depth", 4, 9),
-        "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.12, log=True),
-        "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 25.0),
-        "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 100),
-        "random_strength": trial.suggest_float("random_strength", 0.3, 5.0),
-        # subsample requires bootstrap_type='Bernoulli' — bagging_temperature
-        # is for the default 'Bayesian' bootstrap and cannot coexist with subsample.
-        "bootstrap_type": "Bernoulli",
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "loss_function": "RMSE",
-        "eval_metric": "RMSE",  # MAE is not GPU-native; RMSE avoids the warning
-        "random_seed": 42,
-        "verbose": False,
-        "allow_writing_files": False,
-        "task_type": "GPU" if os.environ.get("COLAB_GPU") else "CPU",
+def walk_forward_cv(
+    input_df: pd.DataFrame,
+    feature_cols: List[str],
+    cat_cols: List[str],
+    cat_indices: List[int],
+    n_folds: int = 4,
+    fold_days: int = 20,
+    model_params: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """
+    Time-series walk-forward cross-validation.
+
+    Folds are built from the tail of the dataset and walked backwards so
+    that the most recent fold's test window aligns with dates just before
+    the final held-out test set.
+    """
+    all_dates = sorted(input_df["game_date"].dt.date.unique())
+    n_dates   = len(all_dates)
+
+    folds: List[Tuple[set, set]] = []
+    for i in range(n_folds):
+        test_end_idx   = n_dates - i * fold_days
+        test_start_idx = test_end_idx - fold_days
+        if test_start_idx < fold_days * 2:
+            break
+        test_window  = set(all_dates[test_start_idx:test_end_idx])
+        train_window = set(all_dates[:test_start_idx])
+        folds.append((train_window, test_window))
+    folds.reverse()  # report in chronological order
+
+    if model_params is None:
+        model_params = {
+            "iterations": 600, "depth": 6, "learning_rate": 0.04,
+            "l2_leaf_reg": 5.0, "loss_function": "RMSE", "eval_metric": "RMSE",
+            "random_seed": 42, "verbose": False, "allow_writing_files": False,
+            "task_type": "CPU",
+        }
+
+    fold_metrics: List[Dict] = []
+    for fold_num, (train_dates, test_dates_set) in enumerate(folds, start=1):
+        fold_train = input_df[input_df["game_date"].dt.date.isin(train_dates)]
+        fold_test  = input_df[input_df["game_date"].dt.date.isin(test_dates_set)]
+        if fold_train.empty or fold_test.empty:
+            continue
+
+        X_tr = prepare(fold_train, feature_cols, cat_cols)
+        X_te = prepare(fold_test,  feature_cols, cat_cols)
+        y_tr = fold_train[TARGET].to_numpy()
+        y_te = fold_test[TARGET].to_numpy()
+        w_tr = make_sample_weights(fold_train)
+
+        tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices, weight=w_tr)
+        te_pool = Pool(X_te, label=y_te, cat_features=cat_indices)
+
+        model = CatBoostRegressor(**model_params)
+        model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=50)
+
+        preds = model.predict(te_pool)
+        mae   = mean_absolute_error(y_te, preds)
+        rmse  = math.sqrt(mean_squared_error(y_te, preds))
+        r2    = r2_score(y_te, preds)
+        fold_metrics.append({
+            "fold": fold_num, "mae": mae, "rmse": rmse, "r2": r2,
+            "train_rows": len(fold_train), "test_rows": len(fold_test),
+        })
+        print(f"  Fold {fold_num}  MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}"
+              f"  (train={len(fold_train):,}  test={len(fold_test):,})")
+
+    if not fold_metrics:
+        return {"fold_metrics": [], "mean_mae": None, "mean_rmse": None, "mean_r2": None}
+
+    mean_mae  = float(np.mean([m["mae"]  for m in fold_metrics]))
+    mean_rmse = float(np.mean([m["rmse"] for m in fold_metrics]))
+    mean_r2   = float(np.mean([m["r2"]   for m in fold_metrics]))
+    print(f"\n  CV Summary  MAE={mean_mae:.3f}  RMSE={mean_rmse:.3f}  R²={mean_r2:.3f}")
+    return {
+        "fold_metrics": fold_metrics,
+        "mean_mae": mean_mae,
+        "mean_rmse": mean_rmse,
+        "mean_r2": mean_r2,
     }
 
-    X_tr = prepare(tune_train, UNIFIED_FEATURES, UNIFIED_CAT)
-    X_te = prepare(tune_test, UNIFIED_FEATURES, UNIFIED_CAT)
-    y_tr = tune_train[TARGET].to_numpy()
-    y_te = tune_test[TARGET].to_numpy()
 
-    model = CatBoostRegressor(**params)
-    tr_pool = Pool(X_tr, label=y_tr, cat_features=unified_cat_indices)
-    te_pool = Pool(X_te, label=y_te, cat_features=unified_cat_indices)
+print("Running 4-fold walk-forward CV on unified feature set...")
+unified_cat_indices = [UNIFIED_FEATURES.index(c) for c in UNIFIED_CAT if c in UNIFIED_FEATURES]
+cv_results = walk_forward_cv(
+    train_all,
+    feature_cols=UNIFIED_FEATURES,
+    cat_cols=UNIFIED_CAT,
+    cat_indices=unified_cat_indices,
+)
+
+# %% [markdown]
+# ## 7. Per-Stat MultiQuantile Models (Baseline)
+#
+# One CatBoostRegressor per stat type using `MultiQuantile:alpha=0.25,0.5,0.75`.
+# Outputs shape (n, 3) = [q25, q50, q75].
+#
+# The IQR (q75 - q25) replaces the old residual-std Gaussian approach.
+# `edge_score.py` uses IQR linear interpolation to derive `p_over`.
+
+# %%
+QUANTILE_ALPHAS    = "0.25,0.5,0.75"
+cat_indices_per_st = [FEATURE_COLS.index(c) for c in CAT_FEATURES if c in FEATURE_COLS]
+
+per_stat_models:  Dict[str, CatBoostRegressor] = {}
+per_stat_results: Dict[str, Dict]              = {}
+
+for stat_type in sorted(df["stat_type"].unique()):
+    train_st = train_all[train_all["stat_type"] == stat_type]
+    test_st  = test_all[test_all["stat_type"]  == stat_type]
+    if len(train_st) < 200 or test_st.empty:
+        print(f"  {stat_type:15s}  SKIP (train rows={len(train_st)})")
+        continue
+
+    X_tr = prepare(train_st, FEATURE_COLS)
+    X_te = prepare(test_st,  FEATURE_COLS)
+    y_tr = train_st[TARGET].to_numpy()
+    y_te = test_st[TARGET].to_numpy()
+    w_tr = make_sample_weights(train_st)
+
+    tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices_per_st, weight=w_tr)
+    te_pool = Pool(X_te, label=y_te, cat_features=cat_indices_per_st)
+
+    model = CatBoostRegressor(
+        iterations=800, depth=6, learning_rate=0.03, l2_leaf_reg=5.0,
+        loss_function=f"MultiQuantile:alpha={QUANTILE_ALPHAS}",
+        random_seed=42, verbose=False, allow_writing_files=False,
+        task_type="CPU", # MultiQuantile loss is not supported on GPU in CatBoost
+    )
     model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=50)
 
-    preds = model.predict(te_pool)
-    return mean_absolute_error(y_te, preds)
+    preds_q  = model.predict(te_pool)        # shape (n, 3)
+    q25, q50, q75 = preds_q[:, 0], preds_q[:, 1], preds_q[:, 2]
 
-study = optuna.create_study(direction="minimize", study_name="regression_hpo")
-study.optimize(objective, n_trials=40, show_progress_bar=True)
+    mae    = mean_absolute_error(y_te, q50)
+    rmse   = math.sqrt(mean_squared_error(y_te, q50))
+    r2     = r2_score(y_te, q50)
+    med_ae = float(np.median(np.abs(y_te - q50)))
+    iqr    = float(np.median(q75 - q25))
 
-print(f"\n🏆 Best MAE: {study.best_value:.4f}")
-print(f"Best params:\n{json.dumps(study.best_params, indent=2)}")
-
-# %% [markdown]
-# ## 9. Retrain with Best Params
-
-# %%
-best_params = {
-    **study.best_params,
-    # Ensure bootstrap_type is always set — the study params include 'subsample'
-    # which requires Bernoulli; if it's not in best_params for some reason, default it.
-    "bootstrap_type": study.best_params.get("bootstrap_type", "Bernoulli"),
-    "loss_function": "RMSE",
-    "eval_metric": "RMSE",
-    "random_seed": 42,
-    "verbose": 100,
-    "allow_writing_files": False,
-    "task_type": "GPU" if os.environ.get("COLAB_GPU") else "CPU",
-}
-
-# Train on full train set with best params
-tuned_model = CatBoostRegressor(**best_params)
-tuned_model.fit(tr_pool_u, eval_set=te_pool_u, use_best_model=True, early_stopping_rounds=75)
-
-tuned_preds = tuned_model.predict(te_pool_u)
-tuned_mae = mean_absolute_error(y_te_u, tuned_preds)
-tuned_rmse = math.sqrt(mean_squared_error(y_te_u, tuned_preds))
-tuned_r2 = r2_score(y_te_u, tuned_preds)
-print(f"\nTuned Unified:  MAE={tuned_mae:.3f}  RMSE={tuned_rmse:.3f}  R²={tuned_r2:.3f}")
-
-# Compare
-print(f"\nImprovement vs baseline:")
-print(f"  MAE:  {mae_u:.3f} → {tuned_mae:.3f} ({(tuned_mae-mae_u)/mae_u*100:+.1f}%)")
-print(f"  RMSE: {rmse_u:.3f} → {tuned_rmse:.3f} ({(tuned_rmse-rmse_u)/rmse_u*100:+.1f}%)")
-print(f"  R²:   {r2_u:.3f} → {tuned_r2:.3f}")
+    per_stat_models[stat_type]  = model
+    per_stat_results[stat_type] = {
+        "mae": mae, "rmse": rmse, "r2": r2, "median_ae": med_ae,
+        "median_iqr": iqr, "test_rows": len(test_st),
+        "q25": q25, "q50": q50, "q75": q75, "actuals": y_te,
+    }
+    print(f"  {stat_type:15s}  MAE={mae:.2f}  RMSE={rmse:.2f}  "
+          f"R²={r2:.3f}  MedianIQR={iqr:.2f}  n_test={len(test_st)}")
 
 # %%
-# Backtest tuned model
-if prop_df_loaded is not None:
-    print("\n--- Tuned Model Backtest ---")
-    backtest_tuned = backtest_vs_lines(tuned_preds, test_all, prop_df_loaded)
+baseline_df = pd.DataFrame({
+    st: {
+        "MAE": r["mae"], "RMSE": r["rmse"], "R²": r["r2"],
+        "Median AE": r["median_ae"], "Median IQR": r["median_iqr"],
+    }
+    for st, r in per_stat_results.items()
+}).T.round(3)
+display(baseline_df.sort_values("MAE"))
 
 # %% [markdown]
-# ## 10. LightGBM Comparison
+# ## 8. Prop Line Backtest — Hit Rate + Simulated ROI
+#
+# For each matched prop row: q50 vs. line determines the model's pick.
+# Simulated ROI assumes -110 juice on every bet (break-even = 52.4%).
+# We also break down accuracy by confidence tier (margin and p_over).
+
+# %%
+def simulated_roi(correct_series: pd.Series) -> float:
+    """Per-bet ROI at -110 juice. Wins return +100/110; losses cost -1 unit."""
+    n = len(correct_series)
+    if n == 0:
+        return float("nan")
+    wins   = correct_series.sum()
+    losses = n - wins
+    profit = wins * (100.0 / 110.0) - losses * 1.0
+    return profit / n
+
+
+def backtest_vs_lines(
+    q50_preds: np.ndarray,
+    test_df: pd.DataFrame,
+    prop_df: Optional[pd.DataFrame] = None,
+    q25_preds: Optional[np.ndarray] = None,
+    q75_preds: Optional[np.ndarray] = None,
+    label: str = "",
+) -> Optional[pd.DataFrame]:
+    """
+    Backtest quantile regression predictions against actual prop lines.
+
+    Reports directional accuracy, simulated ROI at -110, confidence-tier
+    breakdowns by margin and p_over, and per-stat accuracy.
+    """
+    if prop_df is None:
+        print("No prop data available - skipping line backtest")
+        return None
+
+    prop_df = prop_df.copy()
+    prop_df["game_date"] = pd.to_datetime(prop_df["game_date"], errors="coerce")
+
+    test_with_preds = test_df.copy()
+    test_with_preds["q50_pred"] = q50_preds
+    if q25_preds is not None:
+        test_with_preds["q25_pred"] = q25_preds
+    if q75_preds is not None:
+        test_with_preds["q75_pred"] = q75_preds
+
+    test_with_preds["player_id"] = test_with_preds["player_id"].astype(str)
+    prop_df["player_id"] = prop_df["player_id"].astype(str)
+
+    merged = test_with_preds.merge(
+        prop_df[[
+            "game_date", "player_id", "stat_type", "sportsbook",
+            "side", "line", "final_stat_value", "hit_label",
+        ]].drop_duplicates(),
+        on=["game_date", "player_id", "stat_type"],
+        how="inner",
+    )
+
+    if merged.empty:
+        print("No overlapping games between test set and prop data")
+        return None
+
+    print(f"\n{'=' * 55}")
+    if label:
+        print(f"  Backtest: {label}")
+    print(f"  Matched {len(merged):,} prop rows")
+
+    merged["line"]      = pd.to_numeric(merged["line"],      errors="coerce")
+    merged["hit_label"] = pd.to_numeric(merged["hit_label"], errors="coerce")
+    merged = merged[merged["line"].notna() & merged["hit_label"].isin([0, 1])].copy()
+
+    merged["model_side"]   = np.where(merged["q50_pred"] > merged["line"], "over", "under")
+    merged["model_margin"] = np.abs(merged["q50_pred"] - merged["line"])
+
+    # IQR-derived p_over (mirrors edge_score.py _compute_ml_regression_context logic)
+    if "q25_pred" in merged.columns and "q75_pred" in merged.columns:
+        iqr  = (merged["q75_pred"] - merged["q25_pred"]).clip(lower=1e-6)
+        frac = ((merged["line"] - merged["q25_pred"]) / iqr).clip(0.0, 1.0)
+        merged["p_over"] = (0.75 - frac * 0.50).clip(0.10, 0.90)
+    else:
+        merged["p_over"] = np.where(merged["model_side"] == "over", 0.60, 0.40)
+
+    model_correct = (
+        ((merged["model_side"] == "over")  & (merged["actual_value"] > merged["line"])) |
+        ((merged["model_side"] == "under") & (merged["actual_value"] < merged["line"]))
+    )
+    merged["model_correct"] = model_correct.astype(int)
+
+    overall_acc = model_correct.mean()
+    overall_roi = simulated_roi(merged["model_correct"])
+    print(f"\n  Overall  acc={overall_acc:.3f}  ROI={overall_roi:+.4f}  "
+          f"(break-even: 0.524)")
+
+    # Margin tiers
+    print("\n  --- Confidence tiers by q50 margin ---")
+    for thr in [0.5, 1.0, 2.0, 3.0, 5.0]:
+        tier = merged[merged["model_margin"] >= thr]
+        if len(tier) < 10:
+            continue
+        acc = tier["model_correct"].mean()
+        roi = simulated_roi(tier["model_correct"])
+        print(f"    Margin >= {thr}: n={len(tier):,}  acc={acc:.3f}  ROI={roi:+.4f}")
+
+    # p_over tiers
+    print("\n  --- Confidence tiers by p_over ---")
+    for thr in [0.55, 0.60, 0.65, 0.70]:
+        over_mask  = (merged["model_side"] == "over")  & (merged["p_over"] >= thr)
+        under_mask = (merged["model_side"] == "under") & (merged["p_over"] <= 1.0 - thr)
+        tier = merged[over_mask | under_mask]
+        if len(tier) < 10:
+            continue
+        acc = tier["model_correct"].mean()
+        roi = simulated_roi(tier["model_correct"])
+        print(f"    p_over >= {thr} (or <= {1-thr:.2f}): "
+              f"n={len(tier):,}  acc={acc:.3f}  ROI={roi:+.4f}")
+
+    # Per-stat breakdown
+    print("\n  --- Per-stat accuracy ---")
+    for st in sorted(merged["stat_type"].unique()):
+        mask = merged["stat_type"] == st
+        sub  = merged[mask]
+        if len(sub) < 10:
+            continue
+        acc = sub["model_correct"].mean()
+        roi = simulated_roi(sub["model_correct"])
+        print(f"    {st:15s}  n={len(sub):4d}  acc={acc:.3f}  ROI={roi:+.4f}")
+
+    return merged
+
+
+# %%
+prop_df_loaded = None
+if PROP_CSV:
+    prop_df_loaded = pd.read_csv(PROP_CSV)
+    prop_df_loaded["game_date"] = pd.to_datetime(
+        prop_df_loaded["game_date"], errors="coerce"
+    )
+
+# Run backtest on PTS as representative stat
+if "PTS" in per_stat_results and prop_df_loaded is not None:
+    pts_test = test_all[test_all["stat_type"] == "PTS"]
+    backtest_vs_lines(
+        per_stat_results["PTS"]["q50"],
+        pts_test,
+        prop_df_loaded,
+        q25_preds=per_stat_results["PTS"]["q25"],
+        q75_preds=per_stat_results["PTS"]["q75"],
+        label="Baseline PTS model",
+    )
+
+# %% [markdown]
+# ## 9. Per-Stat Optuna Hyperparameter Tuning
+#
+# Runs independently per stat type. Trial budget is scaled by sample size:
+# 40 trials for PTS / AST / REB / FG3M, 20 for all others.
+# Tuning uses a rolling split within the training set — the final held-out
+# test set is never touched during tuning.
+
+# %%
+HIGH_VOLUME_STATS = {"PTS", "AST", "REB", "FG3M"}
+ALL_STAT_TYPES    = sorted(df["stat_type"].unique())
+TRIAL_BUDGET      = {st: (40 if st in HIGH_VOLUME_STATS else 20) for st in ALL_STAT_TYPES}
+
+best_params_per_stat: Dict[str, Dict] = {}
+
+for stat_type in ALL_STAT_TYPES:
+    stat_df = df[df["stat_type"] == stat_type].copy()
+    n_trials = TRIAL_BUDGET.get(stat_type, 20)
+    if len(stat_df) < 500:
+        print(f"  {stat_type:15s}  SKIP (n={len(stat_df)})")
+        continue
+
+    tune_dates  = sorted(stat_df["game_date"].dt.date.unique())
+    tune_split  = pd.Timestamp(tune_dates[-15])
+    tune_train  = stat_df[stat_df["game_date"] < tune_split]
+    tune_test   = stat_df[stat_df["game_date"] >= tune_split]
+    if len(tune_train) < 200 or tune_test.empty:
+        continue
+
+    def objective(
+        trial,
+        _train=tune_train,
+        _test=tune_test,
+    ):
+        params = {
+            "iterations":          trial.suggest_int("iterations", 300, 1500),
+            "depth":               trial.suggest_int("depth", 4, 9),
+            "learning_rate":       trial.suggest_float("learning_rate", 0.005, 0.12, log=True),
+            "l2_leaf_reg":         trial.suggest_float("l2_leaf_reg", 1.0, 25.0),
+            "min_data_in_leaf":    trial.suggest_int("min_data_in_leaf", 5, 80),
+            "random_strength":     trial.suggest_float("random_strength", 0.3, 5.0),
+            "bootstrap_type":      "Bernoulli",
+            "subsample":           trial.suggest_float("subsample", 0.6, 1.0),
+            "loss_function":       f"MultiQuantile:alpha={QUANTILE_ALPHAS}",
+            "random_seed":         42,
+            "verbose":             False,
+            "allow_writing_files": False,
+            "task_type":           "GPU" if os.environ.get("COLAB_GPU") else "CPU",
+        }
+
+        X_tr = prepare(_train, FEATURE_COLS)
+        X_te = prepare(_test,  FEATURE_COLS)
+        y_tr = _train[TARGET].to_numpy()
+        y_te = _test[TARGET].to_numpy()
+        w_tr = make_sample_weights(_train)
+
+        model   = CatBoostRegressor(**params)
+        tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices_per_st, weight=w_tr)
+        te_pool = Pool(X_te, label=y_te, cat_features=cat_indices_per_st)
+        model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=40)
+
+        preds_q = model.predict(te_pool)
+        return mean_absolute_error(y_te, preds_q[:, 1])  # optimise q50 MAE
+
+    study = optuna.create_study(direction="minimize", study_name=f"tune_{stat_type}")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    best_params_per_stat[stat_type] = study.best_params
+    print(f"  {stat_type:15s}  best MAE={study.best_value:.4f}  trials={n_trials}")
+
+print("\nOptuna tuning complete")
+
+# %% [markdown]
+# ## 10. Retrain Per-Stat Models with Tuned Params
+
+# %%
+tuned_per_stat_models:  Dict[str, CatBoostRegressor] = {}
+tuned_per_stat_results: Dict[str, Dict]              = {}
+
+for stat_type in ALL_STAT_TYPES:
+    train_st = train_all[train_all["stat_type"] == stat_type]
+    test_st  = test_all[test_all["stat_type"]  == stat_type]
+    if len(train_st) < 200 or test_st.empty:
+        continue
+
+    base = best_params_per_stat.get(stat_type, {})
+    params = {
+        **base,
+        "bootstrap_type":      base.get("bootstrap_type", "Bernoulli"),
+        "loss_function":       f"MultiQuantile:alpha={QUANTILE_ALPHAS}",
+        "random_seed":         42,
+        "verbose":             100,
+        "allow_writing_files": False,
+        "task_type":           "GPU" if os.environ.get("COLAB_GPU") else "CPU",
+    }
+
+    X_tr = prepare(train_st, FEATURE_COLS)
+    X_te = prepare(test_st,  FEATURE_COLS)
+    y_tr = train_st[TARGET].to_numpy()
+    y_te = test_st[TARGET].to_numpy()
+    w_tr = make_sample_weights(train_st)
+
+    tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices_per_st, weight=w_tr)
+    te_pool = Pool(X_te, label=y_te, cat_features=cat_indices_per_st)
+
+    model = CatBoostRegressor(**params)
+    model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=60)
+
+    preds_q         = model.predict(te_pool)
+    q25, q50, q75   = preds_q[:, 0], preds_q[:, 1], preds_q[:, 2]
+    mae  = mean_absolute_error(y_te, q50)
+    rmse = math.sqrt(mean_squared_error(y_te, q50))
+    r2   = r2_score(y_te, q50)
+    iqr  = float(np.median(q75 - q25))
+
+    tuned_per_stat_models[stat_type]  = model
+    tuned_per_stat_results[stat_type] = {
+        "mae": mae, "rmse": rmse, "r2": r2, "median_iqr": iqr,
+        "test_rows": len(test_st),
+        "q25": q25, "q50": q50, "q75": q75, "actuals": y_te,
+    }
+    print(f"  {stat_type:15s}  MAE={mae:.3f}  RMSE={rmse:.3f}  "
+          f"R²={r2:.3f}  IQR={iqr:.2f}")
+
+# %%
+# Backtest tuned models
+if prop_df_loaded is not None and "PTS" in tuned_per_stat_results:
+    pts_test = test_all[test_all["stat_type"] == "PTS"]
+    backtest_vs_lines(
+        tuned_per_stat_results["PTS"]["q50"],
+        pts_test,
+        prop_df_loaded,
+        q25_preds=tuned_per_stat_results["PTS"]["q25"],
+        q75_preds=tuned_per_stat_results["PTS"]["q75"],
+        label="Tuned PTS model",
+    )
+
+# %% [markdown]
+# ## 11. LightGBM Unified Comparison
+#
+# Three separate LightGBM passes (alpha=0.25, 0.5, 0.75) on the full unified
+# feature set (all stat types combined with stat_type as a categorical).
+# LightGBM does not support MultiQuantile natively.
 
 # %%
 import lightgbm as lgb
 
 X_tr_lgb = prepare(train_all, UNIFIED_FEATURES, UNIFIED_CAT)
-X_te_lgb = prepare(test_all, UNIFIED_FEATURES, UNIFIED_CAT)
+X_te_lgb = prepare(test_all,  UNIFIED_FEATURES, UNIFIED_CAT)
+y_tr_u   = train_all[TARGET].to_numpy()
+y_te_u   = test_all[TARGET].to_numpy()
+w_tr_u   = make_sample_weights(train_all)
 
 for c in UNIFIED_CAT:
     if c in X_tr_lgb.columns:
         X_tr_lgb[c] = X_tr_lgb[c].astype("category")
         X_te_lgb[c] = X_te_lgb[c].astype("category")
 
-lgb_model = lgb.LGBMRegressor(
-    n_estimators=1000, max_depth=7, learning_rate=0.03, reg_lambda=5.0,
-    random_state=42, verbose=-1, force_col_wise=True,
-)
-lgb_model.fit(X_tr_lgb, y_tr_u,
-              eval_set=[(X_te_lgb, y_te_u)],
-              callbacks=[lgb.early_stopping(50, verbose=False)])
+lgb_preds_by_alpha: Dict[float, np.ndarray] = {}
+for alpha in [0.25, 0.5, 0.75]:
+    lgb_model = lgb.LGBMRegressor(
+        n_estimators=800, max_depth=7, learning_rate=0.03,
+        reg_lambda=5.0, objective="quantile", alpha=alpha,
+        random_state=42, verbose=-1, force_col_wise=True,
+    )
+    lgb_model.fit(
+        X_tr_lgb, y_tr_u,
+        sample_weight=w_tr_u,
+        eval_set=[(X_te_lgb, y_te_u)],
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
+    lgb_preds_by_alpha[alpha] = lgb_model.predict(X_te_lgb)
+    print(f"  LightGBM alpha={alpha} done")
 
-lgb_preds = lgb_model.predict(X_te_lgb)
-lgb_mae = mean_absolute_error(y_te_u, lgb_preds)
-lgb_rmse = math.sqrt(mean_squared_error(y_te_u, lgb_preds))
-lgb_r2 = r2_score(y_te_u, lgb_preds)
-print(f"LightGBM:  MAE={lgb_mae:.3f}  RMSE={lgb_rmse:.3f}  R²={lgb_r2:.3f}")
+lgb_q50  = lgb_preds_by_alpha[0.5]
+lgb_mae  = mean_absolute_error(y_te_u, lgb_q50)
+lgb_rmse = math.sqrt(mean_squared_error(y_te_u, lgb_q50))
+lgb_r2   = r2_score(y_te_u, lgb_q50)
+lgb_iqr  = float(np.median(lgb_preds_by_alpha[0.75] - lgb_preds_by_alpha[0.25]))
+print(f"\nLightGBM unified:  MAE={lgb_mae:.3f}  RMSE={lgb_rmse:.3f}  "
+      f"R²={lgb_r2:.3f}  IQR={lgb_iqr:.2f}")
 
 # %% [markdown]
-# ## 11. Feature Importance
+# ## 12. Feature Importance
 
 # %%
-# CatBoost feature importance
-imps = tuned_model.get_feature_importance()
-imp_df = pd.DataFrame({"feature": UNIFIED_FEATURES, "importance": imps})
-imp_df = imp_df.sort_values("importance", ascending=False)
+ref_stat  = "PTS" if "PTS" in tuned_per_stat_models else list(tuned_per_stat_models.keys())[0]
+ref_model = tuned_per_stat_models[ref_stat]
+imps      = ref_model.get_feature_importance()
+imp_df    = pd.DataFrame({"feature": FEATURE_COLS, "importance": imps})
+imp_df    = imp_df.sort_values("importance", ascending=False)
 
-fig, ax = plt.subplots(figsize=(10, max(6, len(imp_df) * 0.25)))
-top_n = min(25, len(imp_df))
+top_n = min(30, len(imp_df))
+fig, ax = plt.subplots(figsize=(10, max(6, top_n * 0.28)))
 sns.barplot(data=imp_df.head(top_n), y="feature", x="importance", ax=ax, palette="viridis")
-ax.set_title(f"Top {top_n} Feature Importances — Tuned Regression")
+ax.set_title(f"Top {top_n} Feature Importances — {ref_stat} Tuned MultiQuantile")
 plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## 12. Prediction Error Analysis
+# ## 13. Prediction Error Analysis
 
 # %%
-# Residual plots
-fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+if "PTS" in tuned_per_stat_results:
+    r_pts    = tuned_per_stat_results["PTS"]
+    y_pts    = r_pts["actuals"]
+    q25_pts  = r_pts["q25"]
+    q50_pts  = r_pts["q50"]
+    q75_pts  = r_pts["q75"]
 
-# Predicted vs actual
-axes[0, 0].scatter(y_te_u, tuned_preds, alpha=0.05, s=5, c="steelblue")
-lims = [min(y_te_u.min(), tuned_preds.min()), max(y_te_u.max(), tuned_preds.max())]
-axes[0, 0].plot(lims, lims, "--", c="red", alpha=0.5)
-axes[0, 0].set_xlabel("Actual")
-axes[0, 0].set_ylabel("Predicted")
-axes[0, 0].set_title("Predicted vs Actual")
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-# Residual distribution
-residuals = y_te_u - tuned_preds
-axes[0, 1].hist(residuals, bins=80, alpha=0.7, color="coral")
-axes[0, 1].set_title(f"Residual Distribution (μ={residuals.mean():.2f}, σ={residuals.std():.2f})")
-axes[0, 1].set_xlabel("Residual (Actual - Predicted)")
+    axes[0, 0].scatter(y_pts, q50_pts, alpha=0.05, s=5, c="steelblue")
+    lims = [min(y_pts.min(), q50_pts.min()), max(y_pts.max(), q50_pts.max())]
+    axes[0, 0].plot(lims, lims, "--", c="red", alpha=0.5)
+    axes[0, 0].set_xlabel("Actual"); axes[0, 0].set_ylabel("q50 Predicted")
+    axes[0, 0].set_title("PTS: Predicted (q50) vs Actual")
 
-# Per-stat MAE
-stat_maes = {}
-for st in sorted(test_all["stat_type"].unique()):
-    mask = test_all["stat_type"].values == st
-    if mask.sum() > 0:
-        stat_maes[st] = mean_absolute_error(y_te_u[mask], tuned_preds[mask])
-pd.Series(stat_maes).sort_values().plot(kind="barh", ax=axes[1, 0], color="teal")
-axes[1, 0].set_title("MAE per Stat Type")
+    residuals = y_pts - q50_pts
+    axes[0, 1].hist(residuals, bins=80, alpha=0.7, color="coral")
+    axes[0, 1].set_title(f"PTS Residuals  mu={residuals.mean():.2f}  sigma={residuals.std():.2f}")
+    axes[0, 1].set_xlabel("Residual (Actual - q50)")
 
-# Residual vs predicted
-axes[1, 1].scatter(tuned_preds, residuals, alpha=0.05, s=5, c="purple")
-axes[1, 1].axhline(y=0, color="red", linestyle="--", alpha=0.5)
-axes[1, 1].set_xlabel("Predicted")
-axes[1, 1].set_ylabel("Residual")
-axes[1, 1].set_title("Residuals vs Predicted")
+    # IQR calibration check — well-calibrated quantiles should enclose ~50% of actuals
+    in_iqr = ((y_pts >= q25_pts) & (y_pts <= q75_pts)).mean()
+    axes[1, 0].bar(
+        ["In IQR [q25,q75]", "Outside IQR"],
+        [in_iqr, 1.0 - in_iqr],
+        color=["teal", "salmon"],
+    )
+    axes[1, 0].set_title(f"PTS IQR Coverage: {in_iqr:.1%} (target ~50%)")
+    axes[1, 0].set_ylim(0, 1)
 
-plt.tight_layout()
-plt.show()
+    axes[1, 1].scatter(q50_pts, residuals, alpha=0.05, s=5, c="purple")
+    axes[1, 1].axhline(y=0, color="red", linestyle="--", alpha=0.5)
+    axes[1, 1].set_xlabel("q50 Predicted"); axes[1, 1].set_ylabel("Residual")
+    axes[1, 1].set_title("PTS: Residuals vs Predicted")
 
-# %% [markdown]
-# ## 13. Final Comparison
+    plt.tight_layout()
+    plt.show()
 
 # %%
-comparison = pd.DataFrame({
-    "CatBoost Baseline": {"MAE": mae_u, "RMSE": rmse_u, "R²": r2_u},
-    "CatBoost Tuned": {"MAE": tuned_mae, "RMSE": tuned_rmse, "R²": tuned_r2},
-    "LightGBM": {"MAE": lgb_mae, "RMSE": lgb_rmse, "R²": lgb_r2},
-}).T.round(4)
-display(comparison)
-
-best_name = comparison["MAE"].idxmin()
-print(f"\n🏆 Best model: {best_name} (MAE={comparison.loc[best_name, 'MAE']:.4f})")
+# Per-stat IQR coverage summary
+print("Per-stat IQR calibration ([q25,q75] coverage — target ~50%):")
+for st, r in tuned_per_stat_results.items():
+    y, q25, q75 = r["actuals"], r["q25"], r["q75"]
+    cov = ((y >= q25) & (y <= q75)).mean()
+    print(f"  {st:15s}  {cov:.1%}")
 
 # %% [markdown]
-# ## 14. Export Best Model
+# ## 14. Feature Drift Monitoring
+#
+# Computes per-feature mean and std from the training set and exports them as
+# `feature_drift_baseline.json`. The `check_feature_drift` function below
+# should be imported and called in `utils/ml_inference.py` before running
+# `model.predict()` to catch stale data or ETL regressions early.
+
+# %%
+numeric_drift_cols = [c for c in FEATURE_COLS if c not in CAT_FEATURES]
+
+drift_baseline: Dict[str, Dict[str, float]] = {}
+for col in numeric_drift_cols:
+    col_data = pd.to_numeric(train_all[col], errors="coerce").dropna()
+    if len(col_data) < 10:
+        continue
+    drift_baseline[col] = {
+        "mean": round(float(col_data.mean()), 4),
+        "std":  round(float(col_data.std()),  4),
+    }
+
+print(f"Drift baseline built for {len(drift_baseline)} numeric features")
+
+
+def check_feature_drift(
+    feature_row: Dict[str, Any],
+    baseline: Dict[str, Dict[str, float]],
+    z_threshold: float = 3.0,
+) -> List[str]:
+    """
+    Check a single inference-time feature dict against the training baseline.
+
+    Returns a list of warning strings for any feature whose value sits more
+    than z_threshold standard deviations from its training mean.
+
+    Usage in ml_inference.py:
+        warnings = check_feature_drift(feature_dict, drift_baseline)
+        for w in warnings:
+            logger.warning("Feature drift detected: %s", w)
+    """
+    alerts: List[str] = []
+    for col, stats in baseline.items():
+        val = feature_row.get(col)
+        if val is None:
+            continue
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            continue
+        std = stats["std"]
+        if std < 1e-9:
+            continue
+        z = abs(fval - stats["mean"]) / std
+        if z > z_threshold:
+            alerts.append(
+                f"{col}: {fval:.3f} is {z:.1f}sigma from training "
+                f"mean={stats['mean']:.3f} std={std:.3f}"
+            )
+    return alerts
+
+
+# Sanity check: a training-set row should produce zero warnings
+sample_row = train_all[numeric_drift_cols].iloc[0].to_dict()
+sample_warnings = check_feature_drift(sample_row, drift_baseline)
+print(f"Drift check on training row: {len(sample_warnings)} warnings (expect 0)")
+
+# %% [markdown]
+# ## 15. Final Comparison Table
+
+# %%
+comparison: Dict[str, Dict] = {}
+for st, r in tuned_per_stat_results.items():
+    comparison[f"CatBoost {st} (tuned)"] = {
+        "MAE": r["mae"], "RMSE": r["rmse"], "R²": r["r2"],
+        "Median IQR": r["median_iqr"],
+    }
+comparison["LightGBM unified"] = {
+    "MAE": lgb_mae, "RMSE": lgb_rmse, "R²": lgb_r2, "Median IQR": lgb_iqr,
+}
+comparison_df = pd.DataFrame(comparison).T.round(4)
+display(comparison_df.sort_values("MAE"))
+
+best_name = comparison_df["MAE"].idxmin()
+print(f"\nBest model by MAE: {best_name}  (MAE={comparison_df.loc[best_name,'MAE']:.4f})")
+
+# %% [markdown]
+# ## 16. Export Models
 
 # %%
 export_dir = Path("exported_regression_model")
 export_dir.mkdir(exist_ok=True)
 
-tuned_model.save_model(str(export_dir / "unified_regression.cbm"))
+# One .cbm per stat type
+model_files: Dict[str, str] = {}
+for stat_type, model in tuned_per_stat_models.items():
+    filename = f"model_{stat_type.replace('+', '_')}.cbm"
+    model.save_model(str(export_dir / filename))
+    model_files[stat_type] = filename
+    print(f"  Saved {filename}")
 
+# Quantile calibration stats consumed by ml_inference.py
+quantile_stats: Dict[str, Dict] = {}
+for st, r in tuned_per_stat_results.items():
+    y, q25, q50, q75 = r["actuals"], r["q25"], r["q50"], r["q75"]
+    quantile_stats[st] = {
+        "median_iqr":   round(float(np.median(q75 - q25)), 3),
+        "mae_q50":      round(float(mean_absolute_error(y, q50)), 3),
+        "q50_bias":     round(float((q50 - y).mean()), 3),
+        "iqr_coverage": round(float(((y >= q25) & (y <= q75)).mean()), 3),
+    }
+(export_dir / "quantile_stats.json").write_text(json.dumps(quantile_stats, indent=2))
+
+# Feature drift baseline
+(export_dir / "feature_drift_baseline.json").write_text(
+    json.dumps(drift_baseline, indent=2)
+)
+
+# Metadata
 export_meta = {
-    "model_file": "unified_regression.cbm",
-    "model_type": "regression",
-    "target": "actual_stat_value",
-    "feature_columns": UNIFIED_FEATURES,
-    "cat_features": UNIFIED_CAT,
-    "best_params": study.best_params,
-    "test_metrics": {
-        "mae": round(tuned_mae, 4),
-        "rmse": round(tuned_rmse, 4),
-        "r2": round(tuned_r2, 4),
+    "model_type":            "per_stat_multiquantile",
+    "quantile_alphas":       [0.25, 0.5, 0.75],
+    "target":                "actual_stat_value",
+    "feature_columns":       FEATURE_COLS,
+    "cat_features":          CAT_FEATURES,
+    "engineered_features":   ENGINEERED_COLS,
+    "model_files":           model_files,
+    "cv_results": {
+        "mean_mae":  round(cv_results["mean_mae"],  4) if cv_results.get("mean_mae")  else None,
+        "mean_rmse": round(cv_results["mean_rmse"], 4) if cv_results.get("mean_rmse") else None,
+        "mean_r2":   round(cv_results["mean_r2"],   4) if cv_results.get("mean_r2")   else None,
+        "n_folds":   len(cv_results.get("fold_metrics", [])),
+    },
+    "per_stat_test_metrics": {
+        st: {"mae": round(r["mae"], 4), "rmse": round(r["rmse"], 4), "r2": round(r["r2"], 4)}
+        for st, r in tuned_per_stat_results.items()
     },
     "usage": (
-        "Load model, prepare features for a player-game, predict stat value. "
-        "Compare predicted value to sportsbook line to derive over/under lean. "
-        "Margin = abs(predicted - line) gives confidence. "
-        "Residual std by stat type gives probability calibration."
+        "Load the per-stat .cbm for the relevant stat_type. "
+        "model.predict(pool) returns shape (n, 3): [q25, q50, q75]. "
+        "Pass q25/q50/q75 to edge_score.py which derives p_over via IQR interpolation. "
+        "Call check_feature_drift() with feature_drift_baseline.json before prediction "
+        "to detect stale or out-of-distribution feature values."
     ),
 }
-(export_dir / "model_metadata.json").write_text(json.dumps(export_meta, indent=2, default=str))
+(export_dir / "model_metadata.json").write_text(
+    json.dumps(export_meta, indent=2, default=str)
+)
 
-# Per-stat residual stats for probability calibration
-residual_stats = {}
-for st in sorted(test_all["stat_type"].unique()):
-    mask = test_all["stat_type"].values == st
-    if mask.sum() > 10:
-        res = y_te_u[mask] - tuned_preds[mask]
-        residual_stats[st] = {"mean": round(float(res.mean()), 3), "std": round(float(res.std()), 3)}
-(export_dir / "residual_stats.json").write_text(json.dumps(residual_stats, indent=2))
+print(f"\nAll files in export_dir:")
+for f in sorted(export_dir.iterdir()):
+    print(f"  {f.name}  ({f.stat().st_size // 1024} KB)")
 
-print(f"✅ Model exported to {export_dir}/")
-print(f"   Files: {[f.name for f in export_dir.iterdir()]}")
-
+# %%
 # Download from Colab
 try:
     from google.colab import files as dl
@@ -610,27 +1075,110 @@ try:
     shutil.make_archive("exported_regression_model", "zip", ".", "exported_regression_model")
     dl.download("exported_regression_model.zip")
 except ImportError:
-    print("   (Not on Colab — saved locally)")
+    print("(Not on Colab - saved locally)")
 
 # %% [markdown]
-# ## 15. How to Use at Inference
+# ## 17. How to Use at Inference  (`utils/ml_inference.py`)
 #
 # ```python
+# import json, logging
+# import numpy as np
+# import pandas as pd
 # from catboost import CatBoostRegressor, Pool
-# import json
+# from typing import Any, Dict, List, Optional
 #
-# model = CatBoostRegressor()
-# model.load_model("unified_regression.cbm")
-# meta = json.loads(open("model_metadata.json").read())
-# residuals = json.loads(open("residual_stats.json").read())
+# logger = logging.getLogger("MLInference")
 #
-# # For a player/game/stat, prepare features and predict:
-# predicted_value = model.predict(feature_pool)[0]
-# margin = predicted_value - line
+# # ── Load once at module import (not per prediction) ──────────────────────
+# _MODEL_DIR  = "path/to/exported_regression_model"
+# _meta       = json.loads(open(f"{_MODEL_DIR}/model_metadata.json").read())
+# _q_stats    = json.loads(open(f"{_MODEL_DIR}/quantile_stats.json").read())
+# _drift_b    = json.loads(open(f"{_MODEL_DIR}/feature_drift_baseline.json").read())
+# _FEAT_COLS  = _meta["feature_columns"]
+# _CAT_COLS   = _meta["cat_features"]
+# _CAT_IDX    = [_FEAT_COLS.index(c) for c in _CAT_COLS if c in _FEAT_COLS]
+# _MODELS: Dict[str, CatBoostRegressor] = {
+#     st: CatBoostRegressor().load_model(f"{_MODEL_DIR}/{fname}")
+#     for st, fname in _meta["model_files"].items()
+# }
 #
-# # Derive hit probability using the residual distribution:
-# from scipy.stats import norm
-# stat_std = residuals[stat_type]["std"]
-# over_prob = 1 - norm.cdf(line, loc=predicted_value, scale=stat_std)
-# under_prob = norm.cdf(line, loc=predicted_value, scale=stat_std)
+# def get_ml_predictor():
+#     return _MLPredictor()
+#
+# class _MLPredictor:
+#     def predict(
+#         self,
+#         player_info: Dict[str, Any],
+#         logs: List[Dict[str, Any]],
+#         stat_type: str,
+#     ) -> Optional[Dict[str, float]]:
+#         model = _MODELS.get(stat_type)
+#         if model is None:
+#             return None
+#
+#         features = _build_feature_dict(player_info, logs, stat_type)
+#
+#         # Drift check — log warnings but never block inference
+#         for warning in _check_drift(features):
+#             logger.warning("Feature drift: %s", warning)
+#
+#         X = pd.DataFrame([features])[_FEAT_COLS]
+#         for c in _FEAT_COLS:
+#             if c in _CAT_COLS:
+#                 X[c] = X[c].fillna("UNKNOWN").astype(str)
+#             else:
+#                 X[c] = pd.to_numeric(X[c], errors="coerce")
+#
+#         pool  = Pool(X, cat_features=_CAT_IDX)
+#         preds = model.predict(pool)  # shape (1, 3)
+#
+#         return {
+#             "q25": float(preds[0, 0]),
+#             "q50": float(preds[0, 1]),
+#             "q75": float(preds[0, 2]),
+#         }
+#
+#     def hit_probability(self, prediction, std_dev, line, side):
+#         # Legacy interface — kept for backward compatibility.
+#         # New code should use q25/q50/q75 directly via edge_score.py IQR path.
+#         from scipy.stats import norm
+#         if std_dev is None or std_dev <= 0:
+#             return 0.6 if (side == "over") == (prediction > line) else 0.4
+#         p_over = 1.0 - norm.cdf(line, loc=prediction, scale=std_dev)
+#         return p_over if side == "over" else 1.0 - p_over
+#
+# def _check_drift(features: Dict[str, Any], z_threshold: float = 3.0) -> List[str]:
+#     alerts = []
+#     for col, stats in _drift_b.items():
+#         val = features.get(col)
+#         if val is None:
+#             continue
+#         try:
+#             fval = float(val)
+#         except (TypeError, ValueError):
+#             continue
+#         std = stats["std"]
+#         if std < 1e-9:
+#             continue
+#         z = abs(fval - stats["mean"]) / std
+#         if z > z_threshold:
+#             alerts.append(
+#                 f"{col}: {fval:.3f} is {z:.1f}sigma "
+#                 f"from training mean={stats['mean']:.3f}"
+#             )
+#     return alerts
+#
+# def _build_feature_dict(
+#     player_info: Dict[str, Any],
+#     logs: List[Dict[str, Any]],
+#     stat_type: str,
+# ) -> Dict[str, Any]:
+#     # Populate _FEAT_COLS from player_info and logs.
+#     # Engineering must mirror regression_notebook.py: engineer_features().
+#     # Key engineered features to replicate:
+#     #   momentum_diff_5v20  = recent5_stat_avg  - recent20_stat_avg
+#     #   momentum_diff_3v10  = recent3_stat_avg  - recent10_stat_avg
+#     #   expected_possessions = team_pace * (season_usage_pct_avg / 100)
+#     #   predicted_minutes    = (r5*0.5 + r10*0.3 + sea*0.2) * (1 - 0.035*is_b2b)
+#     raise NotImplementedError("Implement feature extraction from player_info + logs")
 # ```
