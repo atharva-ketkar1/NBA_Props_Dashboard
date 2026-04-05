@@ -657,29 +657,47 @@ def fetch_action_network_odds(
     book_ids: Optional[List[str]] = None,
     schedule_path: Path = DEFAULT_SCHEDULE_PATH,
 ) -> Dict[str, Any]:
-    resolved_query_date = resolve_query_date(query_date, days_ahead=days_ahead)
     resolved_book_ids = [
         str(book_id).strip()
         for book_id in (book_ids or DEFAULT_BOOK_IDS)
         if str(book_id).strip()
     ]
-    logger.info("[RUN] Action Network odds fetch | date=%s", resolved_query_date)
-    raw_payload = fetch_raw_action_network_payload(
-        query_date=resolved_query_date,
-        book_ids=resolved_book_ids,
-    )
-    payload = parse_action_network_payload(
-        raw_payload,
-        query_date=resolved_query_date,
-        book_ids=resolved_book_ids,
-        schedule_rows=load_schedule_rows(schedule_path),
-    )
+    schedule_rows = load_schedule_rows(schedule_path)
+    
+    offsets = [days_ahead] if query_date else [days_ahead, days_ahead + 1]
+    combined_payload = None
+    
+    for offset in offsets:
+        target_date = resolve_query_date(query_date, days_ahead=offset)
+        logger.info("[RUN] Action Network odds fetch | date=%s", target_date)
+        raw_payload = fetch_raw_action_network_payload(
+            query_date=target_date,
+            book_ids=resolved_book_ids,
+        )
+        payload = parse_action_network_payload(
+            raw_payload,
+            query_date=target_date,
+            book_ids=resolved_book_ids,
+            schedule_rows=schedule_rows,
+        )
+        
+        if combined_payload is None:
+            combined_payload = payload
+        else:
+            combined_payload["games"].extend(payload.get("games", []))
+            combined_payload["unmatched_action_network_games"].extend(
+                payload.get("unmatched_action_network_games", [])
+            )
+            for key in ["game_count", "schedule_game_count", "matched_game_count", "unmatched_action_network_game_count"]:
+                if key in payload:
+                    combined_payload[key] = combined_payload.get(key, 0) + payload[key]
+
     logger.info(
         "[OK] Action Network odds fetch complete | date=%s games=%d",
-        payload["query_date"],
-        payload["game_count"],
+        combined_payload["query_date"],
+        combined_payload["game_count"],
     )
-    return payload
+    return combined_payload
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -814,7 +832,8 @@ def refresh_action_network_odds_if_needed(
         }
 
     payload = fetch_action_network_odds(
-        query_date=resolved_query_date,
+        query_date=query_date,
+        days_ahead=days_ahead,
         book_ids=book_ids,
         schedule_path=schedule_path,
     )

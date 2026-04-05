@@ -40,6 +40,7 @@ ARCHIVE_DIR = os.path.join(BASE_DIR, "data", "archive")
 
 MASTER_FEED_PATH = os.path.join(CURRENT_DIR, "master_feed.json")
 SCHEDULE_PATH = os.path.join(CURRENT_DIR, "today_schedule.json")
+ACTION_NETWORK_PATH = os.path.join(CURRENT_DIR, "action_network_odds.json")
 LINE_MOVEMENTS_PATH = os.path.join(CURRENT_DIR, "line_movements_today.json")
 PRIZEPICKS_PATH = os.path.join(CURRENT_DIR, "prizepicks.csv")
 EDGE_SCORE_PATH = os.path.join(CURRENT_DIR, "edge_scores_top15.json")
@@ -813,6 +814,9 @@ def _resolve_entry_game_team_context(entry: Dict[str, Any]) -> Dict[str, Any]:
     team = str(entry.get("team") or "").strip().upper()
     home_team = str(game.get("home_team_tricode") or "").strip().upper()
     away_team = str(game.get("away_team_tricode") or "").strip().upper()
+    vegas_spread = _safe_float(game.get("spread"))
+    vegas_total = _safe_float(game.get("total"))
+
     if team == home_team:
         return {
             "is_home": True,
@@ -821,6 +825,8 @@ def _resolve_entry_game_team_context(entry: Dict[str, Any]) -> Dict[str, Any]:
             "current_score_differential": _safe_float(game.get("score_differential")),
             "is_live": bool(game.get("is_live")),
             "game_status": game.get("game_status"),
+            "vegas_spread": vegas_spread,
+            "vegas_total": vegas_total,
         }
     if team == away_team:
         return {
@@ -830,6 +836,8 @@ def _resolve_entry_game_team_context(entry: Dict[str, Any]) -> Dict[str, Any]:
             "current_score_differential": _safe_float(game.get("score_differential")),
             "is_live": bool(game.get("is_live")),
             "game_status": game.get("game_status"),
+            "vegas_spread": vegas_spread,
+            "vegas_total": vegas_total,
         }
     return {}
 
@@ -855,7 +863,7 @@ def _legacy_projection_baseline(
     return baseline_projection
 
 
-def _compute_expected_minutes_context(entry: Dict[str, Any], logs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _compute_expected_minutes_context(entry: Dict[str, Any], logs: List[Dict[str, Any]], blowout_risk_boost: bool = False) -> Dict[str, Any]:
     player = entry.get("player") if isinstance(entry, dict) else {}
     stats = player.get("stats") if isinstance(player, dict) and isinstance(player.get("stats"), dict) else {}
     season_minutes = _safe_float(stats.get("MIN"))
@@ -899,8 +907,14 @@ def _compute_expected_minutes_context(entry: Dict[str, Any], logs: List[Dict[str
         historical_adjustment_ratio = (blowout_avg - competitive_avg) / competitive_avg
 
     blowout_risk = 0.0
-    if win_pct_gap is not None:
+    vegas_spread = game_team_context.get("vegas_spread")
+    if vegas_spread is not None:
+        blowout_risk = _clamp((abs(vegas_spread) - 8.0) / 7.0, 0.0, 1.0)
+    elif win_pct_gap is not None:
         blowout_risk = _clamp((win_pct_gap - 0.08) / 0.28, 0.0, 1.0)
+
+    if blowout_risk_boost:
+        blowout_risk = min(1.0, blowout_risk + 0.20)
 
     live_score_differential = _safe_float(game_team_context.get("current_score_differential"))
     if game_team_context.get("is_live") and live_score_differential is not None:
@@ -1174,7 +1188,7 @@ def _estimate_stat_rate_context(player: Dict[str, Any], logs: List[Dict[str, Any
     }
 
 
-def _build_schedule_context(schedule_payload: Any) -> Dict[str, Any]:
+def _build_schedule_context(schedule_payload: Any, action_network_payload: Any = None) -> Dict[str, Any]:
     if isinstance(schedule_payload, dict):
         games = schedule_payload.get("games", [])
     elif isinstance(schedule_payload, list):
@@ -1222,6 +1236,16 @@ def _build_schedule_context(schedule_payload: Any) -> Dict[str, Any]:
                 game for _, game in future_games
                 if _normalize_game_date(game.get("game_date")) == target_date
             ]
+
+    an_games = action_network_payload.get("games", []) if isinstance(action_network_payload, dict) else []
+    for game in active_games:
+        an_match = next((g for g in an_games if g.get("game_id") == game.get("game_id") or (
+            g.get("home_team_tricode") == game.get("home_team_tricode") and
+            g.get("away_team_tricode") == game.get("away_team_tricode")
+        )), None)
+        if an_match:
+            game["spread"] = an_match.get("spread")
+            game["total"] = an_match.get("total")
 
     active_teams = set()
     active_dates = set()
@@ -1768,9 +1792,228 @@ def _compute_matchup_context(player: Dict[str, Any], stat_type: str, side: str) 
     }
 
 
+def _classify_player_role(season_minutes: Optional[float], season_usage_pct: Optional[float]) -> str:
+    mins = season_minutes or 0.0
+    usg = season_usage_pct or 0.0
+    if mins >= 30.0 and usg >= 0.24:
+        return "star"
+    if mins >= 24.0:
+        return "starter"
+    if mins >= 16.0:
+        return "rotation"
+    return "bench"
+
+
+def _load_tonight_dnps(master_feed: Any, injury_report: Any, schedule_context: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    if not isinstance(injury_report, dict):
+        return {}
+    
+    matcher, id_to_team = _build_master_feed_matcher(master_feed)
+    if not matcher:
+        return {}
+        
+    master_stats = {}
+    if isinstance(master_feed, list):
+        for player in master_feed:
+            if isinstance(player, dict) and player.get("id"):
+                master_stats[str(player["id"])] = player
+            
+    dnps_by_team: Dict[str, List[Dict[str, Any]]] = {}
+    
+    games = injury_report.get("games", [])
+    if isinstance(games, list):
+        for game in games:
+            if not isinstance(game, dict):
+                continue
+            for player_entry in game.get("players", []):
+                if not isinstance(player_entry, dict):
+                    continue
+                
+                status = str(player_entry.get("current_status") or "").lower()
+                if status not in {"out", "doubtful"}:
+                    continue
+                    
+                raw_name = player_entry.get("player_name") or player_entry.get("report_player_name") or ""
+                
+                player_id = matcher.match_player(raw_name, "UNK") 
+                if not player_id:
+                    continue
+                    
+                canonical_team = id_to_team.get(str(player_id))
+                if not canonical_team:
+                    continue
+                
+                master_player = master_stats.get(str(player_id), {})
+                stats = master_player.get("stats", {})
+                season_minutes = _safe_float(stats.get("MIN"))
+                season_usage = _normalize_fraction(stats.get("USG_PCT"))
+                
+                role = _classify_player_role(season_minutes, season_usage)
+                
+                dnps_by_team.setdefault(canonical_team, []).append({
+                    "player_id": str(player_id),
+                    "player_name": master_player.get("name", raw_name),
+                    "season_usage_pct": season_usage * 100.0 if season_usage is not None else None,
+                    "season_minutes": season_minutes,
+                    "position": master_player.get("position"),
+                    "role": role,
+                })
+                
+    return dnps_by_team
+
+
+def _compute_lineup_adjustment(
+    player: Dict[str, Any],
+    stat_type: str,
+    side: str,
+    tonight_dnps: Optional[Dict[str, List[Dict[str, Any]]]],
+    tonight_opponent_dnps: Optional[List[Dict[str, Any]]],
+    logs: List[Dict[str, Any]],
+    team_recent_games: Dict[str, str],
+    game_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    adjustment = {
+        "q50_multiplier": 1.0,
+        "adjustment_type": "none",
+        "reason": "",
+        "freed_usage_pct": 0.0,
+        "absent_stars": [],
+        "blowout_risk_boost": False,
+        "b2b_rest_flip": False,
+        "opponent_reb_context": None,
+    }
+    
+    if not isinstance(tonight_dnps, dict):
+        return adjustment
+        
+    team = player.get("team")
+    if not team:
+        return adjustment
+        
+    stats = player.get("stats", {}) if isinstance(player, dict) else {}
+    player_season_usage_pct = _normalize_fraction(stats.get("USG_PCT"))
+    player_season_minutes = _safe_float(stats.get("MIN"))
+    player_position = str(player.get("position") or "").upper()
+    
+    team_recent_date_str = team_recent_games.get(team)
+    if team_recent_date_str:
+        team_recent_date = _parse_date(team_recent_date_str)
+        now = get_et_now()
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        if team_recent_date_str == yesterday and logs:
+            latest_logged_date = _parse_date(logs[0].get("GAME_DATE"))
+            if team_recent_date and latest_logged_date and (team_recent_date - latest_logged_date).days >= 1:
+                adjustment["b2b_rest_flip"] = True
+                
+    if tonight_opponent_dnps and (player_season_minutes is None or player_season_minutes < 28.0):
+        if any(dnp.get("role") == "star" for dnp in tonight_opponent_dnps):
+            adjustment["blowout_risk_boost"] = True
+
+    absent_teammates = tonight_dnps.get(team, [])
+    absent_stars = []
+    freed_usg = 0.0
+    n_absent = 0
+    opponent_frontcourt_freed = 0.0
+    opponent_reb_context = None
+
+    for dnp in absent_teammates:
+        role = dnp.get("role")
+        if role in {"star", "starter", "rotation"}:
+            freed_usg += (dnp.get("season_usage_pct") or 0.0)
+            n_absent += 1
+            if role in {"star", "starter"}:
+                absent_stars.append(dnp.get("player_name") or "Unknown")
+
+    adjustment["freed_usage_pct"] = freed_usg
+    adjustment["absent_stars"] = absent_stars
+
+    is_beneficiary = False
+    if freed_usg >= 8.0 and player_season_minutes is not None and player_season_minutes >= 16.0:
+        target_positions = set()
+        for pos_char in player_position:
+            if pos_char == 'G': target_positions.add('G')
+            if pos_char == 'F': target_positions.update(['F', 'G'])
+            if pos_char == 'C': target_positions.update(['C', 'F'])
+            
+        for dnp in absent_teammates:
+            if dnp.get("role") not in {"star", "starter", "rotation"}: continue
+            dnp_pos = str(dnp.get("position") or "G").upper()
+            if any(p in target_positions for p in dnp_pos):
+                is_beneficiary = True
+                break
+
+    q50_multiplier = 1.0
+
+    if is_beneficiary:
+        if n_absent >= 3:
+            absorption_rate = 0.28
+            adjustment_type = "rotation_vacuum" if not any(d.get("role") == "star" for d in absent_teammates) else "usage_boost"
+        elif n_absent == 2:
+            absorption_rate = 0.32
+            adjustment_type = "usage_boost"
+        else:
+            absorption_rate = 0.35
+            adjustment_type = "usage_boost"
+            
+        usage_gain = freed_usg * absorption_rate
+        if player_season_usage_pct and player_season_usage_pct > 0.05:
+            usage_gain_frac = usage_gain / 100.0
+            gain_ratio = usage_gain_frac / player_season_usage_pct
+            q50_multiplier = 1.0 + min(gain_ratio, 0.40)
+            adjustment["adjustment_type"] = adjustment_type
+            adjustment["reason"] = f"Usage boost applied (freed={freed_usg:.1f}%)"
+
+    if stat_type in {"REB", "PTS+REB+AST", "PTS+REB", "REB+AST"}:
+        for dnp in tonight_opponent_dnps or []:
+            role = dnp.get("role")
+            pos = str(dnp.get("position") or "").upper()
+            if role in {"star", "starter"} and ("C" in pos or "F" in pos):
+                opponent_frontcourt_freed += (dnp.get("season_minutes") or 0.0)
+                if role == "star":
+                    opponent_reb_context = "star_out"
+                elif role == "starter" and opponent_reb_context != "star_out":
+                    opponent_reb_context = "starter_out"
+                    
+        if opponent_frontcourt_freed >= 24.0:
+            if opponent_reb_context == "star_out":
+                q50_multiplier *= 1.07
+            else:
+                q50_multiplier *= 1.04
+            adjustment["opponent_reb_context"] = opponent_reb_context
+            if adjustment["adjustment_type"] == "none":
+                adjustment["adjustment_type"] = "opponent_reb_boost"
+            adjustment["reason"] = (adjustment.get("reason", "") + " (Easier rebounding context)").strip()
+
+    vegas_total = _safe_float(game_context.get("total")) if game_context else None
+    if vegas_total is not None:
+        raw_reason = adjustment.get("reason", "")
+        if vegas_total >= 235.0 and player_position == "G" and stat_type in {"PTS", "AST", "PTS+AST", "PTS+REB+AST"}:
+            q50_multiplier *= 1.04
+            adjustment["reason"] = (raw_reason + " | High total favors pace/guards").strip(" |")
+        elif vegas_total <= 215.0 and player_position in {"C", "F"} and stat_type in {"REB", "REB+AST", "PTS+REB"}:
+            q50_multiplier *= 1.05
+            adjustment["reason"] = (raw_reason + " | Low total creates interior rebounding").strip(" |")
+        elif vegas_total <= 210.0 and stat_type == "PTS":
+            q50_multiplier *= 0.96
+            adjustment["reason"] = (raw_reason + " | Depressed scoring environment").strip(" |")
+
+    adjustment["q50_multiplier"] = _clamp(q50_multiplier, 0.70, 1.50)
+    return adjustment
+
+
 _ml_predictor = None
 
-def _compute_ml_regression_context(player: Dict[str, Any], opponent: str, stat_type: str, line: float, side: str) -> Dict[str, Any]:
+def _compute_ml_regression_context(
+    player: Dict[str, Any],
+    opponent: str,
+    stat_type: str,
+    line: float,
+    side: str,
+    tonight_dnps: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    tonight_opponent_dnps: Optional[List[Dict[str, Any]]] = None,
+    team_recent_games: Optional[Dict[str, str]] = None,
+    game_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Compute the ML regression component score for a player/stat/line/side combination.
 
@@ -1812,6 +2055,26 @@ def _compute_ml_regression_context(player: Dict[str, Any], opponent: str, stat_t
     q75 = _safe_float(res.get("q75"))
 
     if q25 is not None and q50 is not None and q75 is not None:
+        adjustment = _compute_lineup_adjustment(
+            player=player,
+            stat_type=stat_type,
+            side=side,
+            tonight_dnps=tonight_dnps,
+            tonight_opponent_dnps=tonight_opponent_dnps,
+            logs=logs,
+            team_recent_games=team_recent_games or {},
+            game_context=game_context,
+        )
+        mult = adjustment.get("q50_multiplier", 1.0)
+        if mult != 1.0:
+            q25 *= mult
+            q50 *= mult
+            q75 *= mult
+            logger.info(
+                "Lineup adjustment applied | player=%s stat=%s mult=%.3f reason=%s",
+                player.get("name"), stat_type, mult, adjustment.get("reason"),
+            )
+            
         # Linear interpolation across [q25, q75] to estimate p_over.
         # - line <= q25  → ~75% of outcomes are above  → p_over ≈ 0.75
         # - line == q50  → 50% of outcomes are above   → p_over = 0.50
@@ -1838,6 +2101,9 @@ def _compute_ml_regression_context(player: Dict[str, Any], opponent: str, stat_t
             "hit_probability": round(p_over * 100.0, 1),
             "p_over": round(p_over, 4),
             "calibration": "quantile_iqr",
+            "ml_lineup_adjustment": adjustment,
+            "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
+            "vegas_spread": _safe_float(game_context.get("spread")) if game_context else None,
         }
 
     # ── Legacy path (std_dev / Gaussian fallback) ────────────────────────────
@@ -1855,6 +2121,8 @@ def _compute_ml_regression_context(player: Dict[str, Any], opponent: str, stat_t
             "p_over": round(p_over, 4),
             "std_dev": round(std_dev, 2) if std_dev is not None else None,
             "calibration": "gaussian_legacy",
+            "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
+            "vegas_spread": _safe_float(game_context.get("spread")) if game_context else None,
         }
 
     # ── Score mapping: p_over → [-1, 1] ─────────────────────────────────────
@@ -1944,7 +2212,13 @@ def _compute_recent_form_context(player: Dict[str, Any], stat_type: str, line: f
     }
 
 
-def _compute_projection_context(entry: Dict[str, Any], stat_type: str, line: float, side: str) -> Dict[str, Any]:
+def _compute_projection_context(
+    entry: Dict[str, Any],
+    stat_type: str,
+    line: float,
+    side: str,
+    blowout_risk_boost: bool = False,
+) -> Dict[str, Any]:
     player = entry.get("player") if isinstance(entry, dict) else {}
     profile = STAT_PROFILES.get(stat_type, {})
     scale = profile.get("scale", 5.0)
@@ -1954,7 +2228,7 @@ def _compute_projection_context(entry: Dict[str, Any], stat_type: str, line: flo
     recent5_avg = _average(values[:5])
     recent10_avg = _average(values[:10])
 
-    minutes_context = _compute_expected_minutes_context(entry, logs)
+    minutes_context = _compute_expected_minutes_context(entry, logs, blowout_risk_boost=blowout_risk_boost)
     expected_minutes = _safe_float(minutes_context.get("expected_minutes"))
     season_minutes = _safe_float(minutes_context.get("season_minutes"))
     recent_minutes = _safe_float(minutes_context.get("recent_5_minutes"))
@@ -2055,6 +2329,7 @@ def _compute_back_to_back_context(
     stat_type: str,
     game_date: str,
     side: str,
+    b2b_rest_flip: bool = False,
 ) -> Dict[str, Any]:
     logs = _extract_logs(player)
     if not logs:
@@ -2064,6 +2339,21 @@ def _compute_back_to_back_context(
     latest_logged_date = _parse_date(logs[0].get("GAME_DATE"))
     if current_game_date is None or latest_logged_date is None:
         return {"available": False, "score": 0.0, "raw_score": 0.0, "details": {}}
+
+    profile = STAT_PROFILES.get(stat_type, {})
+    if b2b_rest_flip:
+        base_bias = profile.get("b2b_bias", -0.08)
+        score = _clamp(abs(base_bias) * 0.5 * SIDE_MULTIPLIERS[side], -0.25, 0.25)
+        return {
+            "available": True,
+            "score": score,
+            "raw_score": score,
+            "details": {
+                "current_is_b2b": False,
+                "b2b_rest_flip": True,
+                "fallback_bias": _round(abs(base_bias) * 0.5),
+            },
+        }
 
     current_is_b2b = (current_game_date - latest_logged_date).days == 1
     if not current_is_b2b:
@@ -2501,6 +2791,8 @@ def _build_candidate(
     active_entries: List[Dict[str, Any]],
     style_cache: Dict[int, Dict[str, float]],
     line_lookup: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]],
+    tonight_dnps: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    team_recent_games: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     player = entry["player"]
     profile = STAT_PROFILES.get(stat_type)
@@ -2522,7 +2814,17 @@ def _build_candidate(
         "recent_form": _compute_recent_form_context(player, stat_type, line, side),
         "matchup": _compute_matchup_context(player, stat_type, side),
         "market": _compute_market_context(market_selection, side),
-        "ml_regression": _compute_ml_regression_context(player, opponent, stat_type, line, side),
+        "ml_regression": _compute_ml_regression_context(
+            player=player,
+            opponent=opponent,
+            stat_type=stat_type,
+            line=line,
+            side=side,
+            tonight_dnps=tonight_dnps,
+            tonight_opponent_dnps=tonight_dnps.get(opponent, []) if tonight_dnps and opponent else [],
+            team_recent_games=team_recent_games,
+            game_context=entry.get("game_context"),
+        ),
         "line_movement": _compute_line_movement_context(
             line_lookup,
             player_id=player_id,
@@ -3070,6 +3372,28 @@ def _component_reason_snippet(recommendation: Dict[str, Any], component_name: st
             )
         return f"baseline projection still lands {direction} the line"
 
+    if component_name == "ml_regression":
+        ml_inputs = inputs.get("ml_regression", {})
+        prediction_val = ml_inputs.get("prediction_val")
+        if prediction_val is not None:
+            adj = ml_inputs.get("ml_lineup_adjustment", {})
+            adj_type = adj.get("adjustment_type", "none")
+            
+            vegas_total = _safe_float(ml_inputs.get("vegas_total"))
+            vegas_spread = _safe_float(ml_inputs.get("vegas_spread"))
+            
+            if vegas_total is not None and vegas_total >= 235.0 and stat_type == "PTS":
+                return f"the massive total ({vegas_total}) implies a fast-paced game script, shifting the regression projection to {prediction_val:.1f}"
+            if vegas_spread is not None and abs(vegas_spread) >= 12.0:
+                return f"the point spread ({vegas_spread}) signals massive blowout risk, threatening 4th-quarter minutes and capping the regression projection to {prediction_val:.1f}"
+
+            if adj_type != "none" and adj.get("absent_stars", []):
+                stars_out = ", ".join(adj.get("absent_stars"))
+                pct_boost = (adj.get("q50_multiplier", 1.0) - 1.0) * 100.0
+                return f"the regression model projects {prediction_val:.1f} (lineup-adjusted +{pct_boost:.0f}%: {stars_out} out)"
+                
+            return f"the regression model projects {prediction_val:.1f}"
+
     if component_name == "recent_form":
         recent_form = inputs.get("recent_form", {}) or {}
         averages = recent_form.get("averages", {}) or {}
@@ -3170,6 +3494,8 @@ def _component_reason_snippet(recommendation: Dict[str, Any], component_name: st
 
     if component_name == "back_to_back":
         b2b = inputs.get("back_to_back", {}) or {}
+        if stat_type == "STL" or stat_type == "BLK" or stat_type == "STL+BLK":
+            return None
         if b2b.get("current_is_b2b"):
             delta = _safe_float(b2b.get("delta_vs_overall"))
             if delta is not None:
@@ -4369,10 +4695,12 @@ def run_edge_score_refresh(
     schedule_path: str = SCHEDULE_PATH,
     line_movements_path: str = LINE_MOVEMENTS_PATH,
     prizepicks_path: str = PRIZEPICKS_PATH,
+    action_network_path: str = ACTION_NETWORK_PATH,
 ) -> Dict[str, Any]:
     start_time = time.time()
     master_feed = _load_json(master_feed_path, [])
     schedule_payload = _load_json(schedule_path, {"games": []})
+    action_network_payload = _load_json(action_network_path, {"games": []})
     line_movements_payload = _load_json(line_movements_path, {"snapshots": []})
     state = _load_json(EDGE_SCORE_STATE_PATH, {})
     if not isinstance(state, dict):
@@ -4380,6 +4708,23 @@ def run_edge_score_refresh(
 
     if not isinstance(master_feed, list):
         master_feed = []
+
+    team_recent_games = {}
+    for player in master_feed:
+        if not isinstance(player, dict): continue
+        t = player.get("team")
+        logs = _extract_logs(player)
+        if t and logs:
+            ld = _normalize_game_date(logs[0].get("GAME_DATE"))
+            if ld and (t not in team_recent_games or ld > team_recent_games[t]):
+                team_recent_games[t] = ld
+
+    schedule_context = _build_schedule_context(schedule_payload, action_network_payload)
+
+    injury_report = _load_json(os.path.join(CURRENT_DIR, "nba_injury_report.json"), {})
+    tonight_dnps = _load_tonight_dnps(master_feed, injury_report, schedule_context)
+    if tonight_dnps:
+        logger.info("Tonight DNPs loaded | teams_with_absences=%d", len(tonight_dnps))
 
     recap_result = {"sent_dates": [], "state_changed": False}
     if refresh_label == "pipeline" and _results_recap_webhook_url():
@@ -4483,6 +4828,8 @@ def run_edge_score_refresh(
                     active_entries,
                     style_cache,
                     line_lookup,
+                    tonight_dnps=tonight_dnps,
+                    team_recent_games=team_recent_games,
                 )
                 if candidate is not None:
                     side_candidates.append(candidate)

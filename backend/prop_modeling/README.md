@@ -1,104 +1,62 @@
-# Prop Modeling Workspace
+# NBA Prop Modeling & Discord Pipeline
 
-This folder is the offline research/training workspace for a better
-Discord prop model. It is intentionally separate from `backend/utils/edge_score.py`
-so model experiments do not get mixed into the production refresh path.
+This folder is the offline research and training workspace for our player prop model. The core of this system predicts player performance and powers the live Discord alerts. 
 
-## Current layout
+---
 
-- `build_prop_dataset.py` builds a leak-safe historical training dataset.
-- `train_prop_model.py` trains one CatBoost classifier per stat type and writes
-  `.cbm` model artifacts plus a manifest.
-- `feature_schema.py` defines shared dataset columns and feature groups.
-- `generated/` holds local datasets/model artifacts and is git-ignored.
+## 1. How the Machine Learning Model Works
 
-## How to build the first training table
+### The Core Engine
+I used **CatBoost**, an advanced machine learning algorithm that excels at handling categorical data (like player names or team abbreviations). Instead of simply guessing if a player goes "Over" or "Under," I used a **regression model** to predict raw statistical limits.
 
-Run from the repo root:
+### How it Learns
+The scripts in this folder (`build_prop_dataset.py` and `train_prop_model.py`) assemble historical datasets. The model analyzes past games, focusing on:
+- **Rolling Form:** What the player averaged in their last 5, 10, or 20 games.
+- **Opportunity Rates:** Their usage percentage (how much of their team's offense they carry) and play types (drives, assists).
+- **Market Context:** It compares historical expectations against actual sportsbook lines and totals from previous games.
 
-```bash
-python3 backend/prop_modeling/build_prop_dataset.py
-```
+### Quantile Predictions (The Magic)
+Rather than giving a single flat prediction (e.g., "LeBron will score 26 points"), our model predicts three exact percentiles:
+1. **q25:** The pessimistic outcome (25% chance he scores less).
+2. **q50 (The Median):** The central expectation.
+3. **q75:** The optimistic outcome.
 
-That writes:
+By measuring the gap between these percentiles (*the IQR or spread*), the pipeline figures out exactly how likely a player is to confidently beat a sportsbook's line (e.g., assigning a 70% probability for the Over).
 
-```text
-backend/prop_modeling/generated/prop_training_dataset.csv
-```
+---
 
-`build_prop_dataset.py` also reads archived spreads/totals from:
+## 2. The Real-Time Scoring Pipeline (Under the Hood)
 
-```text
-backend/data/archive/action_network_odds/
-```
+You might wonder: *If the ML model only knows about the past, what happens if a star player gets injured right before tip-off?*
 
-## What the first dataset contains
+**You DO NOT need to retrain or change the ML model for this.** Our pipeline naturally solves it at the exact moment it runs. Here is the intricate breakdown of the pipeline loop (housed within `backend/utils/edge_score.py`) running every few minutes on our server:
 
-Each row is one `player_id + game_date + stat_type + sportsbook + side + line`
-example with:
+### Step A: Gathering the Slate
+The pipeline rapidly pulls in static files: the day's schedule, the canonical "master feed" of player statistics, real-time odds from PrizePicks, DraftKings, and FanDuel, and crucially, the **hourly NBA Injury Report**.
 
-- final hit/miss/push label
-- market fields such as line, odds, implied probability, consensus line
-- game-market fields such as spread, total, team totals, implied team totals,
-  and favorite/underdog context from Action Network
-- rolling player-form fields computed only from games before that game date
-- usage/opportunity-rate fields from prior game logs
-- rest/home-away context
+### Step B: The Dynamic Lineup Adjustment
+Before ever trusting the ML model, the pipeline checks tonight's active players against the injury report. It acts as the model's eyes and ears for tonight's game:
 
-## Why zone/similarity features are not in v1 yet
+- **The Usage Vacuum:** If a star (like Cade Cunningham) is OUT, the pipeline calculates exactly how much offensive usage is now freed up. It finds players taking his place (like Daniss Jenkins) and applies a mathematical **Usage Boost**, multiplying the ML model's baseline prediction by up to +40%.
+- **Blowout Amplifications:** If an opponent's star is OUT, the game is more likely to turn into a blowout. The pipeline amplifies blowout risk algorithms, heavily cutting down projected playing time for role players who get benched in garbage time.
+- **Rest Reversals:** It scans game logs for players who sat out yesterday while their team played (DNP - Rest) and flips the typical back-to-back fatigue penalty into a freshness bonus.
+- **The Empty Paint:** If the opposing team sits their starting Center, the pipeline naturally inflates our player's Rebounding (REB) expectations.
 
-Shooting zones, assist zones, play types, and similar-player comps already exist
-in the live Signal Score path, but your repo does not currently keep historical
-point-in-time snapshots of those feature families for each slate.
+### Step C: Scoring the Edge
+The pipeline collects the *adjusted* ML predictions, then bundles them with other traditional analytics:
+1. **Matchup Grades:** Favorable shot/zone defenses by the opposing team.
+2. **Recent Form:** Hard hot/cold streaks.
+3. **Line Movement:** Has the "sharp" market shifted the line since this morning?
+4. **Similar Players:** How did players of a similar stylistic archetype fare against this specific line recently?
 
-If we train old rows using today's `master_feed.json`, that would leak future
-information into past examples and make the backtest look better than reality.
+It merges all these sub-components using weighted calculations to generate a final, unified **Edge Score** out of 99.0.
 
-So v1 starts with safe rolling game-log + market + Action Network game-context
-features only. Older rows will have blank Action Network columns until the new
-Priority 4 archive builds up enough history.
+### Step D: The Discord Alerts
+The system ranks every candidate across every sportsbook. If a prop crosses our high thresholds for statistical edge and ML conviction, the alert triggers! 
 
-Once we archive daily point-in-time snapshots for zone/style/opponent context,
-we can add those groups to `feature_schema.py` and run a proper ablation study:
+When a payload hits the Discord tracker webhook:
+- It posts the direct line (e.g. `O 14.5 Points` for Daniss Jenkins). 
+- It bundles visual data like sportsbook pricing.
+- Most importantly, it posts a human-readable **Reason Snippet** pieced together by the pipeline: *"The regression model projects 16.5 (lineup-adjusted +20%: Cade Cunningham out) and recent form is averaging 18.0..."* 
 
-- baseline model
-- baseline + zone/matchup features
-- baseline + similar-player features
-- baseline + all feature groups
-
-## Next step
-
-After building the dataset, train the first CatBoost models:
-
-```bash
-./.venv/bin/python backend/prop_modeling/train_prop_model.py
-```
-
-That writes per-stat `.cbm` files and metadata under:
-
-```text
-backend/prop_modeling/generated/catboost_models/
-```
-
-The intended production handoff is:
-
-1. Train offline here.
-2. Save model artifacts under `backend/prop_modeling/generated/` or a dedicated
-   model registry folder.
-3. Add a tiny inference adapter in `backend/utils/edge_score.py`.
-
-## Environment note
-
-Use `./.venv/bin/python` for this workspace. CatBoost and scikit-learn import
-cleanly there.
-
-`lightgbm` and `xgboost` currently fail because `libomp.dylib` is missing on
-this machine. If you want those engines too, install OpenMP with:
-
-```bash
-brew install libomp
-```
-
-`shap` imports, but Matplotlib warns that `/Users/atharvaketkar/.matplotlib` is
-not writable. If SHAP plots feel slow or noisy, set `MPLCONFIGDIR` to a
-writable local directory before running SHAP-based analysis.
+This completely automates professional sports-betting research, adapting dynamically as news breaks up until tip-off.
