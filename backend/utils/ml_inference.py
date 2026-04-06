@@ -189,7 +189,8 @@ class MLPredictor:
             stat_type=stat_type,
             min_prior=3,
             min_minutes=1.0,
-            enrichment=self.enrichment
+            enrichment=self.enrichment,
+            star_out_dict={}
         )
 
         if not row_obj:
