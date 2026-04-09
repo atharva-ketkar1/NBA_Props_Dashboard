@@ -615,7 +615,12 @@ def main(dry_run=False, mock_time=None):
             return
 
         refresh_game_status_if_needed(now, state, dry_run=dry_run)
-            
+
+        # Check Priority 4
+        ran_injury_report = run_nba_injury_report_if_needed(now, state, dry_run=dry_run)
+        if ran_injury_report:
+            return
+
         # Check Priority 2
         ran_closing = check_closing_lines(now, state, dry_run=dry_run)
         if ran_closing:
@@ -624,11 +629,6 @@ def main(dry_run=False, mock_time=None):
         # Check Priority 3
         ran_intraday = run_intraday_if_needed(now, state, dry_run=dry_run)
         if ran_intraday:
-            return
-
-        # Check Priority 4
-        ran_injury_report = run_nba_injury_report_if_needed(now, state, dry_run=dry_run)
-        if ran_injury_report:
             return
 
         # Check Priority 5
