@@ -1,0 +1,72 @@
+{
+  "model_type": "minutes_multiquantile",
+  "quantile_alphas": [
+    0.25,
+    0.5,
+    0.75
+  ],
+  "target": "actual_minutes",
+  "feature_columns": [
+    "player_id",
+    "team",
+    "opponent",
+    "is_home",
+    "prior_games",
+    "same_team_current_season_games",
+    "days_rest",
+    "is_b2b",
+    "season_minutes_avg",
+    "recent3_minutes_avg",
+    "recent5_minutes_avg",
+    "recent10_minutes_avg",
+    "minutes_trend_5v20",
+    "minutes_cv_recent5",
+    "recent3_1q_minutes_avg",
+    "recent5_1h_minutes_avg",
+    "recent5_1h_minutes_share",
+    "missing_team_usage_pct",
+    "missing_team_minutes",
+    "missing_same_pos_usage_pct",
+    "missing_same_pos_minutes",
+    "missing_guard_usage_pct",
+    "missing_guard_minutes",
+    "missing_high_usage_usage_pct",
+    "missing_high_usage_minutes",
+    "missing_playmaker_potential_ast_pg",
+    "missing_playmaker_minutes",
+    "missing_onball_drives_pg",
+    "missing_onball_minutes",
+    "missing_key_teammates_player_minutes_delta",
+    "returning_key_teammates_player_minutes_delta",
+    "recent_team_games_missed_10",
+    "inactive_streak_team_games",
+    "games_since_return",
+    "previous_absence_streak_team_games",
+    "minutes_last_game",
+    "minutes_delta_last1_vs_recent5",
+    "recent5_minutes_max",
+    "recent5_minutes_min",
+    "recent10_blowout_rate"
+  ],
+  "cat_features": [
+    "player_id",
+    "team",
+    "opponent"
+  ],
+  "model_file": "minutes_model.cbm",
+  "test_metrics": {
+    "mae_q50": 4.5294,
+    "rmse_q50": 5.92,
+    "r2_q50": 0.663,
+    "median_iqr": 6.8485,
+    "q50_bias": -0.0613,
+    "iqr_coverage": 0.472
+  },
+  "heuristic_baseline_metrics": {
+    "mae_q50": 5.0342,
+    "rmse_q50": 6.5403,
+    "r2_q50": 0.5887
+  },
+  "oof_block_dates": 10,
+  "oof_min_train_dates": 30
+}

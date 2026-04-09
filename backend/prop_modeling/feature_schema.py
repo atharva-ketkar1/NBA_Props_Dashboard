@@ -10,6 +10,7 @@ BACKEND_DIR = PROP_MODELING_DIR.parent
 GENERATED_DIR = PROP_MODELING_DIR / "generated"
 DEFAULT_DATASET_PATH = GENERATED_DIR / "prop_training_dataset.csv"
 DEFAULT_MODEL_DIR = GENERATED_DIR / "catboost_models"
+DEFAULT_MINUTES_DATASET_PATH = GENERATED_DIR / "minutes_training_dataset.csv"
 
 DEFAULT_GAMELOG_PATHS = [
     BACKEND_DIR / "data" / "archive" / "gamelogs_2024-25.csv",

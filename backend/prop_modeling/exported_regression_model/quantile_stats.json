@@ -1,68 +1,68 @@
 {
   "AST": {
-    "median_iqr": 2.061,
-    "mae_q50": 1.424,
-    "q50_bias": -0.293,
-    "iqr_coverage": 0.467
+    "median_iqr": 2.17,
+    "mae_q50": 1.42,
+    "q50_bias": -0.308,
+    "iqr_coverage": 0.493
   },
   "BLK": {
-    "median_iqr": 0.945,
-    "mae_q50": 0.456,
-    "q50_bias": -0.317,
-    "iqr_coverage": 0.103
+    "median_iqr": 0.931,
+    "mae_q50": 0.457,
+    "q50_bias": -0.277,
+    "iqr_coverage": 0.222
   },
   "FG3M": {
-    "median_iqr": 1.798,
-    "mae_q50": 0.911,
-    "q50_bias": -0.25,
-    "iqr_coverage": 0.476
+    "median_iqr": 1.816,
+    "mae_q50": 0.908,
+    "q50_bias": -0.254,
+    "iqr_coverage": 0.456
   },
   "PTS": {
-    "median_iqr": 7.531,
-    "mae_q50": 4.628,
-    "q50_bias": -0.67,
-    "iqr_coverage": 0.473
+    "median_iqr": 7.482,
+    "mae_q50": 4.639,
+    "q50_bias": -0.715,
+    "iqr_coverage": 0.468
   },
   "PTS+AST": {
-    "median_iqr": 8.4,
-    "mae_q50": 5.042,
-    "q50_bias": -0.577,
-    "iqr_coverage": 0.492
+    "median_iqr": 8.023,
+    "mae_q50": 5.022,
+    "q50_bias": -0.714,
+    "iqr_coverage": 0.473
   },
   "PTS+REB": {
-    "median_iqr": 9.007,
-    "mae_q50": 5.451,
-    "q50_bias": -0.524,
-    "iqr_coverage": 0.478
+    "median_iqr": 8.466,
+    "mae_q50": 5.457,
+    "q50_bias": -0.58,
+    "iqr_coverage": 0.457
   },
   "PTS+REB+AST": {
-    "median_iqr": 9.553,
-    "mae_q50": 5.835,
-    "q50_bias": -0.606,
+    "median_iqr": 9.542,
+    "mae_q50": 5.826,
+    "q50_bias": -0.675,
     "iqr_coverage": 0.483
   },
   "REB": {
-    "median_iqr": 3.059,
-    "mae_q50": 1.875,
-    "q50_bias": -0.157,
-    "iqr_coverage": 0.487
+    "median_iqr": 2.989,
+    "mae_q50": 1.881,
+    "q50_bias": -0.18,
+    "iqr_coverage": 0.481
   },
   "REB+AST": {
-    "median_iqr": 4.16,
-    "mae_q50": 2.569,
-    "q50_bias": -0.299,
-    "iqr_coverage": 0.493
+    "median_iqr": 4.205,
+    "mae_q50": 2.565,
+    "q50_bias": -0.28,
+    "iqr_coverage": 0.496
   },
   "STL": {
-    "median_iqr": 1.153,
-    "mae_q50": 0.733,
-    "q50_bias": -0.176,
-    "iqr_coverage": 0.387
+    "median_iqr": 1.141,
+    "mae_q50": 0.734,
+    "q50_bias": -0.197,
+    "iqr_coverage": 0.4
   },
   "STL+BLK": {
-    "median_iqr": 1.735,
-    "mae_q50": 0.957,
-    "q50_bias": -0.144,
-    "iqr_coverage": 0.464
+    "median_iqr": 1.848,
+    "mae_q50": 0.959,
+    "q50_bias": -0.134,
+    "iqr_coverage": 0.471
   }
 }

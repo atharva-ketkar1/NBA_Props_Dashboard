@@ -106,7 +106,10 @@
     "momentum_diff_5v20",
     "momentum_diff_3v10",
     "expected_possessions",
-    "predicted_minutes"
+    "predicted_minutes",
+    "modeled_minutes_q50",
+    "modeled_minutes_iqr",
+    "modeled_minutes_delta_vs_recent5"
   ],
   "cat_features": [
     "player_id",
@@ -118,6 +121,11 @@
     "momentum_diff_3v10",
     "expected_possessions",
     "predicted_minutes"
+  ],
+  "modeled_minutes_features": [
+    "modeled_minutes_q50",
+    "modeled_minutes_iqr",
+    "modeled_minutes_delta_vs_recent5"
   ],
   "model_files": {
     "AST": "model_AST.cbm",
@@ -132,67 +140,78 @@
     "STL": "model_STL.cbm",
     "STL+BLK": "model_STL_BLK.cbm"
   },
+  "minutes_model_file": "minutes_model.cbm",
+  "minutes_model_metadata_file": "minutes_model_metadata.json",
+  "minutes_quantile_stats_file": "minutes_quantile_stats.json",
   "cv_results": {
-    "mean_mae": 2.7621,
-    "mean_rmse": 4.3293,
-    "mean_r2": 0.7743,
+    "mean_mae": 2.7596,
+    "mean_rmse": 4.3227,
+    "mean_r2": 0.775,
     "n_folds": 4
+  },
+  "minutes_test_metrics": {
+    "mae_q50": 4.5294,
+    "rmse_q50": 5.92,
+    "r2_q50": 0.663,
+    "median_iqr": 6.8485,
+    "q50_bias": -0.0613,
+    "iqr_coverage": 0.472
   },
   "per_stat_test_metrics": {
     "AST": {
-      "mae": 1.4243,
-      "rmse": 1.9471,
-      "r2": 0.4673
+      "mae": 1.42,
+      "rmse": 1.9484,
+      "r2": 0.4666
     },
     "BLK": {
-      "mae": 0.4561,
-      "rmse": 0.8444,
-      "r2": 0.0134
+      "mae": 0.4573,
+      "rmse": 0.8203,
+      "r2": 0.0689
     },
     "FG3M": {
-      "mae": 0.9114,
-      "rmse": 1.3052,
-      "r2": 0.2888
+      "mae": 0.908,
+      "rmse": 1.3054,
+      "r2": 0.2886
     },
     "PTS": {
-      "mae": 4.6279,
-      "rmse": 5.9881,
-      "r2": 0.4523
+      "mae": 4.639,
+      "rmse": 6.0009,
+      "r2": 0.45
     },
     "PTS+AST": {
-      "mae": 5.0416,
-      "rmse": 6.4819,
+      "mae": 5.0222,
+      "rmse": 6.4818,
       "r2": 0.5226
     },
     "PTS+REB": {
-      "mae": 5.4511,
-      "rmse": 6.9428,
-      "r2": 0.4725
+      "mae": 5.4568,
+      "rmse": 6.9648,
+      "r2": 0.4691
     },
     "PTS+REB+AST": {
-      "mae": 5.8349,
-      "rmse": 7.4614,
-      "r2": 0.5236
+      "mae": 5.8264,
+      "rmse": 7.4538,
+      "r2": 0.5245
     },
     "REB": {
-      "mae": 1.8751,
-      "rmse": 2.4685,
-      "r2": 0.4134
+      "mae": 1.8808,
+      "rmse": 2.4754,
+      "r2": 0.4102
     },
     "REB+AST": {
-      "mae": 2.5692,
-      "rmse": 3.385,
-      "r2": 0.4397
+      "mae": 2.5647,
+      "rmse": 3.3712,
+      "r2": 0.4442
     },
     "STL": {
-      "mae": 0.7333,
-      "rmse": 1.0159,
-      "r2": 0.0129
+      "mae": 0.7338,
+      "rmse": 1.0138,
+      "r2": 0.0169
     },
     "STL+BLK": {
-      "mae": 0.9575,
-      "rmse": 1.2703,
-      "r2": 0.1062
+      "mae": 0.9587,
+      "rmse": 1.2721,
+      "r2": 0.1036
     }
   },
   "usage": "Load the per-stat .cbm for the relevant stat_type. model.predict(pool) returns shape (n, 3): [q25, q50, q75]. Pass q25/q50/q75 to edge_score.py which derives p_over via IQR interpolation. Call check_feature_drift() with feature_drift_baseline.json before prediction to detect stale or out-of-distribution feature values."

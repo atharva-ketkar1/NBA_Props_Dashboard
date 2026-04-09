@@ -33,8 +33,9 @@
 #   (replaces `residual_stats.json`).
 #
 # **Upload files when prompted:**
-# 1. `regression_training_dataset.csv`  (~455k rows, ~80MB)
-# 2. `prop_training_dataset.csv`  (optional, for backtest against actual lines)
+# 1. `regression_training_dataset.csv`
+# 2. `minutes_training_dataset.csv`
+# 3. `prop_training_dataset.csv`  (optional, for backtest against actual lines)
 
 # %% [markdown]
 # ## 1. Setup
@@ -66,6 +67,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from catboost import CatBoostRegressor, Pool
+from IPython.display import display
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 sns.set_theme(style="darkgrid", palette="muted")
@@ -103,17 +106,40 @@ else:
 # df = pd.read_csv(REG_CSV)
 
 # %%
+COLAB_MINUTES_PATH = "/content/drive/MyDrive/minutes_training_dataset.csv"
+LOCAL_MINUTES_PATH = "backend/prop_modeling/generated/minutes_training_dataset.csv"
+
+if os.path.exists(COLAB_MINUTES_PATH):
+    MINUTES_CSV = COLAB_MINUTES_PATH
+    print(f"✅ Minutes data found in Drive: {MINUTES_CSV}")
+elif os.path.exists(LOCAL_MINUTES_PATH):
+    MINUTES_CSV = LOCAL_MINUTES_PATH
+    print(f"✅ Minutes data found locally: {MINUTES_CSV}")
+else:
+    raise FileNotFoundError(
+        "minutes_training_dataset.csv not found. Upload it to Google Drive or place it in "
+        "backend/prop_modeling/generated/."
+    )
+
+# %%
 df = pd.read_csv(REG_CSV)
 df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
 df = df[df["game_date"].notna()].copy()
 df["actual_value"] = pd.to_numeric(df["actual_value"], errors="coerce")
 df = df[df["actual_value"].notna()].copy()
 
+minutes_df = pd.read_csv(MINUTES_CSV)
+minutes_df["game_date"] = pd.to_datetime(minutes_df["game_date"], errors="coerce")
+minutes_df = minutes_df[minutes_df["game_date"].notna()].copy()
+minutes_df["actual_minutes"] = pd.to_numeric(minutes_df["actual_minutes"], errors="coerce")
+minutes_df = minutes_df[minutes_df["actual_minutes"].notna()].copy()
+
 print(f"Loaded {len(df):,} rows")
 print(f"Dates: {df['game_date'].dt.date.nunique()} "
       f"({df['game_date'].min().date()} to {df['game_date'].max().date()})")
 print(f"Players:    {df['player_id'].nunique()}")
 print(f"Stat types: {sorted(df['stat_type'].unique())}")
+print(f"Minutes rows: {len(minutes_df):,}")
 
 # %%
 import os
@@ -174,6 +200,57 @@ print(missing[missing > 0.1].to_string())
 # %%
 TARGET = "actual_value"
 CAT_FEATURES = ["player_id", "team", "opponent"]
+MINUTES_TARGET = "actual_minutes"
+MINUTES_CAT_FEATURES = ["player_id", "team", "opponent"]
+MODELED_MINUTES_COLS = [
+    "modeled_minutes_q50",
+    "modeled_minutes_iqr",
+    "modeled_minutes_delta_vs_recent5",
+]
+MINUTES_FEATURE_COLS = [
+    "player_id",
+    "team",
+    "opponent",
+    "is_home",
+    "prior_games",
+    "same_team_current_season_games",
+    "days_rest",
+    "is_b2b",
+    "season_minutes_avg",
+    "recent3_minutes_avg",
+    "recent5_minutes_avg",
+    "recent10_minutes_avg",
+    "minutes_trend_5v20",
+    "minutes_cv_recent5",
+    "recent3_1q_minutes_avg",
+    "recent5_1h_minutes_avg",
+    "recent5_1h_minutes_share",
+    "missing_team_usage_pct",
+    "missing_team_minutes",
+    "missing_same_pos_usage_pct",
+    "missing_same_pos_minutes",
+    "missing_guard_usage_pct",
+    "missing_guard_minutes",
+    "missing_high_usage_usage_pct",
+    "missing_high_usage_minutes",
+    "missing_playmaker_potential_ast_pg",
+    "missing_playmaker_minutes",
+    "missing_onball_drives_pg",
+    "missing_onball_minutes",
+    "missing_key_teammates_player_minutes_delta",
+    "returning_key_teammates_player_minutes_delta",
+    "recent_team_games_missed_10",
+    "inactive_streak_team_games",
+    "games_since_return",
+    "previous_absence_streak_team_games",
+    "minutes_last_game",
+    "minutes_delta_last1_vs_recent5",
+    "recent5_minutes_max",
+    "recent5_minutes_min",
+    "recent10_blowout_rate",
+]
+MINUTES_OOF_BLOCK_DATES = 10
+MINUTES_OOF_MIN_TRAIN_DATES = 30
 
 BASE_FEATURE_COLS = [
     "player_id", "team", "opponent", "is_home",
@@ -258,7 +335,9 @@ BASE_FEATURE_COLS = [
 
 # Filter to columns that actually exist in the loaded CSV
 BASE_FEATURE_COLS = [c for c in BASE_FEATURE_COLS if c in df.columns]
+MINUTES_FEATURE_COLS = [c for c in MINUTES_FEATURE_COLS if c in minutes_df.columns]
 print(f"Base features available in CSV: {len(BASE_FEATURE_COLS)}")
+print(f"Minutes features available in CSV: {len(MINUTES_FEATURE_COLS)}")
 
 # %%
 # ── Engineered features ──────────────────────────────────────────────────────
@@ -356,12 +435,240 @@ def make_sample_weights(input_df: pd.DataFrame, decay: float = 0.001) -> np.ndar
     weights  = weights / weights.mean()
     return weights.astype(np.float32)
 
+
+def estimate_minutes_iqr_series(input_df: pd.DataFrame, center_col: str) -> pd.Series:
+    center = pd.to_numeric(input_df[center_col], errors="coerce")
+    recent5 = pd.to_numeric(input_df.get("recent5_minutes_avg"), errors="coerce")
+    recent10 = pd.to_numeric(input_df.get("recent10_minutes_avg"), errors="coerce")
+    season = pd.to_numeric(input_df.get("season_minutes_avg"), errors="coerce")
+    cv = pd.to_numeric(input_df.get("minutes_cv_recent5"), errors="coerce")
+
+    spread = pd.Series(1.0, index=input_df.index, dtype=float)
+    if cv is not None:
+        spread = np.maximum(spread, (center.fillna(0.0) * cv.fillna(0.0)).abs())
+    if recent5 is not None and recent10 is not None:
+        spread = np.maximum(spread, (recent5.fillna(0.0) - recent10.fillna(0.0)).abs())
+    if recent5 is not None and season is not None:
+        spread = np.maximum(spread, (recent5.fillna(0.0) - season.fillna(0.0)).abs())
+    if recent10 is not None and season is not None:
+        spread = np.maximum(spread, (recent10.fillna(0.0) - season.fillna(0.0)).abs())
+
+    return pd.Series(spread, index=input_df.index).round(4)
+
+
+def minutes_metrics(actual: np.ndarray, q25: np.ndarray, q50: np.ndarray, q75: np.ndarray) -> Dict[str, float]:
+    coverage = float(((actual >= q25) & (actual <= q75)).mean()) if len(actual) else 0.0
+    return {
+        "mae_q50": round(float(mean_absolute_error(actual, q50)), 4),
+        "rmse_q50": round(float(math.sqrt(mean_squared_error(actual, q50))), 4),
+        "r2_q50": round(float(r2_score(actual, q50)), 4),
+        "median_iqr": round(float(np.median(q75 - q25)), 4),
+        "q50_bias": round(float((q50 - actual).mean()), 4),
+        "iqr_coverage": round(coverage, 4),
+    }
+
+
+def train_minutes_model(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+) -> Tuple[CatBoostRegressor, np.ndarray]:
+    train_params = {
+        "iterations": 700,
+        "depth": 6,
+        "learning_rate": 0.035,
+        "l2_leaf_reg": 5.0,
+        "loss_function": "MultiQuantile:alpha=0.25,0.5,0.75",
+        "random_seed": 42,
+        "verbose": False,
+        "allow_writing_files": False,
+        "task_type": CATBOOST_MULTIQUANTILE_TASK_TYPE,
+    }
+    if params:
+        train_params.update(params)
+
+    X_tr = prepare(train_df, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
+    X_te = prepare(test_df, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
+    y_tr = train_df[MINUTES_TARGET].to_numpy()
+    w_tr = make_sample_weights(train_df)
+
+    cat_idx = [MINUTES_FEATURE_COLS.index(c) for c in MINUTES_CAT_FEATURES if c in MINUTES_FEATURE_COLS]
+    tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_idx, weight=w_tr)
+    te_pool = Pool(X_te, label=test_df[MINUTES_TARGET].to_numpy(), cat_features=cat_idx)
+
+    model = CatBoostRegressor(**train_params)
+    model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=50)
+    preds = model.predict(te_pool)
+    return model, preds
+
+
+def build_minutes_prediction_frame(
+    input_df: pd.DataFrame,
+    *,
+    train_cutoff: pd.Timestamp,
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], CatBoostRegressor]:
+    oof_records: List[pd.DataFrame] = []
+    all_dates = sorted(input_df["game_date"].dt.date.unique())
+    cat_idx = [MINUTES_FEATURE_COLS.index(c) for c in MINUTES_CAT_FEATURES if c in MINUTES_FEATURE_COLS]
+
+    for block_start in range(MINUTES_OOF_MIN_TRAIN_DATES, len(all_dates), MINUTES_OOF_BLOCK_DATES):
+        block_dates = all_dates[block_start:block_start + MINUTES_OOF_BLOCK_DATES]
+        if not block_dates:
+            continue
+        train_dates = all_dates[:block_start]
+        train_block = input_df[input_df["game_date"].dt.date.isin(train_dates)].copy()
+        pred_block = input_df[
+            input_df["game_date"].dt.date.isin(block_dates)
+            & (input_df["game_date"] < train_cutoff)
+        ].copy()
+        if train_block.empty or pred_block.empty:
+            continue
+
+        X_tr = prepare(train_block, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
+        X_pr = prepare(pred_block, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
+        y_tr = train_block[MINUTES_TARGET].to_numpy()
+        w_tr = make_sample_weights(train_block)
+
+        tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_idx, weight=w_tr)
+        pr_pool = Pool(X_pr, cat_features=cat_idx)
+        model = CatBoostRegressor(
+            iterations=700,
+            depth=6,
+            learning_rate=0.035,
+            l2_leaf_reg=5.0,
+            loss_function="MultiQuantile:alpha=0.25,0.5,0.75",
+            random_seed=42,
+            verbose=False,
+            allow_writing_files=False,
+            task_type=CATBOOST_MULTIQUANTILE_TASK_TYPE,
+        )
+        model.fit(tr_pool, verbose=False)
+        preds = model.predict(pr_pool)
+
+        block_frame = pred_block[["game_date", "player_id", "game_id"]].copy()
+        block_frame["modeled_minutes_q25"] = preds[:, 0]
+        block_frame["modeled_minutes_q50"] = preds[:, 1]
+        block_frame["modeled_minutes_q75"] = preds[:, 2]
+        oof_records.append(block_frame)
+
+    oof_minutes = (
+        pd.concat(oof_records, ignore_index=True)
+        if oof_records
+        else pd.DataFrame(columns=["game_date", "player_id", "game_id", "modeled_minutes_q25", "modeled_minutes_q50", "modeled_minutes_q75"])
+    )
+
+    train_minutes = input_df[input_df["game_date"] < train_cutoff].copy()
+    test_minutes = input_df[input_df["game_date"] >= train_cutoff].copy()
+    final_model, test_preds = train_minutes_model(train_minutes, test_minutes)
+    final_test_preds = test_minutes[["game_date", "player_id", "game_id"]].copy()
+    final_test_preds["modeled_minutes_q25"] = test_preds[:, 0]
+    final_test_preds["modeled_minutes_q50"] = test_preds[:, 1]
+    final_test_preds["modeled_minutes_q75"] = test_preds[:, 2]
+
+    minutes_pred_frame = pd.concat([oof_minutes, final_test_preds], ignore_index=True)
+    minutes_test_metrics = minutes_metrics(
+        test_minutes[MINUTES_TARGET].to_numpy(),
+        test_preds[:, 0],
+        test_preds[:, 1],
+        test_preds[:, 2],
+    )
+
+    baseline_pred = pd.to_numeric(test_minutes["recent5_minutes_avg"], errors="coerce").fillna(
+        pd.to_numeric(test_minutes["season_minutes_avg"], errors="coerce")
+    )
+    heuristic_pred = pd.to_numeric(test_minutes.get("recent5_minutes_avg"), errors="coerce").fillna(
+        pd.to_numeric(test_minutes.get("season_minutes_avg"), errors="coerce")
+    ) * 0.50
+    heuristic_pred += pd.to_numeric(test_minutes.get("recent10_minutes_avg"), errors="coerce").fillna(
+        pd.to_numeric(test_minutes.get("season_minutes_avg"), errors="coerce")
+    ) * 0.30
+    heuristic_pred += pd.to_numeric(test_minutes.get("season_minutes_avg"), errors="coerce").fillna(
+        pd.to_numeric(test_minutes.get("recent5_minutes_avg"), errors="coerce")
+    ) * 0.20
+    if "is_b2b" in test_minutes.columns:
+        heuristic_pred *= 1.0 - 0.035 * pd.to_numeric(test_minutes["is_b2b"], errors="coerce").fillna(0.0)
+    heuristic_pred = heuristic_pred.clip(lower=4.0, upper=42.0)
+    heuristic_metrics = {
+        "mae_q50": round(float(mean_absolute_error(test_minutes[MINUTES_TARGET], heuristic_pred)), 4),
+        "rmse_q50": round(float(math.sqrt(mean_squared_error(test_minutes[MINUTES_TARGET], heuristic_pred))), 4),
+        "r2_q50": round(float(r2_score(test_minutes[MINUTES_TARGET], heuristic_pred)), 4),
+    }
+
+    return minutes_pred_frame, minutes_test_metrics, heuristic_metrics, final_model
+
+
+def attach_modeled_minutes(input_df: pd.DataFrame, minutes_pred_frame: pd.DataFrame) -> pd.DataFrame:
+    merged = input_df.copy()
+    merged["player_id"] = merged["player_id"].astype(str)
+    merged["game_id"] = merged["game_id"].astype(str)
+
+    pred_frame = minutes_pred_frame.copy()
+    pred_frame["player_id"] = pred_frame["player_id"].astype(str)
+    pred_frame["game_id"] = pred_frame["game_id"].astype(str)
+
+    merged = merged.merge(
+        pred_frame,
+        on=["game_date", "player_id", "game_id"],
+        how="left",
+    )
+
+    fallback_q50 = pd.to_numeric(merged["predicted_minutes"], errors="coerce")
+    fallback_q50 = fallback_q50.fillna(
+        (
+            pd.to_numeric(merged.get("recent5_minutes_avg"), errors="coerce").fillna(
+                pd.to_numeric(merged.get("season_minutes_avg"), errors="coerce")
+            ) * 0.50
+            + pd.to_numeric(merged.get("recent10_minutes_avg"), errors="coerce").fillna(
+                pd.to_numeric(merged.get("season_minutes_avg"), errors="coerce")
+            ) * 0.30
+            + pd.to_numeric(merged.get("season_minutes_avg"), errors="coerce").fillna(
+                pd.to_numeric(merged.get("recent5_minutes_avg"), errors="coerce")
+            ) * 0.20
+        ).clip(lower=4.0, upper=42.0)
+    )
+    fallback_iqr = estimate_minutes_iqr_series(
+        merged.assign(modeled_minutes_q50=fallback_q50),
+        "modeled_minutes_q50",
+    )
+
+    merged["modeled_minutes_q50"] = pd.to_numeric(merged["modeled_minutes_q50"], errors="coerce").fillna(fallback_q50)
+    q25 = pd.to_numeric(merged.get("modeled_minutes_q25"), errors="coerce")
+    q75 = pd.to_numeric(merged.get("modeled_minutes_q75"), errors="coerce")
+    modeled_iqr = (q75 - q25).where(q25.notna() & q75.notna())
+    merged["modeled_minutes_iqr"] = pd.to_numeric(modeled_iqr, errors="coerce").fillna(fallback_iqr).clip(lower=0.0)
+    merged["modeled_minutes_delta_vs_recent5"] = (
+        merged["modeled_minutes_q50"]
+        - pd.to_numeric(merged.get("recent5_minutes_avg"), errors="coerce").fillna(0.0)
+    )
+
+    return merged
+
+
+shared_dates = sorted(df["game_date"].dt.date.unique())
+shared_test_dates = shared_dates[-20:]
+shared_split_ts = pd.Timestamp(shared_test_dates[0])
+
+minutes_pred_frame, minutes_test_metrics, heuristic_minutes_metrics, minutes_model = build_minutes_prediction_frame(
+    minutes_df,
+    train_cutoff=shared_split_ts,
+)
+df = attach_modeled_minutes(df, minutes_pred_frame)
+
+FEATURE_COLS = BASE_FEATURE_COLS + ENGINEERED_COLS + [
+    column for column in MODELED_MINUTES_COLS if column in df.columns
+]
+UNIFIED_FEATURES = ["stat_type"] + FEATURE_COLS
+UNIFIED_CAT = ["stat_type"] + CAT_FEATURES
+
+print("Minutes model test metrics:", minutes_test_metrics)
+print("Heuristic minutes baseline:", heuristic_minutes_metrics)
+print(f"Total feature columns after modeled minutes: {len(FEATURE_COLS)}")
+
 # %% [markdown]
 # ## 5. Train / Test Split
 
 # %%
-from catboost import CatBoostRegressor, Pool
-
 unique_dates = sorted(df["game_date"].dt.date.unique())
 test_dates   = unique_dates[-20:]   # last 20 game dates = held-out test set
 split_ts     = pd.Timestamp(test_dates[0])
@@ -1036,6 +1343,30 @@ print(f"\nBest model by MAE: {best_name}  (MAE={comparison_df.loc[best_name,'MAE
 export_dir = Path("exported_regression_model")
 export_dir.mkdir(exist_ok=True)
 
+# Minutes model artifact + metadata
+minutes_model_file = "minutes_model.cbm"
+minutes_model.save_model(str(export_dir / minutes_model_file))
+(export_dir / "minutes_quantile_stats.json").write_text(
+    json.dumps(minutes_test_metrics, indent=2)
+)
+(export_dir / "minutes_model_metadata.json").write_text(
+    json.dumps(
+        {
+            "model_type": "minutes_multiquantile",
+            "quantile_alphas": [0.25, 0.5, 0.75],
+            "target": "actual_minutes",
+            "feature_columns": MINUTES_FEATURE_COLS,
+            "cat_features": MINUTES_CAT_FEATURES,
+            "model_file": minutes_model_file,
+            "test_metrics": minutes_test_metrics,
+            "heuristic_baseline_metrics": heuristic_minutes_metrics,
+            "oof_block_dates": MINUTES_OOF_BLOCK_DATES,
+            "oof_min_train_dates": MINUTES_OOF_MIN_TRAIN_DATES,
+        },
+        indent=2,
+    )
+)
+
 # One .cbm per stat type
 model_files: Dict[str, str] = {}
 for stat_type, model in tuned_per_stat_models.items():
@@ -1069,13 +1400,18 @@ export_meta = {
     "feature_columns":       FEATURE_COLS,
     "cat_features":          CAT_FEATURES,
     "engineered_features":   ENGINEERED_COLS,
+    "modeled_minutes_features": MODELED_MINUTES_COLS,
     "model_files":           model_files,
+    "minutes_model_file":    minutes_model_file,
+    "minutes_model_metadata_file": "minutes_model_metadata.json",
+    "minutes_quantile_stats_file": "minutes_quantile_stats.json",
     "cv_results": {
         "mean_mae":  round(cv_results["mean_mae"],  4) if cv_results.get("mean_mae")  else None,
         "mean_rmse": round(cv_results["mean_rmse"], 4) if cv_results.get("mean_rmse") else None,
         "mean_r2":   round(cv_results["mean_r2"],   4) if cv_results.get("mean_r2")   else None,
         "n_folds":   len(cv_results.get("fold_metrics", [])),
     },
+    "minutes_test_metrics": minutes_test_metrics,
     "per_stat_test_metrics": {
         st: {"mae": round(r["mae"], 4), "rmse": round(r["rmse"], 4), "r2": round(r["r2"], 4)}
         for st, r in tuned_per_stat_results.items()

@@ -2198,6 +2198,15 @@ def _compute_ml_regression_context(
                 key: feature_snapshot.get(key)
                 for key in (
                     "recent5_minutes_avg",
+                    "predicted_minutes",
+                    "modeled_minutes_q50",
+                    "modeled_minutes_iqr",
+                    "modeled_minutes_delta_vs_recent5",
+                    "same_team_current_season_games",
+                    "recent_team_games_missed_10",
+                    "inactive_streak_team_games",
+                    "games_since_return",
+                    "previous_absence_streak_team_games",
                     "missing_team_usage_pct",
                     "missing_team_minutes",
                     "missing_same_pos_usage_pct",

@@ -23,68 +23,39 @@ import pandas as pd
 from catboost import CatBoostRegressor, Pool
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from feature_schema import GENERATED_DIR
+from feature_schema import GENERATED_DIR, DEFAULT_MINUTES_DATASET_PATH
+from minutes_model_config import (
+    MINUTES_MODEL_CATEGORICAL_FEATURES,
+    MINUTES_MODEL_FEATURE_COLUMNS,
+    MINUTES_MODEL_FILE_NAME,
+    MINUTES_MODEL_METADATA_FILE_NAME,
+    MINUTES_MODEL_QUANTILES_FILE_NAME,
+    MINUTES_MODEL_TARGET_COLUMN,
+    MODELED_MINUTES_FEATURE_COLUMNS,
+    MINUTES_OOF_BLOCK_DATES,
+    MINUTES_OOF_MIN_TRAIN_DATES,
+    apply_modeled_minutes_features,
+    build_fallback_modeled_minutes,
+    minutes_metrics_summary,
+)
 
 
 DEFAULT_REGRESSION_DATASET_PATH = GENERATED_DIR / "regression_training_dataset.csv"
 DEFAULT_REGRESSION_MODEL_DIR = GENERATED_DIR / "regression_models"
-
-CATEGORICAL_FEATURES = ["player_id", "team", "opponent"]
 TARGET_COLUMN = "actual_value"
-
-FEATURE_COLUMNS = [
-    "player_id", "team", "opponent", "is_home",
-    "prior_games", "days_rest", "is_b2b",
-    "season_stat_avg",
-    "recent3_stat_avg", "recent5_stat_avg", "recent10_stat_avg", "recent20_stat_avg",
-    "season_stat_std", "recent5_stat_std", "recent10_stat_std",
-    "momentum_5v20", "momentum_3v10",
-    "recent5_cv", "recent10_cv",
-    "season_minutes_avg", "recent3_minutes_avg",
-    "recent5_minutes_avg", "recent10_minutes_avg",
-    "minutes_trend_5v20", "minutes_cv_recent5",
-    "season_usage_pct_avg", "recent10_usage_pct_avg",
-    "season_ast_pct_avg", "recent10_ast_pct_avg",
-    "season_reb_pct_avg", "recent10_reb_pct_avg",
-    "season_ts_pct_avg", "recent10_ts_pct_avg",
-    "season_potential_ast_rate", "recent10_potential_ast_rate",
-    "season_reb_chance_rate", "recent10_reb_chance_rate",
-    "season_drive_rate", "recent10_drive_rate",
-    "season_fg3a_rate", "recent10_fg3a_rate",
-    "recent5_1h_stat_share",
-    "missing_team_usage_pct", "missing_team_minutes",
-    "missing_same_pos_usage_pct", "missing_same_pos_minutes",
-    "missing_guard_usage_pct", "missing_guard_minutes",
-    "missing_high_usage_usage_pct", "missing_high_usage_minutes",
-    "missing_playmaker_potential_ast_pg", "missing_playmaker_minutes",
-    "missing_onball_drives_pg", "missing_onball_minutes",
-    "playmaker_vacuum_x_player_ast_rate",
-    "onball_vacuum_x_player_drive_rate",
-    "usage_vacuum_x_player_usage_pct",
-    "missing_key_teammates_player_stat_delta",
-    "missing_key_teammates_player_minutes_delta",
-    "missing_key_teammates_player_usage_pct_delta",
-    "missing_key_teammates_player_potential_ast_rate_delta",
-    "missing_key_teammates_player_drive_rate_delta",
-    "missing_key_teammates_effective_support",
-    "returning_key_teammates_player_stat_delta",
-    "returning_key_teammates_player_minutes_delta",
-    "returning_key_teammates_player_usage_pct_delta",
-    "returning_key_teammates_player_potential_ast_rate_delta",
-    "returning_key_teammates_player_drive_rate_delta",
-    "returning_key_teammates_effective_support",
-]
 ENGINEERED_FEATURE_COLUMNS = [
     "momentum_diff_5v20",
     "momentum_diff_3v10",
     "expected_possessions",
     "predicted_minutes",
 ]
+NON_FEATURE_COLUMNS = {"game_date", "game_id", TARGET_COLUMN}
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train regression models for stat value prediction.")
     p.add_argument("--dataset-csv", default=str(DEFAULT_REGRESSION_DATASET_PATH))
+    p.add_argument("--minutes-dataset-csv", default=str(DEFAULT_MINUTES_DATASET_PATH))
     p.add_argument("--model-dir", default=str(DEFAULT_REGRESSION_MODEL_DIR))
     p.add_argument("--iterations", type=int, default=1000)
     p.add_argument("--depth", type=int, default=6)
@@ -120,10 +91,23 @@ def _load_dataset(path: Path) -> pd.DataFrame:
     return df
 
 
-def _prepare_features(df: pd.DataFrame, feature_cols: Sequence[str]) -> pd.DataFrame:
+def _load_minutes_dataset(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
+    df = df[df["game_date"].notna()].copy()
+    df[MINUTES_MODEL_TARGET_COLUMN] = pd.to_numeric(df[MINUTES_MODEL_TARGET_COLUMN], errors="coerce")
+    df = df[df[MINUTES_MODEL_TARGET_COLUMN].notna()].copy()
+    return df
+
+
+def _prepare_features(
+    df: pd.DataFrame,
+    feature_cols: Sequence[str],
+    cat_features: Sequence[str],
+) -> pd.DataFrame:
     X = df[feature_cols].copy()
     for c in feature_cols:
-        if c in CATEGORICAL_FEATURES or c == "stat_type":
+        if c in cat_features or c == "stat_type":
             X[c] = X[c].fillna("UNKNOWN").astype(str)
         else:
             X[c] = pd.to_numeric(X[c], errors="coerce")
@@ -155,6 +139,181 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         out["predicted_minutes"] = pred_min.clip(lower=4.0, upper=42.0)
 
     return out
+
+
+def make_sample_weights(input_df: pd.DataFrame, decay: float = 0.001) -> np.ndarray:
+    today = input_df["game_date"].max()
+    days_ago = (today - input_df["game_date"]).dt.days.clip(lower=0).to_numpy()
+    weights = np.exp(-decay * days_ago)
+    weights = weights / weights.mean()
+    return weights.astype(np.float32)
+
+
+def _derive_feature_columns(df: pd.DataFrame) -> List[str]:
+    return [
+        column
+        for column in df.columns
+        if column not in NON_FEATURE_COLUMNS and column != "stat_type"
+    ]
+
+
+def _train_minutes_quantile_model(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> Tuple[CatBoostRegressor, np.ndarray]:
+    cat_indices = [
+        MINUTES_MODEL_FEATURE_COLUMNS.index(column)
+        for column in MINUTES_MODEL_CATEGORICAL_FEATURES
+        if column in MINUTES_MODEL_FEATURE_COLUMNS
+    ]
+    X_train = _prepare_features(train_df, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
+    X_test = _prepare_features(test_df, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
+    y_train = train_df[MINUTES_MODEL_TARGET_COLUMN].to_numpy()
+    w_train = make_sample_weights(train_df)
+
+    train_pool = Pool(X_train, label=y_train, cat_features=cat_indices, weight=w_train)
+    test_pool = Pool(X_test, label=test_df[MINUTES_MODEL_TARGET_COLUMN].to_numpy(), cat_features=cat_indices)
+
+    model = CatBoostRegressor(
+        iterations=700,
+        depth=6,
+        learning_rate=0.035,
+        l2_leaf_reg=5.0,
+        loss_function="MultiQuantile:alpha=0.25,0.5,0.75",
+        random_seed=42,
+        verbose=False,
+        allow_writing_files=False,
+        task_type="CPU",
+    )
+    model.fit(train_pool, eval_set=test_pool, use_best_model=True, early_stopping_rounds=50)
+    return model, model.predict(test_pool)
+
+
+def _build_minutes_prediction_frame(
+    minutes_df: pd.DataFrame,
+    *,
+    split_date: pd.Timestamp,
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], CatBoostRegressor]:
+    oof_frames: List[pd.DataFrame] = []
+    all_dates = sorted(minutes_df["game_date"].dt.date.unique())
+    cat_indices = [
+        MINUTES_MODEL_FEATURE_COLUMNS.index(column)
+        for column in MINUTES_MODEL_CATEGORICAL_FEATURES
+        if column in MINUTES_MODEL_FEATURE_COLUMNS
+    ]
+
+    for block_start in range(MINUTES_OOF_MIN_TRAIN_DATES, len(all_dates), MINUTES_OOF_BLOCK_DATES):
+        pred_dates = all_dates[block_start:block_start + MINUTES_OOF_BLOCK_DATES]
+        if not pred_dates:
+            continue
+        train_dates = all_dates[:block_start]
+        train_block = minutes_df[minutes_df["game_date"].dt.date.isin(train_dates)].copy()
+        pred_block = minutes_df[
+            minutes_df["game_date"].dt.date.isin(pred_dates)
+            & (minutes_df["game_date"] < split_date)
+        ].copy()
+        if train_block.empty or pred_block.empty:
+            continue
+
+        X_train = _prepare_features(train_block, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
+        X_pred = _prepare_features(pred_block, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
+        y_train = train_block[MINUTES_MODEL_TARGET_COLUMN].to_numpy()
+        w_train = make_sample_weights(train_block)
+
+        train_pool = Pool(X_train, label=y_train, cat_features=cat_indices, weight=w_train)
+        pred_pool = Pool(X_pred, cat_features=cat_indices)
+        model = CatBoostRegressor(
+            iterations=700,
+            depth=6,
+            learning_rate=0.035,
+            l2_leaf_reg=5.0,
+            loss_function="MultiQuantile:alpha=0.25,0.5,0.75",
+            random_seed=42,
+            verbose=False,
+            allow_writing_files=False,
+            task_type="CPU",
+        )
+        model.fit(train_pool, verbose=False)
+        preds = model.predict(pred_pool)
+
+        oof_frame = pred_block[["game_date", "player_id", "game_id"]].copy()
+        oof_frame["modeled_minutes_q25"] = preds[:, 0]
+        oof_frame["modeled_minutes_q50"] = preds[:, 1]
+        oof_frame["modeled_minutes_q75"] = preds[:, 2]
+        oof_frames.append(oof_frame)
+
+    train_minutes = minutes_df[minutes_df["game_date"] < split_date].copy()
+    test_minutes = minutes_df[minutes_df["game_date"] >= split_date].copy()
+    final_model, final_preds = _train_minutes_quantile_model(train_minutes, test_minutes)
+    final_frame = test_minutes[["game_date", "player_id", "game_id"]].copy()
+    final_frame["modeled_minutes_q25"] = final_preds[:, 0]
+    final_frame["modeled_minutes_q50"] = final_preds[:, 1]
+    final_frame["modeled_minutes_q75"] = final_preds[:, 2]
+
+    pred_frame = pd.concat([*oof_frames, final_frame], ignore_index=True)
+    minutes_metrics = minutes_metrics_summary(
+        actuals=test_minutes[MINUTES_MODEL_TARGET_COLUMN].to_numpy(),
+        q25_preds=final_preds[:, 0],
+        q50_preds=final_preds[:, 1],
+        q75_preds=final_preds[:, 2],
+    )
+
+    heuristic_source = test_minutes.copy()
+    heuristic_pred = (
+        pd.to_numeric(heuristic_source.get("recent5_minutes_avg"), errors="coerce").fillna(
+            pd.to_numeric(heuristic_source.get("season_minutes_avg"), errors="coerce")
+        ) * 0.50
+        + pd.to_numeric(heuristic_source.get("recent10_minutes_avg"), errors="coerce").fillna(
+            pd.to_numeric(heuristic_source.get("season_minutes_avg"), errors="coerce")
+        ) * 0.30
+        + pd.to_numeric(heuristic_source.get("season_minutes_avg"), errors="coerce").fillna(
+            pd.to_numeric(heuristic_source.get("recent5_minutes_avg"), errors="coerce")
+        ) * 0.20
+    )
+    if "is_b2b" in heuristic_source.columns:
+        heuristic_pred *= (
+            1.0 - 0.035 * pd.to_numeric(heuristic_source["is_b2b"], errors="coerce").fillna(0.0)
+        )
+    heuristic_pred = heuristic_pred.clip(lower=4.0, upper=42.0)
+    heuristic_metrics = {
+        "mae_q50": _safe_metric(mean_absolute_error(test_minutes[MINUTES_MODEL_TARGET_COLUMN], heuristic_pred)),
+        "rmse_q50": _safe_metric(math.sqrt(mean_squared_error(test_minutes[MINUTES_MODEL_TARGET_COLUMN], heuristic_pred))),
+        "r2_q50": _safe_metric(r2_score(test_minutes[MINUTES_MODEL_TARGET_COLUMN], heuristic_pred)),
+    }
+    return pred_frame, minutes_metrics, heuristic_metrics, final_model
+
+
+def _attach_modeled_minutes_features(
+    stat_df: pd.DataFrame,
+    minutes_pred_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    merged = stat_df.copy()
+    merged["player_id"] = merged["player_id"].astype(str)
+    merged["game_id"] = merged["game_id"].astype(str)
+    pred_frame = minutes_pred_frame.copy()
+    pred_frame["player_id"] = pred_frame["player_id"].astype(str)
+    pred_frame["game_id"] = pred_frame["game_id"].astype(str)
+    merged = merged.merge(
+        pred_frame,
+        on=["game_date", "player_id", "game_id"],
+        how="left",
+    )
+
+    output_rows: List[Dict[str, Any]] = []
+    for row in merged.to_dict("records"):
+        q25 = row.pop("modeled_minutes_q25", None)
+        q50 = row.get("modeled_minutes_q50")
+        q75 = row.pop("modeled_minutes_q75", None)
+        modeled_iqr = None
+        if q25 is not None and q75 is not None:
+            modeled_iqr = max(0.0, float(q75) - float(q25))
+        apply_modeled_minutes_features(
+            row,
+            modeled_minutes_q50=q50,
+            modeled_minutes_iqr=modeled_iqr,
+        )
+        output_rows.append(row)
+    return pd.DataFrame(output_rows)
 
 
 def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
@@ -251,13 +410,14 @@ def _train_and_eval(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     feature_cols: List[str],
+    cat_cols: List[str],
     cat_indices: List[int],
     args: argparse.Namespace,
     stat_type: str,
 ) -> Dict[str, Any]:
     """Train one regression model on train_df and evaluate on test_df."""
-    X_train = _prepare_features(train_df, feature_cols)
-    X_test = _prepare_features(test_df, feature_cols)
+    X_train = _prepare_features(train_df, feature_cols, cat_cols)
+    X_test = _prepare_features(test_df, feature_cols, cat_cols)
     y_train = train_df[TARGET_COLUMN].to_numpy()
     y_test = test_df[TARGET_COLUMN].to_numpy()
 
@@ -290,6 +450,7 @@ def _train_and_eval(
 def _walk_forward_regression(
     df: pd.DataFrame,
     feature_cols: List[str],
+    cat_cols: List[str],
     cat_indices: List[int],
     args: argparse.Namespace,
     stat_type: str,
@@ -315,7 +476,7 @@ def _walk_forward_regression(
         if train_df.empty or test_df.empty or len(train_df) < 100:
             continue
 
-        result = _train_and_eval(train_df, test_df, feature_cols, cat_indices, args, stat_type)
+        result = _train_and_eval(train_df, test_df, feature_cols, cat_cols, cat_indices, args, stat_type)
         final_model = result["model"]
         all_preds.extend(result["y_pred"].tolist())
         all_actuals.extend(result["y_test"].tolist())
@@ -342,27 +503,46 @@ def _walk_forward_regression(
 def main() -> int:
     args = _parse_args()
     dataset_csv = Path(args.dataset_csv)
+    minutes_dataset_csv = Path(args.minutes_dataset_csv)
     if not dataset_csv.exists():
         raise FileNotFoundError(f"Dataset not found: {dataset_csv}. Run build_regression_dataset.py first.")
+    if not minutes_dataset_csv.exists():
+        raise FileNotFoundError(
+            f"Minutes dataset not found: {minutes_dataset_csv}. Run build_regression_dataset.py first."
+        )
 
     df = _load_dataset(dataset_csv)
     df = _engineer_features(df)
+    minutes_df = _load_minutes_dataset(minutes_dataset_csv)
     print(f"Loaded {len(df):,} rows, {df['game_date'].dt.date.nunique()} dates, "
           f"{df['stat_type'].nunique()} stat types")
+    print(f"Loaded {len(minutes_df):,} minutes rows")
 
     model_dir = Path(args.model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    feature_cols = [c for c in (FEATURE_COLUMNS + ENGINEERED_FEATURE_COLUMNS) if c in df.columns]
+    unique_dates = sorted(df["game_date"].dt.date.unique())
+    split_idx = max(0, len(unique_dates) - args.test_date_count)
+    split_date = pd.Timestamp(unique_dates[split_idx])
+
+    minutes_pred_frame, minutes_metrics, heuristic_minutes_metrics, minutes_model = _build_minutes_prediction_frame(
+        minutes_df,
+        split_date=split_date,
+    )
+    df = _attach_modeled_minutes_features(df, minutes_pred_frame)
+
+    feature_cols = _derive_feature_columns(df)
     if args.unified and "stat_type" not in feature_cols:
         feature_cols = ["stat_type"] + feature_cols
 
-    cat_cols_in_use = [c for c in (CATEGORICAL_FEATURES + (["stat_type"] if args.unified else []))
+    base_cat_features = ["player_id", "team", "opponent"]
+    cat_cols_in_use = [c for c in (base_cat_features + (["stat_type"] if args.unified else []))
                        if c in feature_cols]
     cat_indices = [feature_cols.index(c) for c in cat_cols_in_use]
 
     manifest = {
         "dataset": str(dataset_csv.resolve()),
+        "minutes_dataset": str(minutes_dataset_csv.resolve()),
         "model_dir": str(model_dir.resolve()),
         "feature_columns": feature_cols,
         "cat_features": cat_cols_in_use,
@@ -371,8 +551,39 @@ def main() -> int:
             "learning_rate": args.learning_rate, "l2_leaf_reg": args.l2_leaf_reg,
             "seed": args.seed, "unified": args.unified, "walk_forward": args.walk_forward,
         },
+        "minutes_model": {
+            "model_file": MINUTES_MODEL_FILE_NAME,
+            "metadata_file": MINUTES_MODEL_METADATA_FILE_NAME,
+            "quantiles_file": MINUTES_MODEL_QUANTILES_FILE_NAME,
+            "feature_columns": MINUTES_MODEL_FEATURE_COLUMNS,
+            "cat_features": MINUTES_MODEL_CATEGORICAL_FEATURES,
+            "test_metrics": minutes_metrics,
+            "heuristic_baseline_metrics": heuristic_minutes_metrics,
+        },
         "stat_models": {},
     }
+
+    minutes_model.save_model(str(model_dir / MINUTES_MODEL_FILE_NAME))
+    (model_dir / MINUTES_MODEL_METADATA_FILE_NAME).write_text(
+        json.dumps(
+            {
+                "target": MINUTES_MODEL_TARGET_COLUMN,
+                "feature_columns": MINUTES_MODEL_FEATURE_COLUMNS,
+                "cat_features": MINUTES_MODEL_CATEGORICAL_FEATURES,
+                "model_file": MINUTES_MODEL_FILE_NAME,
+                "test_metrics": minutes_metrics,
+                "heuristic_baseline_metrics": heuristic_minutes_metrics,
+                "modeled_minutes_features": MODELED_MINUTES_FEATURE_COLUMNS,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    (model_dir / MINUTES_MODEL_QUANTILES_FILE_NAME).write_text(
+        json.dumps(minutes_metrics, indent=2, sort_keys=True)
+    )
+    print(f"Minutes model test metrics: {minutes_metrics}")
+    print(f"Heuristic minutes baseline: {heuristic_minutes_metrics}")
 
     # Optional: load prop lines for backtest hit-rate evaluation
     prop_df = None
@@ -386,14 +597,11 @@ def main() -> int:
         stat_type_label = "unified"
 
         if args.walk_forward:
-            result = _walk_forward_regression(df, feature_cols, cat_indices, args, stat_type_label)
+            result = _walk_forward_regression(df, feature_cols, cat_cols_in_use, cat_indices, args, stat_type_label)
         else:
-            unique_dates = sorted(df["game_date"].dt.date.unique())
-            split_idx = max(0, len(unique_dates) - args.test_date_count)
-            split_date = pd.Timestamp(unique_dates[split_idx])
             train_df = df[df["game_date"] < split_date]
             test_df = df[df["game_date"] >= split_date]
-            r = _train_and_eval(train_df, test_df, feature_cols, cat_indices, args, stat_type_label)
+            r = _train_and_eval(train_df, test_df, feature_cols, cat_cols_in_use, cat_indices, args, stat_type_label)
             result = {"model": r["model"], "metrics": r["metrics"],
                       "all_preds": r["y_pred"], "all_actuals": r["y_test"]}
 
@@ -427,20 +635,18 @@ def main() -> int:
             print(f"\n{stat_type}: {len(stat_df):,} rows")
 
             if args.walk_forward:
-                result = _walk_forward_regression(stat_df, feature_cols, cat_indices, args, stat_type)
+                result = _walk_forward_regression(stat_df, feature_cols, cat_cols_in_use, cat_indices, args, stat_type)
             else:
-                unique_dates = sorted(stat_df["game_date"].dt.date.unique())
-                if len(unique_dates) < 5:
-                    print(f"  SKIP: only {len(unique_dates)} dates")
+                stat_dates = sorted(stat_df["game_date"].dt.date.unique())
+                if len(stat_dates) < 5:
+                    print(f"  SKIP: only {len(stat_dates)} dates")
                     continue
-                split_idx = max(0, len(unique_dates) - args.test_date_count)
-                split_date = pd.Timestamp(unique_dates[split_idx])
                 train_df = stat_df[stat_df["game_date"] < split_date]
                 test_df = stat_df[stat_df["game_date"] >= split_date]
                 if len(train_df) < 100:
                     print(f"  SKIP: only {len(train_df)} train rows")
                     continue
-                r = _train_and_eval(train_df, test_df, feature_cols, cat_indices, args, stat_type)
+                r = _train_and_eval(train_df, test_df, feature_cols, cat_cols_in_use, cat_indices, args, stat_type)
                 result = {"model": r["model"], "metrics": r["metrics"],
                           "all_preds": r["y_pred"], "all_actuals": r["y_test"]}
 

@@ -386,5 +386,17 @@
   "predicted_minutes": {
     "mean": 24.3383,
     "std": 7.5892
+  },
+  "modeled_minutes_q50": {
+    "mean": 24.8174,
+    "std": 7.7271
+  },
+  "modeled_minutes_iqr": {
+    "mean": 6.1904,
+    "std": 1.859
+  },
+  "modeled_minutes_delta_vs_recent5": {
+    "mean": 0.1404,
+    "std": 2.8027
   }
 }

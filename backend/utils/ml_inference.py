@@ -21,11 +21,12 @@ from build_regression_dataset import (
     EnrichmentData,
     _build_history,
     _build_key_teammate_onoff_features,
+    _build_minutes_row,
     _build_player_index,
     _build_team_presence_context,
-    _mean,
     _parse_date,
     _build_regression_row,
+    _mean,
     _safe_float,
 )
 from injury_feature_config import (
@@ -45,6 +46,13 @@ from injury_feature_config import (
     normalize_player_name,
     normalize_position_group,
 )
+from minutes_model_config import (
+    MINUTES_LIVE_MIN_SAME_TEAM_GAMES,
+    MINUTES_MODEL_FILE_NAME,
+    MINUTES_MODEL_METADATA_FILE_NAME,
+    MINUTES_MODEL_QUANTILES_FILE_NAME,
+    apply_modeled_minutes_features,
+)
 
 ML_MODEL_DIR = BACKEND_DIR / "prop_modeling" / "exported_regression_model"
 CURRENT_DATA_DIR = BACKEND_DIR / "data" / "current"
@@ -62,8 +70,11 @@ class MLPredictor:
 
     def _initialize(self):
         self.models: Dict[str, CatBoostRegressor] = {}
+        self.minutes_model: Optional[CatBoostRegressor] = None
         self.meta = {}
+        self.minutes_meta: Dict[str, Any] = {}
         self.q_stats = {}
+        self.minutes_q_stats: Dict[str, Any] = {}
         self.drift_b = {}
         self.enrichment = None
         self.ready = False
@@ -72,6 +83,9 @@ class MLPredictor:
         meta_path = ML_MODEL_DIR / "model_metadata.json"
         q_stats_path = ML_MODEL_DIR / "quantile_stats.json"
         drift_b_path = ML_MODEL_DIR / "feature_drift_baseline.json"
+        minutes_meta_path = ML_MODEL_DIR / MINUTES_MODEL_METADATA_FILE_NAME
+        minutes_q_stats_path = ML_MODEL_DIR / MINUTES_MODEL_QUANTILES_FILE_NAME
+        minutes_model_path = ML_MODEL_DIR / MINUTES_MODEL_FILE_NAME
 
         if not meta_path.exists():
             logger.warning("MLPredictor: Missing model_metadata.json. ML Inference offline.")
@@ -88,6 +102,12 @@ class MLPredictor:
             if drift_b_path.exists():
                 with open(drift_b_path) as f:
                     self.drift_b = json.load(f)
+            if minutes_meta_path.exists():
+                with open(minutes_meta_path) as f:
+                    self.minutes_meta = json.load(f)
+            if minutes_q_stats_path.exists():
+                with open(minutes_q_stats_path) as f:
+                    self.minutes_q_stats = json.load(f)
 
             # Load per-stat models
             model_files = self.meta.get("model_files", {})
@@ -99,9 +119,19 @@ class MLPredictor:
                 else:
                     logger.warning(f"MLPredictor: Missing model file {fname} for {st}")
 
+            if minutes_model_path.exists():
+                self.minutes_model = CatBoostRegressor().load_model(str(minutes_model_path))
+
             self.feat_cols = self.meta.get("feature_columns", [])
             self.cat_cols = self.meta.get("cat_features", [])
             self.cat_idx = [self.feat_cols.index(c) for c in self.cat_cols if c in self.feat_cols]
+            self.minutes_feat_cols = self.minutes_meta.get("feature_columns", [])
+            self.minutes_cat_cols = self.minutes_meta.get("cat_features", [])
+            self.minutes_cat_idx = [
+                self.minutes_feat_cols.index(c)
+                for c in self.minutes_cat_cols
+                if c in self.minutes_feat_cols
+            ]
 
             # Load the cache dictionary for team paces and opposing defensives (~0.5s)
             self.enrichment = EnrichmentData(CURRENT_DATA_DIR)
@@ -440,8 +470,14 @@ class MLPredictor:
             top_summary,
         )
 
-    def _build_feature_dict(self, player_info: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Optional[Dict[str, Any]]:
-        # Same initial conversion as old setup
+    def _build_live_player_history_context(
+        self,
+        player_info: Dict[str, Any],
+        logs: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not logs:
+            return None
+
         last_log = logs[0]
         asc_logs = list(reversed(logs))
         team_abbr = str(
@@ -467,28 +503,104 @@ class MLPredictor:
             "POSITION": player_info.get("position", ""),
             "MIN": 30.0,
         }
-        
         for st in ["PTS", "AST", "REB", "STL", "BLK", "FG3M", "TOV", "FGA", "FTA", "FGM", "FTM"]:
             dummy_row[st] = 0.0
-            
+
         if "team_abbrev" not in player_info and "team" in player_info:
             dummy_row["TEAM_ABBREVIATION"] = player_info["team"]
 
         asc_logs.append(dummy_row)
 
-        player_history = []
-        for i, r in enumerate(asc_logs):
-            d = r.get("GAME_DATE")
+        player_history: List[Tuple[date, Dict[str, Any]]] = []
+        for idx, row in enumerate(asc_logs):
             parsed_d = None
-            if d:
+            game_date = row.get("GAME_DATE")
+            if game_date:
                 try:
-                    parsed_d = datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
-                except:
-                    pass
-            if i == len(asc_logs) - 1:
+                    parsed_d = datetime.strptime(str(game_date)[:10], "%Y-%m-%d").date()
+                except Exception:
+                    parsed_d = None
+            if idx == len(asc_logs) - 1:
                 parsed_d = target_date
-            player_history.append((parsed_d, r))
-            
+            player_history.append((parsed_d, row))
+
+        return {
+            "player_history": player_history,
+            "team_abbr": team_abbr,
+            "opponent_abbr": opponent_abbr,
+            "player_id": player_id,
+            "target_date": target_date,
+        }
+
+    @staticmethod
+    def _prepare_model_frame(
+        feature_row: Dict[str, Any],
+        feature_cols: List[str],
+        cat_cols: List[str],
+    ) -> pd.DataFrame:
+        frame = pd.DataFrame([{column: feature_row.get(column) for column in feature_cols}])
+        for column in feature_cols:
+            if column in cat_cols:
+                frame[column] = frame[column].fillna("UNKNOWN").astype(str)
+            else:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        return frame
+
+    def _predict_modeled_minutes(
+        self,
+        row_obj: Dict[str, Any],
+        minutes_row: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, float]]:
+        if (
+            self.minutes_model is None
+            or not self.minutes_feat_cols
+            or not minutes_row
+            or float(minutes_row.get("same_team_current_season_games") or 0.0)
+            < MINUTES_LIVE_MIN_SAME_TEAM_GAMES
+        ):
+            apply_modeled_minutes_features(
+                row_obj,
+                modeled_minutes_q50=None,
+                modeled_minutes_iqr=None,
+            )
+            return None
+
+        minutes_frame = self._prepare_model_frame(
+            minutes_row,
+            self.minutes_feat_cols,
+            self.minutes_cat_cols,
+        )
+        minutes_pool = Pool(minutes_frame, cat_features=self.minutes_cat_idx)
+        preds = self.minutes_model.predict(minutes_pool)
+        if getattr(preds, "shape", None) == (1, 3):
+            q25 = float(preds[0, 0])
+            q50 = float(preds[0, 1])
+            q75 = float(preds[0, 2])
+            apply_modeled_minutes_features(
+                row_obj,
+                modeled_minutes_q50=q50,
+                modeled_minutes_iqr=max(0.0, q75 - q25),
+            )
+            return {"q25": q25, "q50": q50, "q75": q75}
+
+        apply_modeled_minutes_features(
+            row_obj,
+            modeled_minutes_q50=None,
+            modeled_minutes_iqr=None,
+        )
+        return None
+
+    def _build_feature_dict(self, player_info: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Optional[Dict[str, Any]]:
+        history_context = self._build_live_player_history_context(player_info, logs)
+        if not history_context:
+            return None
+
+        player_history = history_context["player_history"]
+        team_abbr = history_context["team_abbr"]
+        opponent_abbr = history_context["opponent_abbr"]
+        player_id = history_context["player_id"]
+        target_date = history_context["target_date"]
+
         row_obj = _build_regression_row(
             game_idx=len(player_history)-1,
             player_history=player_history,
@@ -561,6 +673,28 @@ class MLPredictor:
             same_pos_vacancy_stats=same_pos_vacancy_stats,
             teammate_onoff_stats=teammate_onoff_stats,
         )
+
+        minutes_row = _build_minutes_row(
+            player_history,
+            len(player_history) - 1,
+            min_prior=3,
+            enrichment=self.enrichment,
+            team_missing_player_priors_dict=self.live_missing_player_priors,
+            team_active_player_priors_dict=self.live_active_player_priors,
+            team_presence_index=self.live_team_presence_index,
+            team_game_dates_by_season=self.live_team_game_dates_by_season,
+        )
+        minutes_preds = self._predict_modeled_minutes(row_obj, minutes_row)
+        if minutes_row:
+            row_obj["same_team_current_season_games"] = minutes_row.get("same_team_current_season_games")
+            row_obj["recent_team_games_missed_10"] = minutes_row.get("recent_team_games_missed_10")
+            row_obj["inactive_streak_team_games"] = minutes_row.get("inactive_streak_team_games")
+            row_obj["games_since_return"] = minutes_row.get("games_since_return")
+            row_obj["previous_absence_streak_team_games"] = minutes_row.get("previous_absence_streak_team_games")
+        if minutes_preds:
+            row_obj["minutes_model_q25"] = round(minutes_preds["q25"], 4)
+            row_obj["minutes_model_q50"] = round(minutes_preds["q50"], 4)
+            row_obj["minutes_model_q75"] = round(minutes_preds["q75"], 4)
 
         # Keep legacy exported models working until retraining replaces the old flag.
         if "star_teammate_out_flag" in getattr(self, "feat_cols", []):

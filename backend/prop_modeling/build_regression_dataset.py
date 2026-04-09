@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from feature_schema import (
     DEFAULT_GAMELOG_PATHS,
+    DEFAULT_MINUTES_DATASET_PATH,
     GENERATED_DIR,
     STAT_COLUMNS,
     BACKEND_DIR,
@@ -56,6 +57,10 @@ from injury_feature_config import (
     normalize_position_group,
     season_key_for_date,
     trailing_active_values,
+)
+from minutes_model_config import (
+    MINUTES_MODEL_FEATURE_COLUMNS,
+    MINUTES_MODEL_TARGET_COLUMN,
 )
 
 
@@ -131,6 +136,13 @@ REGRESSION_DATASET_COLUMNS = [
 
 DEFAULT_REGRESSION_DATASET_PATH = GENERATED_DIR / "regression_training_dataset.csv"
 CURRENT_DATA_DIR = BACKEND_DIR / "data" / "current"
+
+MINUTES_DATASET_COLUMNS = [
+    "game_date",
+    "game_id",
+    MINUTES_MODEL_TARGET_COLUMN,
+    *MINUTES_MODEL_FEATURE_COLUMNS,
+]
 
 # Abbreviation → full team name mapping (for matching opp_def_zones keys)
 ABBREV_TO_FULL = {
@@ -516,8 +528,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gamelogs", nargs="*",
                         default=[str(p) for p in DEFAULT_GAMELOG_PATHS])
     parser.add_argument("--output-csv", default=str(DEFAULT_REGRESSION_DATASET_PATH))
+    parser.add_argument("--minutes-output-csv", default=str(DEFAULT_MINUTES_DATASET_PATH))
     parser.add_argument("--min-prior-games", type=int, default=5)
     parser.add_argument("--min-minutes", type=float, default=10.0)
+    parser.add_argument("--minutes-min-prior-games", type=int, default=3)
     parser.add_argument("--stat-types", nargs="*",
                         default=["PTS", "AST", "REB", "FG3M", "STL", "BLK",
                                  "PTS+REB+AST", "PTS+REB", "PTS+AST", "REB+AST", "STL+BLK"])
@@ -525,7 +539,11 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_history(gamelog_paths: Sequence[Path]) -> List[Tuple[date, str, Dict[str, Any]]]:
+def _build_history(
+    gamelog_paths: Sequence[Path],
+    *,
+    include_zero_minutes: bool = False,
+) -> List[Tuple[date, str, Dict[str, Any]]]:
     rows: List[Tuple[date, str, Dict[str, Any]]] = []
     for path in gamelog_paths:
         if not path.exists():
@@ -535,10 +553,15 @@ def _build_history(gamelog_paths: Sequence[Path]) -> List[Tuple[date, str, Dict[
                 pid = str(row.get("PLAYER_ID") or "").strip()
                 gd = _parse_date(row.get("GAME_DATE"))
                 mins = _safe_float(row.get("MIN"))
-                if not pid or gd is None or mins is None or mins <= 0:
+                if not pid or gd is None or mins is None:
+                    continue
+                if include_zero_minutes:
+                    if mins < 0:
+                        continue
+                elif mins <= 0:
                     continue
                 rows.append((gd, pid, row))
-    rows.sort(key=lambda x: x[0])
+    rows.sort(key=lambda x: (x[0], str(x[2].get("GAME_ID") or "").strip(), x[1]))
     return rows
 
 
@@ -877,6 +900,251 @@ def _build_key_teammate_onoff_features(
         )
     )
     return feature_values
+
+
+def _aggregate_vacancy_stats_from_player_priors(
+    missing_player_priors: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+    team_stats = make_team_vacancy_stats()
+    same_pos_stats = _empty_same_pos_by_group()
+
+    for priors in missing_player_priors.values():
+        usage_pct = _safe_float(priors.get("usage_pct"))
+        minutes = _safe_float(priors.get("minutes"))
+        ast_pct = _safe_float(priors.get("ast_pct"))
+        potential_ast_pg = _safe_float(priors.get("potential_ast_pg"))
+        drives_pg = _safe_float(priors.get("drives_pg"))
+        pos_group = normalize_position_group(priors.get("pos_group"))
+
+        if usage_pct is None and minutes is None:
+            continue
+
+        team_stats["missing_team_usage_pct"] += usage_pct or 0.0
+        team_stats["missing_team_minutes"] += minutes or 0.0
+
+        same_pos_stats[pos_group]["missing_same_pos_usage_pct"] += usage_pct or 0.0
+        same_pos_stats[pos_group]["missing_same_pos_minutes"] += minutes or 0.0
+
+        if pos_group == "G":
+            team_stats["missing_guard_usage_pct"] += usage_pct or 0.0
+            team_stats["missing_guard_minutes"] += minutes or 0.0
+
+        if is_high_usage(usage_pct):
+            team_stats["missing_high_usage_usage_pct"] += usage_pct or 0.0
+            team_stats["missing_high_usage_minutes"] += minutes or 0.0
+
+        if is_playmaker(ast_pct, potential_ast_pg):
+            team_stats["missing_playmaker_potential_ast_pg"] += potential_ast_pg or 0.0
+            team_stats["missing_playmaker_minutes"] += minutes or 0.0
+
+        if is_onball(drives_pg):
+            team_stats["missing_onball_drives_pg"] += drives_pg or 0.0
+            team_stats["missing_onball_minutes"] += minutes or 0.0
+
+    return (
+        {key: _r(value) or 0.0 for key, value in team_stats.items()},
+        {
+            pos_group: {key: _r(value) or 0.0 for key, value in pos_stats.items()}
+            for pos_group, pos_stats in same_pos_stats.items()
+        },
+    )
+
+
+def _build_team_game_regime_features(
+    *,
+    team: str,
+    player_id: str,
+    target_date: date,
+    team_presence_index: Dict[Tuple[str, date], set[str]],
+    team_game_dates_by_season: Dict[Tuple[str, int], List[date]],
+) -> Dict[str, float]:
+    season_key = season_key_for_date(target_date)
+    prior_team_dates = [
+        game_date
+        for game_date in team_game_dates_by_season.get((team, season_key), [])
+        if game_date < target_date
+    ]
+    prior_presence_flags = [
+        player_id in team_presence_index.get((team, game_date), set())
+        for game_date in prior_team_dates
+    ]
+
+    recent_team_games_missed_10 = sum(1 for flag in prior_presence_flags[-10:] if not flag)
+
+    inactive_streak = 0
+    for flag in reversed(prior_presence_flags):
+        if flag:
+            break
+        inactive_streak += 1
+
+    previous_absence_streak = 0
+    games_since_return = 0
+
+    if inactive_streak > 0:
+        previous_absence_streak = inactive_streak
+    else:
+        current_active_streak = 0
+        for flag in reversed(prior_presence_flags):
+            if not flag:
+                break
+            current_active_streak += 1
+        idx = len(prior_presence_flags) - current_active_streak - 1
+        while idx >= 0 and not prior_presence_flags[idx]:
+            previous_absence_streak += 1
+            idx -= 1
+        if previous_absence_streak > 0:
+            games_since_return = current_active_streak
+
+    return {
+        "recent_team_games_missed_10": float(recent_team_games_missed_10),
+        "inactive_streak_team_games": float(inactive_streak),
+        "games_since_return": float(games_since_return),
+        "previous_absence_streak_team_games": float(previous_absence_streak),
+    }
+
+
+def _build_minutes_row(
+    player_history: List[Tuple[date, Dict[str, Any]]],
+    game_idx: int,
+    *,
+    min_prior: int,
+    enrichment: EnrichmentData,
+    team_missing_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+    team_active_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+    team_presence_index: Dict[Tuple[str, date], set[str]],
+    team_game_dates_by_season: Dict[Tuple[str, int], List[date]],
+) -> Optional[Dict[str, Any]]:
+    target_date, target_row = player_history[game_idx]
+    target_player_id = str(target_row.get("PLAYER_ID") or "").strip()
+    team = str(target_row.get("TEAM_ABBREVIATION") or "").strip()
+    if not target_player_id or not team or target_date is None:
+        return None
+
+    target_season_key = season_key_for_date(target_date)
+    prior_history = player_history[:game_idx]
+    prior_rows = [row for _, row in prior_history]
+    prior_same_team_season_rows = [
+        row
+        for game_date, row in prior_history
+        if (
+            str(row.get("TEAM_ABBREVIATION") or "").strip() == team
+            and game_date is not None
+            and season_key_for_date(game_date) == target_season_key
+        )
+    ]
+    if len(prior_same_team_season_rows) < min_prior:
+        return None
+
+    target_mins = _safe_float(target_row.get("MIN"))
+    if target_mins is None or target_mins < 0:
+        return None
+
+    mins_all = [_safe_float(r.get("MIN")) for r in prior_same_team_season_rows]
+    m3 = [_safe_float(r.get("MIN")) for r in prior_same_team_season_rows[-3:]]
+    m5 = [_safe_float(r.get("MIN")) for r in prior_same_team_season_rows[-5:]]
+    m10 = [_safe_float(r.get("MIN")) for r in prior_same_team_season_rows[-10:]]
+    m20 = [_safe_float(r.get("MIN")) for r in prior_same_team_season_rows[-20:]]
+    m5_avg = _mean(m5)
+    m20_avg = _mean(m20)
+    m5_std = _std(m5)
+    min_trend = None if m5_avg is None or m20_avg is None else m5_avg - m20_avg
+    min_cv = None if m5_avg is None or m5_std is None or abs(m5_avg) < 0.01 else m5_std / abs(m5_avg)
+
+    recent_1q = [_safe_float(r.get("1Q_MIN")) for r in prior_same_team_season_rows[-3:]]
+    recent_1h = [_safe_float(r.get("1H_MIN")) for r in prior_same_team_season_rows[-5:]]
+    recent_1h_shares = []
+    for row in prior_same_team_season_rows[-5:]:
+        full_min = _safe_float(row.get("MIN"))
+        first_half_min = _safe_float(row.get("1H_MIN"))
+        if full_min is None or first_half_min is None or full_min <= 0:
+            continue
+        recent_1h_shares.append(first_half_min / full_min)
+
+    last_active_date = prior_history[-1][0] if prior_history else None
+    days_rest = (target_date - last_active_date).days if last_active_date else None
+
+    recent_margins = []
+    for row in prior_same_team_season_rows[-10:]:
+        game_id = str(row.get("GAME_ID") or "").strip()
+        margin = enrichment.get_game_margin(game_id, team)
+        if margin is not None:
+            recent_margins.append(abs(margin))
+    blowout_rate = (
+        sum(1 for margin in recent_margins if margin > 15.0) / len(recent_margins)
+        if recent_margins
+        else 0.0
+    )
+
+    last_game_minutes = _safe_float(prior_same_team_season_rows[-1].get("MIN")) if prior_same_team_season_rows else None
+    target_pos_group = enrichment.get_player_position_group(target_player_id)
+    opponent, is_home = _parse_matchup(target_row.get("MATCHUP"), team)
+
+    current_missing_player_priors = {
+        pid: priors
+        for pid, priors in team_missing_player_priors_dict.get((team, target_date), {}).items()
+        if pid != target_player_id
+    }
+    team_vacancy_stats, same_pos_vacancy_stats_by_group = _aggregate_vacancy_stats_from_player_priors(
+        current_missing_player_priors
+    )
+    teammate_onoff_stats = _build_key_teammate_onoff_features(
+        player_history,
+        game_idx,
+        stat_type="PTS",
+        team_presence_index=team_presence_index,
+        team_game_dates_by_season=team_game_dates_by_season,
+        current_missing_player_priors=current_missing_player_priors,
+        current_active_player_priors={
+            pid: priors
+            for pid, priors in team_active_player_priors_dict.get((team, target_date), {}).items()
+            if pid != target_player_id
+        },
+    )
+    regime_features = _build_team_game_regime_features(
+        team=team,
+        player_id=target_player_id,
+        target_date=target_date,
+        team_presence_index=team_presence_index,
+        team_game_dates_by_season=team_game_dates_by_season,
+    )
+
+    row_obj = {
+        "game_date": target_date.isoformat(),
+        "player_id": target_player_id,
+        "team": team,
+        "opponent": opponent,
+        "game_id": str(target_row.get("GAME_ID") or "").strip() or None,
+        "is_home": is_home,
+        MINUTES_MODEL_TARGET_COLUMN: _r(target_mins),
+        "prior_games": len(prior_rows),
+        "same_team_current_season_games": len(prior_same_team_season_rows),
+        "days_rest": days_rest,
+        "is_b2b": 1 if days_rest == 1 else 0,
+        "season_minutes_avg": _r(_mean(mins_all)),
+        "recent3_minutes_avg": _r(_mean(m3)),
+        "recent5_minutes_avg": _r(m5_avg),
+        "recent10_minutes_avg": _r(_mean(m10)),
+        "minutes_trend_5v20": _r(min_trend),
+        "minutes_cv_recent5": _r(min_cv),
+        "recent3_1q_minutes_avg": _r(_mean(recent_1q)),
+        "recent5_1h_minutes_avg": _r(_mean(recent_1h)),
+        "recent5_1h_minutes_share": _r(_mean(recent_1h_shares)),
+        **regime_features,
+        "minutes_last_game": _r(last_game_minutes),
+        "minutes_delta_last1_vs_recent5": _r(
+            None if last_game_minutes is None or m5_avg is None else last_game_minutes - m5_avg
+        ),
+        "recent5_minutes_max": _r(max((m for m in m5 if m is not None), default=None)),
+        "recent5_minutes_min": _r(min((m for m in m5 if m is not None), default=None)),
+        "recent10_blowout_rate": _r(blowout_rate),
+    }
+
+    return apply_injury_feature_values(
+        row_obj,
+        team_vacancy_stats=team_vacancy_stats,
+        same_pos_vacancy_stats=same_pos_vacancy_stats_by_group.get(target_pos_group),
+        teammate_onoff_stats=teammate_onoff_stats,
+    )
 
 
 def _build_regression_row(
@@ -1237,23 +1505,25 @@ def _build_missing_team_stats(
     )
 
 
-def build_regression_dataset(
+def _prepare_dataset_context(
     gamelog_paths: Sequence[Path],
-    stat_types: Sequence[str],
-    min_prior_games: int,
-    min_minutes: float,
     data_dir: Path,
-) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+) -> Dict[str, Any]:
     print("Loading enrichment data...")
     enrichment = EnrichmentData(data_dir)
 
     print("\nLoading game logs...")
-    all_rows = _build_history(gamelog_paths)
-    print(f"  {len(all_rows):,} total game-log entries")
+    active_rows = _build_history(gamelog_paths)
+    full_boxscore_rows = _build_history(gamelog_paths, include_zero_minutes=True)
+    print(f"  {len(active_rows):,} active game-log entries")
+    print(f"  {len(full_boxscore_rows):,} boxscore-present entries")
 
-    player_index = _build_player_index(all_rows)
-    print(f"  {len(player_index):,} unique players")
-    team_presence_index, team_game_dates_by_season = _build_team_presence_context(all_rows)
+    active_player_index = _build_player_index(active_rows)
+    full_player_index = _build_player_index(full_boxscore_rows)
+    print(f"  {len(active_player_index):,} unique active players")
+    print(f"  {len(full_player_index):,} unique boxscore players")
+
+    team_presence_index, team_game_dates_by_season = _build_team_presence_context(active_rows)
 
     print("Pre-computing archetype-aware missing teammate vacancy features...")
     (
@@ -1261,13 +1531,47 @@ def build_regression_dataset(
         same_pos_missing_stats_dict,
         team_missing_player_priors_dict,
         team_active_player_priors_dict,
-    ) = _build_missing_team_stats(all_rows, enrichment)
+    ) = _build_missing_team_stats(active_rows, enrichment)
     populated_missing_games = sum(
         1
         for stats_map in team_missing_stats_dict.values()
         if any((stats_map.get(column) or 0.0) > 0.0 for column in TEAM_VACANCY_FEATURE_COLUMNS)
     )
     print(f"  Populated missing-player features for {populated_missing_games:,} team-games")
+
+    return {
+        "enrichment": enrichment,
+        "active_rows": active_rows,
+        "full_boxscore_rows": full_boxscore_rows,
+        "active_player_index": active_player_index,
+        "full_player_index": full_player_index,
+        "team_presence_index": team_presence_index,
+        "team_game_dates_by_season": team_game_dates_by_season,
+        "team_missing_stats_dict": team_missing_stats_dict,
+        "same_pos_missing_stats_dict": same_pos_missing_stats_dict,
+        "team_missing_player_priors_dict": team_missing_player_priors_dict,
+        "team_active_player_priors_dict": team_active_player_priors_dict,
+        "populated_missing_games": populated_missing_games,
+    }
+
+
+def build_regression_dataset(
+    gamelog_paths: Sequence[Path],
+    stat_types: Sequence[str],
+    min_prior_games: int,
+    min_minutes: float,
+    data_dir: Path,
+    context: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    context = context or _prepare_dataset_context(gamelog_paths, data_dir)
+    enrichment = context["enrichment"]
+    player_index = context["active_player_index"]
+    team_presence_index = context["team_presence_index"]
+    team_game_dates_by_season = context["team_game_dates_by_season"]
+    team_missing_stats_dict = context["team_missing_stats_dict"]
+    same_pos_missing_stats_dict = context["same_pos_missing_stats_dict"]
+    team_missing_player_priors_dict = context["team_missing_player_priors_dict"]
+    team_active_player_priors_dict = context["team_active_player_priors_dict"]
 
     output_rows: List[Dict[str, Any]] = []
     stats = {"total_candidates": 0, "written_rows": 0,
@@ -1306,19 +1610,87 @@ def build_regression_dataset(
     return output_rows, stats
 
 
+def build_minutes_dataset(
+    *,
+    full_player_index: Dict[str, List[Tuple[date, Dict[str, Any]]]],
+    active_player_index: Dict[str, List[Tuple[date, Dict[str, Any]]]],
+    min_prior_games: int,
+    enrichment: EnrichmentData,
+    team_missing_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+    team_active_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+    team_presence_index: Dict[Tuple[str, date], set[str]],
+    team_game_dates_by_season: Dict[Tuple[str, int], List[date]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    output_rows: List[Dict[str, Any]] = []
+    stats = {
+        "total_candidates": 0,
+        "written_rows": 0,
+        "skipped_too_few_prior": 0,
+        "skipped_missing_target_minutes": 0,
+    }
+
+    for pid, full_history in full_player_index.items():
+        active_history = active_player_index.get(pid, [])
+        active_cursor = 0
+
+        for target_date, target_row in full_history:
+            stats["total_candidates"] += 1
+
+            while active_cursor < len(active_history) and active_history[active_cursor][0] < target_date:
+                active_cursor += 1
+
+            prior_active_history = active_history[:active_cursor]
+            player_history = [*prior_active_history, (target_date, target_row)]
+            row = _build_minutes_row(
+                player_history,
+                len(player_history) - 1,
+                min_prior=min_prior_games,
+                enrichment=enrichment,
+                team_missing_player_priors_dict=team_missing_player_priors_dict,
+                team_active_player_priors_dict=team_active_player_priors_dict,
+                team_presence_index=team_presence_index,
+                team_game_dates_by_season=team_game_dates_by_season,
+            )
+            if row is None:
+                target_minutes = _safe_float(target_row.get("MIN"))
+                if target_minutes is None or target_minutes < 0:
+                    stats["skipped_missing_target_minutes"] += 1
+                else:
+                    stats["skipped_too_few_prior"] += 1
+                continue
+            output_rows.append(row)
+
+    stats["written_rows"] = len(output_rows)
+    output_rows.sort(key=lambda r: r["game_date"])
+    return output_rows, stats
+
+
 def main() -> int:
     args = _parse_args()
     gamelog_paths = [Path(p) for p in args.gamelogs]
     output_csv = Path(args.output_csv)
+    minutes_output_csv = Path(args.minutes_output_csv)
     data_dir = Path(args.data_dir)
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
+    context = _prepare_dataset_context(gamelog_paths, data_dir)
     rows, stats = build_regression_dataset(
         gamelog_paths=gamelog_paths,
         stat_types=args.stat_types,
         min_prior_games=args.min_prior_games,
         min_minutes=args.min_minutes,
         data_dir=data_dir,
+        context=context,
+    )
+    minutes_rows, minutes_stats = build_minutes_dataset(
+        full_player_index=context["full_player_index"],
+        active_player_index=context["active_player_index"],
+        min_prior_games=args.minutes_min_prior_games,
+        enrichment=context["enrichment"],
+        team_missing_player_priors_dict=context["team_missing_player_priors_dict"],
+        team_active_player_priors_dict=context["team_active_player_priors_dict"],
+        team_presence_index=context["team_presence_index"],
+        team_game_dates_by_season=context["team_game_dates_by_season"],
     )
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -1328,12 +1700,28 @@ def main() -> int:
         for row in rows:
             writer.writerow({k: row.get(k) for k in REGRESSION_DATASET_COLUMNS})
 
+    minutes_output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with minutes_output_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=MINUTES_DATASET_COLUMNS)
+        writer.writeheader()
+        for row in minutes_rows:
+            writer.writerow({k: row.get(k) for k in MINUTES_DATASET_COLUMNS})
+
     print(f"\nwrote_rows={stats['written_rows']:,}")
     print(f"total_candidates={stats['total_candidates']:,}")
     print(f"skipped_too_few_prior={stats['skipped_too_few_prior']:,}")
     print(f"skipped_low_minutes={stats['skipped_low_minutes']:,}")
     print(f"skipped_missing_stat={stats['skipped_missing_stat']:,}")
     print(f"output_csv={output_csv}")
+
+    print(f"\nminutes_wrote_rows={minutes_stats['written_rows']:,}")
+    print(f"minutes_total_candidates={minutes_stats['total_candidates']:,}")
+    print(f"minutes_skipped_too_few_prior={minutes_stats['skipped_too_few_prior']:,}")
+    print(
+        "minutes_skipped_missing_target_minutes="
+        f"{minutes_stats['skipped_missing_target_minutes']:,}"
+    )
+    print(f"minutes_output_csv={minutes_output_csv}")
 
     if rows:
         from collections import Counter
@@ -1351,6 +1739,10 @@ def main() -> int:
         for col in new_cols:
             filled = sum(1 for r in rows if r.get(col) is not None)
             print(f"  {col}: {filled/len(rows)*100:.1f}% filled ({filled:,}/{len(rows):,})")
+
+    if minutes_rows:
+        dates = sorted(set(r["game_date"] for r in minutes_rows))
+        print(f"\nMinutes date range: {dates[0]} → {dates[-1]} ({len(dates)} dates)")
 
     return 0
 
