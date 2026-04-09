@@ -52,6 +52,33 @@ FEATURE_COLUMNS = [
     "season_drive_rate", "recent10_drive_rate",
     "season_fg3a_rate", "recent10_fg3a_rate",
     "recent5_1h_stat_share",
+    "missing_team_usage_pct", "missing_team_minutes",
+    "missing_same_pos_usage_pct", "missing_same_pos_minutes",
+    "missing_guard_usage_pct", "missing_guard_minutes",
+    "missing_high_usage_usage_pct", "missing_high_usage_minutes",
+    "missing_playmaker_potential_ast_pg", "missing_playmaker_minutes",
+    "missing_onball_drives_pg", "missing_onball_minutes",
+    "playmaker_vacuum_x_player_ast_rate",
+    "onball_vacuum_x_player_drive_rate",
+    "usage_vacuum_x_player_usage_pct",
+    "missing_key_teammates_player_stat_delta",
+    "missing_key_teammates_player_minutes_delta",
+    "missing_key_teammates_player_usage_pct_delta",
+    "missing_key_teammates_player_potential_ast_rate_delta",
+    "missing_key_teammates_player_drive_rate_delta",
+    "missing_key_teammates_effective_support",
+    "returning_key_teammates_player_stat_delta",
+    "returning_key_teammates_player_minutes_delta",
+    "returning_key_teammates_player_usage_pct_delta",
+    "returning_key_teammates_player_potential_ast_rate_delta",
+    "returning_key_teammates_player_drive_rate_delta",
+    "returning_key_teammates_effective_support",
+]
+ENGINEERED_FEATURE_COLUMNS = [
+    "momentum_diff_5v20",
+    "momentum_diff_3v10",
+    "expected_possessions",
+    "predicted_minutes",
 ]
 
 
@@ -101,6 +128,33 @@ def _prepare_features(df: pd.DataFrame, feature_cols: Sequence[str]) -> pd.DataF
         else:
             X[c] = pd.to_numeric(X[c], errors="coerce")
     return X
+
+
+def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if "recent5_stat_avg" in out.columns and "recent20_stat_avg" in out.columns:
+        out["momentum_diff_5v20"] = out["recent5_stat_avg"] - out["recent20_stat_avg"]
+    if "recent3_stat_avg" in out.columns and "recent10_stat_avg" in out.columns:
+        out["momentum_diff_3v10"] = out["recent3_stat_avg"] - out["recent10_stat_avg"]
+
+    if "team_pace" in out.columns and "season_usage_pct_avg" in out.columns:
+        out["expected_possessions"] = (
+            out["team_pace"] * (out["season_usage_pct_avg"].fillna(0.0) / 100.0)
+        )
+
+    min_cols = ["recent5_minutes_avg", "recent10_minutes_avg", "season_minutes_avg"]
+    if all(c in out.columns for c in min_cols):
+        r5 = out["recent5_minutes_avg"].fillna(out["season_minutes_avg"])
+        r10 = out["recent10_minutes_avg"].fillna(out["season_minutes_avg"])
+        sea = out["season_minutes_avg"].fillna(out["recent5_minutes_avg"])
+        pred_min = r5 * 0.50 + r10 * 0.30 + sea * 0.20
+        if "is_b2b" in out.columns:
+            b2b = pd.to_numeric(out["is_b2b"], errors="coerce").fillna(0.0)
+            pred_min = pred_min * (1.0 - 0.035 * b2b)
+        out["predicted_minutes"] = pred_min.clip(lower=4.0, upper=42.0)
+
+    return out
 
 
 def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
@@ -292,13 +346,14 @@ def main() -> int:
         raise FileNotFoundError(f"Dataset not found: {dataset_csv}. Run build_regression_dataset.py first.")
 
     df = _load_dataset(dataset_csv)
+    df = _engineer_features(df)
     print(f"Loaded {len(df):,} rows, {df['game_date'].dt.date.nunique()} dates, "
           f"{df['stat_type'].nunique()} stat types")
 
     model_dir = Path(args.model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
+    feature_cols = [c for c in (FEATURE_COLUMNS + ENGINEERED_FEATURE_COLUMNS) if c in df.columns]
     if args.unified and "stat_type" not in feature_cols:
         feature_cols = ["stat_type"] + feature_cols
 

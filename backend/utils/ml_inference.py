@@ -1,8 +1,9 @@
 import json
 import logging
 import math
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import date, datetime
 import sys
 
@@ -16,10 +17,38 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BACKEND_DIR / "prop_modeling"))
 
 # Import the EnrichmentData logic that builds the row initially
-from build_regression_dataset import EnrichmentData, _build_regression_row
+from build_regression_dataset import (
+    EnrichmentData,
+    _build_history,
+    _build_key_teammate_onoff_features,
+    _build_player_index,
+    _build_team_presence_context,
+    _mean,
+    _parse_date,
+    _build_regression_row,
+    _safe_float,
+)
+from injury_feature_config import (
+    ACTIVE_ROSTER_LOOKBACK_DAYS,
+    MIN_LIVE_PRIOR_ACTIVE_GAMES,
+    POSITION_GROUPS,
+    SAME_POS_VACANCY_FEATURE_COLUMNS,
+    TEAM_VACANCY_FEATURE_COLUMNS,
+    TRAILING_ABSENT_PRIOR_GAMES,
+    apply_injury_feature_values,
+    is_high_usage,
+    is_onball,
+    is_playmaker,
+    make_same_pos_vacancy_stats,
+    make_team_vacancy_stats,
+    normalize_percent_metric,
+    normalize_player_name,
+    normalize_position_group,
+)
 
 ML_MODEL_DIR = BACKEND_DIR / "prop_modeling" / "exported_regression_model"
 CURRENT_DATA_DIR = BACKEND_DIR / "data" / "current"
+UNAVAILABLE_INJURY_STATUSES = {"out", "doubtful"}
 
 class MLPredictor:
     """Singleton ML Predictor for blazingly fast in-memory inference."""
@@ -38,6 +67,7 @@ class MLPredictor:
         self.drift_b = {}
         self.enrichment = None
         self.ready = False
+        self._drift_feature_high_water: Dict[str, float] = {}
 
         meta_path = ML_MODEL_DIR / "model_metadata.json"
         q_stats_path = ML_MODEL_DIR / "quantile_stats.json"
@@ -75,33 +105,261 @@ class MLPredictor:
 
             # Load the cache dictionary for team paces and opposing defensives (~0.5s)
             self.enrichment = EnrichmentData(CURRENT_DATA_DIR)
-            
-            # Load live injury report precisely for inference today
-            self.live_injured_players = set()
-            p = CURRENT_DATA_DIR / "nba_injury_report.json"
-            if p.exists():
-                try:
-                    with open(p) as f:
-                        raw = json.load(f)
-                    games = raw.get("games", [])
-                    for game in games:
-                        teams = game.get("teams", {})
-                        for team_data in teams.values():
-                            players = team_data.get("players", [])
-                            for report in players:
-                                name_str = report.get("player_name")
-                                status = report.get("current_status")
-                                if name_str and status in ["Out", "Doubtful", "Probable"]:
-                                    self.live_injured_players.add(name_str.upper())
-                except Exception as e:
-                    logger.error(f"MLPredictor: Failed to load live injuries: {e}")
+
+            self.live_player_histories: Dict[str, List[Tuple[date, Dict[str, Any]]]] = {}
+            self.live_player_name_lookup: Dict[Tuple[str, str], str] = {}
+            self.live_team_player_ids: Dict[str, set[str]] = {}
+            self.live_player_prior_cache: Dict[Tuple[str, date], Dict[str, Any]] = {}
+            self.live_team_vacancy_stats: Dict[Tuple[str, date], Dict[str, float]] = {}
+            self.live_same_pos_vacancy_stats: Dict[Tuple[str, date, str], Dict[str, float]] = {}
+            self.live_missing_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
+            self.live_active_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
+            self.live_team_presence_index: Dict[Tuple[str, date], set[str]] = {}
+            self.live_team_game_dates_by_season: Dict[Tuple[str, int], List[date]] = {}
+            self.live_team_game_dates: Dict[str, date] = {}
+            self.live_team_matchup_dates: Dict[Tuple[str, str], date] = {}
+            self._initialize_live_injury_feature_cache()
             
             self.ready = True
             logger.info(f"MLPredictor: Successfully loaded {len(self.models)} per-stat models.")
         except Exception as e:
             logger.error(f"MLPredictor: Initialization failed: {e}")
 
-    def _check_drift(self, features: Dict[str, Any], z_threshold: float = 3.0) -> List[str]:
+    @staticmethod
+    def _normalize_player_name(raw_name: Any) -> str:
+        return normalize_player_name(raw_name)
+
+    @staticmethod
+    def _normalize_percent_metric(raw_value: Any) -> Optional[float]:
+        return normalize_percent_metric(raw_value)
+
+    def _initialize_live_injury_feature_cache(self) -> None:
+        self._load_live_player_histories()
+        self._build_live_player_name_lookup()
+        self._load_live_injury_report_context()
+
+    def _load_live_player_histories(self) -> None:
+        current_gamelog_paths = sorted(CURRENT_DATA_DIR.glob("gamelogs_*.csv"))
+        if not current_gamelog_paths:
+            return
+        live_rows = _build_history(current_gamelog_paths)
+        self.live_player_histories = _build_player_index(live_rows)
+        self.live_team_presence_index, self.live_team_game_dates_by_season = _build_team_presence_context(
+            live_rows
+        )
+
+    def _build_live_player_name_lookup(self) -> None:
+        lookup: Dict[Tuple[str, str], str] = {}
+        team_player_ids: Dict[str, set[str]] = defaultdict(set)
+        if not self.enrichment:
+            self.live_player_name_lookup = lookup
+            self.live_team_player_ids = {}
+            return
+
+        for pid, stats in self.enrichment.season_stats.items():
+            team = str(stats.get("TEAM_ABBREVIATION") or "").strip().upper()
+            normalized_name = normalize_player_name(
+                self.enrichment.player_id_to_name.get(pid) or stats.get("PLAYER_NAME")
+            )
+            if team and normalized_name and (team, normalized_name) not in lookup:
+                lookup[(team, normalized_name)] = pid
+            if team:
+                team_player_ids[team].add(pid)
+
+        self.live_player_name_lookup = lookup
+        self.live_team_player_ids = {team: set(player_ids) for team, player_ids in team_player_ids.items()}
+
+    def _fallback_live_player_priors(self, player_id: str) -> Dict[str, Any]:
+        if not self.enrichment:
+            return {
+                "active_games": 0,
+                "within_active_roster_window": False,
+                "usage_pct": None,
+                "ast_pct": None,
+                "potential_ast_pg": None,
+                "drives_pg": None,
+                "minutes": None,
+                "pos_group": normalize_position_group(None),
+            }
+
+        stats = self.enrichment.season_stats.get(str(player_id).strip(), {})
+        return {
+            "active_games": 0,
+            "within_active_roster_window": False,
+            "usage_pct": self._normalize_percent_metric(stats.get("USG_PCT")),
+            "ast_pct": self._normalize_percent_metric(stats.get("AST_PCT")),
+            "potential_ast_pg": _safe_float(stats.get("POTENTIAL_AST")),
+            "drives_pg": _safe_float(stats.get("DRIVES")),
+            "minutes": _safe_float(stats.get("MIN")),
+            "pos_group": self.enrichment.get_player_position_group(player_id),
+        }
+
+    def _get_live_player_priors(self, player_id: str, slate_date: date) -> Dict[str, Any]:
+        cache_key = (str(player_id).strip(), slate_date)
+        if cache_key in self.live_player_prior_cache:
+            return self.live_player_prior_cache[cache_key]
+
+        history = self.live_player_histories.get(cache_key[0], [])
+        prior_rows = [
+            row
+            for game_date, row in history
+            if 0 < (slate_date - game_date).days <= ACTIVE_ROSTER_LOOKBACK_DAYS
+        ][-TRAILING_ABSENT_PRIOR_GAMES:]
+
+        priors = {
+            "active_games": len(prior_rows),
+            "within_active_roster_window": bool(prior_rows),
+            "usage_pct": _mean([_safe_float(row.get("USG_PCT")) for row in prior_rows]),
+            "ast_pct": _mean([_safe_float(row.get("AST_PCT")) for row in prior_rows]),
+            "potential_ast_pg": _mean([_safe_float(row.get("POTENTIAL_AST")) for row in prior_rows]),
+            "drives_pg": _mean([_safe_float(row.get("DRIVES")) for row in prior_rows]),
+            "minutes": _mean([_safe_float(row.get("MIN")) for row in prior_rows]),
+            "pos_group": self.enrichment.get_player_position_group(player_id) if self.enrichment else normalize_position_group(None),
+        }
+
+        if priors["active_games"] < MIN_LIVE_PRIOR_ACTIVE_GAMES and priors["within_active_roster_window"]:
+            fallback = self._fallback_live_player_priors(cache_key[0])
+            priors = {
+                **fallback,
+                "active_games": priors["active_games"],
+                "within_active_roster_window": True,
+            }
+        else:
+            fallback = self._fallback_live_player_priors(cache_key[0])
+            for metric_key in ("usage_pct", "ast_pct", "potential_ast_pg", "drives_pg", "minutes"):
+                if priors.get(metric_key) is None:
+                    priors[metric_key] = fallback.get(metric_key)
+
+        self.live_player_prior_cache[cache_key] = priors
+        return priors
+
+    def _load_live_injury_report_context(self) -> None:
+        if not self.enrichment:
+            return
+
+        injury_report_path = CURRENT_DATA_DIR / "nba_injury_report.json"
+        if not injury_report_path.exists():
+            return
+
+        try:
+            with injury_report_path.open() as handle:
+                payload = json.load(handle)
+        except Exception as exc:
+            logger.error(f"MLPredictor: Failed to load live injuries: {exc}")
+            return
+
+        for game in payload.get("games", []):
+            if not isinstance(game, dict):
+                continue
+
+            game_date = _parse_date(game.get("game_date")) or date.today()
+            home_team = str(game.get("home_team_tricode") or "").strip().upper()
+            away_team = str(game.get("away_team_tricode") or "").strip().upper()
+            if home_team:
+                self.live_team_game_dates[home_team] = game_date
+            if away_team:
+                self.live_team_game_dates[away_team] = game_date
+            if home_team and away_team:
+                self.live_team_matchup_dates[(home_team, away_team)] = game_date
+                self.live_team_matchup_dates[(away_team, home_team)] = game_date
+
+            teams = game.get("teams", {})
+            if not isinstance(teams, dict):
+                continue
+
+            for team_abbrev, team_data in teams.items():
+                team_key = str(team_abbrev or "").strip().upper()
+                if not team_key:
+                    continue
+                if not isinstance(team_data, dict):
+                    continue
+                team_stats = make_team_vacancy_stats()
+                same_pos_stats = {
+                    group: make_same_pos_vacancy_stats()
+                    for group in POSITION_GROUPS
+                }
+                current_missing_player_priors: Dict[str, Dict[str, Any]] = {}
+                current_active_player_priors: Dict[str, Dict[str, Any]] = {}
+                missing_player_ids: set[str] = set()
+
+                for report in team_data.get("players", []):
+                    if not isinstance(report, dict):
+                        continue
+                    status = str(report.get("current_status") or "").strip().lower()
+                    if status not in UNAVAILABLE_INJURY_STATUSES:
+                        continue
+
+                    normalized_name = normalize_player_name(
+                        report.get("player_name") or report.get("report_player_name")
+                    )
+                    if not normalized_name:
+                        continue
+
+                    player_id = self.live_player_name_lookup.get((team_key, normalized_name))
+                    if not player_id:
+                        continue
+                    missing_player_ids.add(player_id)
+
+                for player_id in sorted(self.live_team_player_ids.get(team_key, set())):
+                    priors = self._get_live_player_priors(player_id, game_date)
+                    if not priors.get("within_active_roster_window"):
+                        continue
+
+                    if player_id in missing_player_ids:
+                        current_missing_player_priors[player_id] = dict(priors)
+                        usage_pct = priors.get("usage_pct")
+                        minutes = priors.get("minutes")
+                        pos_group = priors.get("pos_group") or normalize_position_group(None)
+                        if usage_pct is None and minutes is None:
+                            continue
+
+                        team_stats["missing_team_usage_pct"] += usage_pct or 0.0
+                        team_stats["missing_team_minutes"] += minutes or 0.0
+                        same_pos_stats[pos_group]["missing_same_pos_usage_pct"] += usage_pct or 0.0
+                        same_pos_stats[pos_group]["missing_same_pos_minutes"] += minutes or 0.0
+
+                        if pos_group == "G":
+                            team_stats["missing_guard_usage_pct"] += usage_pct or 0.0
+                            team_stats["missing_guard_minutes"] += minutes or 0.0
+
+                        if is_high_usage(usage_pct):
+                            team_stats["missing_high_usage_usage_pct"] += usage_pct or 0.0
+                            team_stats["missing_high_usage_minutes"] += minutes or 0.0
+
+                        if is_playmaker(priors.get("ast_pct"), priors.get("potential_ast_pg")):
+                            team_stats["missing_playmaker_potential_ast_pg"] += priors.get("potential_ast_pg") or 0.0
+                            team_stats["missing_playmaker_minutes"] += minutes or 0.0
+
+                        if is_onball(priors.get("drives_pg")):
+                            team_stats["missing_onball_drives_pg"] += priors.get("drives_pg") or 0.0
+                            team_stats["missing_onball_minutes"] += minutes or 0.0
+                    else:
+                        current_active_player_priors[player_id] = dict(priors)
+
+                self.live_team_vacancy_stats[(team_key, game_date)] = {
+                    key: round(float(team_stats.get(key) or 0.0), 4)
+                    for key in TEAM_VACANCY_FEATURE_COLUMNS
+                }
+                self.live_missing_player_priors[(team_key, game_date)] = current_missing_player_priors
+                self.live_active_player_priors[(team_key, game_date)] = current_active_player_priors
+                for pos_group, pos_stats in same_pos_stats.items():
+                    self.live_same_pos_vacancy_stats[(team_key, game_date, pos_group)] = {
+                        key: round(float(pos_stats.get(key) or 0.0), 4)
+                        for key in SAME_POS_VACANCY_FEATURE_COLUMNS
+                    }
+
+    def _resolve_live_target_date(self, team_abbrev: str, opponent_abbrev: Optional[str]) -> date:
+        team_key = str(team_abbrev or "").strip().upper()
+        opp_key = str(opponent_abbrev or "").strip().upper()
+        if team_key and opp_key:
+            matchup_date = self.live_team_matchup_dates.get((team_key, opp_key))
+            if matchup_date is not None:
+                return matchup_date
+        if team_key and team_key in self.live_team_game_dates:
+            return self.live_team_game_dates[team_key]
+        return date.today()
+
+    def _check_drift(self, features: Dict[str, Any], z_threshold: float = 3.0) -> List[Dict[str, float]]:
         alerts = []
         for col, stats in self.drift_b.items():
             val = features.get(col)
@@ -117,46 +375,95 @@ class MLPredictor:
             mean_val = stats.get("mean", 0.0)
             z = abs(fval - mean_val) / std
             if z > z_threshold:
-                alerts.append(
-                    f"{col}: {fval:.3f} is {z:.1f}sigma from training mean={mean_val:.3f}"
-                )
+                alerts.append({
+                    "column": col,
+                    "value": fval,
+                    "z_score": z,
+                    "mean": mean_val,
+                })
         return alerts
 
-    def _get_injured_star_flag(self, team_abbrev: str) -> int:
-        if not self.enrichment:
-            return 0
-            
-        stars = set()
-        for pid, stats in self.enrichment.season_stats.items():
-            t = str(stats.get("TEAM_ABBREVIATION") or "").strip()
-            if t == team_abbrev:
-                usg = stats.get("USG_PCT")
-                try:
-                    f_usg = float(usg)
-                except (TypeError, ValueError):
-                    f_usg = 0.0
-                    
-                if f_usg >= 23.0:
-                    name = self.enrichment.player_id_to_name.get(pid)
-                    if name:
-                        stars.add(name.upper())
+    def _log_drift_summary(
+        self,
+        player_info: Dict[str, Any],
+        stat_type: str,
+        alerts: List[Dict[str, float]],
+    ) -> None:
+        if not alerts:
+            return
 
-        for star_name in stars:
-            if star_name in getattr(self, "live_injured_players", set()):
-                logger.info(f"Team {team_abbrev} has star {star_name} injured! Setting flag.")
-                return 1
-        return 0
+        significant_alerts = []
+        for alert in alerts:
+            column = str(alert.get("column") or "").strip()
+            z_score = float(alert.get("z_score") or 0.0)
+            if not column:
+                continue
+            high_water = self._drift_feature_high_water.get(column, 0.0)
+            if z_score >= high_water + 0.5:
+                self._drift_feature_high_water[column] = z_score
+                significant_alerts.append(alert)
+
+        if not significant_alerts:
+            return
+
+        top_alerts = sorted(
+            significant_alerts,
+            key=lambda alert: float(alert.get("z_score") or 0.0),
+            reverse=True,
+        )[:5]
+        top_summary = "; ".join(
+            (
+                f"{alert['column']}={alert['value']:.3f} "
+                f"({alert['z_score']:.1f}sigma vs {alert['mean']:.3f})"
+            )
+            for alert in top_alerts
+        )
+        player_name = str(
+            player_info.get("player_name")
+            or player_info.get("name")
+            or player_info.get("player")
+            or "unknown"
+        ).strip()
+        player_id = str(
+            player_info.get("player_id")
+            or player_info.get("PLAYER_ID")
+            or ""
+        ).strip()
+        logger.warning(
+            "Feature drift summary | stat_type=%s player=%s player_id=%s "
+            "new_features=%s total_features=%s top=%s",
+            stat_type,
+            player_name or "unknown",
+            player_id or "n/a",
+            len(significant_alerts),
+            len(alerts),
+            top_summary,
+        )
 
     def _build_feature_dict(self, player_info: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Optional[Dict[str, Any]]:
         # Same initial conversion as old setup
         last_log = logs[0]
         asc_logs = list(reversed(logs))
-        
+        team_abbr = str(
+            player_info.get("team_abbrev")
+            or player_info.get("team")
+            or last_log.get("TEAM_ABBREVIATION")
+            or ""
+        ).strip().upper()
+        opponent_abbr = str(player_info.get("opponent_abbrev") or "UNK").strip().upper()
+        player_id = str(player_info.get("player_id", last_log.get("PLAYER_ID")) or "").strip()
+        target_date = self._resolve_live_target_date(team_abbr, opponent_abbr)
+        dummy_matchup = (
+            f"{team_abbr} vs. {opponent_abbr}"
+            if team_abbr and opponent_abbr and opponent_abbr != "UNK"
+            else f"vs. {opponent_abbr or 'UNK'}"
+        )
+
         dummy_row = {
-            "PLAYER_ID": player_info.get("player_id", last_log.get("PLAYER_ID")),
+            "PLAYER_ID": player_id,
             "PLAYER_NAME": player_info.get("player_name"),
-            "TEAM_ABBREVIATION": player_info.get("team_abbrev", last_log.get("TEAM_ABBREVIATION")),
-            "MATCHUP": f"vs. {player_info.get('opponent_abbrev', 'UNK')}",
+            "TEAM_ABBREVIATION": team_abbr or player_info.get("team_abbrev", last_log.get("TEAM_ABBREVIATION")),
+            "MATCHUP": dummy_matchup,
             "POSITION": player_info.get("position", ""),
             "MIN": 30.0,
         }
@@ -168,8 +475,7 @@ class MLPredictor:
             dummy_row["TEAM_ABBREVIATION"] = player_info["team"]
 
         asc_logs.append(dummy_row)
-        
-        target_date = date.today()
+
         player_history = []
         for i, r in enumerate(asc_logs):
             d = r.get("GAME_DATE")
@@ -190,7 +496,12 @@ class MLPredictor:
             min_prior=3,
             min_minutes=1.0,
             enrichment=self.enrichment,
-            star_out_dict={}
+            team_missing_stats_dict={},
+            same_pos_missing_stats_dict={},
+            team_missing_player_priors_dict={},
+            team_active_player_priors_dict={},
+            team_presence_index={},
+            team_game_dates_by_season={},
         )
 
         if not row_obj:
@@ -228,13 +539,46 @@ class MLPredictor:
                     pred_min *= (1.0 - 0.035)
                 row_obj["predicted_minutes"] = max(4.0, min(42.0, pred_min))
 
-        # Check for live injured star teammates!
-        team_abbr = player_info.get("team_abbrev", dummy_row.get("TEAM_ABBREVIATION"))
-        row_obj["star_teammate_out_flag"] = self._get_injured_star_flag(team_abbr)
+        target_pos_group = (
+            self.enrichment.get_player_position_group(player_id)
+            if self.enrichment
+            else normalize_position_group(player_info.get("position"))
+        )
+        team_vacancy_stats = self.live_team_vacancy_stats.get((team_abbr, target_date))
+        same_pos_vacancy_stats = self.live_same_pos_vacancy_stats.get((team_abbr, target_date, target_pos_group))
+        teammate_onoff_stats = _build_key_teammate_onoff_features(
+            player_history,
+            len(player_history) - 1,
+            stat_type=stat_type,
+            team_presence_index=self.live_team_presence_index,
+            team_game_dates_by_season=self.live_team_game_dates_by_season,
+            current_missing_player_priors=self.live_missing_player_priors.get((team_abbr, target_date)),
+            current_active_player_priors=self.live_active_player_priors.get((team_abbr, target_date)),
+        )
+        apply_injury_feature_values(
+            row_obj,
+            team_vacancy_stats=team_vacancy_stats,
+            same_pos_vacancy_stats=same_pos_vacancy_stats,
+            teammate_onoff_stats=teammate_onoff_stats,
+        )
+
+        # Keep legacy exported models working until retraining replaces the old flag.
+        if "star_teammate_out_flag" in getattr(self, "feat_cols", []):
+            row_obj["star_teammate_out_flag"] = 1 if (
+                (row_obj.get("missing_team_usage_pct") or 0.0) > 0.0
+                or (row_obj.get("missing_team_minutes") or 0.0) > 0.0
+            ) else 0
 
         return row_obj
 
-    def predict(self, player_info: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Optional[Dict[str, Any]]:
+    def predict(
+        self,
+        player_info: Dict[str, Any],
+        logs: List[Dict[str, Any]],
+        stat_type: str,
+        *,
+        include_features: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         if not self.ready:
             return None
 
@@ -249,8 +593,8 @@ class MLPredictor:
         if not features:
             return None
 
-        for warning in self._check_drift(features):
-            logger.warning(f"Feature drift: {warning}")
+        drift_alerts = self._check_drift(features)
+        self._log_drift_summary(player_info, stat_type, drift_alerts)
 
         vector = []
         for c in self.feat_cols:
@@ -266,17 +610,23 @@ class MLPredictor:
         try:
             preds = model.predict([vector]) # shape (1, 3) for quantiles if length 3
             if preds.shape == (1, 3):
-                return {
+                result = {
                     "q25": float(preds[0, 0]),
                     "q50": float(preds[0, 1]),
                     "q75": float(preds[0, 2])
                 }
+                if include_features:
+                    result["feature_snapshot"] = dict(features)
+                return result
             elif preds.shape == (1,):
                 # Legacy model handling
-                return {
+                result = {
                     "prediction": float(preds[0]),
                     "std_dev": self.q_stats.get(stat_type, {}).get("std", 1.0) # Fallback to residuals
                 }
+                if include_features:
+                    result["feature_snapshot"] = dict(features)
+                return result
             else:
                 return None
         except Exception as e:

@@ -558,7 +558,12 @@ def check_mutual_exclusion():
             lock_pid = lock_info.get("pid")
 
             if lock_pid and _is_pid_running(lock_pid):
-                log_status(logger, "WARN", "Another master cron instance is active", pid=lock_pid)
+                log_status(
+                    logger,
+                    "SKIP",
+                    "Master cron run skipped; active instance holds lock",
+                    pid=lock_pid,
+                )
                 return False
 
             if lock_pid and not _is_pid_running(lock_pid):
@@ -570,7 +575,7 @@ def check_mutual_exclusion():
                     log_status(logger, "WARN", "Removing stale cron lock")
                     os.remove(LOCK_FILE)
                 else:
-                    log_status(logger, "WARN", "Another master cron instance is active")
+                    log_status(logger, "SKIP", "Master cron run skipped; active lock file present")
                     return False
         except Exception:
             return False

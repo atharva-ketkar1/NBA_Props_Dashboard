@@ -12,6 +12,16 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 
+from prop_modeling.injury_feature_config import (
+    CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
+    ONBALL_BENEFIT_DRIVES_THRESHOLD,
+    OVERLAY_MAX_MULTIPLIER,
+    OVERLAY_MIN_RECENT5_MINUTES,
+    OVERLAY_MULTI_BENEFIT_MULTIPLIER,
+    OVERLAY_SINGLE_BENEFIT_MULTIPLIER,
+    SAME_POS_BENEFIT_MINUTES_THRESHOLD,
+    USAGE_BENEFIT_USAGE_THRESHOLD,
+)
 from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
 
@@ -47,6 +57,20 @@ EDGE_SCORE_PATH = os.path.join(CURRENT_DIR, "edge_scores_top15.json")
 EDGE_SCORE_STATE_PATH = os.path.join(CURRENT_DIR, "edge_score_notification_state.json")
 EDGE_SCORE_HISTORY_PATH = os.path.join(ARCHIVE_DIR, "edge_scores_history.json")
 EDGE_SCORE_RESULTS_HISTORY_PATH = os.path.join(ARCHIVE_DIR, "edge_score_results_history.json")
+BOXSCORE_CDN_BASE_URL = "https://cdn.nba.com/static/json/liveData/boxscore"
+BOXSCORE_CDN_HEADERS = {
+    "accept": "application/json, text/plain, */*",
+    "origin": "https://www.nba.com",
+    "referer": "https://www.nba.com/",
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    ),
+}
+ISO8601_DURATION_RE = re.compile(
+    r"^PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?$"
+)
+DISCORD_WEBHOOK_MESSAGE_PATH_RE = re.compile(r"/messages/\d+$")
 
 EDGE_SCORE_TABLE = "edge_scores_current"
 EDGE_LIMIT = max(1, _env_int("EDGE_SCORE_LIMIT", 15))
@@ -84,6 +108,7 @@ EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = max(
     0.25,
     _env_float("EDGE_SCORE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS", 30.0),
 )
+_DISCORD_WEBHOOK_RATE_LIMIT_UNTIL: Dict[str, float] = {}
 UNDATED_PROP_KEY = "__undated__"
 
 SUPPORTED_BOOKS = {"dk", "fd", "pp"}
@@ -421,10 +446,55 @@ def _discord_retry_after_seconds(response: requests.Response) -> float:
     return EDGE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS
 
 
+def _discord_rate_limit_bucket_key(method: str, url: str) -> str:
+    split = urlsplit(url)
+    normalized_path = DISCORD_WEBHOOK_MESSAGE_PATH_RE.sub("", split.path.rstrip("/"))
+    return f"{method.upper()} {split.scheme}://{split.netloc}{normalized_path}"
+
+
+def _wait_for_discord_rate_limit_window(method: str, url: str) -> None:
+    bucket_key = _discord_rate_limit_bucket_key(method, url)
+    wait_until = _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.get(bucket_key)
+    if wait_until is None:
+        return
+
+    now = time.monotonic()
+    if wait_until <= now:
+        _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.pop(bucket_key, None)
+        return
+
+    time.sleep(wait_until - now)
+
+
+def _record_discord_rate_limit_window(method: str, url: str, response: requests.Response) -> None:
+    bucket_key = _discord_rate_limit_bucket_key(method, url)
+    now = time.monotonic()
+    cooldown_seconds: Optional[float] = None
+
+    if response.status_code == 429:
+        cooldown_seconds = _discord_retry_after_seconds(response)
+    else:
+        remaining = str(response.headers.get("X-RateLimit-Remaining") or "").strip()
+        if remaining == "0":
+            cooldown_seconds = _safe_float(response.headers.get("X-RateLimit-Reset-After"))
+
+    if cooldown_seconds is None or cooldown_seconds <= 0:
+        if _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.get(bucket_key, 0.0) <= now:
+            _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.pop(bucket_key, None)
+        return
+
+    _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL[bucket_key] = max(
+        _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.get(bucket_key, 0.0),
+        now + min(cooldown_seconds, EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS),
+    )
+
+
 def _discord_webhook_request(method: str, url: str, *, payload: Optional[Dict[str, Any]] = None) -> requests.Response:
     last_response: Optional[requests.Response] = None
     for attempt_index in range(EDGE_DISCORD_HTTP_MAX_ATTEMPTS):
+        _wait_for_discord_rate_limit_window(method, url)
         response = requests.request(method, url, json=payload, timeout=10)
+        _record_discord_rate_limit_window(method, url, response)
         if response.status_code != 429:
             return response
 
@@ -441,7 +511,6 @@ def _discord_webhook_request(method: str, url: str, *, payload: Optional[Dict[st
             attempt_index + 1,
             EDGE_DISCORD_HTTP_MAX_ATTEMPTS,
         )
-        time.sleep(sleep_seconds)
 
     if last_response is not None:
         return last_response
@@ -1825,31 +1894,42 @@ def _load_tonight_dnps(master_feed: Any, injury_report: Any, schedule_context: D
         for game in games:
             if not isinstance(game, dict):
                 continue
+            team_player_entries: List[Tuple[str, Dict[str, Any]]] = []
+            teams_payload = game.get("teams", {})
+            if isinstance(teams_payload, dict):
+                for team_abbrev, team_data in teams_payload.items():
+                    if not isinstance(team_data, dict):
+                        continue
+                    for player_entry in team_data.get("players", []):
+                        if isinstance(player_entry, dict):
+                            team_player_entries.append((str(team_abbrev or "").strip().upper(), player_entry))
+
             for player_entry in game.get("players", []):
-                if not isinstance(player_entry, dict):
-                    continue
-                
+                if isinstance(player_entry, dict):
+                    team_player_entries.append(("", player_entry))
+
+            for team_context, player_entry in team_player_entries:
                 status = str(player_entry.get("current_status") or "").lower()
                 if status not in {"out", "doubtful"}:
                     continue
-                    
+
                 raw_name = player_entry.get("player_name") or player_entry.get("report_player_name") or ""
-                
-                player_id = matcher.match_player(raw_name, "UNK") 
+
+                player_id = matcher.match_player(raw_name, team_context or "UNK")
                 if not player_id:
                     continue
-                    
-                canonical_team = id_to_team.get(str(player_id))
+
+                canonical_team = team_context or id_to_team.get(str(player_id))
                 if not canonical_team:
                     continue
-                
+
                 master_player = master_stats.get(str(player_id), {})
                 stats = master_player.get("stats", {})
                 season_minutes = _safe_float(stats.get("MIN"))
                 season_usage = _normalize_fraction(stats.get("USG_PCT"))
-                
+
                 role = _classify_player_role(season_minutes, season_usage)
-                
+
                 dnps_by_team.setdefault(canonical_team, []).append({
                     "player_id": str(player_id),
                     "player_name": master_player.get("name", raw_name),
@@ -1871,6 +1951,7 @@ def _compute_lineup_adjustment(
     logs: List[Dict[str, Any]],
     team_recent_games: Dict[str, str],
     game_context: Optional[Dict[str, Any]] = None,
+    feature_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     adjustment = {
         "q50_multiplier": 1.0,
@@ -1878,22 +1959,21 @@ def _compute_lineup_adjustment(
         "reason": "",
         "freed_usage_pct": 0.0,
         "absent_stars": [],
+        "benefit_flags": [],
         "blowout_risk_boost": False,
         "b2b_rest_flip": False,
         "opponent_reb_context": None,
     }
-    
-    if not isinstance(tonight_dnps, dict):
-        return adjustment
-        
+
     team = player.get("team")
     if not team:
         return adjustment
-        
+
     stats = player.get("stats", {}) if isinstance(player, dict) else {}
-    player_season_usage_pct = _normalize_fraction(stats.get("USG_PCT"))
     player_season_minutes = _safe_float(stats.get("MIN"))
     player_position = str(player.get("position") or "").upper()
+    feature_snapshot = feature_snapshot if isinstance(feature_snapshot, dict) else {}
+    absent_teammates = tonight_dnps.get(team, []) if isinstance(tonight_dnps, dict) else []
     
     team_recent_date_str = team_recent_games.get(team)
     if team_recent_date_str:
@@ -1909,59 +1989,69 @@ def _compute_lineup_adjustment(
         if any(dnp.get("role") == "star" for dnp in tonight_opponent_dnps):
             adjustment["blowout_risk_boost"] = True
 
-    absent_teammates = tonight_dnps.get(team, [])
     absent_stars = []
-    freed_usg = 0.0
-    n_absent = 0
+    freed_usg = _safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0
     opponent_frontcourt_freed = 0.0
     opponent_reb_context = None
 
     for dnp in absent_teammates:
         role = dnp.get("role")
         if role in {"star", "starter", "rotation"}:
-            freed_usg += (dnp.get("season_usage_pct") or 0.0)
-            n_absent += 1
             if role in {"star", "starter"}:
                 absent_stars.append(dnp.get("player_name") or "Unknown")
 
     adjustment["freed_usage_pct"] = freed_usg
     adjustment["absent_stars"] = absent_stars
 
-    is_beneficiary = False
-    if freed_usg >= 8.0 and player_season_minutes is not None and player_season_minutes >= 16.0:
-        target_positions = set()
-        for pos_char in player_position:
-            if pos_char == 'G': target_positions.add('G')
-            if pos_char == 'F': target_positions.update(['F', 'G'])
-            if pos_char == 'C': target_positions.update(['C', 'F'])
-            
-        for dnp in absent_teammates:
-            if dnp.get("role") not in {"star", "starter", "rotation"}: continue
-            dnp_pos = str(dnp.get("position") or "G").upper()
-            if any(p in target_positions for p in dnp_pos):
-                is_beneficiary = True
-                break
-
     q50_multiplier = 1.0
 
-    if is_beneficiary:
-        if n_absent >= 3:
-            absorption_rate = 0.28
-            adjustment_type = "rotation_vacuum" if not any(d.get("role") == "star" for d in absent_teammates) else "usage_boost"
-        elif n_absent == 2:
-            absorption_rate = 0.32
-            adjustment_type = "usage_boost"
-        else:
-            absorption_rate = 0.35
-            adjustment_type = "usage_boost"
-            
-        usage_gain = freed_usg * absorption_rate
-        if player_season_usage_pct and player_season_usage_pct > 0.05:
-            usage_gain_frac = usage_gain / 100.0
-            gain_ratio = usage_gain_frac / player_season_usage_pct
-            q50_multiplier = 1.0 + min(gain_ratio, 0.40)
-            adjustment["adjustment_type"] = adjustment_type
-            adjustment["reason"] = f"Usage boost applied (freed={freed_usg:.1f}%)"
+    benefit_flags: List[str] = []
+    recent5_minutes_avg = _safe_float(feature_snapshot.get("recent5_minutes_avg"))
+    if recent5_minutes_avg is not None and recent5_minutes_avg >= OVERLAY_MIN_RECENT5_MINUTES:
+        missing_same_pos_minutes = _safe_float(feature_snapshot.get("missing_same_pos_minutes"), 0.0) or 0.0
+        missing_playmaker_potential_ast_pg = _safe_float(
+            feature_snapshot.get("missing_playmaker_potential_ast_pg"),
+            0.0,
+        ) or 0.0
+        playmaker_interaction = _safe_float(
+            feature_snapshot.get("playmaker_vacuum_x_player_ast_rate"),
+            0.0,
+        ) or 0.0
+        missing_onball_drives_pg = _safe_float(feature_snapshot.get("missing_onball_drives_pg"), 0.0) or 0.0
+        onball_interaction = _safe_float(
+            feature_snapshot.get("onball_vacuum_x_player_drive_rate"),
+            0.0,
+        ) or 0.0
+        missing_high_usage_usage_pct = _safe_float(
+            feature_snapshot.get("missing_high_usage_usage_pct"),
+            0.0,
+        ) or 0.0
+        usage_interaction = _safe_float(
+            feature_snapshot.get("usage_vacuum_x_player_usage_pct"),
+            0.0,
+        ) or 0.0
+
+        if missing_same_pos_minutes >= SAME_POS_BENEFIT_MINUTES_THRESHOLD:
+            benefit_flags.append("same_pos_benefit")
+        if (
+            missing_playmaker_potential_ast_pg >= CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD
+            and playmaker_interaction > 0.0
+        ):
+            benefit_flags.append("creation_benefit")
+        if missing_onball_drives_pg >= ONBALL_BENEFIT_DRIVES_THRESHOLD and onball_interaction > 0.0:
+            benefit_flags.append("onball_benefit")
+        if missing_high_usage_usage_pct >= USAGE_BENEFIT_USAGE_THRESHOLD and usage_interaction > 0.0:
+            benefit_flags.append("usage_benefit")
+
+    adjustment["benefit_flags"] = benefit_flags
+    if len(benefit_flags) == 1:
+        q50_multiplier *= OVERLAY_SINGLE_BENEFIT_MULTIPLIER
+        adjustment["adjustment_type"] = "beneficiary_boost"
+        adjustment["reason"] = benefit_flags[0].replace("_", " ")
+    elif len(benefit_flags) >= 2:
+        q50_multiplier *= OVERLAY_MULTI_BENEFIT_MULTIPLIER
+        adjustment["adjustment_type"] = "beneficiary_boost"
+        adjustment["reason"] = ", ".join(flag.replace("_", " ") for flag in benefit_flags)
 
     if stat_type in {"REB", "PTS+REB+AST", "PTS+REB", "REB+AST"}:
         for dnp in tonight_opponent_dnps or []:
@@ -1997,7 +2087,7 @@ def _compute_lineup_adjustment(
             q50_multiplier *= 0.96
             adjustment["reason"] = (raw_reason + " | Depressed scoring environment").strip(" |")
 
-    adjustment["q50_multiplier"] = _clamp(q50_multiplier, 0.70, 1.50)
+    adjustment["q50_multiplier"] = _clamp(q50_multiplier, 0.70, OVERLAY_MAX_MULTIPLIER)
     return adjustment
 
 
@@ -2045,9 +2135,10 @@ def _compute_ml_regression_context(
         "position": player.get("position"),
     }
 
-    res = _ml_predictor.predict(player_info, logs, stat_type)
+    res = _ml_predictor.predict(player_info, logs, stat_type, include_features=True)
     if not res:
         return {"available": False, "score": 0.0, "p_over": None, "details": {}}
+    feature_snapshot = res.get("feature_snapshot", {}) if isinstance(res, dict) else {}
 
     # ── Quantile path (preferred) ────────────────────────────────────────────
     q25 = _safe_float(res.get("q25"))
@@ -2064,6 +2155,7 @@ def _compute_ml_regression_context(
             logs=logs,
             team_recent_games=team_recent_games or {},
             game_context=game_context,
+            feature_snapshot=feature_snapshot,
         )
         mult = adjustment.get("q50_multiplier", 1.0)
         if mult != 1.0:
@@ -2102,6 +2194,39 @@ def _compute_ml_regression_context(
             "p_over": round(p_over, 4),
             "calibration": "quantile_iqr",
             "ml_lineup_adjustment": adjustment,
+            "injury_feature_snapshot": {
+                key: feature_snapshot.get(key)
+                for key in (
+                    "recent5_minutes_avg",
+                    "missing_team_usage_pct",
+                    "missing_team_minutes",
+                    "missing_same_pos_usage_pct",
+                    "missing_same_pos_minutes",
+                    "missing_guard_usage_pct",
+                    "missing_guard_minutes",
+                    "missing_high_usage_usage_pct",
+                    "missing_high_usage_minutes",
+                    "missing_playmaker_potential_ast_pg",
+                    "missing_playmaker_minutes",
+                    "missing_onball_drives_pg",
+                    "missing_onball_minutes",
+                    "playmaker_vacuum_x_player_ast_rate",
+                    "onball_vacuum_x_player_drive_rate",
+                    "usage_vacuum_x_player_usage_pct",
+                    "missing_key_teammates_player_stat_delta",
+                    "missing_key_teammates_player_minutes_delta",
+                    "missing_key_teammates_player_usage_pct_delta",
+                    "missing_key_teammates_player_potential_ast_rate_delta",
+                    "missing_key_teammates_player_drive_rate_delta",
+                    "missing_key_teammates_effective_support",
+                    "returning_key_teammates_player_stat_delta",
+                    "returning_key_teammates_player_minutes_delta",
+                    "returning_key_teammates_player_usage_pct_delta",
+                    "returning_key_teammates_player_potential_ast_rate_delta",
+                    "returning_key_teammates_player_drive_rate_delta",
+                    "returning_key_teammates_effective_support",
+                )
+            },
             "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
             "vegas_spread": _safe_float(game_context.get("spread")) if game_context else None,
         }
@@ -3387,10 +3512,13 @@ def _component_reason_snippet(recommendation: Dict[str, Any], component_name: st
             if vegas_spread is not None and abs(vegas_spread) >= 12.0:
                 return f"the point spread ({vegas_spread}) signals massive blowout risk, threatening 4th-quarter minutes and capping the regression projection to {prediction_val:.1f}"
 
-            if adj_type != "none" and adj.get("absent_stars", []):
-                stars_out = ", ".join(adj.get("absent_stars"))
+            if adj_type != "none":
                 pct_boost = (adj.get("q50_multiplier", 1.0) - 1.0) * 100.0
-                return f"the regression model projects {prediction_val:.1f} (lineup-adjusted +{pct_boost:.0f}%: {stars_out} out)"
+                if adj.get("absent_stars", []):
+                    stars_out = ", ".join(adj.get("absent_stars"))
+                    return f"the regression model projects {prediction_val:.1f} (lineup-adjusted +{pct_boost:.0f}%: {stars_out} out)"
+                if adj.get("reason"):
+                    return f"the regression model projects {prediction_val:.1f} (lineup-adjusted +{pct_boost:.0f}%: {adj.get('reason')})"
                 
             return f"the regression model projects {prediction_val:.1f}"
 
@@ -3784,6 +3912,153 @@ def _find_game_log_for_date(player: Dict[str, Any], game_date: str) -> Optional[
     return None
 
 
+def _iso8601_duration_minutes(raw_value: Any) -> float:
+    if raw_value is None:
+        return 0.0
+    if isinstance(raw_value, (int, float)):
+        return max(0.0, float(raw_value))
+
+    raw_text = str(raw_value).strip()
+    if not raw_text:
+        return 0.0
+
+    parsed_direct = _safe_float(raw_text)
+    if parsed_direct is not None:
+        return max(0.0, parsed_direct)
+
+    match = ISO8601_DURATION_RE.match(raw_text)
+    if not match:
+        return 0.0
+
+    hours = float(match.group("hours") or 0.0)
+    minutes = float(match.group("minutes") or 0.0)
+    seconds = float(match.group("seconds") or 0.0)
+    return max(0.0, hours * 60.0 + minutes + (seconds / 60.0))
+
+
+def _boxscore_player_to_game_log(player_entry: Dict[str, Any]) -> Dict[str, Any]:
+    statistics = player_entry.get("statistics", {})
+    if not isinstance(statistics, dict):
+        statistics = {}
+
+    minutes = _iso8601_duration_minutes(
+        statistics.get("minutes") or statistics.get("minutesCalculated")
+    )
+    game_log = {
+        "MIN": minutes,
+        "PTS": _safe_float(statistics.get("points"), 0.0) or 0.0,
+        "REB": _safe_float(statistics.get("reboundsTotal"), 0.0) or 0.0,
+        "AST": _safe_float(statistics.get("assists"), 0.0) or 0.0,
+        "FG3M": _safe_float(statistics.get("threePointersMade"), 0.0) or 0.0,
+        "BLK": _safe_float(statistics.get("blocks"), 0.0) or 0.0,
+        "STL": _safe_float(statistics.get("steals"), 0.0) or 0.0,
+        "TOV": _safe_float(statistics.get("turnovers"), 0.0) or 0.0,
+    }
+    not_playing_reason = (
+        player_entry.get("notPlayingDescription")
+        or player_entry.get("notPlayingReason")
+        or (
+            player_entry.get("status")
+            if str(player_entry.get("played") or "").strip() != "1"
+            else None
+        )
+    )
+    if not_playing_reason:
+        game_log["_not_playing_reason"] = str(not_playing_reason)
+    return game_log
+
+
+def _boxscore_cache_for_game(
+    game_id: str,
+    boxscore_cache: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    cached = boxscore_cache.get(game_id)
+    if isinstance(cached, dict):
+        return cached
+
+    cache_entry: Dict[str, Dict[str, Dict[str, Any]]] = {
+        "by_player_id": {},
+        "by_name": {},
+    }
+    boxscore_cache[game_id] = cache_entry
+
+    if not game_id:
+        return cache_entry
+
+    url = f"{BOXSCORE_CDN_BASE_URL}/boxscore_{game_id}.json"
+    try:
+        response = requests.get(url, headers=BOXSCORE_CDN_HEADERS, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        logger.warning("Boxscore fallback fetch failed for %s: %s", game_id, exc)
+        return cache_entry
+
+    game_payload = payload.get("game", {})
+    if not isinstance(game_payload, dict):
+        return cache_entry
+
+    game_status = int(_safe_float(game_payload.get("gameStatus"), 0.0) or 0.0)
+    if game_status < 3:
+        return cache_entry
+
+    for team_key in ("homeTeam", "awayTeam", "gameTeam"):
+        team_payload = game_payload.get(team_key, {})
+        if not isinstance(team_payload, dict):
+            continue
+        for player_entry in team_payload.get("players", []):
+            if not isinstance(player_entry, dict):
+                continue
+            player_id = str(player_entry.get("personId") or "").strip()
+            player_name = (
+                player_entry.get("name")
+                or " ".join(
+                    part
+                    for part in (
+                        str(player_entry.get("firstName") or "").strip(),
+                        str(player_entry.get("familyName") or "").strip(),
+                    )
+                    if part
+                )
+            )
+            game_log = _boxscore_player_to_game_log(player_entry)
+            if player_id:
+                cache_entry["by_player_id"][player_id] = game_log
+            normalized_name = _normalize_person_name(player_name)
+            if normalized_name and normalized_name not in cache_entry["by_name"]:
+                cache_entry["by_name"][normalized_name] = game_log
+
+    return cache_entry
+
+
+def _find_boxscore_player_game_log(
+    recommendation: Dict[str, Any],
+    boxscore_cache: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
+) -> Optional[Dict[str, Any]]:
+    game_id = str(recommendation.get("game_id") or "").strip()
+    if not game_id:
+        return None
+
+    cache_entry = _boxscore_cache_for_game(game_id, boxscore_cache)
+    by_player_id = cache_entry.get("by_player_id", {})
+    if isinstance(by_player_id, dict):
+        player_id = str(recommendation.get("player_id") or "").strip()
+        if player_id:
+            player_game = by_player_id.get(player_id)
+            if isinstance(player_game, dict):
+                return dict(player_game)
+
+    by_name = cache_entry.get("by_name", {})
+    if isinstance(by_name, dict):
+        player_name = _normalize_person_name(recommendation.get("player_name"))
+        if player_name:
+            player_game = by_name.get(player_name)
+            if isinstance(player_game, dict):
+                return dict(player_game)
+
+    return None
+
+
 def _build_dnp_lookup(master_feed: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, set]]:
     lookup: Dict[Tuple[str, str], Dict[str, set]] = {}
     for player in master_feed:
@@ -3831,6 +4106,7 @@ def _grade_results_recap(
         if isinstance(player, dict) and player.get("id") is not None
     }
     dnp_lookup = _build_dnp_lookup(master_feed)
+    boxscore_cache: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {}
 
     graded_recommendations = []
     unresolved = []
@@ -3846,18 +4122,20 @@ def _grade_results_recap(
         line = _safe_float(recommendation.get("line"))
         side = str(recommendation.get("pick") or "").lower()
 
-        player = player_lookup.get(player_id)
-        if player is None or not game_date or line is None or side not in SIDE_MULTIPLIERS:
+        if not game_date or line is None or side not in SIDE_MULTIPLIERS:
             unresolved.append(recommendation.get("recommendation_key"))
             continue
 
-        game_log = _find_game_log_for_date(player, game_date)
+        player = player_lookup.get(player_id)
+        game_log = _find_game_log_for_date(player, game_date) if player is not None else None
+        if game_log is None:
+            game_log = _find_boxscore_player_game_log(recommendation, boxscore_cache)
         if game_log is not None:
             minutes = _safe_float(game_log.get("MIN"), 0.0) or 0.0
             if minutes <= 0:
                 status = "void"
                 final_value = None
-                result_note = "No logged minutes"
+                result_note = str(game_log.get("_not_playing_reason") or "No logged minutes")
             else:
                 final_value = _stat_value_from_game(game_log, stat_type)
                 if final_value is None:
@@ -4727,7 +5005,7 @@ def run_edge_score_refresh(
         logger.info("Tonight DNPs loaded | teams_with_absences=%d", len(tonight_dnps))
 
     recap_result = {"sent_dates": [], "state_changed": False}
-    if refresh_label == "pipeline" and _results_recap_webhook_url():
+    if _results_recap_webhook_url():
         try:
             recap_result = _process_results_recaps(master_feed, state)
         except Exception as exc:

@@ -121,3 +121,7 @@ def configure_logging(level=logging.INFO):
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+    logging.getLogger("requests.packages.urllib3").setLevel(logging.ERROR)
+    logging.getLogger("requests.packages.urllib3.connectionpool").setLevel(logging.ERROR)
