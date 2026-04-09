@@ -37,7 +37,15 @@
     "missing_onball_drives_pg",
     "missing_onball_minutes",
     "missing_key_teammates_player_minutes_delta",
+    "missing_key_teammate_count",
+    "missing_same_pos_key_count",
+    "missing_guard_key_count",
+    "missing_playmaker_key_count",
     "returning_key_teammates_player_minutes_delta",
+    "returning_key_teammate_count",
+    "returning_same_pos_key_count",
+    "returning_guard_key_count",
+    "returning_playmaker_key_count",
     "recent_team_games_missed_10",
     "inactive_streak_team_games",
     "games_since_return",
@@ -55,12 +63,12 @@
   ],
   "model_file": "minutes_model.cbm",
   "test_metrics": {
-    "mae_q50": 4.5294,
-    "rmse_q50": 5.92,
-    "r2_q50": 0.663,
-    "median_iqr": 6.8485,
-    "q50_bias": -0.0613,
-    "iqr_coverage": 0.472
+    "mae_q50": 4.5195,
+    "rmse_q50": 5.9128,
+    "r2_q50": 0.6638,
+    "median_iqr": 6.7466,
+    "q50_bias": 0.0052,
+    "iqr_coverage": 0.4666
   },
   "heuristic_baseline_metrics": {
     "mae_q50": 5.0342,
@@ -68,5 +76,20 @@
     "r2_q50": 0.5887
   },
   "oof_block_dates": 10,
-  "oof_min_train_dates": 30
+  "oof_min_train_dates": 30,
+  "promotion_guardrail": {
+    "min_missing_team_usage_pct": 45.0,
+    "min_missing_team_minutes": 60.0,
+    "min_recent5_minutes_avg": 12.0,
+    "min_modeled_minutes_delta_vs_recent5": 3.0,
+    "min_missing_key_teammates_player_minutes_delta": 2.0,
+    "min_missing_same_pos_minutes": 28.0,
+    "min_missing_guard_minutes": 28.0,
+    "min_cross_position_creator_metric": 10.0,
+    "single_stat_gap_pct": 0.25,
+    "combo_stat_gap_pct": 0.19,
+    "display_edge_score_cap": 69.9,
+    "edge_score_penalty_points": 12.0,
+    "confidence_penalty_points": 15.0
+  }
 }

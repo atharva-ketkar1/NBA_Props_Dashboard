@@ -19,7 +19,7 @@ import argparse
 import csv
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from statistics import fmean, pstdev
@@ -98,6 +98,8 @@ REGRESSION_DATASET_COLUMNS = [
     "season_drive_rate", "recent10_drive_rate",
     "season_fg3a_rate", "recent10_fg3a_rate",
     "recent5_pts_per100",
+    "recent10_target_per_min",
+    "missing_same_pos_minutes_x_player_target_per_min",
     # Half / quarter trends
     "recent5_1h_stat_share",
     # ── NEW v2: Opponent defensive features ──────────────────────────────────
@@ -173,7 +175,7 @@ POSITION_GROUP = {
 class EnrichmentData:
     """Loads all supplementary data files once and exposes lookup methods."""
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, *, verbose: bool = True) -> None:
         self.opp_def_ranks: Dict[str, Dict] = {}       # team_full → {catchAndShoot, pullups, lessThanTenFeet}
         self.opp_def_zones: Dict[str, Dict] = {}       # team_full → {G/F/C → zone → {percentage, rank}}
         self.play_type_players: Dict[str, Dict] = {}   # player_name → {points → {transition, iso, ...}}
@@ -181,8 +183,17 @@ class EnrichmentData:
         self.game_margins: Dict[str, Dict[str, float]] = {}  # game_id → {team_abbrev → margin}
         self.season_stats: Dict[str, Dict] = {}        # player_id_str → {PACE, DEF_RATING, ...}
         self.team_season_stats: Dict[str, Dict] = {}   # team_abbrev → aggregated stats
+        self.player_id_to_name: Dict[str, str] = {}    # pid_str → player name
+        self.player_id_to_position: Dict[str, str] = {}  # pid_str → raw position from season stats
+        self.log_position_counts: Dict[Tuple[str, str, int], Counter[str]] = defaultdict(Counter)
+        self.live_player_id_to_position: Dict[str, str] = {}
+        self.verbose = verbose
 
         self._load(data_dir)
+
+    def _log(self, message: str) -> None:
+        if self.verbose:
+            print(message)
 
     def _load(self, data_dir: Path) -> None:
         # 1. Opponent defensive ranks
@@ -191,20 +202,20 @@ class EnrichmentData:
             raw = json.loads(p.read_text())
             for team, v in raw.items():
                 self.opp_def_ranks[team] = v.get("rankings", {})
-            print(f"  opp_def_ranks: {len(self.opp_def_ranks)} teams")
+            self._log(f"  opp_def_ranks: {len(self.opp_def_ranks)} teams")
 
         # 2. Opponent defensive zones
         p = data_dir / "opp_def_zones.json"
         if p.exists():
             self.opp_def_zones = json.loads(p.read_text())
-            print(f"  opp_def_zones: {len(self.opp_def_zones)} teams")
+            self._log(f"  opp_def_zones: {len(self.opp_def_zones)} teams")
 
         # 3. Play type analysis
         p = data_dir / "play_type_analysis.json"
         if p.exists():
             raw = json.loads(p.read_text())
             self.play_type_players = raw.get("players", {})
-            print(f"  play_type: {len(self.play_type_players)} players")
+            self._log(f"  play_type: {len(self.play_type_players)} players")
 
         # 4. Shot type analysis
         p = data_dir / "shot_type_analysis.json"
@@ -220,7 +231,7 @@ class EnrichmentData:
                         "pullup_pg": entry.get("pullups", 0) / gp,
                         "lessThan10ft_pg": entry.get("lessThanTenFeet", 0) / gp,
                     }
-            print(f"  shot_type: {len(self.shot_type_players)} players")
+            self._log(f"  shot_type: {len(self.shot_type_players)} players")
 
         # 5. Boxscores (game margins)
         p = data_dir / "boxscores.json"
@@ -232,11 +243,9 @@ class EnrichmentData:
                     self.game_margins[str(game_id)] = {
                         str(team): float(margin) for team, margin in margins.items()
                     }
-            print(f"  boxscores: {len(self.game_margins)} games with margins")
+            self._log(f"  boxscores: {len(self.game_margins)} games with margins")
 
         # 6. Season stats CSV
-        self.player_id_to_name: Dict[str, str] = {}  # pid_str → player name
-        self.player_id_to_position: Dict[str, str] = {}  # pid_str → raw position
         p = data_dir / "season_stats.csv"
         if p.exists():
             with p.open(newline="") as f:
@@ -256,7 +265,87 @@ class EnrichmentData:
                         # we want team-level pace/rating — take from any player)
                         if team not in self.team_season_stats:
                             self.team_season_stats[team] = row
-            print(f"  season_stats: {len(self.season_stats)} players, {len(self.team_season_stats)} teams, {len(self.player_id_to_name)} named")
+            self._log(
+                f"  season_stats: {len(self.season_stats)} players, "
+                f"{len(self.team_season_stats)} teams, {len(self.player_id_to_name)} named"
+            )
+
+    def ingest_log_positions(self, all_rows: Sequence[Tuple[date, str, Dict[str, Any]]]) -> None:
+        counts: Dict[Tuple[str, str, int], Counter[str]] = defaultdict(Counter)
+        for game_date, player_id, row in all_rows:
+            if game_date is None:
+                continue
+            pid = str(player_id or "").strip()
+            team = str(row.get("TEAM_ABBREVIATION") or "").strip().upper()
+            start_position = str(row.get("START_POSITION") or row.get("POSITION") or "").strip().upper()
+            if not pid or not team or not start_position:
+                continue
+            counts[(pid, team, season_key_for_date(game_date))][start_position] += 1
+        self.log_position_counts = counts
+
+    def load_live_master_feed_positions(self, master_feed_path: Path) -> None:
+        positions: Dict[str, str] = {}
+        if master_feed_path.exists():
+            try:
+                payload = json.loads(master_feed_path.read_text())
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for player in payload:
+                    if not isinstance(player, dict):
+                        continue
+                    pid = str(player.get("id") or "").strip()
+                    position = str(player.get("position") or "").strip().upper()
+                    if pid and position:
+                        positions[pid] = position
+        self.live_player_id_to_position = positions
+
+    def _get_log_position(
+        self,
+        player_id: Optional[str],
+        *,
+        team_abbrev: Optional[str],
+        game_date: Optional[date],
+    ) -> Optional[str]:
+        pid = str(player_id or "").strip()
+        team = str(team_abbrev or "").strip().upper()
+        if not pid or not team or game_date is None:
+            return None
+        counter = self.log_position_counts.get((pid, team, season_key_for_date(game_date)))
+        if not counter:
+            return None
+        return counter.most_common(1)[0][0]
+
+    def get_player_position_resolution(
+        self,
+        player_id: Optional[str],
+        *,
+        team_abbrev: Optional[str] = None,
+        game_date: Optional[date] = None,
+        allow_live_fallback: bool = False,
+    ) -> Tuple[str, str]:
+        pid = str(player_id or "").strip()
+        if not pid:
+            return "G", "fallback"
+
+        season_position = str(self.player_id_to_position.get(pid) or "").strip().upper()
+        if season_position:
+            return season_position, "season_stats"
+
+        log_position = self._get_log_position(
+            pid,
+            team_abbrev=team_abbrev,
+            game_date=game_date,
+        )
+        if log_position:
+            return log_position, "log_modal"
+
+        if allow_live_fallback:
+            live_position = str(self.live_player_id_to_position.get(pid) or "").strip().upper()
+            if live_position:
+                return live_position, "master_feed"
+
+        return "G", "fallback"
 
 
     def get_opp_def_ranks(self, opp_abbrev: Optional[str]) -> Dict[str, Optional[float]]:
@@ -296,7 +385,7 @@ class EnrichmentData:
             return empty
 
         # Map position to group: G / F / C
-        pos_group = POSITION_GROUP.get((position or "").upper(), "G")
+        pos_group = normalize_position_group(position or "G")
         zones = team_zones.get(pos_group, {})
         if not zones:
             zones = team_zones.get("G", {})  # fallback
@@ -418,15 +507,38 @@ class EnrichmentData:
         margins = self.game_margins.get(normalized, {})
         return margins.get(team_abbrev.upper())
 
-    def get_player_position(self, player_id: Optional[str]) -> Optional[str]:
-        pid = str(player_id or "").strip()
-        if not pid:
-            return None
-        position = self.player_id_to_position.get(pid)
-        return position or None
+    def get_player_position(
+        self,
+        player_id: Optional[str],
+        *,
+        team_abbrev: Optional[str] = None,
+        game_date: Optional[date] = None,
+        allow_live_fallback: bool = False,
+    ) -> str:
+        position, _ = self.get_player_position_resolution(
+            player_id,
+            team_abbrev=team_abbrev,
+            game_date=game_date,
+            allow_live_fallback=allow_live_fallback,
+        )
+        return position
 
-    def get_player_position_group(self, player_id: Optional[str]) -> str:
-        return normalize_position_group(self.get_player_position(player_id))
+    def get_player_position_group(
+        self,
+        player_id: Optional[str],
+        *,
+        team_abbrev: Optional[str] = None,
+        game_date: Optional[date] = None,
+        allow_live_fallback: bool = False,
+    ) -> str:
+        return normalize_position_group(
+            self.get_player_position(
+                player_id,
+                team_abbrev=team_abbrev,
+                game_date=game_date,
+                allow_live_fallback=allow_live_fallback,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +608,14 @@ def _metric_rate(row: Dict[str, Any], key: str) -> Optional[float]:
     if num is None or mins is None or mins <= 0:
         return None
     return num / mins
+
+
+def _target_per_min(row: Dict[str, Any], stat_type: str) -> Optional[float]:
+    total = _sum_stat(row, stat_type)
+    mins = _safe_float(row.get("MIN"))
+    if total is None or mins is None or mins <= 0:
+        return None
+    return total / mins
 
 
 def _parse_matchup(matchup: Any, team: str) -> Tuple[Optional[str], Optional[int]]:
@@ -814,6 +934,7 @@ def _build_key_teammate_onoff_features(
     game_idx: int,
     *,
     stat_type: str,
+    target_pos_group: str,
     team_presence_index: Dict[Tuple[str, date], set[str]],
     team_game_dates_by_season: Dict[Tuple[str, int], List[date]],
     current_missing_player_priors: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -850,6 +971,31 @@ def _build_key_teammate_onoff_features(
             _safe_float(priors.get("drives_pg")),
         )
     }
+    feature_values["missing_key_teammate_count"] = float(len(missing_teammate_priors))
+    feature_values["missing_same_pos_key_count"] = float(
+        sum(
+            1
+            for priors in missing_teammate_priors.values()
+            if normalize_position_group(priors.get("pos_group")) == target_pos_group
+        )
+    )
+    feature_values["missing_guard_key_count"] = float(
+        sum(
+            1
+            for priors in missing_teammate_priors.values()
+            if normalize_position_group(priors.get("pos_group")) == "G"
+        )
+    )
+    feature_values["missing_playmaker_key_count"] = float(
+        sum(
+            1
+            for priors in missing_teammate_priors.values()
+            if is_playmaker(
+                _safe_float(priors.get("ast_pct")),
+                _safe_float(priors.get("potential_ast_pg")),
+            )
+        )
+    )
 
     previous_team_dates = [
         game_date
@@ -876,6 +1022,32 @@ def _build_key_teammate_onoff_features(
             )
             if absent_count >= RETURN_ABSENT_THRESHOLD:
                 returning_teammate_priors[teammate_id] = priors
+
+    feature_values["returning_key_teammate_count"] = float(len(returning_teammate_priors))
+    feature_values["returning_same_pos_key_count"] = float(
+        sum(
+            1
+            for priors in returning_teammate_priors.values()
+            if normalize_position_group(priors.get("pos_group")) == target_pos_group
+        )
+    )
+    feature_values["returning_guard_key_count"] = float(
+        sum(
+            1
+            for priors in returning_teammate_priors.values()
+            if normalize_position_group(priors.get("pos_group")) == "G"
+        )
+    )
+    feature_values["returning_playmaker_key_count"] = float(
+        sum(
+            1
+            for priors in returning_teammate_priors.values()
+            if is_playmaker(
+                _safe_float(priors.get("ast_pct")),
+                _safe_float(priors.get("potential_ast_pg")),
+            )
+        )
+    )
 
     feature_values.update(
         _aggregate_teammate_delta_features(
@@ -1076,7 +1248,11 @@ def _build_minutes_row(
     )
 
     last_game_minutes = _safe_float(prior_same_team_season_rows[-1].get("MIN")) if prior_same_team_season_rows else None
-    target_pos_group = enrichment.get_player_position_group(target_player_id)
+    target_pos_group = enrichment.get_player_position_group(
+        target_player_id,
+        team_abbrev=team,
+        game_date=target_date,
+    )
     opponent, is_home = _parse_matchup(target_row.get("MATCHUP"), team)
 
     current_missing_player_priors = {
@@ -1091,6 +1267,7 @@ def _build_minutes_row(
         player_history,
         game_idx,
         stat_type="PTS",
+        target_pos_group=target_pos_group,
         team_presence_index=team_presence_index,
         team_game_dates_by_season=team_game_dates_by_season,
         current_missing_player_priors=current_missing_player_priors,
@@ -1224,8 +1401,16 @@ def _build_regression_row(
     # Gamelogs don't carry PLAYER_NAME — resolve from season_stats by PLAYER_ID
     player_id_str = str(target_row.get("PLAYER_ID") or "").strip()
     player_name = enrichment.player_id_to_name.get(player_id_str, "")
-    position = enrichment.get_player_position(player_id_str)
-    target_pos_group = enrichment.get_player_position_group(player_id_str)
+    position = enrichment.get_player_position(
+        player_id_str,
+        team_abbrev=team,
+        game_date=target_date,
+    )
+    target_pos_group = enrichment.get_player_position_group(
+        player_id_str,
+        team_abbrev=team,
+        game_date=target_date,
+    )
 
     opp_ranks   = enrichment.get_opp_def_ranks(opp)
     opp_zones   = enrichment.get_opp_def_zones(opp, position)
@@ -1249,6 +1434,7 @@ def _build_regression_row(
         player_history,
         game_idx,
         stat_type=stat_type,
+        target_pos_group=target_pos_group,
         team_presence_index=team_presence_index,
         team_game_dates_by_season=team_game_dates_by_season,
         current_missing_player_priors=team_missing_player_priors_dict.get((team, target_date)),
@@ -1270,6 +1456,11 @@ def _build_regression_row(
         avg_pace = _mean(pace_recent)
         if avg_pace and avg_pace > 0:
             r5_pts_per100 = (r5_avg / m5_avg) * 48.0 * 100.0 / avg_pace
+
+    recent10_target_per_min = _mean([_target_per_min(r, stat_type) for r in prior_rows[-10:]])
+    same_pos_missing_minutes = (
+        _safe_float((same_pos_missing_stats or {}).get("missing_same_pos_minutes")) or 0.0
+    )
 
     row_obj = {
         # Identity
@@ -1324,6 +1515,10 @@ def _build_regression_row(
         "season_fg3a_rate": _r(_mean([_metric_rate(r, "FG3A") for r in prior_rows])),
         "recent10_fg3a_rate": _r(_mean([_metric_rate(r, "FG3A") for r in prior_rows[-10:]])),
         "recent5_pts_per100": _r(r5_pts_per100),
+        "recent10_target_per_min": _r(recent10_target_per_min),
+        "missing_same_pos_minutes_x_player_target_per_min": _r(
+            same_pos_missing_minutes * (recent10_target_per_min or 0.0)
+        ),
         "recent5_1h_stat_share": _r(r5_1h_share),
         # Opponent defense (v2)
         **opp_ranks,
@@ -1462,7 +1657,11 @@ def _build_missing_team_stats(
                     pid,
                     {
                         "last_active_date": current_date,
-                        "pos_group": enrichment.get_player_position_group(pid),
+                        "pos_group": enrichment.get_player_position_group(
+                            pid,
+                            team_abbrev=team,
+                            game_date=current_date,
+                        ),
                         "usg_history": [],
                         "ast_pct_history": [],
                         "potential_ast_history": [],
@@ -1484,7 +1683,11 @@ def _build_missing_team_stats(
                     state["drive_history"].append((current_date, drives))
                 state["min_history"].append((current_date, mins))
                 state["last_active_date"] = current_date
-                state["pos_group"] = enrichment.get_player_position_group(pid)
+                state["pos_group"] = enrichment.get_player_position_group(
+                    pid,
+                    team_abbrev=team,
+                    game_date=current_date,
+                )
 
                 if len(state["usg_history"]) > 25:
                     state["usg_history"] = state["usg_history"][-25:]
@@ -1515,6 +1718,7 @@ def _prepare_dataset_context(
     print("\nLoading game logs...")
     active_rows = _build_history(gamelog_paths)
     full_boxscore_rows = _build_history(gamelog_paths, include_zero_minutes=True)
+    enrichment.ingest_log_positions(full_boxscore_rows)
     print(f"  {len(active_rows):,} active game-log entries")
     print(f"  {len(full_boxscore_rows):,} boxscore-present entries")
 

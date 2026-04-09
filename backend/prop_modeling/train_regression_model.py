@@ -38,6 +38,7 @@ from minutes_model_config import (
     build_fallback_modeled_minutes,
     minutes_metrics_summary,
 )
+from injury_feature_config import default_promotion_guardrail_config
 
 
 DEFAULT_REGRESSION_DATASET_PATH = GENERATED_DIR / "regression_training_dataset.csv"
@@ -137,6 +138,12 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
             b2b = pd.to_numeric(out["is_b2b"], errors="coerce").fillna(0.0)
             pred_min = pred_min * (1.0 - 0.035 * b2b)
         out["predicted_minutes"] = pred_min.clip(lower=4.0, upper=42.0)
+
+    if "modeled_minutes_q50" in out.columns and "recent10_target_per_min" in out.columns:
+        out["modeled_minutes_x_recent10_target_per_min"] = (
+            pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
+            * pd.to_numeric(out["recent10_target_per_min"], errors="coerce").fillna(0.0)
+        )
 
     return out
 
@@ -530,6 +537,7 @@ def main() -> int:
         split_date=split_date,
     )
     df = _attach_modeled_minutes_features(df, minutes_pred_frame)
+    df = _engineer_features(df)
 
     feature_cols = _derive_feature_columns(df)
     if args.unified and "stat_type" not in feature_cols:
@@ -560,6 +568,7 @@ def main() -> int:
             "test_metrics": minutes_metrics,
             "heuristic_baseline_metrics": heuristic_minutes_metrics,
         },
+        "promotion_guardrail": default_promotion_guardrail_config(),
         "stat_models": {},
     }
 
@@ -574,6 +583,7 @@ def main() -> int:
                 "test_metrics": minutes_metrics,
                 "heuristic_baseline_metrics": heuristic_minutes_metrics,
                 "modeled_minutes_features": MODELED_MINUTES_FEATURE_COLUMNS,
+                "promotion_guardrail": default_promotion_guardrail_config(),
             },
             indent=2,
             sort_keys=True,

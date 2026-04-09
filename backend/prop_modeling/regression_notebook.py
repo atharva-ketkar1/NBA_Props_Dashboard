@@ -238,7 +238,15 @@ MINUTES_FEATURE_COLS = [
     "missing_onball_drives_pg",
     "missing_onball_minutes",
     "missing_key_teammates_player_minutes_delta",
+    "missing_key_teammate_count",
+    "missing_same_pos_key_count",
+    "missing_guard_key_count",
+    "missing_playmaker_key_count",
     "returning_key_teammates_player_minutes_delta",
+    "returning_key_teammate_count",
+    "returning_same_pos_key_count",
+    "returning_guard_key_count",
+    "returning_playmaker_key_count",
     "recent_team_games_missed_10",
     "inactive_streak_team_games",
     "games_since_return",
@@ -274,6 +282,8 @@ BASE_FEATURE_COLS = [
     "season_drive_rate", "recent10_drive_rate",
     "season_fg3a_rate", "recent10_fg3a_rate",
     "recent5_pts_per100",
+    "recent10_target_per_min",
+    "missing_same_pos_minutes_x_player_target_per_min",
     "recent5_1h_stat_share",
     # Opponent defensive features
     "opp_pts_defense_rank",
@@ -318,18 +328,29 @@ BASE_FEATURE_COLS = [
     "playmaker_vacuum_x_player_ast_rate",
     "onball_vacuum_x_player_drive_rate",
     "usage_vacuum_x_player_usage_pct",
+    "missing_playmaker_potential_ast_pg_x_player_ast_rate",
+    "missing_onball_drives_pg_x_player_drive_rate",
+    "missing_high_usage_usage_pct_x_player_usage_rate",
     "missing_key_teammates_player_stat_delta",
     "missing_key_teammates_player_minutes_delta",
     "missing_key_teammates_player_usage_pct_delta",
     "missing_key_teammates_player_potential_ast_rate_delta",
     "missing_key_teammates_player_drive_rate_delta",
     "missing_key_teammates_effective_support",
+    "missing_key_teammate_count",
+    "missing_same_pos_key_count",
+    "missing_guard_key_count",
+    "missing_playmaker_key_count",
     "returning_key_teammates_player_stat_delta",
     "returning_key_teammates_player_minutes_delta",
     "returning_key_teammates_player_usage_pct_delta",
     "returning_key_teammates_player_potential_ast_rate_delta",
     "returning_key_teammates_player_drive_rate_delta",
     "returning_key_teammates_effective_support",
+    "returning_key_teammate_count",
+    "returning_same_pos_key_count",
+    "returning_guard_key_count",
+    "returning_playmaker_key_count",
     "team_fg_attempts_share_last5",
 ]
 
@@ -384,6 +405,12 @@ def engineer_features(input_df: pd.DataFrame) -> pd.DataFrame:
             pred_min = pred_min * (1.0 - 0.035 * b2b)
         out["predicted_minutes"] = pred_min.clip(lower=4.0, upper=42.0)
 
+    if "modeled_minutes_q50" in out.columns and "recent10_target_per_min" in out.columns:
+        out["modeled_minutes_x_recent10_target_per_min"] = (
+            pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
+            * pd.to_numeric(out["recent10_target_per_min"], errors="coerce").fillna(0.0)
+        )
+
     return out
 
 
@@ -392,7 +419,8 @@ df = engineer_features(df)
 # Final feature list: base (from CSV) + engineered
 ENGINEERED_COLS = [
     c for c in ["momentum_diff_5v20", "momentum_diff_3v10",
-                 "expected_possessions", "predicted_minutes"]
+                 "expected_possessions", "predicted_minutes",
+                 "modeled_minutes_x_recent10_target_per_min"]
     if c in df.columns
 ]
 FEATURE_COLS = BASE_FEATURE_COLS + ENGINEERED_COLS
@@ -654,7 +682,14 @@ minutes_pred_frame, minutes_test_metrics, heuristic_minutes_metrics, minutes_mod
     train_cutoff=shared_split_ts,
 )
 df = attach_modeled_minutes(df, minutes_pred_frame)
+df = engineer_features(df)
 
+ENGINEERED_COLS = [
+    c for c in ["momentum_diff_5v20", "momentum_diff_3v10",
+                 "expected_possessions", "predicted_minutes",
+                 "modeled_minutes_x_recent10_target_per_min"]
+    if c in df.columns
+]
 FEATURE_COLS = BASE_FEATURE_COLS + ENGINEERED_COLS + [
     column for column in MODELED_MINUTES_COLS if column in df.columns
 ]
@@ -983,6 +1018,219 @@ def backtest_vs_lines(
     return merged
 
 
+SUPPORTED_PROMOTION_GUARDRAIL_STATS = {
+    "PTS", "AST", "REB", "FG3M",
+    "PTS+AST", "PTS+REB", "REB+AST", "PTS+REB+AST",
+}
+
+
+def default_promotion_guardrail_config() -> Dict[str, float]:
+    return {
+        "min_missing_team_usage_pct": 45.0,
+        "min_missing_team_minutes": 60.0,
+        "min_recent5_minutes_avg": 12.0,
+        "min_modeled_minutes_delta_vs_recent5": 3.0,
+        "min_missing_key_teammates_player_minutes_delta": 2.0,
+        "min_missing_same_pos_minutes": 28.0,
+        "min_missing_guard_minutes": 28.0,
+        "min_cross_position_creator_metric": 10.0,
+        "single_stat_gap_pct": 0.15,
+        "combo_stat_gap_pct": 0.12,
+        "display_edge_score_cap": 69.9,
+        "edge_score_penalty_points": 12.0,
+        "confidence_penalty_points": 15.0,
+    }
+
+
+def _merge_backtest_predictions(
+    q50_preds: np.ndarray,
+    test_df: pd.DataFrame,
+    prop_df: Optional[pd.DataFrame],
+    *,
+    q25_preds: Optional[np.ndarray] = None,
+    q75_preds: Optional[np.ndarray] = None,
+) -> Optional[pd.DataFrame]:
+    if prop_df is None:
+        return None
+    prop_local = prop_df.copy()
+    prop_local["game_date"] = pd.to_datetime(prop_local["game_date"], errors="coerce")
+
+    test_with_preds = test_df.copy()
+    test_with_preds["q50_pred"] = q50_preds
+    if q25_preds is not None:
+        test_with_preds["q25_pred"] = q25_preds
+    if q75_preds is not None:
+        test_with_preds["q75_pred"] = q75_preds
+    test_with_preds["player_id"] = test_with_preds["player_id"].astype(str)
+    prop_local["player_id"] = prop_local["player_id"].astype(str)
+
+    merged = test_with_preds.merge(
+        prop_local[[
+            "game_date", "player_id", "stat_type", "sportsbook",
+            "side", "line", "final_stat_value", "hit_label",
+        ]].drop_duplicates(),
+        on=["game_date", "player_id", "stat_type"],
+        how="inner",
+    )
+    if merged.empty:
+        return None
+    merged["line"] = pd.to_numeric(merged["line"], errors="coerce")
+    merged = merged[merged["line"].notna()].copy()
+    return merged
+
+
+def _promotion_role_alignment_mask(merged: pd.DataFrame, cfg: Dict[str, float]) -> pd.Series:
+    same_pos_ok = pd.to_numeric(merged.get("missing_same_pos_minutes"), errors="coerce").fillna(0.0) >= cfg["min_missing_same_pos_minutes"]
+    guard_ok = pd.to_numeric(merged.get("missing_guard_minutes"), errors="coerce").fillna(0.0) >= cfg["min_missing_guard_minutes"]
+    creator_ok = (
+        (
+            pd.to_numeric(merged.get("missing_playmaker_potential_ast_pg"), errors="coerce").fillna(0.0)
+            >= cfg["min_cross_position_creator_metric"]
+        )
+        & (
+            pd.to_numeric(
+                merged.get("missing_playmaker_potential_ast_pg_x_player_ast_rate"),
+                errors="coerce",
+            ).fillna(
+                pd.to_numeric(merged.get("playmaker_vacuum_x_player_ast_rate"), errors="coerce").fillna(0.0)
+            ) > 0.0
+        )
+    ) | (
+        (
+            pd.to_numeric(merged.get("missing_onball_drives_pg"), errors="coerce").fillna(0.0)
+            >= cfg["min_cross_position_creator_metric"]
+        )
+        & (
+            pd.to_numeric(
+                merged.get("missing_onball_drives_pg_x_player_drive_rate"),
+                errors="coerce",
+            ).fillna(
+                pd.to_numeric(merged.get("onball_vacuum_x_player_drive_rate"), errors="coerce").fillna(0.0)
+            ) > 0.0
+        )
+    )
+    return same_pos_ok | guard_ok | creator_ok
+
+
+def _best_gap_threshold(eligible: pd.DataFrame, *, default_threshold: float) -> Tuple[float, Dict[str, Any]]:
+    if eligible.empty:
+        return default_threshold, {"status": "no_eligible_rows", "rows": 0}
+
+    false_under = eligible["actual_value"] > eligible["line"]
+    if false_under.sum() == 0:
+        return default_threshold, {"status": "no_false_unders", "rows": int(len(eligible))}
+
+    best = {
+        "threshold": default_threshold,
+        "f1": -1.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "suppressed": 0,
+        "rows": int(len(eligible)),
+    }
+    for threshold in np.arange(0.05, 0.251, 0.01):
+        suppressed = eligible["gap_pct"] < threshold
+        tp = int((suppressed & false_under).sum())
+        fp = int((suppressed & ~false_under).sum())
+        fn = int((~suppressed & false_under).sum())
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        if (
+            f1 > best["f1"]
+            or (math.isclose(f1, best["f1"]) and precision > best["precision"])
+            or (
+                math.isclose(f1, best["f1"])
+                and math.isclose(precision, best["precision"])
+                and threshold < best["threshold"]
+            )
+        ):
+            best = {
+                "threshold": round(float(threshold), 4),
+                "f1": round(float(f1), 4),
+                "precision": round(float(precision), 4),
+                "recall": round(float(recall), 4),
+                "suppressed": int(suppressed.sum()),
+                "rows": int(len(eligible)),
+            }
+    return float(best["threshold"]), best
+
+
+def calibrate_promotion_guardrail_config(
+    tuned_results: Dict[str, Dict[str, Any]],
+    test_df: pd.DataFrame,
+    prop_df: Optional[pd.DataFrame],
+) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    cfg = default_promotion_guardrail_config()
+    if prop_df is None:
+        return cfg, {"status": "skipped_missing_prop_dataset"}
+
+    merged_frames = []
+    for stat_type, result in tuned_results.items():
+        if stat_type not in SUPPORTED_PROMOTION_GUARDRAIL_STATS:
+            continue
+        test_st = test_df[test_df["stat_type"] == stat_type].copy()
+        if test_st.empty:
+            continue
+        merged = _merge_backtest_predictions(
+            result["q50"],
+            test_st,
+            prop_df,
+            q25_preds=result.get("q25"),
+            q75_preds=result.get("q75"),
+        )
+        if merged is not None and not merged.empty:
+            merged_frames.append(merged)
+
+    if not merged_frames:
+        return cfg, {"status": "no_overlapping_backtest_rows"}
+
+    merged_all = pd.concat(merged_frames, ignore_index=True)
+    merged_all["gap_pct"] = (
+        (pd.to_numeric(merged_all["line"], errors="coerce") - pd.to_numeric(merged_all["q50_pred"], errors="coerce"))
+        / pd.to_numeric(merged_all["line"], errors="coerce").abs().clip(lower=1.0)
+    ).clip(lower=0.0)
+    base_trigger = (
+        (pd.to_numeric(merged_all.get("missing_team_usage_pct"), errors="coerce").fillna(0.0) >= cfg["min_missing_team_usage_pct"])
+        & (pd.to_numeric(merged_all.get("missing_team_minutes"), errors="coerce").fillna(0.0) >= cfg["min_missing_team_minutes"])
+        & (pd.to_numeric(merged_all.get("recent5_minutes_avg"), errors="coerce").fillna(0.0) >= cfg["min_recent5_minutes_avg"])
+        & (
+            (
+                pd.to_numeric(merged_all.get("modeled_minutes_delta_vs_recent5"), errors="coerce").fillna(0.0)
+                >= cfg["min_modeled_minutes_delta_vs_recent5"]
+            )
+            | (
+                pd.to_numeric(
+                    merged_all.get("missing_key_teammates_player_minutes_delta"),
+                    errors="coerce",
+                ).fillna(0.0) >= cfg["min_missing_key_teammates_player_minutes_delta"]
+            )
+        )
+        & _promotion_role_alignment_mask(merged_all, cfg)
+        & (pd.to_numeric(merged_all["q50_pred"], errors="coerce") < pd.to_numeric(merged_all["line"], errors="coerce"))
+    )
+    eligible = merged_all[base_trigger].copy()
+    single_mask = ~eligible["stat_type"].astype(str).str.contains(r"\+")
+    combo_mask = ~single_mask
+
+    single_threshold, single_metrics = _best_gap_threshold(
+        eligible[single_mask].copy(),
+        default_threshold=cfg["single_stat_gap_pct"],
+    )
+    combo_threshold, combo_metrics = _best_gap_threshold(
+        eligible[combo_mask].copy(),
+        default_threshold=cfg["combo_stat_gap_pct"],
+    )
+    cfg["single_stat_gap_pct"] = single_threshold
+    cfg["combo_stat_gap_pct"] = combo_threshold
+    return cfg, {
+        "status": "ok",
+        "eligible_rows": int(len(eligible)),
+        "single_stat": single_metrics,
+        "combo_stat": combo_metrics,
+    }
+
+
 # %%
 prop_df_loaded = None
 if PROP_CSV:
@@ -1138,6 +1386,109 @@ if prop_df_loaded is not None and "PTS" in tuned_per_stat_results:
         q75_preds=tuned_per_stat_results["PTS"]["q75"],
         label="Tuned PTS model",
     )
+
+promotion_guardrail_config, promotion_guardrail_calibration = calibrate_promotion_guardrail_config(
+    tuned_per_stat_results,
+    test_all,
+    prop_df_loaded,
+)
+print("Promotion guardrail config:", promotion_guardrail_config)
+print("Promotion guardrail calibration:", promotion_guardrail_calibration)
+
+
+def build_position_contract_summary() -> Dict[str, Any]:
+    current_dir_candidates = [
+        Path("backend/data/current"),
+        Path("../data/current"),
+        Path("/content/drive/MyDrive/NBA_Dashboard/backend/data/current"),
+    ]
+    current_dir = next((path for path in current_dir_candidates if path.exists()), None)
+    if current_dir is None:
+        return {"status": "unavailable"}
+
+    season_stats_path = current_dir / "season_stats.csv"
+    master_feed_path = current_dir / "master_feed.json"
+    gamelog_paths = sorted(current_dir.glob("gamelogs_*.csv"))
+    if not season_stats_path.exists():
+        return {"status": "missing_season_stats"}
+
+    season_stats_df = pd.read_csv(season_stats_path)
+    if "POSITION" not in season_stats_df.columns:
+        season_stats_df["POSITION"] = np.nan
+    season_positions = season_stats_df["POSITION"].replace("", np.nan)
+    fill_rate = round(float(season_positions.notna().mean() * 100.0), 2) if len(season_stats_df) else 0.0
+
+    live_players = []
+    if master_feed_path.exists():
+        try:
+            live_players = json.loads(master_feed_path.read_text())
+        except Exception:
+            live_players = []
+
+    log_modal: Dict[Tuple[str, str], str] = {}
+    for path in gamelog_paths:
+        logs_df = pd.read_csv(path, usecols=lambda c: c in {"PLAYER_ID", "TEAM_ABBREVIATION", "START_POSITION"})
+        if logs_df.empty or "START_POSITION" not in logs_df.columns:
+            continue
+        logs_df["PLAYER_ID"] = logs_df["PLAYER_ID"].astype(str)
+        logs_df["TEAM_ABBREVIATION"] = logs_df["TEAM_ABBREVIATION"].astype(str).str.upper()
+        logs_df["START_POSITION"] = logs_df["START_POSITION"].fillna("").astype(str).str.upper()
+        logs_df = logs_df[logs_df["START_POSITION"] != ""].copy()
+        if logs_df.empty:
+            continue
+        counts = (
+            logs_df.groupby(["PLAYER_ID", "TEAM_ABBREVIATION", "START_POSITION"])
+            .size()
+            .reset_index(name="count")
+            .sort_values(["PLAYER_ID", "TEAM_ABBREVIATION", "count"], ascending=[True, True, False])
+            .drop_duplicates(["PLAYER_ID", "TEAM_ABBREVIATION"])
+        )
+        for _, row in counts.iterrows():
+            log_modal[(row["PLAYER_ID"], row["TEAM_ABBREVIATION"])] = row["START_POSITION"]
+
+    season_position_map = {}
+    if {"PLAYER_ID", "POSITION"}.issubset(season_stats_df.columns):
+        season_position_map = {
+            str(row["PLAYER_ID"]): str(row["POSITION"]).strip().upper()
+            for _, row in season_stats_df.iterrows()
+            if str(row.get("POSITION") or "").strip()
+        }
+
+    tier_counts: Dict[str, int] = {"season_stats": 0, "log_modal": 0, "master_feed": 0, "fallback": 0}
+    for player in live_players if isinstance(live_players, list) else []:
+        if not isinstance(player, dict):
+            continue
+        pid = str(player.get("id") or "").strip()
+        team = str(player.get("team") or "").strip().upper()
+        master_position = str(player.get("position") or "").strip().upper()
+        if pid in season_position_map:
+            tier_counts["season_stats"] += 1
+        elif (pid, team) in log_modal:
+            tier_counts["log_modal"] += 1
+        elif master_position:
+            tier_counts["master_feed"] += 1
+        else:
+            tier_counts["fallback"] += 1
+
+    total_live = sum(tier_counts.values())
+    return {
+        "status": "ok",
+        "season_stats_position_fill_rate_pct": fill_rate,
+        "live_resolution_counts": tier_counts,
+        "live_resolution_percentages": (
+            {
+                key: round((value / float(total_live)) * 100.0, 2)
+                for key, value in tier_counts.items()
+            }
+            if total_live > 0
+            else {}
+        ),
+        "live_resolution_total": total_live,
+    }
+
+
+position_contract_summary = build_position_contract_summary()
+print("Position contract summary:", position_contract_summary)
 
 # %% [markdown]
 # ## 11. LightGBM Unified Comparison
@@ -1362,6 +1713,7 @@ minutes_model.save_model(str(export_dir / minutes_model_file))
             "heuristic_baseline_metrics": heuristic_minutes_metrics,
             "oof_block_dates": MINUTES_OOF_BLOCK_DATES,
             "oof_min_train_dates": MINUTES_OOF_MIN_TRAIN_DATES,
+            "promotion_guardrail": promotion_guardrail_config,
         },
         indent=2,
     )
@@ -1412,6 +1764,9 @@ export_meta = {
         "n_folds":   len(cv_results.get("fold_metrics", [])),
     },
     "minutes_test_metrics": minutes_test_metrics,
+    "promotion_guardrail": promotion_guardrail_config,
+    "promotion_guardrail_calibration": promotion_guardrail_calibration,
+    "position_contract_summary": position_contract_summary,
     "per_stat_test_metrics": {
         st: {"mae": round(r["mae"], 4), "rmse": round(r["rmse"], 4), "r2": round(r["r2"], 4)}
         for st, r in tuned_per_stat_results.items()

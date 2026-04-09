@@ -24,6 +24,10 @@ PLAYMAKER_AST_PCT_THRESHOLD = 18.0
 PLAYMAKER_POTENTIAL_AST_THRESHOLD = 8.0
 ONBALL_DRIVES_THRESHOLD = 8.0
 
+INJURY_FRESHNESS_NORMAL_MAX_AGE_MINUTES = 60
+INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES = 15
+INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET = 6
+
 OVERLAY_MIN_RECENT5_MINUTES = 12.0
 SAME_POS_BENEFIT_MINUTES_THRESHOLD = 20.0
 CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD = 10.0
@@ -34,6 +38,16 @@ OVERLAY_MULTI_BENEFIT_MULTIPLIER = 1.04
 OVERLAY_MAX_MULTIPLIER = 1.05
 
 POSITION_GROUPS = ("G", "F", "C")
+PROMOTION_GUARDRAIL_SUPPORTED_STAT_TYPES = (
+    "PTS",
+    "AST",
+    "REB",
+    "FG3M",
+    "PTS+AST",
+    "PTS+REB",
+    "REB+AST",
+    "PTS+REB+AST",
+)
 
 TEAM_VACANCY_FEATURE_COLUMNS = (
     "missing_team_usage_pct",
@@ -57,6 +71,9 @@ INJURY_INTERACTION_COLUMNS = (
     "playmaker_vacuum_x_player_ast_rate",
     "onball_vacuum_x_player_drive_rate",
     "usage_vacuum_x_player_usage_pct",
+    "missing_playmaker_potential_ast_pg_x_player_ast_rate",
+    "missing_onball_drives_pg_x_player_drive_rate",
+    "missing_high_usage_usage_pct_x_player_usage_rate",
 )
 
 TEAMMATE_ONOFF_FEATURE_COLUMNS = (
@@ -66,12 +83,20 @@ TEAMMATE_ONOFF_FEATURE_COLUMNS = (
     "missing_key_teammates_player_potential_ast_rate_delta",
     "missing_key_teammates_player_drive_rate_delta",
     "missing_key_teammates_effective_support",
+    "missing_key_teammate_count",
+    "missing_same_pos_key_count",
+    "missing_guard_key_count",
+    "missing_playmaker_key_count",
     "returning_key_teammates_player_stat_delta",
     "returning_key_teammates_player_minutes_delta",
     "returning_key_teammates_player_usage_pct_delta",
     "returning_key_teammates_player_potential_ast_rate_delta",
     "returning_key_teammates_player_drive_rate_delta",
     "returning_key_teammates_effective_support",
+    "returning_key_teammate_count",
+    "returning_same_pos_key_count",
+    "returning_guard_key_count",
+    "returning_playmaker_key_count",
 )
 
 ALL_INJURY_FEATURE_COLUMNS = (
@@ -165,6 +190,35 @@ def make_teammate_onoff_stats() -> Dict[str, float]:
     return dict(EMPTY_TEAMMATE_ONOFF_STATS)
 
 
+def default_promotion_guardrail_config() -> Dict[str, float]:
+    return {
+        "min_missing_team_usage_pct": 45.0,
+        "min_missing_team_minutes": 60.0,
+        "min_recent5_minutes_avg": 12.0,
+        "min_modeled_minutes_delta_vs_recent5": 3.0,
+        "min_missing_key_teammates_player_minutes_delta": 2.0,
+        "min_missing_same_pos_minutes": 28.0,
+        "min_missing_guard_minutes": 28.0,
+        "min_cross_position_creator_metric": 10.0,
+        "single_stat_gap_pct": 0.15,
+        "combo_stat_gap_pct": 0.12,
+        "display_edge_score_cap": 69.9,
+        "edge_score_penalty_points": 12.0,
+        "confidence_penalty_points": 15.0,
+    }
+
+
+def resolve_promotion_guardrail_config(raw_config: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    resolved = default_promotion_guardrail_config()
+    if not isinstance(raw_config, dict):
+        return resolved
+    for key in list(resolved.keys()):
+        value = _coerce_float(raw_config.get(key))
+        if value is not None:
+            resolved[key] = value
+    return resolved
+
+
 def is_high_usage(usage_pct: Optional[float]) -> bool:
     return usage_pct is not None and usage_pct >= HIGH_USAGE_THRESHOLD
 
@@ -256,4 +310,13 @@ def apply_injury_feature_values(
     row_obj["usage_vacuum_x_player_usage_pct"] = _rounded_or_zero(
         (resolved_team["missing_high_usage_usage_pct"] or 0.0) * (chosen_usage_pct or 0.0)
     )
+    row_obj["missing_playmaker_potential_ast_pg_x_player_ast_rate"] = row_obj[
+        "playmaker_vacuum_x_player_ast_rate"
+    ]
+    row_obj["missing_onball_drives_pg_x_player_drive_rate"] = row_obj[
+        "onball_vacuum_x_player_drive_rate"
+    ]
+    row_obj["missing_high_usage_usage_pct_x_player_usage_rate"] = row_obj[
+        "usage_vacuum_x_player_usage_pct"
+    ]
     return row_obj

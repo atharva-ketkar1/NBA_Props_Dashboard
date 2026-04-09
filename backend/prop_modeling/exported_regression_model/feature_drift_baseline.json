@@ -164,96 +164,104 @@
     "std": 0.0811
   },
   "recent5_pts_per100": {
-    "mean": 11.8421,
-    "std": 9.0822
+    "mean": 11.8497,
+    "std": 9.0881
+  },
+  "recent10_target_per_min": {
+    "mean": 0.2836,
+    "std": 0.282
+  },
+  "missing_same_pos_minutes_x_player_target_per_min": {
+    "mean": 20.2761,
+    "std": 25.1175
   },
   "recent5_1h_stat_share": {
     "mean": 0.5322,
     "std": 0.1951
   },
   "opp_pts_defense_rank": {
-    "mean": 15.491,
-    "std": 4.1128
+    "mean": 15.5019,
+    "std": 4.1255
   },
   "opp_catchAndShoot_rank": {
     "mean": 15.4771,
     "std": 8.7687
   },
   "opp_pullup_rank": {
-    "mean": 15.2268,
-    "std": 8.7091
+    "mean": 15.2594,
+    "std": 8.7225
   },
   "opp_lessThan10ft_rank": {
     "mean": 15.7691,
     "std": 8.6894
   },
   "opp_def_restricted_pct": {
-    "mean": 0.663,
-    "std": 0.027
+    "mean": 0.6662,
+    "std": 0.0281
   },
   "opp_def_paint_pct": {
-    "mean": 0.441,
-    "std": 0.026
+    "mean": 0.4393,
+    "std": 0.0272
   },
   "opp_def_3pt_pct": {
     "mean": 0.3708,
-    "std": 0.0162
+    "std": 0.0157
   },
   "opp_def_restricted_rank": {
-    "mean": 15.4229,
-    "std": 8.6196
+    "mean": 15.4676,
+    "std": 8.7731
   },
   "opp_def_3pt_rank": {
-    "mean": 13.9417,
-    "std": 7.9038
+    "mean": 14.0615,
+    "std": 8.2493
   },
   "player_catchAndShoot_pg": {
-    "mean": 3.0861,
-    "std": 1.8789
+    "mean": 3.0841,
+    "std": 1.8733
   },
   "player_pullup_pg": {
-    "mean": 2.197,
-    "std": 2.5992
+    "mean": 2.1949,
+    "std": 2.6064
   },
   "player_lessThan10ft_pg": {
-    "mean": 4.5125,
-    "std": 2.9875
+    "mean": 4.5799,
+    "std": 3.0307
   },
   "player_transition_pg": {
-    "mean": 2.5497,
-    "std": 1.4954
+    "mean": 2.552,
+    "std": 1.4914
   },
   "player_isolation_pg": {
-    "mean": 1.23,
-    "std": 1.3703
+    "mean": 1.2308,
+    "std": 1.3711
   },
   "player_pnr_pg": {
-    "mean": 2.1787,
-    "std": 2.2415
+    "mean": 2.1864,
+    "std": 2.2424
   },
   "player_spotup_pg": {
-    "mean": 3.1262,
-    "std": 1.466
+    "mean": 3.123,
+    "std": 1.465
   },
   "matchup_score_fg3": {
-    "mean": -0.0144,
-    "std": 2.0464
+    "mean": -0.0143,
+    "std": 2.0437
   },
   "matchup_score_pts": {
-    "mean": -0.0406,
-    "std": 2.545
+    "mean": -0.0337,
+    "std": 2.5523
   },
   "matchup_score_interior": {
-    "mean": 0.0782,
-    "std": 3.0302
+    "mean": 0.0799,
+    "std": 3.0752
   },
   "team_pace": {
-    "mean": 101.1142,
-    "std": 2.7454
+    "mean": 101.0494,
+    "std": 2.7364
   },
   "opp_def_rating": {
-    "mean": 111.4959,
-    "std": 10.1966
+    "mean": 112.6109,
+    "std": 8.3111
   },
   "recent5_avg_game_margin": {
     "mean": 12.962,
@@ -272,20 +280,20 @@
     "std": 40.8073
   },
   "missing_same_pos_usage_pct": {
-    "mean": 31.3852,
-    "std": 26.4792
+    "mean": 84.9352,
+    "std": 39.0632
   },
   "missing_same_pos_minutes": {
-    "mean": 26.7521,
-    "std": 25.5489
+    "mean": 72.6227,
+    "std": 40.8073
   },
   "missing_guard_usage_pct": {
-    "mean": 37.5787,
-    "std": 25.7551
+    "mean": 84.9352,
+    "std": 39.0632
   },
   "missing_guard_minutes": {
-    "mean": 32.5312,
-    "std": 26.0382
+    "mean": 72.6227,
+    "std": 40.8073
   },
   "missing_high_usage_usage_pct": {
     "mean": 34.2071,
@@ -323,6 +331,18 @@
     "mean": 624.1445,
     "std": 607.1917
   },
+  "missing_playmaker_potential_ast_pg_x_player_ast_rate": {
+    "mean": 1.4361,
+    "std": 1.8123
+  },
+  "missing_onball_drives_pg_x_player_drive_rate": {
+    "mean": 1.1046,
+    "std": 2.0944
+  },
+  "missing_high_usage_usage_pct_x_player_usage_rate": {
+    "mean": 624.1445,
+    "std": 607.1917
+  },
   "missing_key_teammates_player_stat_delta": {
     "mean": 0.2918,
     "std": 1.6314
@@ -346,6 +366,22 @@
   "missing_key_teammates_effective_support": {
     "mean": 4.3349,
     "std": 2.9804
+  },
+  "missing_key_teammate_count": {
+    "mean": 2.9102,
+    "std": 1.7032
+  },
+  "missing_same_pos_key_count": {
+    "mean": 2.9102,
+    "std": 1.7032
+  },
+  "missing_guard_key_count": {
+    "mean": 2.9102,
+    "std": 1.7032
+  },
+  "missing_playmaker_key_count": {
+    "mean": 1.1524,
+    "std": 1.0469
   },
   "returning_key_teammates_player_stat_delta": {
     "mean": -0.1375,
@@ -371,6 +407,22 @@
     "mean": 2.3654,
     "std": 3.2957
   },
+  "returning_key_teammate_count": {
+    "mean": 0.7816,
+    "std": 0.8788
+  },
+  "returning_same_pos_key_count": {
+    "mean": 0.7816,
+    "std": 0.8788
+  },
+  "returning_guard_key_count": {
+    "mean": 0.7816,
+    "std": 0.8788
+  },
+  "returning_playmaker_key_count": {
+    "mean": 0.3137,
+    "std": 0.5515
+  },
   "momentum_diff_5v20": {
     "mean": 0.1094,
     "std": 1.9705
@@ -380,23 +432,27 @@
     "std": 2.2711
   },
   "expected_possessions": {
-    "mean": 18.6937,
-    "std": 5.4919
+    "mean": 18.6817,
+    "std": 5.4882
   },
   "predicted_minutes": {
     "mean": 24.3383,
     "std": 7.5892
   },
+  "modeled_minutes_x_recent10_target_per_min": {
+    "mean": 7.301,
+    "std": 8.4079
+  },
   "modeled_minutes_q50": {
-    "mean": 24.8174,
-    "std": 7.7271
+    "mean": 24.8036,
+    "std": 7.7307
   },
   "modeled_minutes_iqr": {
-    "mean": 6.1904,
-    "std": 1.859
+    "mean": 6.1973,
+    "std": 1.8652
   },
   "modeled_minutes_delta_vs_recent5": {
-    "mean": 0.1404,
-    "std": 2.8027
+    "mean": 0.1266,
+    "std": 2.814
   }
 }

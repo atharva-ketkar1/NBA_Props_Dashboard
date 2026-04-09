@@ -14,13 +14,18 @@ from dotenv import load_dotenv
 
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
+    INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
+    INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET,
+    INJURY_FRESHNESS_NORMAL_MAX_AGE_MINUTES,
     ONBALL_BENEFIT_DRIVES_THRESHOLD,
     OVERLAY_MAX_MULTIPLIER,
     OVERLAY_MIN_RECENT5_MINUTES,
     OVERLAY_MULTI_BENEFIT_MULTIPLIER,
     OVERLAY_SINGLE_BENEFIT_MULTIPLIER,
+    PROMOTION_GUARDRAIL_SUPPORTED_STAT_TYPES,
     SAME_POS_BENEFIT_MINUTES_THRESHOLD,
     USAGE_BENEFIT_USAGE_THRESHOLD,
+    resolve_promotion_guardrail_config,
 )
 from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
@@ -698,10 +703,21 @@ def _book_sort_key(book: Any) -> Tuple[int, str]:
 
 def _candidate_sort_key(candidate: Dict[str, Any]) -> Tuple[float, float, float]:
     return (
-        candidate.get("edge_score", 0.0),
-        candidate.get("confidence", 0.0),
+        _ranking_edge_score(candidate),
+        _ranking_confidence(candidate),
         candidate.get("signal_score", 0.0),
     )
+
+
+def _ranking_edge_score(candidate: Dict[str, Any]) -> float:
+    return _safe_float(candidate.get("display_edge_score"), _safe_float(candidate.get("edge_score"), 0.0)) or 0.0
+
+
+def _ranking_confidence(candidate: Dict[str, Any]) -> float:
+    return _safe_float(
+        candidate.get("display_confidence"),
+        _safe_float(candidate.get("confidence"), 0.0),
+    ) or 0.0
 
 
 def _format_signal_score_threshold(value: float) -> str:
@@ -2091,6 +2107,218 @@ def _compute_lineup_adjustment(
     return adjustment
 
 
+def _injury_refresh_target_age_minutes(schedule_payload: Dict[str, Any]) -> int:
+    now = get_et_now()
+    rows = schedule_payload.get("games", []) if isinstance(schedule_payload, dict) else []
+    today_str = now.date().isoformat()
+    has_today_games = any(
+        isinstance(row, dict) and _normalize_game_date(row.get("game_date")) == today_str
+        for row in rows
+    )
+    if has_today_games and now.hour >= INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET:
+        return INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES
+    return INJURY_FRESHNESS_NORMAL_MAX_AGE_MINUTES
+
+
+def _refresh_injury_report_for_scoring(
+    schedule_payload: Dict[str, Any],
+    *,
+    refresh_label: str,
+) -> None:
+    target_age_minutes = _injury_refresh_target_age_minutes(schedule_payload)
+    try:
+        from pathlib import Path
+        from scrapers import fetch_nba_injury_report
+
+        result = fetch_nba_injury_report.refresh_nba_injury_report_if_needed(
+            output_path=Path(os.path.join(CURRENT_DIR, "nba_injury_report.json")),
+            schedule_path=Path(SCHEDULE_PATH),
+            min_refresh_interval_seconds=int(target_age_minutes * 60),
+        )
+        payload = result.get("payload") if isinstance(result, dict) else {}
+        logger.info(
+            "Edge Score injury refresh | label=%s refreshed=%s age_target_min=%s games=%s players=%s",
+            refresh_label,
+            bool(result.get("refreshed")) if isinstance(result, dict) else False,
+            target_age_minutes,
+            (payload or {}).get("game_count", 0),
+            (payload or {}).get("player_row_count", 0),
+        )
+    except Exception as exc:
+        logger.warning("Edge Score injury pre-refresh failed: %s", exc)
+
+
+def _injury_artifact_freshness(
+    injury_report: Dict[str, Any],
+    *,
+    schedule_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    generated_at = str((injury_report or {}).get("generated_at") or "").strip()
+    age_minutes = None
+    if generated_at:
+        try:
+            generated_dt = datetime.fromisoformat(generated_at)
+            if generated_dt.tzinfo is None:
+                generated_dt = generated_dt.replace(tzinfo=ET_ZONE)
+            age_minutes = round(
+                max(0.0, (get_et_now() - generated_dt.astimezone(ET_ZONE)).total_seconds() / 60.0),
+                2,
+            )
+        except ValueError:
+            age_minutes = None
+    max_age_minutes = _injury_refresh_target_age_minutes(schedule_payload)
+    return {
+        "generated_at": generated_at or None,
+        "report_timestamp_et": (injury_report or {}).get("report_timestamp_et"),
+        "query_date": (injury_report or {}).get("query_date"),
+        "age_minutes": age_minutes,
+        "max_age_minutes": float(max_age_minutes),
+        "is_stale": age_minutes is None or age_minutes > max_age_minutes,
+    }
+
+
+def _get_promotion_guardrail_config() -> Dict[str, float]:
+    global _ml_predictor
+    raw_config = {}
+    if _ml_predictor is not None and isinstance(getattr(_ml_predictor, "meta", None), dict):
+        raw_config = _ml_predictor.meta.get("promotion_guardrail", {}) or {}
+    return resolve_promotion_guardrail_config(raw_config)
+
+
+def _is_combo_stat_type(stat_type: str) -> bool:
+    return "+" in str(stat_type or "")
+
+
+def _compute_promotion_guardrail(
+    *,
+    player: Dict[str, Any],
+    stat_type: str,
+    side: str,
+    line: float,
+    ml_details: Dict[str, Any],
+    edge_score: float,
+    confidence: float,
+) -> Dict[str, Any]:
+    guardrail = {
+        "active": False,
+        "reason": "",
+        "edge_score_penalty": 0.0,
+        "confidence_penalty": 0.0,
+        "display_edge_score": edge_score,
+        "display_confidence": confidence,
+        "gap_pct": None,
+        "gap_threshold_pct": None,
+    }
+    if side != "under" or stat_type not in PROMOTION_GUARDRAIL_SUPPORTED_STAT_TYPES:
+        return guardrail
+
+    injury_freshness = ml_details.get("injury_report_freshness") or {}
+    if injury_freshness.get("is_stale"):
+        guardrail["reason"] = "injury_context_stale"
+        return guardrail
+
+    feature_snapshot = ml_details.get("injury_feature_snapshot") or {}
+    q50 = _safe_float(ml_details.get("q50"), _safe_float(ml_details.get("prediction_val")))
+    if q50 is None or q50 >= line:
+        return guardrail
+
+    config = _get_promotion_guardrail_config()
+    missing_team_usage_pct = _safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0
+    missing_team_minutes = _safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0
+    recent5_minutes_avg = _safe_float(feature_snapshot.get("recent5_minutes_avg"), 0.0) or 0.0
+    modeled_minutes_delta = _safe_float(feature_snapshot.get("modeled_minutes_delta_vs_recent5"), 0.0) or 0.0
+    teammate_minutes_delta = _safe_float(
+        feature_snapshot.get("missing_key_teammates_player_minutes_delta"),
+        0.0,
+    ) or 0.0
+    if (
+        missing_team_usage_pct < config["min_missing_team_usage_pct"]
+        or missing_team_minutes < config["min_missing_team_minutes"]
+        or recent5_minutes_avg < config["min_recent5_minutes_avg"]
+        or (
+            modeled_minutes_delta < config["min_modeled_minutes_delta_vs_recent5"]
+            and teammate_minutes_delta < config["min_missing_key_teammates_player_minutes_delta"]
+        )
+    ):
+        return guardrail
+
+    pos_group = str(
+        feature_snapshot.get("resolved_pos_group")
+        or _simple_position(player.get("position"))
+        or "G"
+    ).upper()
+    missing_same_pos_minutes = _safe_float(feature_snapshot.get("missing_same_pos_minutes"), 0.0) or 0.0
+    missing_guard_minutes = _safe_float(feature_snapshot.get("missing_guard_minutes"), 0.0) or 0.0
+    missing_playmaker_potential_ast_pg = _safe_float(
+        feature_snapshot.get("missing_playmaker_potential_ast_pg"),
+        0.0,
+    ) or 0.0
+    missing_onball_drives_pg = _safe_float(feature_snapshot.get("missing_onball_drives_pg"), 0.0) or 0.0
+    playmaker_interaction = _safe_float(
+        feature_snapshot.get("missing_playmaker_potential_ast_pg_x_player_ast_rate"),
+        _safe_float(feature_snapshot.get("playmaker_vacuum_x_player_ast_rate"), 0.0),
+    ) or 0.0
+    onball_interaction = _safe_float(
+        feature_snapshot.get("missing_onball_drives_pg_x_player_drive_rate"),
+        _safe_float(feature_snapshot.get("onball_vacuum_x_player_drive_rate"), 0.0),
+    ) or 0.0
+
+    role_reasons: List[str] = []
+    role_aligned = False
+    if pos_group == "G":
+        if (
+            missing_guard_minutes >= config["min_missing_guard_minutes"]
+            or missing_same_pos_minutes >= config["min_missing_same_pos_minutes"]
+        ):
+            role_aligned = True
+            role_reasons.append("guard vacancy")
+    else:
+        if missing_same_pos_minutes >= config["min_missing_same_pos_minutes"]:
+            role_aligned = True
+            role_reasons.append("same-position vacancy")
+        elif (
+            (
+                missing_playmaker_potential_ast_pg >= config["min_cross_position_creator_metric"]
+                and playmaker_interaction > 0.0
+            )
+            or (
+                missing_onball_drives_pg >= config["min_cross_position_creator_metric"]
+                and onball_interaction > 0.0
+            )
+        ):
+            role_aligned = True
+            role_reasons.append("cross-position creator vacancy")
+
+    if not role_aligned:
+        return guardrail
+
+    gap_pct = max(0.0, (line - q50) / max(abs(line), 1.0))
+    gap_threshold_pct = (
+        config["combo_stat_gap_pct"]
+        if _is_combo_stat_type(stat_type)
+        else config["single_stat_gap_pct"]
+    )
+    guardrail["gap_pct"] = round(gap_pct, 4)
+    guardrail["gap_threshold_pct"] = round(gap_threshold_pct, 4)
+    if gap_pct >= gap_threshold_pct:
+        return guardrail
+
+    display_edge_score = min(
+        edge_score - config["edge_score_penalty_points"],
+        config["display_edge_score_cap"],
+    )
+    display_confidence = max(0.0, confidence - config["confidence_penalty_points"])
+    guardrail.update({
+        "active": True,
+        "reason": ", ".join(role_reasons),
+        "edge_score_penalty": round(max(0.0, edge_score - display_edge_score), 2),
+        "confidence_penalty": round(max(0.0, confidence - display_confidence), 2),
+        "display_edge_score": round(max(1.0, display_edge_score), 1),
+        "display_confidence": round(display_confidence, 1),
+    })
+    return guardrail
+
+
 _ml_predictor = None
 
 def _compute_ml_regression_context(
@@ -2139,6 +2367,8 @@ def _compute_ml_regression_context(
     if not res:
         return {"available": False, "score": 0.0, "p_over": None, "details": {}}
     feature_snapshot = res.get("feature_snapshot", {}) if isinstance(res, dict) else {}
+    injury_report_freshness = res.get("injury_report_freshness", {}) if isinstance(res, dict) else {}
+    position_resolution_summary = res.get("position_resolution_summary", {}) if isinstance(res, dict) else {}
 
     # ── Quantile path (preferred) ────────────────────────────────────────────
     q25 = _safe_float(res.get("q25"))
@@ -2194,14 +2424,20 @@ def _compute_ml_regression_context(
             "p_over": round(p_over, 4),
             "calibration": "quantile_iqr",
             "ml_lineup_adjustment": adjustment,
+            "injury_report_freshness": injury_report_freshness,
+            "position_resolution_summary": position_resolution_summary,
             "injury_feature_snapshot": {
                 key: feature_snapshot.get(key)
                 for key in (
+                    "resolved_pos_group",
+                    "position_resolution_tier",
                     "recent5_minutes_avg",
                     "predicted_minutes",
                     "modeled_minutes_q50",
                     "modeled_minutes_iqr",
                     "modeled_minutes_delta_vs_recent5",
+                    "modeled_minutes_x_recent10_target_per_min",
+                    "recent10_target_per_min",
                     "same_team_current_season_games",
                     "recent_team_games_missed_10",
                     "inactive_streak_team_games",
@@ -2222,18 +2458,30 @@ def _compute_ml_regression_context(
                     "playmaker_vacuum_x_player_ast_rate",
                     "onball_vacuum_x_player_drive_rate",
                     "usage_vacuum_x_player_usage_pct",
+                    "missing_playmaker_potential_ast_pg_x_player_ast_rate",
+                    "missing_onball_drives_pg_x_player_drive_rate",
+                    "missing_high_usage_usage_pct_x_player_usage_rate",
+                    "missing_same_pos_minutes_x_player_target_per_min",
                     "missing_key_teammates_player_stat_delta",
                     "missing_key_teammates_player_minutes_delta",
                     "missing_key_teammates_player_usage_pct_delta",
                     "missing_key_teammates_player_potential_ast_rate_delta",
                     "missing_key_teammates_player_drive_rate_delta",
                     "missing_key_teammates_effective_support",
+                    "missing_key_teammate_count",
+                    "missing_same_pos_key_count",
+                    "missing_guard_key_count",
+                    "missing_playmaker_key_count",
                     "returning_key_teammates_player_stat_delta",
                     "returning_key_teammates_player_minutes_delta",
                     "returning_key_teammates_player_usage_pct_delta",
                     "returning_key_teammates_player_potential_ast_rate_delta",
                     "returning_key_teammates_player_drive_rate_delta",
                     "returning_key_teammates_effective_support",
+                    "returning_key_teammate_count",
+                    "returning_same_pos_key_count",
+                    "returning_guard_key_count",
+                    "returning_playmaker_key_count",
                 )
             },
             "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
@@ -2255,6 +2503,8 @@ def _compute_ml_regression_context(
             "p_over": round(p_over, 4),
             "std_dev": round(std_dev, 2) if std_dev is not None else None,
             "calibration": "gaussian_legacy",
+            "injury_report_freshness": injury_report_freshness,
+            "position_resolution_summary": position_resolution_summary,
             "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
             "vegas_spread": _safe_float(game_context.get("spread")) if game_context else None,
         }
@@ -3013,6 +3263,17 @@ def _build_candidate(
     weighted_score = _clamp(weighted_score + ml_boost, -1.0, 1.0)
     confidence_multiplier = 0.85 + (min(confidence, 100.0) / 100.0) * 0.15
     edge_score = round(_clamp(50.0 + (weighted_score * 45.0 * confidence_multiplier), 1.0, 99.0), 1)
+    promotion_guardrail = _compute_promotion_guardrail(
+        player=player,
+        stat_type=stat_type,
+        side=side,
+        line=line,
+        ml_details=components["ml_regression"].get("details", {}) or {},
+        edge_score=edge_score,
+        confidence=confidence,
+    )
+    display_edge_score = promotion_guardrail.get("display_edge_score", edge_score)
+    display_confidence = promotion_guardrail.get("display_confidence", confidence)
 
     reasons = _build_reason_strings(side, line, stat_type, components)
     recommendation_key = f"{player_id}|{game_date}|{stat_type}|{side}"
@@ -3038,10 +3299,16 @@ def _build_candidate(
         "odds_display": _format_odds(chosen.get("odds")),
         "opposite_odds": _safe_float(chosen.get("opposite_odds")),
         "edge_score": edge_score,
+        "display_edge_score": round(float(display_edge_score), 1),
         "confidence": confidence,
+        "display_confidence": round(float(display_confidence), 1),
         "signal_score": round(weighted_score, 3),
         "ml_p_over": p_over,
         "ml_boost_applied": round(ml_boost, 4) if ml_boost != 0.0 else None,
+        "guardrail_active": bool(promotion_guardrail.get("active")),
+        "guardrail_reason": promotion_guardrail.get("reason"),
+        "guardrail_confidence_penalty": promotion_guardrail.get("confidence_penalty"),
+        "guardrail_edge_score_penalty": promotion_guardrail.get("edge_score_penalty"),
         "reasons": reasons,
         "inputs": {
             "projection": components["projection"]["details"],
@@ -3049,6 +3316,7 @@ def _build_candidate(
             "matchup": components["matchup"]["details"],
             "market": components["market"]["details"],
             "ml_regression": components["ml_regression"]["details"],
+            "promotion_guardrail": promotion_guardrail,
             "line_movement": components["line_movement"]["details"],
             "similar_players": components["similar_players"]["details"],
             "head_to_head": components["head_to_head"]["details"],
@@ -3136,6 +3404,7 @@ def _write_history_snapshot(payload: Dict[str, Any]) -> None:
                 "sportsbook": recommendation.get("sportsbook"),
                 "line": recommendation.get("line"),
                 "edge_score": recommendation.get("edge_score"),
+                "display_edge_score": recommendation.get("display_edge_score"),
             }
             for recommendation in payload.get("recommendations", [])
         ],
@@ -3154,6 +3423,7 @@ def _state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -
             "sportsbook": recommendation.get("sportsbook"),
             "line": recommendation.get("line"),
             "odds": recommendation.get("odds"),
+            "display_edge_score": recommendation.get("display_edge_score"),
         }
     return snapshot
 
@@ -3175,6 +3445,8 @@ def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, 
             "odds": recommendation.get("odds"),
             "odds_display": recommendation.get("odds_display"),
             "edge_score": recommendation.get("edge_score"),
+            "display_edge_score": recommendation.get("display_edge_score"),
+            "guardrail_active": recommendation.get("guardrail_active"),
             "game_date": _normalize_game_date(recommendation.get("game_date")),
             "first_logged_at": recommendation.get("first_logged_at"),
             "why_summary": recommendation.get("why_summary") or _discord_signal_summary(recommendation),
@@ -3186,7 +3458,7 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
     per_book_counts: Dict[str, int] = {}
     filtered = []
     for recommendation in recommendations:
-        signal_score = _safe_float(recommendation.get("edge_score"), 0.0) or 0.0
+        signal_score = _ranking_edge_score(recommendation)
         book = str(recommendation.get("sportsbook") or "").strip().lower()
         if book not in SUPPORTED_BOOKS:
             continue
@@ -3202,7 +3474,7 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
 def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     filtered = []
     for recommendation in recommendations:
-        signal_score = _safe_float(recommendation.get("edge_score"), 0.0) or 0.0
+        signal_score = _ranking_edge_score(recommendation)
         if signal_score < EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE:
             continue
         filtered.append(recommendation)
@@ -3723,7 +3995,7 @@ def _serialize_recommendation_for_results(recommendation: Dict[str, Any]) -> Dic
         "line": _safe_float(recommendation.get("line")),
         "odds": _safe_float(recommendation.get("odds")),
         "odds_display": recommendation.get("odds_display"),
-        "edge_score": _safe_float(recommendation.get("edge_score")),
+        "edge_score": _safe_float(recommendation.get("display_edge_score"), _safe_float(recommendation.get("edge_score"))),
         "first_logged_at": recommendation.get("first_logged_at"),
     }
 
@@ -3889,7 +4161,7 @@ def _tracker_running_recommendations(
     recommendations.sort(
         key=lambda recommendation: (
             str(recommendation.get("first_logged_at") or ""),
-            -(_safe_float(recommendation.get("edge_score"), 0.0) or 0.0),
+            -_ranking_edge_score(recommendation),
             str(recommendation.get("player_name") or ""),
         ),
     )
@@ -4320,7 +4592,7 @@ def _build_discord_book_embed(
         pick_label = recommendation.get("pick_label") or _side_name(str(recommendation.get("pick") or "").lower())
         line_value = _safe_float(recommendation.get("line"))
         line_text = f"{line_value:.1f}" if line_value is not None else "-"
-        edge_score = _safe_float(recommendation.get("edge_score"))
+        edge_score = _safe_float(recommendation.get("display_edge_score"), _safe_float(recommendation.get("edge_score")))
         edge_text = f"{edge_score:.1f}" if edge_score is not None else "n/a"
 
         if channel_variant == "tracker":
@@ -5008,10 +5280,23 @@ def run_edge_score_refresh(
 
     schedule_context = _build_schedule_context(schedule_payload, action_network_payload)
 
+    _refresh_injury_report_for_scoring(schedule_payload, refresh_label=refresh_label)
+
     injury_report = _load_json(os.path.join(CURRENT_DIR, "nba_injury_report.json"), {})
+    injury_report_freshness = _injury_artifact_freshness(
+        injury_report if isinstance(injury_report, dict) else {},
+        schedule_payload=schedule_payload if isinstance(schedule_payload, dict) else {},
+    )
     tonight_dnps = _load_tonight_dnps(master_feed, injury_report, schedule_context)
     if tonight_dnps:
         logger.info("Tonight DNPs loaded | teams_with_absences=%d", len(tonight_dnps))
+    if injury_report_freshness.get("is_stale"):
+        logger.warning(
+            "Edge Score using stale injury artifact | age_minutes=%s max_age_minutes=%s generated_at=%s",
+            injury_report_freshness.get("age_minutes"),
+            injury_report_freshness.get("max_age_minutes"),
+            injury_report_freshness.get("generated_at"),
+        )
 
     recap_result = {"sent_dates": [], "state_changed": False}
     if _results_recap_webhook_url():
@@ -5127,8 +5412,8 @@ def run_edge_score_refresh(
             best_candidate = max(
                 side_candidates,
                 key=lambda candidate: (
-                    candidate.get("edge_score", 0.0),
-                    candidate.get("confidence", 0.0),
+                    _ranking_edge_score(candidate),
+                    _ranking_confidence(candidate),
                     candidate.get("signal_score", 0.0),
                 ),
             )
@@ -5154,6 +5439,7 @@ def run_edge_score_refresh(
             "available_books": sorted(SUPPORTED_BOOKS),
             "sportsbook_board_limit": EDGE_SPORTSBOOK_BOARD_LIMIT,
             "sportsbook_boards": sportsbook_boards,
+            "injury_report_freshness": injury_report_freshness,
             "duration_s": round(time.time() - start_time, 2),
             "scoring_model": "Signal Score",
         },
