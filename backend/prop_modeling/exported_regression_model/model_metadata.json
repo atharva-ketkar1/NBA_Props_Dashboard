@@ -76,7 +76,33 @@
     "opp_def_rating",
     "recent5_avg_game_margin",
     "recent5_blowout_flag",
-    "star_teammate_out_flag",
+    "missing_team_usage_pct",
+    "missing_team_minutes",
+    "missing_same_pos_usage_pct",
+    "missing_same_pos_minutes",
+    "missing_guard_usage_pct",
+    "missing_guard_minutes",
+    "missing_high_usage_usage_pct",
+    "missing_high_usage_minutes",
+    "missing_playmaker_potential_ast_pg",
+    "missing_playmaker_minutes",
+    "missing_onball_drives_pg",
+    "missing_onball_minutes",
+    "playmaker_vacuum_x_player_ast_rate",
+    "onball_vacuum_x_player_drive_rate",
+    "usage_vacuum_x_player_usage_pct",
+    "missing_key_teammates_player_stat_delta",
+    "missing_key_teammates_player_minutes_delta",
+    "missing_key_teammates_player_usage_pct_delta",
+    "missing_key_teammates_player_potential_ast_rate_delta",
+    "missing_key_teammates_player_drive_rate_delta",
+    "missing_key_teammates_effective_support",
+    "returning_key_teammates_player_stat_delta",
+    "returning_key_teammates_player_minutes_delta",
+    "returning_key_teammates_player_usage_pct_delta",
+    "returning_key_teammates_player_potential_ast_rate_delta",
+    "returning_key_teammates_player_drive_rate_delta",
+    "returning_key_teammates_effective_support",
     "momentum_diff_5v20",
     "momentum_diff_3v10",
     "expected_possessions",
@@ -107,66 +133,66 @@
     "STL+BLK": "model_STL_BLK.cbm"
   },
   "cv_results": {
-    "mean_mae": 2.7875,
-    "mean_rmse": 4.3783,
-    "mean_r2": 0.7705,
+    "mean_mae": 2.7621,
+    "mean_rmse": 4.3293,
+    "mean_r2": 0.7743,
     "n_folds": 4
   },
   "per_stat_test_metrics": {
     "AST": {
-      "mae": 1.4456,
-      "rmse": 1.9652,
-      "r2": 0.4569
+      "mae": 1.4243,
+      "rmse": 1.9471,
+      "r2": 0.4673
     },
     "BLK": {
-      "mae": 0.449,
-      "rmse": 0.8037,
-      "r2": 0.0582
+      "mae": 0.4561,
+      "rmse": 0.8444,
+      "r2": 0.0134
     },
     "FG3M": {
-      "mae": 0.9124,
-      "rmse": 1.3025,
-      "r2": 0.273
+      "mae": 0.9114,
+      "rmse": 1.3052,
+      "r2": 0.2888
     },
     "PTS": {
-      "mae": 4.6988,
-      "rmse": 6.0938,
-      "r2": 0.4381
+      "mae": 4.6279,
+      "rmse": 5.9881,
+      "r2": 0.4523
     },
     "PTS+AST": {
-      "mae": 5.0782,
-      "rmse": 6.5836,
-      "r2": 0.5102
+      "mae": 5.0416,
+      "rmse": 6.4819,
+      "r2": 0.5226
     },
     "PTS+REB": {
-      "mae": 5.461,
-      "rmse": 7.0449,
-      "r2": 0.4639
+      "mae": 5.4511,
+      "rmse": 6.9428,
+      "r2": 0.4725
     },
     "PTS+REB+AST": {
-      "mae": 5.8896,
-      "rmse": 7.5724,
-      "r2": 0.5135
+      "mae": 5.8349,
+      "rmse": 7.4614,
+      "r2": 0.5236
     },
     "REB": {
-      "mae": 1.871,
-      "rmse": 2.4558,
-      "r2": 0.4243
+      "mae": 1.8751,
+      "rmse": 2.4685,
+      "r2": 0.4134
     },
     "REB+AST": {
-      "mae": 2.5587,
-      "rmse": 3.3418,
-      "r2": 0.4547
+      "mae": 2.5692,
+      "rmse": 3.385,
+      "r2": 0.4397
     },
     "STL": {
-      "mae": 0.73,
-      "rmse": 0.9988,
-      "r2": 0.0126
+      "mae": 0.7333,
+      "rmse": 1.0159,
+      "r2": 0.0129
     },
     "STL+BLK": {
-      "mae": 0.928,
-      "rmse": 1.2354,
-      "r2": 0.11
+      "mae": 0.9575,
+      "rmse": 1.2703,
+      "r2": 0.1062
     }
   },
   "usage": "Load the per-stat .cbm for the relevant stat_type. model.predict(pool) returns shape (n, 3): [q25, q50, q75]. Pass q25/q50/q75 to edge_score.py which derives p_over via IQR interpolation. Call check_feature_drift() with feature_drift_baseline.json before prediction to detect stale or out-of-distribution feature values."

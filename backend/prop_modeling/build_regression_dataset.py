@@ -31,6 +31,32 @@ from feature_schema import (
     STAT_COLUMNS,
     BACKEND_DIR,
 )
+from injury_feature_config import (
+    ACTIVE_ROSTER_LOOKBACK_DAYS,
+    INJURY_INTERACTION_COLUMNS,
+    POSITION_GROUPS,
+    RETURN_ABSENT_THRESHOLD,
+    RETURN_LOOKBACK_TEAM_GAMES,
+    SAME_POS_VACANCY_FEATURE_COLUMNS,
+    TEAMMATE_ONOFF_FEATURE_COLUMNS,
+    TEAMMATE_ONOFF_FULL_WEIGHT_GAMES,
+    TEAMMATE_ONOFF_LOOKBACK_PLAYER_GAMES,
+    TEAMMATE_ONOFF_MIN_ABSENT_GAMES,
+    TEAMMATE_ONOFF_MIN_PRESENT_GAMES,
+    TEAM_VACANCY_FEATURE_COLUMNS,
+    TRAILING_ABSENT_PRIOR_GAMES,
+    apply_injury_feature_values,
+    is_high_usage,
+    is_key_teammate,
+    is_onball,
+    is_playmaker,
+    make_same_pos_vacancy_stats,
+    make_teammate_onoff_stats,
+    make_team_vacancy_stats,
+    normalize_position_group,
+    season_key_for_date,
+    trailing_active_values,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +123,10 @@ REGRESSION_DATASET_COLUMNS = [
     "recent5_avg_game_margin",   # avg margin of player's last 5 games (blowout flag)
     "recent5_blowout_flag",      # 1 if avg abs margin > 15 in last 5 games
     # ── NEW v2: Injury Reports ────────────────────────────────────────────────
-    "star_teammate_out_flag",    # 1 if a >23% usage teammate logged 0 minutes or DNP
+    *TEAM_VACANCY_FEATURE_COLUMNS,
+    *SAME_POS_VACANCY_FEATURE_COLUMNS,
+    *INJURY_INTERACTION_COLUMNS,
+    *TEAMMATE_ONOFF_FEATURE_COLUMNS,
 ]
 
 DEFAULT_REGRESSION_DATASET_PATH = GENERATED_DIR / "regression_training_dataset.csv"
@@ -195,6 +224,7 @@ class EnrichmentData:
 
         # 6. Season stats CSV
         self.player_id_to_name: Dict[str, str] = {}  # pid_str → player name
+        self.player_id_to_position: Dict[str, str] = {}  # pid_str → raw position
         p = data_dir / "season_stats.csv"
         if p.exists():
             with p.open(newline="") as f:
@@ -202,10 +232,13 @@ class EnrichmentData:
                     pid = str(row.get("PLAYER_ID") or "").strip()
                     name = str(row.get("PLAYER_NAME") or "").strip()
                     team = str(row.get("TEAM_ABBREVIATION") or "").strip()
+                    position = str(row.get("POSITION") or "").strip()
                     if pid:
                         self.season_stats[pid] = row
                         if name:
                             self.player_id_to_name[pid] = name
+                        if position:
+                            self.player_id_to_position[pid] = position
                     if team:
                         # Use last entry per team (season averages are player-level,
                         # we want team-level pace/rating — take from any player)
@@ -373,6 +406,16 @@ class EnrichmentData:
         margins = self.game_margins.get(normalized, {})
         return margins.get(team_abbrev.upper())
 
+    def get_player_position(self, player_id: Optional[str]) -> Optional[str]:
+        pid = str(player_id or "").strip()
+        if not pid:
+            return None
+        position = self.player_id_to_position.get(pid)
+        return position or None
+
+    def get_player_position_group(self, player_id: Optional[str]) -> str:
+        return normalize_position_group(self.get_player_position(player_id))
+
 
 # ---------------------------------------------------------------------------
 # Standalone helpers
@@ -508,6 +551,334 @@ def _build_player_index(
     return dict(index)
 
 
+def _compute_absent_player_priors(
+    player_state: Dict[str, Any],
+    current_date: date,
+) -> Dict[str, Optional[float]]:
+    usage_vals = trailing_active_values(
+        player_state["usg_history"],
+        current_date,
+        lookback_days=ACTIVE_ROSTER_LOOKBACK_DAYS,
+        max_games=TRAILING_ABSENT_PRIOR_GAMES,
+    )
+    ast_pct_vals = trailing_active_values(
+        player_state["ast_pct_history"],
+        current_date,
+        lookback_days=ACTIVE_ROSTER_LOOKBACK_DAYS,
+        max_games=TRAILING_ABSENT_PRIOR_GAMES,
+    )
+    potential_ast_vals = trailing_active_values(
+        player_state["potential_ast_history"],
+        current_date,
+        lookback_days=ACTIVE_ROSTER_LOOKBACK_DAYS,
+        max_games=TRAILING_ABSENT_PRIOR_GAMES,
+    )
+    drive_vals = trailing_active_values(
+        player_state["drive_history"],
+        current_date,
+        lookback_days=ACTIVE_ROSTER_LOOKBACK_DAYS,
+        max_games=TRAILING_ABSENT_PRIOR_GAMES,
+    )
+    minute_vals = trailing_active_values(
+        player_state["min_history"],
+        current_date,
+        lookback_days=ACTIVE_ROSTER_LOOKBACK_DAYS,
+        max_games=TRAILING_ABSENT_PRIOR_GAMES,
+    )
+    usage_pct = _mean(usage_vals)
+    ast_pct = _mean(ast_pct_vals)
+    potential_ast_pg = _mean(potential_ast_vals)
+    drives_pg = _mean(drive_vals)
+    minutes = _mean(minute_vals)
+    active_games = len(minute_vals)
+    return {
+        "usage_pct": usage_pct,
+        "ast_pct": ast_pct,
+        "potential_ast_pg": potential_ast_pg,
+        "drives_pg": drives_pg,
+        "minutes": minutes,
+        "active_games": float(active_games),
+    }
+
+
+def _empty_same_pos_by_group() -> Dict[str, Dict[str, float]]:
+    return {group: make_same_pos_vacancy_stats() for group in POSITION_GROUPS}
+
+
+def _build_team_presence_context(
+    all_rows: List[Tuple[date, str, Dict[str, Any]]],
+) -> Tuple[
+    Dict[Tuple[str, date], set[str]],
+    Dict[Tuple[str, int], List[date]],
+]:
+    team_presence_index: Dict[Tuple[str, date], set[str]] = defaultdict(set)
+    team_game_dates_by_season: Dict[Tuple[str, int], set[date]] = defaultdict(set)
+
+    for game_date, player_id, row in all_rows:
+        team = str(row.get("TEAM_ABBREVIATION") or "").strip()
+        if not team:
+            continue
+        team_presence_index[(team, game_date)].add(player_id)
+        team_game_dates_by_season[(team, season_key_for_date(game_date))].add(game_date)
+
+    return (
+        {key: set(player_ids) for key, player_ids in team_presence_index.items()},
+        {key: sorted(game_dates) for key, game_dates in team_game_dates_by_season.items()},
+    )
+
+
+def _teammate_priors_with_position(player_state: Dict[str, Any], current_date: date) -> Dict[str, Any]:
+    priors = _compute_absent_player_priors(player_state, current_date)
+    return {
+        **priors,
+        "pos_group": player_state.get("pos_group"),
+    }
+
+
+def _teammate_impact_score(priors: Dict[str, Any]) -> float:
+    usage_pct = _safe_float(priors.get("usage_pct")) or 0.0
+    minutes = _safe_float(priors.get("minutes")) or 0.0
+    return usage_pct + 0.5 * minutes
+
+
+def _metric_mean_for_rows(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    stat_type: str,
+    metric_key: str,
+) -> float:
+    if metric_key == "stat":
+        return _mean([_sum_stat(row, stat_type) for row in rows]) or 0.0
+    if metric_key == "minutes":
+        return _mean([_safe_float(row.get("MIN")) for row in rows]) or 0.0
+    if metric_key == "usage_pct":
+        return _mean([_safe_float(row.get("USG_PCT")) for row in rows]) or 0.0
+    if metric_key == "potential_ast_rate":
+        return _mean([_metric_rate(row, "POTENTIAL_AST") for row in rows]) or 0.0
+    if metric_key == "drive_rate":
+        return _mean([_metric_rate(row, "DRIVES") for row in rows]) or 0.0
+    return 0.0
+
+
+def _compute_teammate_split_summary(
+    prior_player_games: Sequence[Tuple[date, Dict[str, Any]]],
+    *,
+    team: str,
+    teammate_id: str,
+    stat_type: str,
+    team_presence_index: Dict[Tuple[str, date], set[str]],
+) -> Optional[Dict[str, float]]:
+    absent_rows: List[Dict[str, Any]] = []
+    present_rows: List[Dict[str, Any]] = []
+
+    for game_date, row in prior_player_games:
+        present_player_ids = team_presence_index.get((team, game_date), set())
+        if teammate_id in present_player_ids:
+            present_rows.append(row)
+        else:
+            absent_rows.append(row)
+
+    absent_games = len(absent_rows)
+    present_games = len(present_rows)
+    if (
+        absent_games < TEAMMATE_ONOFF_MIN_ABSENT_GAMES
+        or present_games < TEAMMATE_ONOFF_MIN_PRESENT_GAMES
+    ):
+        return None
+
+    support = min(absent_games, present_games)
+    shrink = min(1.0, support / float(TEAMMATE_ONOFF_FULL_WEIGHT_GAMES))
+    return {
+        "absent_games": float(absent_games),
+        "present_games": float(present_games),
+        "support": float(support),
+        "shrink": float(shrink),
+        "stat_absent_mean": _metric_mean_for_rows(absent_rows, stat_type=stat_type, metric_key="stat"),
+        "stat_present_mean": _metric_mean_for_rows(present_rows, stat_type=stat_type, metric_key="stat"),
+        "minutes_absent_mean": _metric_mean_for_rows(absent_rows, stat_type=stat_type, metric_key="minutes"),
+        "minutes_present_mean": _metric_mean_for_rows(present_rows, stat_type=stat_type, metric_key="minutes"),
+        "usage_pct_absent_mean": _metric_mean_for_rows(absent_rows, stat_type=stat_type, metric_key="usage_pct"),
+        "usage_pct_present_mean": _metric_mean_for_rows(present_rows, stat_type=stat_type, metric_key="usage_pct"),
+        "potential_ast_rate_absent_mean": _metric_mean_for_rows(
+            absent_rows, stat_type=stat_type, metric_key="potential_ast_rate"
+        ),
+        "potential_ast_rate_present_mean": _metric_mean_for_rows(
+            present_rows, stat_type=stat_type, metric_key="potential_ast_rate"
+        ),
+        "drive_rate_absent_mean": _metric_mean_for_rows(
+            absent_rows, stat_type=stat_type, metric_key="drive_rate"
+        ),
+        "drive_rate_present_mean": _metric_mean_for_rows(
+            present_rows, stat_type=stat_type, metric_key="drive_rate"
+        ),
+    }
+
+
+def _aggregate_teammate_delta_features(
+    teammate_priors: Dict[str, Dict[str, Any]],
+    *,
+    prefix: str,
+    delta_direction: str,
+    prior_player_games: Sequence[Tuple[date, Dict[str, Any]]],
+    team: str,
+    stat_type: str,
+    team_presence_index: Dict[Tuple[str, date], set[str]],
+) -> Dict[str, float]:
+    aggregated = {
+        f"{prefix}_player_stat_delta": 0.0,
+        f"{prefix}_player_minutes_delta": 0.0,
+        f"{prefix}_player_usage_pct_delta": 0.0,
+        f"{prefix}_player_potential_ast_rate_delta": 0.0,
+        f"{prefix}_player_drive_rate_delta": 0.0,
+        f"{prefix}_effective_support": 0.0,
+    }
+    if not teammate_priors:
+        return aggregated
+
+    contributors: List[Tuple[float, Dict[str, float]]] = []
+    for teammate_id, priors in teammate_priors.items():
+        split_summary = _compute_teammate_split_summary(
+            prior_player_games,
+            team=team,
+            teammate_id=teammate_id,
+            stat_type=stat_type,
+            team_presence_index=team_presence_index,
+        )
+        if split_summary is None:
+            continue
+        contributors.append((_teammate_impact_score(priors), split_summary))
+
+    if not contributors:
+        return aggregated
+
+    total_impact = sum(max(impact, 0.0) for impact, _ in contributors)
+    equal_weight = 1.0 / float(len(contributors))
+
+    for impact, split_summary in contributors:
+        weight = equal_weight if total_impact <= 0.0 else max(impact, 0.0) / total_impact
+        shrink = split_summary["shrink"]
+        if delta_direction == "missing":
+            stat_delta = split_summary["stat_absent_mean"] - split_summary["stat_present_mean"]
+            minutes_delta = split_summary["minutes_absent_mean"] - split_summary["minutes_present_mean"]
+            usage_delta = split_summary["usage_pct_absent_mean"] - split_summary["usage_pct_present_mean"]
+            ast_delta = (
+                split_summary["potential_ast_rate_absent_mean"]
+                - split_summary["potential_ast_rate_present_mean"]
+            )
+            drive_delta = split_summary["drive_rate_absent_mean"] - split_summary["drive_rate_present_mean"]
+        else:
+            stat_delta = split_summary["stat_present_mean"] - split_summary["stat_absent_mean"]
+            minutes_delta = split_summary["minutes_present_mean"] - split_summary["minutes_absent_mean"]
+            usage_delta = split_summary["usage_pct_present_mean"] - split_summary["usage_pct_absent_mean"]
+            ast_delta = (
+                split_summary["potential_ast_rate_present_mean"]
+                - split_summary["potential_ast_rate_absent_mean"]
+            )
+            drive_delta = split_summary["drive_rate_present_mean"] - split_summary["drive_rate_absent_mean"]
+
+        aggregated[f"{prefix}_player_stat_delta"] += weight * shrink * stat_delta
+        aggregated[f"{prefix}_player_minutes_delta"] += weight * shrink * minutes_delta
+        aggregated[f"{prefix}_player_usage_pct_delta"] += weight * shrink * usage_delta
+        aggregated[f"{prefix}_player_potential_ast_rate_delta"] += weight * shrink * ast_delta
+        aggregated[f"{prefix}_player_drive_rate_delta"] += weight * shrink * drive_delta
+        aggregated[f"{prefix}_effective_support"] += weight * split_summary["support"]
+
+    return aggregated
+
+
+def _build_key_teammate_onoff_features(
+    player_history: List[Tuple[date, Dict[str, Any]]],
+    game_idx: int,
+    *,
+    stat_type: str,
+    team_presence_index: Dict[Tuple[str, date], set[str]],
+    team_game_dates_by_season: Dict[Tuple[str, int], List[date]],
+    current_missing_player_priors: Optional[Dict[str, Dict[str, Any]]] = None,
+    current_active_player_priors: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, float]:
+    feature_values = make_teammate_onoff_stats()
+    target_date, target_row = player_history[game_idx]
+    team = str(target_row.get("TEAM_ABBREVIATION") or "").strip()
+    target_player_id = str(target_row.get("PLAYER_ID") or "").strip()
+    if not team or not target_player_id:
+        return feature_values
+
+    target_season_key = season_key_for_date(target_date)
+    prior_same_team_season_games = [
+        (game_date, row)
+        for game_date, row in player_history[:game_idx]
+        if (
+            game_date is not None
+            and str(row.get("TEAM_ABBREVIATION") or "").strip() == team
+            and season_key_for_date(game_date) == target_season_key
+        )
+    ][-TEAMMATE_ONOFF_LOOKBACK_PLAYER_GAMES:]
+    if not prior_same_team_season_games:
+        return feature_values
+
+    missing_teammate_priors = {
+        teammate_id: priors
+        for teammate_id, priors in (current_missing_player_priors or {}).items()
+        if teammate_id != target_player_id and is_key_teammate(
+            _safe_float(priors.get("usage_pct")),
+            _safe_float(priors.get("minutes")),
+            _safe_float(priors.get("ast_pct")),
+            _safe_float(priors.get("potential_ast_pg")),
+            _safe_float(priors.get("drives_pg")),
+        )
+    }
+
+    previous_team_dates = [
+        game_date
+        for game_date in team_game_dates_by_season.get((team, target_season_key), [])
+        if game_date < target_date
+    ][-RETURN_LOOKBACK_TEAM_GAMES:]
+    returning_teammate_priors: Dict[str, Dict[str, Any]] = {}
+    if previous_team_dates:
+        for teammate_id, priors in (current_active_player_priors or {}).items():
+            if teammate_id == target_player_id:
+                continue
+            if not is_key_teammate(
+                _safe_float(priors.get("usage_pct")),
+                _safe_float(priors.get("minutes")),
+                _safe_float(priors.get("ast_pct")),
+                _safe_float(priors.get("potential_ast_pg")),
+                _safe_float(priors.get("drives_pg")),
+            ):
+                continue
+            absent_count = sum(
+                1
+                for game_date in previous_team_dates
+                if teammate_id not in team_presence_index.get((team, game_date), set())
+            )
+            if absent_count >= RETURN_ABSENT_THRESHOLD:
+                returning_teammate_priors[teammate_id] = priors
+
+    feature_values.update(
+        _aggregate_teammate_delta_features(
+            missing_teammate_priors,
+            prefix="missing_key_teammates",
+            delta_direction="missing",
+            prior_player_games=prior_same_team_season_games,
+            team=team,
+            stat_type=stat_type,
+            team_presence_index=team_presence_index,
+        )
+    )
+    feature_values.update(
+        _aggregate_teammate_delta_features(
+            returning_teammate_priors,
+            prefix="returning_key_teammates",
+            delta_direction="returning",
+            prior_player_games=prior_same_team_season_games,
+            team=team,
+            stat_type=stat_type,
+            team_presence_index=team_presence_index,
+        )
+    )
+    return feature_values
+
+
 def _build_regression_row(
     player_history: List[Tuple[date, Dict[str, Any]]],
     game_idx: int,
@@ -515,7 +886,12 @@ def _build_regression_row(
     min_prior: int,
     min_minutes: float,
     enrichment: EnrichmentData,
-    star_out_dict: Dict[Tuple[str, date], int],
+    team_missing_stats_dict: Dict[Tuple[str, date], Dict[str, float]],
+    same_pos_missing_stats_dict: Dict[Tuple[str, date, str], Dict[str, float]],
+    team_missing_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+    team_active_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+    team_presence_index: Dict[Tuple[str, date], set[str]],
+    team_game_dates_by_season: Dict[Tuple[str, int], List[date]],
 ) -> Optional[Dict[str, Any]]:
     target_date, target_row = player_history[game_idx]
     target_mins = _safe_float(target_row.get("MIN"))
@@ -580,7 +956,8 @@ def _build_regression_row(
     # Gamelogs don't carry PLAYER_NAME — resolve from season_stats by PLAYER_ID
     player_id_str = str(target_row.get("PLAYER_ID") or "").strip()
     player_name = enrichment.player_id_to_name.get(player_id_str, "")
-    position    = str(target_row.get("POSITION", "")).strip() if "POSITION" in target_row else None
+    position = enrichment.get_player_position(player_id_str)
+    target_pos_group = enrichment.get_player_position_group(player_id_str)
 
     opp_ranks   = enrichment.get_opp_def_ranks(opp)
     opp_zones   = enrichment.get_opp_def_zones(opp, position)
@@ -598,6 +975,17 @@ def _build_regression_row(
             recent_margins.append(abs(margin))
     avg_margin = _mean(recent_margins)
     blowout_flag = 1 if (avg_margin is not None and avg_margin > 15) else 0
+    team_missing_stats = team_missing_stats_dict.get((team, target_date))
+    same_pos_missing_stats = same_pos_missing_stats_dict.get((team, target_date, target_pos_group))
+    teammate_onoff_stats = _build_key_teammate_onoff_features(
+        player_history,
+        game_idx,
+        stat_type=stat_type,
+        team_presence_index=team_presence_index,
+        team_game_dates_by_season=team_game_dates_by_season,
+        current_missing_player_priors=team_missing_player_priors_dict.get((team, target_date)),
+        current_active_player_priors=team_active_player_priors_dict.get((team, target_date)),
+    )
 
     # ── Pace- adjusted form ──
     # Pace is roughly possessions per 48 min. We want PTS per 100 possessions.
@@ -615,7 +1003,7 @@ def _build_regression_row(
         if avg_pace and avg_pace > 0:
             r5_pts_per100 = (r5_avg / m5_avg) * 48.0 * 100.0 / avg_pace
 
-    return {
+    row_obj = {
         # Identity
         "game_date": target_date.isoformat(),
         "player_id": str(target_row.get("PLAYER_ID") or "").strip(),
@@ -680,8 +1068,173 @@ def _build_regression_row(
         **team_ctx,
         "recent5_avg_game_margin": _r(avg_margin),
         "recent5_blowout_flag": blowout_flag,
-        "star_teammate_out_flag": star_out_dict.get((team, target_date), 0),
     }
+    return apply_injury_feature_values(
+        row_obj,
+        team_vacancy_stats=team_missing_stats,
+        same_pos_vacancy_stats=same_pos_missing_stats,
+        teammate_onoff_stats=teammate_onoff_stats,
+    )
+
+
+def _build_missing_team_stats(
+    all_rows: List[Tuple[date, str, Dict[str, Any]]],
+    enrichment: EnrichmentData,
+    lookback_days: int = ACTIVE_ROSTER_LOOKBACK_DAYS,
+) -> Tuple[
+    Dict[Tuple[str, date], Dict[str, float]],
+    Dict[Tuple[str, date, str], Dict[str, float]],
+    Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+    Dict[Tuple[str, date], Dict[str, Dict[str, Any]]],
+]:
+    games_by_date_team: Dict[Tuple[date, str], List[Tuple[str, Dict[str, Any]]]] = defaultdict(list)
+    teams_by_date: Dict[date, set[str]] = defaultdict(set)
+    for gd, pid, row in all_rows:
+        team = str(row.get("TEAM_ABBREVIATION") or "").strip()
+        if not team:
+            continue
+        games_by_date_team[(gd, team)].append((pid, row))
+        teams_by_date[gd].add(team)
+
+    team_active_roster: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    player_current_team: Dict[str, str] = {}
+    team_missing_stats_dict: Dict[Tuple[str, date], Dict[str, float]] = {}
+    same_pos_missing_stats_dict: Dict[Tuple[str, date, str], Dict[str, float]] = {}
+    team_missing_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
+    team_active_player_priors_dict: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
+
+    for current_date in sorted(teams_by_date):
+        for team in sorted(teams_by_date[current_date]):
+            roster_state = team_active_roster[team]
+            actual_players = {
+                pid
+                for pid, row in games_by_date_team[(current_date, team)]
+                if (_safe_float(row.get("MIN")) or 0.0) > 0.0
+            }
+
+            team_stats = make_team_vacancy_stats()
+            same_pos_stats = _empty_same_pos_by_group()
+            stale_players: List[str] = []
+            current_missing_player_priors: Dict[str, Dict[str, Any]] = {}
+            current_active_player_priors: Dict[str, Dict[str, Any]] = {}
+
+            for pid, state in list(roster_state.items()):
+                days_since_last = (current_date - state["last_active_date"]).days
+                if days_since_last > lookback_days:
+                    stale_players.append(pid)
+                    continue
+                if pid in actual_players:
+                    active_priors = _teammate_priors_with_position(state, current_date)
+                    if any(
+                        active_priors.get(metric_key) is not None
+                        for metric_key in ("usage_pct", "minutes", "ast_pct", "potential_ast_pg", "drives_pg")
+                    ):
+                        current_active_player_priors[pid] = active_priors
+                    continue
+
+                priors = _compute_absent_player_priors(state, current_date)
+                avg_usg = priors["usage_pct"]
+                avg_minutes = priors["minutes"]
+                pos_group = state["pos_group"]
+                if avg_usg is None and avg_minutes is None:
+                    continue
+                current_missing_player_priors[pid] = {
+                    **priors,
+                    "pos_group": pos_group,
+                }
+
+                team_stats["missing_team_usage_pct"] += avg_usg or 0.0
+                team_stats["missing_team_minutes"] += avg_minutes or 0.0
+
+                same_pos_stats[pos_group]["missing_same_pos_usage_pct"] += avg_usg or 0.0
+                same_pos_stats[pos_group]["missing_same_pos_minutes"] += avg_minutes or 0.0
+
+                if pos_group == "G":
+                    team_stats["missing_guard_usage_pct"] += avg_usg or 0.0
+                    team_stats["missing_guard_minutes"] += avg_minutes or 0.0
+
+                if is_high_usage(priors["usage_pct"]):
+                    team_stats["missing_high_usage_usage_pct"] += priors["usage_pct"] or 0.0
+                    team_stats["missing_high_usage_minutes"] += avg_minutes or 0.0
+
+                if is_playmaker(priors["ast_pct"], priors["potential_ast_pg"]):
+                    team_stats["missing_playmaker_potential_ast_pg"] += priors["potential_ast_pg"] or 0.0
+                    team_stats["missing_playmaker_minutes"] += avg_minutes or 0.0
+
+                if is_onball(priors["drives_pg"]):
+                    team_stats["missing_onball_drives_pg"] += priors["drives_pg"] or 0.0
+                    team_stats["missing_onball_minutes"] += avg_minutes or 0.0
+
+            for pid in stale_players:
+                roster_state.pop(pid, None)
+
+            team_missing_stats_dict[(team, current_date)] = {
+                key: _r(value) or 0.0
+                for key, value in team_stats.items()
+            }
+            team_missing_player_priors_dict[(team, current_date)] = current_missing_player_priors
+            team_active_player_priors_dict[(team, current_date)] = current_active_player_priors
+            for pos_group, pos_stats in same_pos_stats.items():
+                same_pos_missing_stats_dict[(team, current_date, pos_group)] = {
+                    key: _r(value) or 0.0
+                    for key, value in pos_stats.items()
+                }
+
+            for pid, row in games_by_date_team[(current_date, team)]:
+                mins = _safe_float(row.get("MIN"))
+                if mins is None or mins <= 0:
+                    continue
+
+                old_team = player_current_team.get(pid)
+                if old_team and old_team != team:
+                    team_active_roster.get(old_team, {}).pop(pid, None)
+                player_current_team[pid] = team
+
+                state = roster_state.setdefault(
+                    pid,
+                    {
+                        "last_active_date": current_date,
+                        "pos_group": enrichment.get_player_position_group(pid),
+                        "usg_history": [],
+                        "ast_pct_history": [],
+                        "potential_ast_history": [],
+                        "drive_history": [],
+                        "min_history": [],
+                    },
+                )
+                usg = _safe_float(row.get("USG_PCT"))
+                ast_pct = _safe_float(row.get("AST_PCT"))
+                potential_ast = _safe_float(row.get("POTENTIAL_AST"))
+                drives = _safe_float(row.get("DRIVES"))
+                if usg is not None:
+                    state["usg_history"].append((current_date, usg))
+                if ast_pct is not None:
+                    state["ast_pct_history"].append((current_date, ast_pct))
+                if potential_ast is not None:
+                    state["potential_ast_history"].append((current_date, potential_ast))
+                if drives is not None:
+                    state["drive_history"].append((current_date, drives))
+                state["min_history"].append((current_date, mins))
+                state["last_active_date"] = current_date
+                state["pos_group"] = enrichment.get_player_position_group(pid)
+
+                if len(state["usg_history"]) > 25:
+                    state["usg_history"] = state["usg_history"][-25:]
+                if len(state["ast_pct_history"]) > 25:
+                    state["ast_pct_history"] = state["ast_pct_history"][-25:]
+                if len(state["potential_ast_history"]) > 25:
+                    state["potential_ast_history"] = state["potential_ast_history"][-25:]
+                if len(state["drive_history"]) > 25:
+                    state["drive_history"] = state["drive_history"][-25:]
+                if len(state["min_history"]) > 25:
+                    state["min_history"] = state["min_history"][-25:]
+
+    return (
+        team_missing_stats_dict,
+        same_pos_missing_stats_dict,
+        team_missing_player_priors_dict,
+        team_active_player_priors_dict,
+    )
 
 
 def build_regression_dataset(
@@ -700,47 +1253,21 @@ def build_regression_dataset(
 
     player_index = _build_player_index(all_rows)
     print(f"  {len(player_index):,} unique players")
+    team_presence_index, team_game_dates_by_season = _build_team_presence_context(all_rows)
 
-    print("Pre-computing dynamic Star Teammate absences...")
-    from collections import defaultdict
-    games_by_date_team = defaultdict(list)
-    for gd, pid, row in all_rows:
-        t = str(row.get("TEAM_ABBREVIATION") or "").strip()
-        if t:
-            games_by_date_team[(gd, t)].append((pid, row))
-
-    player_state = {}
-    star_out_dict = {}
-    all_dates = sorted(list(set(gd for gd, _, _ in all_rows)))
-    
-    for current_date in all_dates:
-        teams_playing = set(t for (d, t) in games_by_date_team.keys() if d == current_date)
-        for team in teams_playing:
-            expected_stars = set()
-            for pid, pstate in player_state.items():
-                if pstate['team'] == team and (current_date - pstate['last_date']).days < 30:
-                    hist = pstate['usg_history'][-10:]
-                    if len(hist) >= 5 and (sum(hist) / len(hist)) >= 23.0:
-                        expected_stars.add(pid)
-            
-            actual_players = set()
-            for pid, row in games_by_date_team[(current_date, team)]:
-                mins = _safe_float(row.get("MIN"))
-                if mins and mins > 0:
-                    actual_players.add(pid)
-                    
-            missing_stars = expected_stars - actual_players
-            star_out_dict[(team, current_date)] = 1 if missing_stars else 0
-            
-            for pid, row in games_by_date_team[(current_date, team)]:
-                if pid not in player_state:
-                    player_state[pid] = {'team': team, 'last_date': current_date, 'usg_history': []}
-                usg = _safe_float(row.get("USG_PCT"))
-                if usg is not None:
-                    player_state[pid]['usg_history'].append(usg)
-                player_state[pid]['team'] = team
-                player_state[pid]['last_date'] = current_date
-    print(f"  Flagged {sum(star_out_dict.values()):,} games with missing stars")
+    print("Pre-computing archetype-aware missing teammate vacancy features...")
+    (
+        team_missing_stats_dict,
+        same_pos_missing_stats_dict,
+        team_missing_player_priors_dict,
+        team_active_player_priors_dict,
+    ) = _build_missing_team_stats(all_rows, enrichment)
+    populated_missing_games = sum(
+        1
+        for stats_map in team_missing_stats_dict.values()
+        if any((stats_map.get(column) or 0.0) > 0.0 for column in TEAM_VACANCY_FEATURE_COLUMNS)
+    )
+    print(f"  Populated missing-player features for {populated_missing_games:,} team-games")
 
     output_rows: List[Dict[str, Any]] = []
     stats = {"total_candidates": 0, "written_rows": 0,
@@ -755,7 +1282,12 @@ def build_regression_dataset(
                     min_prior=min_prior_games,
                     min_minutes=min_minutes,
                     enrichment=enrichment,
-                    star_out_dict=star_out_dict,
+                    team_missing_stats_dict=team_missing_stats_dict,
+                    same_pos_missing_stats_dict=same_pos_missing_stats_dict,
+                    team_missing_player_priors_dict=team_missing_player_priors_dict,
+                    team_active_player_priors_dict=team_active_player_priors_dict,
+                    team_presence_index=team_presence_index,
+                    team_game_dates_by_season=team_game_dates_by_season,
                 )
                 if row is None:
                     if game_idx < min_prior_games:

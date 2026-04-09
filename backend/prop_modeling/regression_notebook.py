@@ -41,12 +41,11 @@
 
 # %%
 nvidia-smi
-# %%
+
 
 # %%
 from google.colab import drive
 drive.mount('/content/drive')
-# %%
 
 # %%
 import subprocess, sys
@@ -74,6 +73,11 @@ plt.rcParams["figure.figsize"] = (14, 6)
 plt.rcParams["figure.dpi"] = 100
 
 print("Imports loaded")
+
+# CatBoost MultiQuantile is not supported on GPU in this workflow, so force CPU
+# even in Colab GPU runtimes to avoid failed Optuna trials and retrains.
+CATBOOST_MULTIQUANTILE_TASK_TYPE = "CPU"
+print(f"CatBoost MultiQuantile task_type: {CATBOOST_MULTIQUANTILE_TASK_TYPE}")
 
 # %% [markdown]
 # ## 2. Upload & Load Data
@@ -221,9 +225,34 @@ BASE_FEATURE_COLS = [
     "opp_def_rating",
     "recent5_avg_game_margin",
     "recent5_blowout_flag",
-    # Optional teammate injury context — only consumed if present in CSV.
-    # Add these to the upstream ETL before enabling them here.
-    "star_teammate_out_flag",
+    # Continuous teammate absence context from trailing inactive-player usage/minutes.
+    "missing_team_usage_pct",
+    "missing_team_minutes",
+    "missing_same_pos_usage_pct",
+    "missing_same_pos_minutes",
+    "missing_guard_usage_pct",
+    "missing_guard_minutes",
+    "missing_high_usage_usage_pct",
+    "missing_high_usage_minutes",
+    "missing_playmaker_potential_ast_pg",
+    "missing_playmaker_minutes",
+    "missing_onball_drives_pg",
+    "missing_onball_minutes",
+    "playmaker_vacuum_x_player_ast_rate",
+    "onball_vacuum_x_player_drive_rate",
+    "usage_vacuum_x_player_usage_pct",
+    "missing_key_teammates_player_stat_delta",
+    "missing_key_teammates_player_minutes_delta",
+    "missing_key_teammates_player_usage_pct_delta",
+    "missing_key_teammates_player_potential_ast_rate_delta",
+    "missing_key_teammates_player_drive_rate_delta",
+    "missing_key_teammates_effective_support",
+    "returning_key_teammates_player_stat_delta",
+    "returning_key_teammates_player_minutes_delta",
+    "returning_key_teammates_player_usage_pct_delta",
+    "returning_key_teammates_player_potential_ast_rate_delta",
+    "returning_key_teammates_player_drive_rate_delta",
+    "returning_key_teammates_effective_support",
     "team_fg_attempts_share_last5",
 ]
 
@@ -714,7 +743,7 @@ for stat_type in ALL_STAT_TYPES:
             "random_seed":         42,
             "verbose":             False,
             "allow_writing_files": False,
-            "task_type":           "GPU" if os.environ.get("COLAB_GPU") else "CPU",
+            "task_type":           CATBOOST_MULTIQUANTILE_TASK_TYPE,
         }
 
         X_tr = prepare(_train, FEATURE_COLS)
@@ -759,7 +788,7 @@ for stat_type in ALL_STAT_TYPES:
         "random_seed":         42,
         "verbose":             100,
         "allow_writing_files": False,
-        "task_type":           "GPU" if os.environ.get("COLAB_GPU") else "CPU",
+        "task_type":           CATBOOST_MULTIQUANTILE_TASK_TYPE,
     }
 
     X_tr = prepare(train_st, FEATURE_COLS)
@@ -1069,13 +1098,18 @@ for f in sorted(export_dir.iterdir()):
 
 # %%
 # Download from Colab
-try:
-    from google.colab import files as dl
-    import shutil
-    shutil.make_archive("exported_regression_model", "zip", ".", "exported_regression_model")
-    dl.download("exported_regression_model.zip")
-except ImportError:
-    print("(Not on Colab - saved locally)")
+from google.colab import drive
+drive.mount('/content/drive')
+
+import shutil
+from pathlib import Path
+
+export_dir = Path("exported_regression_model")
+drive_zip_base = "/content/drive/MyDrive/exported_regression_model"
+
+shutil.make_archive(drive_zip_base, "zip", root_dir=".", base_dir="exported_regression_model")
+print("Saved to:", drive_zip_base + ".zip")
+
 
 # %% [markdown]
 # ## 17. How to Use at Inference  (`utils/ml_inference.py`)
