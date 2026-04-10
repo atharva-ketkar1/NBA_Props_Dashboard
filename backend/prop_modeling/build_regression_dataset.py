@@ -100,6 +100,8 @@ REGRESSION_DATASET_COLUMNS = [
     "recent5_pts_per100",
     "recent10_target_per_min",
     "missing_same_pos_minutes_x_player_target_per_min",
+    "missing_playmaker_potential_ast_pg_x_player_target_per_min",
+    "missing_onball_drives_pg_x_player_target_per_min",
     # Half / quarter trends
     "recent5_1h_stat_share",
     # ── NEW v2: Opponent defensive features ──────────────────────────────────
@@ -615,7 +617,7 @@ def _target_per_min(row: Dict[str, Any], stat_type: str) -> Optional[float]:
     mins = _safe_float(row.get("MIN"))
     if total is None or mins is None or mins <= 0:
         return None
-    return total / mins
+    return total / max(mins, 1.0)
 
 
 def _parse_matchup(matchup: Any, team: str) -> Tuple[Optional[str], Optional[int]]:
@@ -800,6 +802,12 @@ def _metric_mean_for_rows(
         return _mean([_metric_rate(row, "POTENTIAL_AST") for row in rows]) or 0.0
     if metric_key == "drive_rate":
         return _mean([_metric_rate(row, "DRIVES") for row in rows]) or 0.0
+    if metric_key == "target_per_min":
+        return _mean([
+            _target_per_min(row, stat_type)
+            for row in rows
+            if (_safe_float(row.get("MIN")) or 0.0) >= 4.0
+        ]) or 0.0
     return 0.0
 
 
@@ -854,6 +862,12 @@ def _compute_teammate_split_summary(
         "drive_rate_present_mean": _metric_mean_for_rows(
             present_rows, stat_type=stat_type, metric_key="drive_rate"
         ),
+        "target_per_min_absent_mean": _metric_mean_for_rows(
+            absent_rows, stat_type=stat_type, metric_key="target_per_min"
+        ),
+        "target_per_min_present_mean": _metric_mean_for_rows(
+            present_rows, stat_type=stat_type, metric_key="target_per_min"
+        ),
     }
 
 
@@ -873,6 +887,7 @@ def _aggregate_teammate_delta_features(
         f"{prefix}_player_usage_pct_delta": 0.0,
         f"{prefix}_player_potential_ast_rate_delta": 0.0,
         f"{prefix}_player_drive_rate_delta": 0.0,
+        f"{prefix}_player_target_per_min_delta": 0.0,
         f"{prefix}_effective_support": 0.0,
     }
     if not teammate_priors:
@@ -909,6 +924,10 @@ def _aggregate_teammate_delta_features(
                 - split_summary["potential_ast_rate_present_mean"]
             )
             drive_delta = split_summary["drive_rate_absent_mean"] - split_summary["drive_rate_present_mean"]
+            target_per_min_delta = (
+                split_summary["target_per_min_absent_mean"]
+                - split_summary["target_per_min_present_mean"]
+            )
         else:
             stat_delta = split_summary["stat_present_mean"] - split_summary["stat_absent_mean"]
             minutes_delta = split_summary["minutes_present_mean"] - split_summary["minutes_absent_mean"]
@@ -918,12 +937,17 @@ def _aggregate_teammate_delta_features(
                 - split_summary["potential_ast_rate_absent_mean"]
             )
             drive_delta = split_summary["drive_rate_present_mean"] - split_summary["drive_rate_absent_mean"]
+            target_per_min_delta = (
+                split_summary["target_per_min_present_mean"]
+                - split_summary["target_per_min_absent_mean"]
+            )
 
         aggregated[f"{prefix}_player_stat_delta"] += weight * shrink * stat_delta
         aggregated[f"{prefix}_player_minutes_delta"] += weight * shrink * minutes_delta
         aggregated[f"{prefix}_player_usage_pct_delta"] += weight * shrink * usage_delta
         aggregated[f"{prefix}_player_potential_ast_rate_delta"] += weight * shrink * ast_delta
         aggregated[f"{prefix}_player_drive_rate_delta"] += weight * shrink * drive_delta
+        aggregated[f"{prefix}_player_target_per_min_delta"] += weight * shrink * target_per_min_delta
         aggregated[f"{prefix}_effective_support"] += weight * split_summary["support"]
 
     return aggregated
@@ -1518,6 +1542,14 @@ def _build_regression_row(
         "recent10_target_per_min": _r(recent10_target_per_min),
         "missing_same_pos_minutes_x_player_target_per_min": _r(
             same_pos_missing_minutes * (recent10_target_per_min or 0.0)
+        ),
+        "missing_playmaker_potential_ast_pg_x_player_target_per_min": _r(
+            (_safe_float((team_missing_stats or {}).get("missing_playmaker_potential_ast_pg")) or 0.0)
+            * (recent10_target_per_min or 0.0)
+        ),
+        "missing_onball_drives_pg_x_player_target_per_min": _r(
+            (_safe_float((team_missing_stats or {}).get("missing_onball_drives_pg")) or 0.0)
+            * (recent10_target_per_min or 0.0)
         ),
         "recent5_1h_stat_share": _r(r5_1h_share),
         # Opponent defense (v2)

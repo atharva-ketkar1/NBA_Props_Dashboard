@@ -74,6 +74,8 @@ INJURY_INTERACTION_COLUMNS = (
     "missing_playmaker_potential_ast_pg_x_player_ast_rate",
     "missing_onball_drives_pg_x_player_drive_rate",
     "missing_high_usage_usage_pct_x_player_usage_rate",
+    "missing_playmaker_potential_ast_pg_x_player_target_per_min",
+    "missing_onball_drives_pg_x_player_target_per_min",
 )
 
 TEAMMATE_ONOFF_FEATURE_COLUMNS = (
@@ -82,6 +84,7 @@ TEAMMATE_ONOFF_FEATURE_COLUMNS = (
     "missing_key_teammates_player_usage_pct_delta",
     "missing_key_teammates_player_potential_ast_rate_delta",
     "missing_key_teammates_player_drive_rate_delta",
+    "missing_key_teammates_player_target_per_min_delta",
     "missing_key_teammates_effective_support",
     "missing_key_teammate_count",
     "missing_same_pos_key_count",
@@ -92,6 +95,7 @@ TEAMMATE_ONOFF_FEATURE_COLUMNS = (
     "returning_key_teammates_player_usage_pct_delta",
     "returning_key_teammates_player_potential_ast_rate_delta",
     "returning_key_teammates_player_drive_rate_delta",
+    "returning_key_teammates_player_target_per_min_delta",
     "returning_key_teammates_effective_support",
     "returning_key_teammate_count",
     "returning_same_pos_key_count",

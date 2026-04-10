@@ -49,6 +49,9 @@ ENGINEERED_FEATURE_COLUMNS = [
     "momentum_diff_3v10",
     "expected_possessions",
     "predicted_minutes",
+    "modeled_minutes_x_recent10_target_per_min",
+    "modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta",
+    "modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta",
 ]
 NON_FEATURE_COLUMNS = {"game_date", "game_id", TARGET_COLUMN}
 
@@ -115,6 +118,27 @@ def _prepare_features(
     return X
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(text)
+    temp_path.replace(path)
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    _atomic_write_text(
+        path,
+        json.dumps(payload, indent=2, sort_keys=True),
+    )
+
+
+def _atomic_save_catboost_model(model: CatBoostRegressor, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    model.save_model(str(temp_path), format="cbm")
+    temp_path.replace(path)
+
+
 def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
@@ -143,6 +167,28 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         out["modeled_minutes_x_recent10_target_per_min"] = (
             pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
             * pd.to_numeric(out["recent10_target_per_min"], errors="coerce").fillna(0.0)
+        )
+    if (
+        "modeled_minutes_q50" in out.columns
+        and "missing_key_teammates_player_target_per_min_delta" in out.columns
+    ):
+        out["modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta"] = (
+            pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
+            * pd.to_numeric(
+                out["missing_key_teammates_player_target_per_min_delta"],
+                errors="coerce",
+            ).fillna(0.0)
+        )
+    if (
+        "modeled_minutes_q50" in out.columns
+        and "returning_key_teammates_player_target_per_min_delta" in out.columns
+    ):
+        out["modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta"] = (
+            pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
+            * pd.to_numeric(
+                out["returning_key_teammates_player_target_per_min_delta"],
+                errors="coerce",
+            ).fillna(0.0)
         )
 
     return out
@@ -572,26 +618,18 @@ def main() -> int:
         "stat_models": {},
     }
 
-    minutes_model.save_model(str(model_dir / MINUTES_MODEL_FILE_NAME))
-    (model_dir / MINUTES_MODEL_METADATA_FILE_NAME).write_text(
-        json.dumps(
-            {
-                "target": MINUTES_MODEL_TARGET_COLUMN,
-                "feature_columns": MINUTES_MODEL_FEATURE_COLUMNS,
-                "cat_features": MINUTES_MODEL_CATEGORICAL_FEATURES,
-                "model_file": MINUTES_MODEL_FILE_NAME,
-                "test_metrics": minutes_metrics,
-                "heuristic_baseline_metrics": heuristic_minutes_metrics,
-                "modeled_minutes_features": MODELED_MINUTES_FEATURE_COLUMNS,
-                "promotion_guardrail": default_promotion_guardrail_config(),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    (model_dir / MINUTES_MODEL_QUANTILES_FILE_NAME).write_text(
-        json.dumps(minutes_metrics, indent=2, sort_keys=True)
-    )
+    _atomic_save_catboost_model(minutes_model, model_dir / MINUTES_MODEL_FILE_NAME)
+    _atomic_write_json(model_dir / MINUTES_MODEL_QUANTILES_FILE_NAME, minutes_metrics)
+    minutes_metadata_payload = {
+        "target": MINUTES_MODEL_TARGET_COLUMN,
+        "feature_columns": MINUTES_MODEL_FEATURE_COLUMNS,
+        "cat_features": MINUTES_MODEL_CATEGORICAL_FEATURES,
+        "model_file": MINUTES_MODEL_FILE_NAME,
+        "test_metrics": minutes_metrics,
+        "heuristic_baseline_metrics": heuristic_minutes_metrics,
+        "modeled_minutes_features": MODELED_MINUTES_FEATURE_COLUMNS,
+        "promotion_guardrail": default_promotion_guardrail_config(),
+    }
     print(f"Minutes model test metrics: {minutes_metrics}")
     print(f"Heuristic minutes baseline: {heuristic_minutes_metrics}")
 
@@ -621,23 +659,22 @@ def main() -> int:
                   f"Median_AE={m['median_ae']}")
 
             model_path = model_dir / "unified_regression.cbm"
-            result["model"].save_model(str(model_path))
+            _atomic_save_catboost_model(result["model"], model_path)
 
             # Feature importance
             try:
                 imps = result["model"].get_feature_importance()
                 imp_pairs = sorted(zip(feature_cols, imps), key=lambda x: -x[1])
                 print(f"  Top features: {[f'{n}={round(i,1)}' for n,i in imp_pairs[:10]]}")
-                (model_dir / "unified_regression.feature_importance.json").write_text(
-                    json.dumps([{"feature": n, "importance": round(float(i), 4)} for n, i in imp_pairs], indent=2)
+                _atomic_write_text(
+                    model_dir / "unified_regression.feature_importance.json",
+                    json.dumps([{"feature": n, "importance": round(float(i), 4)} for n, i in imp_pairs], indent=2),
                 )
             except Exception:
                 pass
 
             meta = {"stat_type": stat_type_label, "metrics": m, "feature_columns": feature_cols}
-            (model_dir / "unified_regression.metadata.json").write_text(
-                json.dumps(meta, indent=2, sort_keys=True)
-            )
+            _atomic_write_json(model_dir / "unified_regression.metadata.json", meta)
             manifest["stat_models"][stat_type_label] = {"metrics": m}
     else:
         for stat_type in sorted(df["stat_type"].dropna().unique()):
@@ -670,17 +707,17 @@ def main() -> int:
 
             slug = stat_type.lower().replace("+", "_plus_")
             model_path = model_dir / f"{slug}_regression.cbm"
-            result["model"].save_model(str(model_path))
+            _atomic_save_catboost_model(result["model"], model_path)
 
             meta = {"stat_type": stat_type, "metrics": m, "feature_columns": feature_cols}
-            (model_dir / f"{slug}_regression.metadata.json").write_text(
-                json.dumps(meta, indent=2, sort_keys=True)
-            )
+            _atomic_write_json(model_dir / f"{slug}_regression.metadata.json", meta)
             manifest["stat_models"][stat_type] = {"metrics": m}
+
+    _atomic_write_json(model_dir / MINUTES_MODEL_METADATA_FILE_NAME, minutes_metadata_payload)
 
     # Save manifest
     manifest_path = model_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    _atomic_write_json(manifest_path, manifest)
     print(f"\nmanifest={manifest_path}")
     print(f"trained_models={len(manifest['stat_models'])}")
     return 0

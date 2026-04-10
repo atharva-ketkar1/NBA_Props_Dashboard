@@ -9,6 +9,14 @@ import time
 import random
 from pathlib import Path
 
+
+def _atomic_write_csv(df: pd.DataFrame, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.name}.tmp")
+    df.to_csv(temp_path, index=False)
+    os.replace(temp_path, output_path)
+
+
 class NBAStatsEngine:
     def __init__(self):
         self.session = requests.Session()
@@ -254,14 +262,13 @@ if __name__ == "__main__":
     engine = NBAStatsEngine()
     final_stats = engine.get_player_data()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_path = os.path.join(script_dir, "..", "data", "current", "season_stats.csv")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    output_path = script_dir.parent / "data" / "current" / "season_stats.csv"
 
     
     if not final_stats.empty:
         print(f"Total Players Processed: {len(final_stats)}")
-        final_stats.to_csv(output_path, index=False)
+        _atomic_write_csv(final_stats, output_path)
         print(f"Saved to: {output_path}")
         print(list(final_stats.columns))
     else:

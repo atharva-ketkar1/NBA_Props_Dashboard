@@ -284,6 +284,8 @@ BASE_FEATURE_COLS = [
     "recent5_pts_per100",
     "recent10_target_per_min",
     "missing_same_pos_minutes_x_player_target_per_min",
+    "missing_playmaker_potential_ast_pg_x_player_target_per_min",
+    "missing_onball_drives_pg_x_player_target_per_min",
     "recent5_1h_stat_share",
     # Opponent defensive features
     "opp_pts_defense_rank",
@@ -336,6 +338,7 @@ BASE_FEATURE_COLS = [
     "missing_key_teammates_player_usage_pct_delta",
     "missing_key_teammates_player_potential_ast_rate_delta",
     "missing_key_teammates_player_drive_rate_delta",
+    "missing_key_teammates_player_target_per_min_delta",
     "missing_key_teammates_effective_support",
     "missing_key_teammate_count",
     "missing_same_pos_key_count",
@@ -346,6 +349,7 @@ BASE_FEATURE_COLS = [
     "returning_key_teammates_player_usage_pct_delta",
     "returning_key_teammates_player_potential_ast_rate_delta",
     "returning_key_teammates_player_drive_rate_delta",
+    "returning_key_teammates_player_target_per_min_delta",
     "returning_key_teammates_effective_support",
     "returning_key_teammate_count",
     "returning_same_pos_key_count",
@@ -410,6 +414,28 @@ def engineer_features(input_df: pd.DataFrame) -> pd.DataFrame:
             pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
             * pd.to_numeric(out["recent10_target_per_min"], errors="coerce").fillna(0.0)
         )
+    if (
+        "modeled_minutes_q50" in out.columns
+        and "missing_key_teammates_player_target_per_min_delta" in out.columns
+    ):
+        out["modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta"] = (
+            pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
+            * pd.to_numeric(
+                out["missing_key_teammates_player_target_per_min_delta"],
+                errors="coerce",
+            ).fillna(0.0)
+        )
+    if (
+        "modeled_minutes_q50" in out.columns
+        and "returning_key_teammates_player_target_per_min_delta" in out.columns
+    ):
+        out["modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta"] = (
+            pd.to_numeric(out["modeled_minutes_q50"], errors="coerce").fillna(0.0)
+            * pd.to_numeric(
+                out["returning_key_teammates_player_target_per_min_delta"],
+                errors="coerce",
+            ).fillna(0.0)
+        )
 
     return out
 
@@ -420,7 +446,9 @@ df = engineer_features(df)
 ENGINEERED_COLS = [
     c for c in ["momentum_diff_5v20", "momentum_diff_3v10",
                  "expected_possessions", "predicted_minutes",
-                 "modeled_minutes_x_recent10_target_per_min"]
+                 "modeled_minutes_x_recent10_target_per_min",
+                 "modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta",
+                 "modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta"]
     if c in df.columns
 ]
 FEATURE_COLS = BASE_FEATURE_COLS + ENGINEERED_COLS
@@ -687,7 +715,9 @@ df = engineer_features(df)
 ENGINEERED_COLS = [
     c for c in ["momentum_diff_5v20", "momentum_diff_3v10",
                  "expected_possessions", "predicted_minutes",
-                 "modeled_minutes_x_recent10_target_per_min"]
+                 "modeled_minutes_x_recent10_target_per_min",
+                 "modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta",
+                 "modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta"]
     if c in df.columns
 ]
 FEATURE_COLS = BASE_FEATURE_COLS + ENGINEERED_COLS + [
@@ -1691,39 +1721,50 @@ print(f"\nBest model by MAE: {best_name}  (MAE={comparison_df.loc[best_name,'MAE
 # ## 16. Export Models
 
 # %%
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(text)
+    temp_path.replace(path)
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_text(path, json.dumps(payload, indent=2, default=str))
+
+
+def atomic_save_catboost_model(model: CatBoostRegressor, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    model.save_model(str(temp_path), format="cbm")
+    temp_path.replace(path)
+
+
 export_dir = Path("exported_regression_model")
 export_dir.mkdir(exist_ok=True)
 
 # Minutes model artifact + metadata
 minutes_model_file = "minutes_model.cbm"
-minutes_model.save_model(str(export_dir / minutes_model_file))
-(export_dir / "minutes_quantile_stats.json").write_text(
-    json.dumps(minutes_test_metrics, indent=2)
-)
-(export_dir / "minutes_model_metadata.json").write_text(
-    json.dumps(
-        {
-            "model_type": "minutes_multiquantile",
-            "quantile_alphas": [0.25, 0.5, 0.75],
-            "target": "actual_minutes",
-            "feature_columns": MINUTES_FEATURE_COLS,
-            "cat_features": MINUTES_CAT_FEATURES,
-            "model_file": minutes_model_file,
-            "test_metrics": minutes_test_metrics,
-            "heuristic_baseline_metrics": heuristic_minutes_metrics,
-            "oof_block_dates": MINUTES_OOF_BLOCK_DATES,
-            "oof_min_train_dates": MINUTES_OOF_MIN_TRAIN_DATES,
-            "promotion_guardrail": promotion_guardrail_config,
-        },
-        indent=2,
-    )
-)
+atomic_save_catboost_model(minutes_model, export_dir / minutes_model_file)
+atomic_write_json(export_dir / "minutes_quantile_stats.json", minutes_test_metrics)
+minutes_metadata_payload = {
+    "model_type": "minutes_multiquantile",
+    "quantile_alphas": [0.25, 0.5, 0.75],
+    "target": "actual_minutes",
+    "feature_columns": MINUTES_FEATURE_COLS,
+    "cat_features": MINUTES_CAT_FEATURES,
+    "model_file": minutes_model_file,
+    "test_metrics": minutes_test_metrics,
+    "heuristic_baseline_metrics": heuristic_minutes_metrics,
+    "oof_block_dates": MINUTES_OOF_BLOCK_DATES,
+    "oof_min_train_dates": MINUTES_OOF_MIN_TRAIN_DATES,
+    "promotion_guardrail": promotion_guardrail_config,
+}
 
 # One .cbm per stat type
 model_files: Dict[str, str] = {}
 for stat_type, model in tuned_per_stat_models.items():
     filename = f"model_{stat_type.replace('+', '_')}.cbm"
-    model.save_model(str(export_dir / filename))
+    atomic_save_catboost_model(model, export_dir / filename)
     model_files[stat_type] = filename
     print(f"  Saved {filename}")
 
@@ -1737,12 +1778,10 @@ for st, r in tuned_per_stat_results.items():
         "q50_bias":     round(float((q50 - y).mean()), 3),
         "iqr_coverage": round(float(((y >= q25) & (y <= q75)).mean()), 3),
     }
-(export_dir / "quantile_stats.json").write_text(json.dumps(quantile_stats, indent=2))
+atomic_write_json(export_dir / "quantile_stats.json", quantile_stats)
 
 # Feature drift baseline
-(export_dir / "feature_drift_baseline.json").write_text(
-    json.dumps(drift_baseline, indent=2)
-)
+atomic_write_json(export_dir / "feature_drift_baseline.json", drift_baseline)
 
 # Metadata
 export_meta = {
@@ -1779,9 +1818,8 @@ export_meta = {
         "to detect stale or out-of-distribution feature values."
     ),
 }
-(export_dir / "model_metadata.json").write_text(
-    json.dumps(export_meta, indent=2, default=str)
-)
+atomic_write_json(export_dir / "minutes_model_metadata.json", minutes_metadata_payload)
+atomic_write_json(export_dir / "model_metadata.json", export_meta)
 
 print(f"\nAll files in export_dir:")
 for f in sorted(export_dir.iterdir()):

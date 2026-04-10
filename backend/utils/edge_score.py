@@ -2189,6 +2189,89 @@ def _is_combo_stat_type(stat_type: str) -> bool:
     return "+" in str(stat_type or "")
 
 
+def _has_positive_creator_interaction(feature_snapshot: Dict[str, Any]) -> bool:
+    return any(
+        (_safe_float(feature_snapshot.get(key), 0.0) or 0.0) > 0.0
+        for key in (
+            "playmaker_vacuum_x_player_ast_rate",
+            "onball_vacuum_x_player_drive_rate",
+            "missing_playmaker_potential_ast_pg_x_player_ast_rate",
+            "missing_onball_drives_pg_x_player_drive_rate",
+        )
+    )
+
+
+def _is_injury_sensitive_recommendation(feature_snapshot: Dict[str, Any]) -> bool:
+    return any(
+        (
+            (_safe_float(feature_snapshot.get("missing_key_teammate_count"), 0.0) or 0.0) > 0.0,
+            (_safe_float(feature_snapshot.get("returning_key_teammate_count"), 0.0) or 0.0) > 0.0,
+            (_safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0) >= 25.0,
+            (_safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0) >= 30.0,
+        )
+    )
+
+
+def _compute_recommendation_eligibility(
+    *,
+    side: str,
+    ml_details: Dict[str, Any],
+) -> Dict[str, Any]:
+    feature_snapshot = ml_details.get("injury_feature_snapshot") or {}
+    injury_sensitive = _is_injury_sensitive_recommendation(feature_snapshot)
+    injury_freshness = ml_details.get("injury_report_freshness") or {}
+    if injury_sensitive and injury_freshness.get("is_stale"):
+        return {
+            "injury_sensitive": True,
+            "eligibility_blocked": True,
+            "eligibility_block_reason": "blocked_stale_injury_context",
+        }
+
+    missing_team_usage_pct = _safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0
+    missing_team_minutes = _safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0
+    missing_key_teammate_count = _safe_float(feature_snapshot.get("missing_key_teammate_count"), 0.0) or 0.0
+    returning_key_teammate_count = _safe_float(feature_snapshot.get("returning_key_teammate_count"), 0.0) or 0.0
+    modeled_minutes_delta = _safe_float(feature_snapshot.get("modeled_minutes_delta_vs_recent5"), 0.0) or 0.0
+    teammate_minutes_delta = _safe_float(
+        feature_snapshot.get("missing_key_teammates_player_minutes_delta"),
+        0.0,
+    ) or 0.0
+    teammate_stat_delta = _safe_float(
+        feature_snapshot.get("missing_key_teammates_player_stat_delta"),
+        0.0,
+    ) or 0.0
+
+    if (
+        side == "under"
+        and injury_sensitive
+        and missing_team_usage_pct >= 45.0
+        and missing_team_minutes >= 60.0
+        and (
+            missing_key_teammate_count >= 2.0
+            or returning_key_teammate_count >= 2.0
+        )
+        and (
+            modeled_minutes_delta >= 3.0
+            or teammate_minutes_delta >= 2.0
+        )
+        and (
+            teammate_stat_delta > 0.0
+            or _has_positive_creator_interaction(feature_snapshot)
+        )
+    ):
+        return {
+            "injury_sensitive": True,
+            "eligibility_blocked": True,
+            "eligibility_block_reason": "blocked_promotion_under",
+        }
+
+    return {
+        "injury_sensitive": injury_sensitive,
+        "eligibility_blocked": False,
+        "eligibility_block_reason": "",
+    }
+
+
 def _compute_promotion_guardrail(
     *,
     player: Dict[str, Any],
@@ -2369,6 +2452,7 @@ def _compute_ml_regression_context(
     feature_snapshot = res.get("feature_snapshot", {}) if isinstance(res, dict) else {}
     injury_report_freshness = res.get("injury_report_freshness", {}) if isinstance(res, dict) else {}
     position_resolution_summary = res.get("position_resolution_summary", {}) if isinstance(res, dict) else {}
+    runtime_context = res.get("runtime_context", {}) if isinstance(res, dict) else {}
 
     # ── Quantile path (preferred) ────────────────────────────────────────────
     q25 = _safe_float(res.get("q25"))
@@ -2426,6 +2510,7 @@ def _compute_ml_regression_context(
             "ml_lineup_adjustment": adjustment,
             "injury_report_freshness": injury_report_freshness,
             "position_resolution_summary": position_resolution_summary,
+            "runtime_context": runtime_context,
             "injury_feature_snapshot": {
                 key: feature_snapshot.get(key)
                 for key in (
@@ -2462,11 +2547,14 @@ def _compute_ml_regression_context(
                     "missing_onball_drives_pg_x_player_drive_rate",
                     "missing_high_usage_usage_pct_x_player_usage_rate",
                     "missing_same_pos_minutes_x_player_target_per_min",
+                    "missing_playmaker_potential_ast_pg_x_player_target_per_min",
+                    "missing_onball_drives_pg_x_player_target_per_min",
                     "missing_key_teammates_player_stat_delta",
                     "missing_key_teammates_player_minutes_delta",
                     "missing_key_teammates_player_usage_pct_delta",
                     "missing_key_teammates_player_potential_ast_rate_delta",
                     "missing_key_teammates_player_drive_rate_delta",
+                    "missing_key_teammates_player_target_per_min_delta",
                     "missing_key_teammates_effective_support",
                     "missing_key_teammate_count",
                     "missing_same_pos_key_count",
@@ -2477,11 +2565,14 @@ def _compute_ml_regression_context(
                     "returning_key_teammates_player_usage_pct_delta",
                     "returning_key_teammates_player_potential_ast_rate_delta",
                     "returning_key_teammates_player_drive_rate_delta",
+                    "returning_key_teammates_player_target_per_min_delta",
                     "returning_key_teammates_effective_support",
                     "returning_key_teammate_count",
                     "returning_same_pos_key_count",
                     "returning_guard_key_count",
                     "returning_playmaker_key_count",
+                    "modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta",
+                    "modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta",
                 )
             },
             "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
@@ -2505,6 +2596,7 @@ def _compute_ml_regression_context(
             "calibration": "gaussian_legacy",
             "injury_report_freshness": injury_report_freshness,
             "position_resolution_summary": position_resolution_summary,
+            "runtime_context": runtime_context,
             "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
             "vegas_spread": _safe_float(game_context.get("spread")) if game_context else None,
         }
@@ -3272,6 +3364,10 @@ def _build_candidate(
         edge_score=edge_score,
         confidence=confidence,
     )
+    eligibility = _compute_recommendation_eligibility(
+        side=side,
+        ml_details=components["ml_regression"].get("details", {}) or {},
+    )
     display_edge_score = promotion_guardrail.get("display_edge_score", edge_score)
     display_confidence = promotion_guardrail.get("display_confidence", confidence)
 
@@ -3309,6 +3405,9 @@ def _build_candidate(
         "guardrail_reason": promotion_guardrail.get("reason"),
         "guardrail_confidence_penalty": promotion_guardrail.get("confidence_penalty"),
         "guardrail_edge_score_penalty": promotion_guardrail.get("edge_score_penalty"),
+        "injury_sensitive": bool(eligibility.get("injury_sensitive")),
+        "eligibility_blocked": bool(eligibility.get("eligibility_blocked")),
+        "eligibility_block_reason": str(eligibility.get("eligibility_block_reason") or ""),
         "reasons": reasons,
         "inputs": {
             "projection": components["projection"]["details"],
@@ -3317,6 +3416,7 @@ def _build_candidate(
             "market": components["market"]["details"],
             "ml_regression": components["ml_regression"]["details"],
             "promotion_guardrail": promotion_guardrail,
+            "eligibility": eligibility,
             "line_movement": components["line_movement"]["details"],
             "similar_players": components["similar_players"]["details"],
             "head_to_head": components["head_to_head"]["details"],
@@ -3458,6 +3558,8 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
     per_book_counts: Dict[str, int] = {}
     filtered = []
     for recommendation in recommendations:
+        if recommendation.get("eligibility_blocked"):
+            continue
         signal_score = _ranking_edge_score(recommendation)
         book = str(recommendation.get("sportsbook") or "").strip().lower()
         if book not in SUPPORTED_BOOKS:
@@ -3474,6 +3576,8 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
 def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     filtered = []
     for recommendation in recommendations:
+        if recommendation.get("eligibility_blocked"):
+            continue
         signal_score = _ranking_edge_score(recommendation)
         if signal_score < EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE:
             continue
@@ -5420,10 +5524,31 @@ def run_edge_score_refresh(
             candidates.append(best_candidate)
 
     candidates.sort(key=_candidate_sort_key, reverse=True)
-    top_recommendations = _diversify_candidates(candidates, EDGE_LIMIT)
+    eligible_candidates = [
+        candidate for candidate in candidates
+        if not candidate.get("eligibility_blocked")
+    ]
+    blocked_candidates = [
+        candidate for candidate in candidates
+        if candidate.get("eligibility_blocked")
+    ]
+    top_recommendations = _diversify_candidates(eligible_candidates, EDGE_LIMIT)
+    blocked_recommendations = _diversify_candidates(blocked_candidates, EDGE_LIMIT)
     for rank, recommendation in enumerate(top_recommendations, start=1):
         recommendation["rank"] = rank
-    sportsbook_boards = _build_sportsbook_boards(candidates, EDGE_SPORTSBOOK_BOARD_LIMIT)
+    for blocked_rank, recommendation in enumerate(blocked_recommendations, start=1):
+        recommendation["blocked_rank"] = blocked_rank
+    sportsbook_boards = _build_sportsbook_boards(eligible_candidates, EDGE_SPORTSBOOK_BOARD_LIMIT)
+    blocked_stale_count = sum(
+        1
+        for candidate in blocked_candidates
+        if candidate.get("eligibility_block_reason") == "blocked_stale_injury_context"
+    )
+    blocked_promotion_under_count = sum(
+        1
+        for candidate in blocked_candidates
+        if candidate.get("eligibility_block_reason") == "blocked_promotion_under"
+    )
 
     notification_delta = _compute_notification_delta(top_recommendations, state, refresh_label)
     official_recommendations = notification_delta.get("official_recommendations", [])
@@ -5435,15 +5560,21 @@ def run_edge_score_refresh(
         "summary": {
             "active_players": len(active_entries),
             "candidate_count": len(candidates),
+            "eligible_candidate_count": len(eligible_candidates),
+            "blocked_candidate_count": len(blocked_candidates),
             "top_count": len(top_recommendations),
+            "blocked_top_count": len(blocked_recommendations),
             "available_books": sorted(SUPPORTED_BOOKS),
             "sportsbook_board_limit": EDGE_SPORTSBOOK_BOARD_LIMIT,
             "sportsbook_boards": sportsbook_boards,
             "injury_report_freshness": injury_report_freshness,
+            "blocked_stale_injury_context_count": blocked_stale_count,
+            "blocked_promotion_under_count": blocked_promotion_under_count,
             "duration_s": round(time.time() - start_time, 2),
             "scoring_model": "Signal Score",
         },
         "recommendations": top_recommendations,
+        "blocked_recommendations": blocked_recommendations,
         "notification": {
             "discord_configured": _has_discord_alert_target(),
             "discord_main_configured": bool(EDGE_SCORE_DISCORD_WEBHOOK_URL),

@@ -77,13 +77,19 @@ class MLPredictor:
     def _initialize(self):
         self.models: Dict[str, CatBoostRegressor] = {}
         self.minutes_model: Optional[CatBoostRegressor] = None
-        self.meta = {}
+        self.meta: Dict[str, Any] = {}
         self.minutes_meta: Dict[str, Any] = {}
-        self.q_stats = {}
+        self.q_stats: Dict[str, Any] = {}
         self.minutes_q_stats: Dict[str, Any] = {}
-        self.drift_b = {}
+        self.drift_b: Dict[str, Any] = {}
         self.enrichment = None
         self.ready = False
+        self.feat_cols: List[str] = []
+        self.cat_cols: List[str] = []
+        self.cat_idx: List[int] = []
+        self.minutes_feat_cols: List[str] = []
+        self.minutes_cat_cols: List[str] = []
+        self.minutes_cat_idx: List[int] = []
         self._drift_feature_high_water: Dict[str, float] = {}
         self._drift_event_count = 0
         self._drift_feature_counter: Counter[str] = Counter()
@@ -91,9 +97,48 @@ class MLPredictor:
         self._drift_last_summary_at = 0.0
         self._injury_report_mtime_ns: Optional[int] = None
         self._master_feed_mtime_ns: Optional[int] = None
+        self._season_stats_mtime_ns: Optional[int] = None
+        self._model_meta_mtime_ns: Optional[int] = None
+        self._minutes_meta_mtime_ns: Optional[int] = None
+        self.runtime_model_artifact_updated_at: Optional[str] = None
+        self.runtime_season_stats_updated_at: Optional[str] = None
         self.live_injury_report_meta: Dict[str, Any] = {}
         self.live_position_resolution_summary: Dict[str, Any] = {}
+        self.live_player_histories: Dict[str, List[Tuple[date, Dict[str, Any]]]] = {}
+        self.live_player_name_lookup: Dict[Tuple[str, str], str] = {}
+        self.live_team_player_ids: Dict[str, set[str]] = {}
+        self.live_player_prior_cache: Dict[Tuple[str, date, str], Dict[str, Any]] = {}
+        self.live_team_vacancy_stats: Dict[Tuple[str, date], Dict[str, float]] = {}
+        self.live_same_pos_vacancy_stats: Dict[Tuple[str, date, str], Dict[str, float]] = {}
+        self.live_missing_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
+        self.live_active_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
+        self.live_team_presence_index: Dict[Tuple[str, date], set[str]] = {}
+        self.live_team_game_dates_by_season: Dict[Tuple[str, int], List[date]] = {}
+        self.live_team_game_dates: Dict[str, date] = {}
+        self.live_team_matchup_dates: Dict[Tuple[str, str], date] = {}
 
+        try:
+            if not self._load_model_bundle(force=True):
+                logger.warning("MLPredictor: Missing model bundle commit marker. ML Inference offline.")
+                return
+            self._load_enrichment(force=True)
+            self._refresh_live_context(force=True)
+            self.ready = True
+            logger.info(f"MLPredictor: Successfully loaded {len(self.models)} per-stat models.")
+        except Exception as e:
+            logger.error(f"MLPredictor: Initialization failed: {e}")
+
+    @staticmethod
+    def _path_mtime_ns(path: Path) -> Optional[int]:
+        return path.stat().st_mtime_ns if path.exists() else None
+
+    @staticmethod
+    def _path_updated_at(path: Path) -> Optional[str]:
+        if not path.exists():
+            return None
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=ET_ZONE).isoformat()
+
+    def _load_model_bundle(self, *, force: bool = False) -> bool:
         meta_path = ML_MODEL_DIR / "model_metadata.json"
         q_stats_path = ML_MODEL_DIR / "quantile_stats.json"
         drift_b_path = ML_MODEL_DIR / "feature_drift_baseline.json"
@@ -101,73 +146,137 @@ class MLPredictor:
         minutes_q_stats_path = ML_MODEL_DIR / MINUTES_MODEL_QUANTILES_FILE_NAME
         minutes_model_path = ML_MODEL_DIR / MINUTES_MODEL_FILE_NAME
 
+        model_meta_mtime_ns = self._path_mtime_ns(meta_path)
+        minutes_meta_mtime_ns = self._path_mtime_ns(minutes_meta_path)
+        if (
+            not force
+            and model_meta_mtime_ns == self._model_meta_mtime_ns
+            and minutes_meta_mtime_ns == self._minutes_meta_mtime_ns
+        ):
+            return False
         if not meta_path.exists():
-            logger.warning("MLPredictor: Missing model_metadata.json. ML Inference offline.")
-            return
+            return False
+        if (
+            not force
+            and minutes_meta_path.exists()
+            and model_meta_mtime_ns is not None
+            and minutes_meta_mtime_ns is not None
+            and model_meta_mtime_ns < minutes_meta_mtime_ns
+        ):
+            return False
 
         try:
-            with open(meta_path) as f:
-                self.meta = json.load(f)
-            
+            with meta_path.open() as handle:
+                new_meta = json.load(handle)
+            new_q_stats: Dict[str, Any] = {}
             if q_stats_path.exists():
-                with open(q_stats_path) as f:
-                    self.q_stats = json.load(f)
-            
+                with q_stats_path.open() as handle:
+                    new_q_stats = json.load(handle)
+            new_drift_b: Dict[str, Any] = {}
             if drift_b_path.exists():
-                with open(drift_b_path) as f:
-                    self.drift_b = json.load(f)
+                with drift_b_path.open() as handle:
+                    new_drift_b = json.load(handle)
+            new_minutes_meta: Dict[str, Any] = {}
             if minutes_meta_path.exists():
-                with open(minutes_meta_path) as f:
-                    self.minutes_meta = json.load(f)
+                with minutes_meta_path.open() as handle:
+                    new_minutes_meta = json.load(handle)
+            new_minutes_q_stats: Dict[str, Any] = {}
             if minutes_q_stats_path.exists():
-                with open(minutes_q_stats_path) as f:
-                    self.minutes_q_stats = json.load(f)
+                with minutes_q_stats_path.open() as handle:
+                    new_minutes_q_stats = json.load(handle)
 
-            # Load per-stat models
-            model_files = self.meta.get("model_files", {})
-            for st, fname in model_files.items():
-                cbm_path = ML_MODEL_DIR / fname
-                if cbm_path.exists():
-                    model = CatBoostRegressor().load_model(str(cbm_path))
-                    self.models[st] = model
-                else:
-                    logger.warning(f"MLPredictor: Missing model file {fname} for {st}")
+            new_models: Dict[str, CatBoostRegressor] = {}
+            for stat_type, filename in (new_meta.get("model_files", {}) or {}).items():
+                cbm_path = ML_MODEL_DIR / str(filename)
+                if not cbm_path.exists():
+                    logger.warning("MLPredictor: Missing model file %s for %s", filename, stat_type)
+                    continue
+                model = CatBoostRegressor()
+                model.load_model(str(cbm_path))
+                new_models[stat_type] = model
 
+            new_minutes_model: Optional[CatBoostRegressor] = None
             if minutes_model_path.exists():
-                self.minutes_model = CatBoostRegressor().load_model(str(minutes_model_path))
+                new_minutes_model = CatBoostRegressor()
+                new_minutes_model.load_model(str(minutes_model_path))
 
-            self.feat_cols = self.meta.get("feature_columns", [])
-            self.cat_cols = self.meta.get("cat_features", [])
-            self.cat_idx = [self.feat_cols.index(c) for c in self.cat_cols if c in self.feat_cols]
-            self.minutes_feat_cols = self.minutes_meta.get("feature_columns", [])
-            self.minutes_cat_cols = self.minutes_meta.get("cat_features", [])
-            self.minutes_cat_idx = [
-                self.minutes_feat_cols.index(c)
-                for c in self.minutes_cat_cols
-                if c in self.minutes_feat_cols
-            ]
+            new_feat_cols = list(new_meta.get("feature_columns", []) or [])
+            new_cat_cols = list(new_meta.get("cat_features", []) or [])
+            new_minutes_feat_cols = list(new_minutes_meta.get("feature_columns", []) or [])
+            new_minutes_cat_cols = list(new_minutes_meta.get("cat_features", []) or [])
+        except Exception as exc:
+            logger.error("MLPredictor: Model bundle reload failed: %s", exc)
+            return False
 
-            # Load the cache dictionary for team paces and opposing defensives (~0.5s)
+        self.models = new_models
+        self.minutes_model = new_minutes_model
+        self.meta = new_meta
+        self.q_stats = new_q_stats
+        self.drift_b = new_drift_b
+        self.minutes_meta = new_minutes_meta
+        self.minutes_q_stats = new_minutes_q_stats
+        self.feat_cols = new_feat_cols
+        self.cat_cols = new_cat_cols
+        self.cat_idx = [self.feat_cols.index(c) for c in self.cat_cols if c in self.feat_cols]
+        self.minutes_feat_cols = new_minutes_feat_cols
+        self.minutes_cat_cols = new_minutes_cat_cols
+        self.minutes_cat_idx = [
+            self.minutes_feat_cols.index(c)
+            for c in self.minutes_cat_cols
+            if c in self.minutes_feat_cols
+        ]
+        self._model_meta_mtime_ns = model_meta_mtime_ns
+        self._minutes_meta_mtime_ns = minutes_meta_mtime_ns
+        self.runtime_model_artifact_updated_at = self._path_updated_at(meta_path)
+        self.ready = bool(self.models)
+        return True
+
+    def _load_enrichment(self, *, force: bool = False) -> bool:
+        season_stats_path = CURRENT_DATA_DIR / "season_stats.csv"
+        season_stats_mtime_ns = self._path_mtime_ns(season_stats_path)
+        if (
+            not force
+            and self.enrichment is not None
+            and season_stats_mtime_ns == self._season_stats_mtime_ns
+        ):
+            return False
+        try:
             self.enrichment = EnrichmentData(CURRENT_DATA_DIR, verbose=False)
+            self._season_stats_mtime_ns = season_stats_mtime_ns
+            self.runtime_season_stats_updated_at = self._path_updated_at(season_stats_path)
+            self.live_player_histories = {}
+            self.live_player_name_lookup = {}
+            self.live_team_player_ids = {}
+            self.live_player_prior_cache = {}
+            self.live_team_vacancy_stats = {}
+            self.live_same_pos_vacancy_stats = {}
+            self.live_missing_player_priors = {}
+            self.live_active_player_priors = {}
+            self.live_team_presence_index = {}
+            self.live_team_game_dates_by_season = {}
+            self.live_team_game_dates = {}
+            self.live_team_matchup_dates = {}
+            self.live_injury_report_meta = {}
+            self.live_position_resolution_summary = {}
+            self._master_feed_mtime_ns = None
+            self._injury_report_mtime_ns = None
+            self._load_live_player_histories()
+            self._build_live_player_name_lookup()
+            return True
+        except Exception as exc:
+            logger.error("MLPredictor: Enrichment reload failed: %s", exc)
+            return False
 
-            self.live_player_histories: Dict[str, List[Tuple[date, Dict[str, Any]]]] = {}
-            self.live_player_name_lookup: Dict[Tuple[str, str], str] = {}
-            self.live_team_player_ids: Dict[str, set[str]] = {}
-            self.live_player_prior_cache: Dict[Tuple[str, date, str], Dict[str, Any]] = {}
-            self.live_team_vacancy_stats: Dict[Tuple[str, date], Dict[str, float]] = {}
-            self.live_same_pos_vacancy_stats: Dict[Tuple[str, date, str], Dict[str, float]] = {}
-            self.live_missing_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
-            self.live_active_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
-            self.live_team_presence_index: Dict[Tuple[str, date], set[str]] = {}
-            self.live_team_game_dates_by_season: Dict[Tuple[str, int], List[date]] = {}
-            self.live_team_game_dates: Dict[str, date] = {}
-            self.live_team_matchup_dates: Dict[Tuple[str, str], date] = {}
-            self._initialize_live_injury_feature_cache()
-            
-            self.ready = True
-            logger.info(f"MLPredictor: Successfully loaded {len(self.models)} per-stat models.")
-        except Exception as e:
-            logger.error(f"MLPredictor: Initialization failed: {e}")
+    def _ensure_runtime_artifacts_fresh(self, *, force: bool = False) -> None:
+        model_reloaded = self._load_model_bundle(force=force)
+        enrichment_reloaded = self._load_enrichment(force=force)
+        self._refresh_live_context(force=force or enrichment_reloaded)
+        if model_reloaded or enrichment_reloaded:
+            logger.info(
+                "MLPredictor: Runtime artifacts refreshed | model_bundle=%s season_stats=%s",
+                bool(model_reloaded),
+                bool(enrichment_reloaded),
+            )
 
     @staticmethod
     def _normalize_player_name(raw_name: Any) -> str:
@@ -797,7 +906,7 @@ class MLPredictor:
         return None
 
     def _build_feature_dict(self, player_info: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Optional[Dict[str, Any]]:
-        self._refresh_live_context()
+        self._ensure_runtime_artifacts_fresh()
         history_context = self._build_live_player_history_context(player_info, logs)
         if not history_context:
             return None
@@ -921,6 +1030,21 @@ class MLPredictor:
             (float(row_obj.get("modeled_minutes_q50") or 0.0) * recent10_target_per_min),
             4,
         )
+        missing_key_target_per_min_delta = _safe_float(
+            row_obj.get("missing_key_teammates_player_target_per_min_delta")
+        ) or 0.0
+        returning_key_target_per_min_delta = _safe_float(
+            row_obj.get("returning_key_teammates_player_target_per_min_delta")
+        ) or 0.0
+        modeled_minutes_q50 = float(row_obj.get("modeled_minutes_q50") or 0.0)
+        row_obj["modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta"] = round(
+            modeled_minutes_q50 * missing_key_target_per_min_delta,
+            4,
+        )
+        row_obj["modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta"] = round(
+            modeled_minutes_q50 * returning_key_target_per_min_delta,
+            4,
+        )
 
         # Keep legacy exported models working until retraining replaces the old flag.
         if "star_teammate_out_flag" in getattr(self, "feat_cols", []):
@@ -939,6 +1063,7 @@ class MLPredictor:
         *,
         include_features: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        self._ensure_runtime_artifacts_fresh()
         if not self.ready:
             return None
 
@@ -974,12 +1099,18 @@ class MLPredictor:
                 str(player_info.get("opponent_abbrev") or "").strip().upper(),
             )
             injury_freshness = self._build_injury_freshness_meta(target_date=target_date)
+            runtime_context = {
+                "model_artifact_updated_at": self.runtime_model_artifact_updated_at,
+                "season_stats_updated_at": self.runtime_season_stats_updated_at,
+                "position_resolution_summary": dict(self.live_position_resolution_summary),
+            }
             if preds.shape == (1, 3):
                 result = {
                     "q25": float(preds[0, 0]),
                     "q50": float(preds[0, 1]),
                     "q75": float(preds[0, 2]),
                     "injury_report_freshness": injury_freshness,
+                    "runtime_context": runtime_context,
                 }
                 if include_features:
                     result["feature_snapshot"] = dict(features)
@@ -991,6 +1122,7 @@ class MLPredictor:
                     "prediction": float(preds[0]),
                     "std_dev": self.q_stats.get(stat_type, {}).get("std", 1.0), # Fallback to residuals
                     "injury_report_freshness": injury_freshness,
+                    "runtime_context": runtime_context,
                 }
                 if include_features:
                     result["feature_snapshot"] = dict(features)

@@ -926,8 +926,10 @@ def fetch_official_injury_report_payload(
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as handle:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w") as handle:
         json.dump(payload, handle, indent=2)
+    temp_path.replace(path)
 
 
 def _load_existing_payload(output_path: Path) -> Optional[Dict[str, Any]]:
