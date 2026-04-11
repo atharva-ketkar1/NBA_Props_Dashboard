@@ -62,6 +62,8 @@ MINUTES_MODEL_FEATURE_COLUMNS = [
 ]
 
 MODELED_MINUTES_FEATURE_COLUMNS = [
+    # These are appended after the minutes model runs and are intended for the
+    # downstream stat models, not for training the minutes model itself.
     "modeled_minutes_q50",
     "modeled_minutes_iqr",
     "modeled_minutes_delta_vs_recent5",

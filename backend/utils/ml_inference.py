@@ -36,13 +36,13 @@ from injury_feature_config import (
     INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
     INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET,
     INJURY_FRESHNESS_NORMAL_MAX_AGE_MINUTES,
-    MIN_LIVE_PRIOR_ACTIVE_GAMES,
     POSITION_GROUPS,
     SAME_POS_VACANCY_FEATURE_COLUMNS,
     TEAM_VACANCY_FEATURE_COLUMNS,
     TRAILING_ABSENT_PRIOR_GAMES,
     apply_injury_feature_values,
     is_high_usage,
+    is_key_teammate,
     is_onball,
     is_playmaker,
     make_same_pos_vacancy_stats,
@@ -62,7 +62,25 @@ from minutes_model_config import (
 ML_MODEL_DIR = BACKEND_DIR / "prop_modeling" / "exported_regression_model"
 CURRENT_DATA_DIR = BACKEND_DIR / "data" / "current"
 UNAVAILABLE_INJURY_STATUSES = {"out", "doubtful"}
+NON_ACTIONABLE_LIVE_INJURY_REASON_MARKERS = (
+    "g league - two-way",
+    "g league - on assignment",
+)
 ET_ZONE = ZoneInfo("America/New_York")
+
+
+def _live_injury_reason_text(report_row: Dict[str, Any]) -> str:
+    parts = []
+    for key in ("reason", "status_reason", "comment", "note", "player_reason"):
+        value = str(report_row.get(key) or "").strip()
+        if value:
+            parts.append(value.lower())
+    return " | ".join(parts)
+
+
+def _is_actionable_live_injury_report_row(report_row: Dict[str, Any]) -> bool:
+    reason_text = _live_injury_reason_text(report_row)
+    return not any(marker in reason_text for marker in NON_ACTIONABLE_LIVE_INJURY_REASON_MARKERS)
 
 class MLPredictor:
     """Singleton ML Predictor for blazingly fast in-memory inference."""
@@ -481,7 +499,7 @@ class MLPredictor:
             "position_resolution_tier": resolution_tier,
         }
 
-        if priors["active_games"] < MIN_LIVE_PRIOR_ACTIVE_GAMES and priors["within_active_roster_window"]:
+        if not priors["within_active_roster_window"]:
             fallback = self._fallback_live_player_priors(
                 cache_key[0],
                 team_abbr=team_abbr,
@@ -489,18 +507,9 @@ class MLPredictor:
             )
             priors = {
                 **fallback,
-                "active_games": priors["active_games"],
-                "within_active_roster_window": True,
+                "active_games": 0,
+                "within_active_roster_window": False,
             }
-        else:
-            fallback = self._fallback_live_player_priors(
-                cache_key[0],
-                team_abbr=team_abbr,
-                slate_date=slate_date,
-            )
-            for metric_key in ("usage_pct", "ast_pct", "potential_ast_pg", "drives_pg", "minutes"):
-                if priors.get(metric_key) is None:
-                    priors[metric_key] = fallback.get(metric_key)
 
         self.live_player_prior_cache[cache_key] = priors
         return priors
@@ -527,6 +536,7 @@ class MLPredictor:
         }
         position_resolution_counts: Dict[str, int] = defaultdict(int)
         position_resolution_total = 0
+        skipped_non_actionable_reports = 0
         payload_query_date = _parse_date(payload.get("query_date"))
 
         for game in payload.get("games", []):
@@ -569,6 +579,9 @@ class MLPredictor:
                     status = str(report.get("current_status") or "").strip().lower()
                     if status not in UNAVAILABLE_INJURY_STATUSES:
                         continue
+                    if not _is_actionable_live_injury_report_row(report):
+                        skipped_non_actionable_reports += 1
+                        continue
 
                     normalized_name = normalize_player_name(
                         report.get("player_name") or report.get("report_player_name")
@@ -593,12 +606,17 @@ class MLPredictor:
                         continue
 
                     if player_id in missing_player_ids:
-                        current_missing_player_priors[player_id] = dict(priors)
                         usage_pct = priors.get("usage_pct")
                         minutes = priors.get("minutes")
+                        ast_pct = priors.get("ast_pct")
+                        potential_ast_pg = priors.get("potential_ast_pg")
+                        drives_pg = priors.get("drives_pg")
                         pos_group = priors.get("pos_group") or normalize_position_group(None)
                         if usage_pct is None and minutes is None:
                             continue
+                        if not is_key_teammate(usage_pct, minutes, ast_pct, potential_ast_pg, drives_pg):
+                            continue
+                        current_missing_player_priors[player_id] = dict(priors)
 
                         team_stats["missing_team_usage_pct"] += usage_pct or 0.0
                         team_stats["missing_team_minutes"] += minutes or 0.0
@@ -643,6 +661,11 @@ class MLPredictor:
                 },
                 "total_players_evaluated": position_resolution_total,
             }
+        if skipped_non_actionable_reports > 0:
+            logger.info(
+                "MLPredictor: Skipped %s non-actionable injury report rows during live vacancy load.",
+                skipped_non_actionable_reports,
+            )
 
     def _resolve_live_target_date(self, team_abbrev: str, opponent_abbrev: Optional[str]) -> date:
         team_key = str(team_abbrev or "").strip().upper()
@@ -905,7 +928,43 @@ class MLPredictor:
         )
         return None
 
-    def _build_feature_dict(self, player_info: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _apply_live_game_context_features(
+        row_obj: Dict[str, Any],
+        game_context: Optional[Dict[str, Any]],
+    ) -> None:
+        if not isinstance(game_context, dict):
+            return
+
+        vegas_total = _safe_float(game_context.get("vegas_total"))
+        team_spread_line = _safe_float(game_context.get("team_spread_line"))
+        team_implied_total = _safe_float(game_context.get("team_implied_total"))
+        opponent_implied_total = _safe_float(game_context.get("opponent_implied_total"))
+
+        row_obj["game_total_line"] = vegas_total
+        row_obj["team_spread_line"] = team_spread_line
+        row_obj["team_is_favorite"] = (
+            None if team_spread_line is None else 1 if team_spread_line < 0 else 0
+        )
+        row_obj["spread_abs"] = _safe_float(game_context.get("spread_abs"))
+        row_obj["team_total_line"] = _safe_float(game_context.get("team_total_line"))
+        row_obj["opponent_team_total_line"] = _safe_float(game_context.get("opponent_team_total_line"))
+        row_obj["team_implied_total"] = team_implied_total
+        row_obj["opponent_implied_total"] = opponent_implied_total
+        if vegas_total is not None and vegas_total > 0:
+            row_obj["game_total_index"] = round((vegas_total - 224.0) / 12.0, 4)
+        if team_implied_total is not None and team_implied_total > 0:
+            row_obj["team_implied_total_index"] = round((team_implied_total - 112.0) / 8.0, 4)
+        if team_implied_total is not None and opponent_implied_total is not None:
+            row_obj["team_implied_total_gap"] = round(team_implied_total - opponent_implied_total, 4)
+
+    def _build_feature_dict(
+        self,
+        player_info: Dict[str, Any],
+        logs: List[Dict[str, Any]],
+        stat_type: str,
+        game_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
         self._ensure_runtime_artifacts_fresh()
         history_context = self._build_live_player_history_context(player_info, logs)
         if not history_context:
@@ -1053,6 +1112,8 @@ class MLPredictor:
                 or (row_obj.get("missing_team_minutes") or 0.0) > 0.0
             ) else 0
 
+        self._apply_live_game_context_features(row_obj, game_context)
+
         return row_obj
 
     def predict(
@@ -1062,19 +1123,22 @@ class MLPredictor:
         stat_type: str,
         *,
         include_features: bool = False,
+        game_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         self._ensure_runtime_artifacts_fresh()
         if not self.ready:
             return None
 
-        model = self.models.get(stat_type)
+        model_key = stat_type
+        model = self.models.get(model_key)
         if model is None:
             # Fallback for unified model backwards compatibility if it exists
             model = self.models.get("unified")
             if model is None:
                 return None
+            model_key = "unified"
 
-        features = self._build_feature_dict(player_info, logs, stat_type)
+        features = self._build_feature_dict(player_info, logs, stat_type, game_context=game_context)
         if not features:
             return None
 
@@ -1117,10 +1181,11 @@ class MLPredictor:
                     result["position_resolution_summary"] = dict(self.live_position_resolution_summary)
                 return result
             elif preds.shape == (1,):
+                residual_stats = self.q_stats.get(stat_type) or self.q_stats.get(model_key) or {}
                 # Legacy model handling
                 result = {
                     "prediction": float(preds[0]),
-                    "std_dev": self.q_stats.get(stat_type, {}).get("std", 1.0), # Fallback to residuals
+                    "std_dev": residual_stats.get("std", 1.0), # Fallback to residuals
                     "injury_report_freshness": injury_freshness,
                     "runtime_context": runtime_context,
                 }

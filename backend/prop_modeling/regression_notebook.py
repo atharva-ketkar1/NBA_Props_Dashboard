@@ -41,12 +41,21 @@
 # ## 1. Setup
 
 # %%
-nvidia-smi
+import shutil
+import subprocess
+
+if shutil.which("nvidia-smi"):
+    subprocess.run(["nvidia-smi"], check=False)
+else:
+    print("nvidia-smi not found; continuing on CPU/local runtime.")
 
 
 # %%
-from google.colab import drive
-drive.mount('/content/drive')
+try:
+    from google.colab import drive
+    drive.mount('/content/drive')
+except ModuleNotFoundError:
+    print("Not running in Colab; using local filesystem paths.")
 
 # %%
 import subprocess, sys
@@ -86,40 +95,135 @@ print(f"CatBoost MultiQuantile task_type: {CATBOOST_MULTIQUANTILE_TASK_TYPE}")
 # ## 2. Upload & Load Data
 
 # %%
-import os
+def find_repo_root(start: Optional[Path] = None) -> Optional[Path]:
+    current = (start or Path.cwd()).resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / "backend" / "prop_modeling").exists():
+            return candidate
+    return None
 
-# The actual path based on your print output
-COLAB_PATH = "/content/drive/MyDrive/regression_training_dataset.csv"
-LOCAL_PATH = "backend/prop_modeling/generated/regression_training_dataset.csv"
 
-if os.path.exists(COLAB_PATH):
-    REG_CSV = COLAB_PATH
-    print(f"✅ Success! Found in Google Drive: {REG_CSV}")
-elif os.path.exists(LOCAL_PATH):
-    REG_CSV = LOCAL_PATH
-    print(f"✅ Running locally: {REG_CSV}")
-else:
-    print("❌ Still can't find it. Run !ls /content/drive/MyDrive to double-check spelling.")
+def ensure_colab_drive_mounted() -> None:
+    if not Path("/content").exists():
+        return
+    if Path("/content/drive/MyDrive").exists() or Path("/content/drive/My Drive").exists():
+        return
+    try:
+        from google.colab import drive
+        drive.mount("/content/drive")
+    except ModuleNotFoundError:
+        return
 
-# Now you can load it
-# import pandas as pd
-# df = pd.read_csv(REG_CSV)
 
-# %%
-COLAB_MINUTES_PATH = "/content/drive/MyDrive/minutes_training_dataset.csv"
-LOCAL_MINUTES_PATH = "backend/prop_modeling/generated/minutes_training_dataset.csv"
+def print_dataset_search_roots() -> None:
+    roots = [
+        Path("/content"),
+        Path("/content/drive"),
+        Path("/content/drive/MyDrive"),
+        Path("/content/drive/My Drive"),
+        Path.cwd(),
+    ]
+    print("Dataset search roots:")
+    for root in roots:
+        exists = root.exists()
+        print(f"  {root}: {'exists' if exists else 'missing'}")
+        if exists and root.name in {"MyDrive", "My Drive", "content"}:
+            matches = sorted(
+                [
+                    *root.glob("*training_dataset*.csv"),
+                    *root.glob("*regression*.csv"),
+                    *root.glob("*minutes*.csv"),
+                ]
+            )
+            if matches:
+                print("    matching CSVs:", [str(path) for path in matches[:10]])
 
-if os.path.exists(COLAB_MINUTES_PATH):
-    MINUTES_CSV = COLAB_MINUTES_PATH
-    print(f"✅ Minutes data found in Drive: {MINUTES_CSV}")
-elif os.path.exists(LOCAL_MINUTES_PATH):
-    MINUTES_CSV = LOCAL_MINUTES_PATH
-    print(f"✅ Minutes data found locally: {MINUTES_CSV}")
-else:
+
+def find_drive_file(filenames: List[str]) -> Optional[Path]:
+    drive_roots = [
+        Path("/content/drive/MyDrive"),
+        Path("/content/drive/My Drive"),
+    ]
+    matches: List[Path] = []
+    for drive_root in drive_roots:
+        if not drive_root.exists():
+            continue
+        for filename in filenames:
+            matches.extend(path for path in drive_root.rglob(filename) if path.is_file())
+    if not matches:
+        return None
+    matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return matches[0]
+
+
+def resolve_dataset_path(label: str, filenames: List[str], candidates: List[Path]) -> str:
+    ensure_colab_drive_mounted()
+    checked = []
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        checked.append(str(path))
+        if path.exists():
+            print(f"✅ {label}: {path}")
+            return str(path)
+    drive_match = find_drive_file(filenames)
+    if drive_match is not None:
+        print(f"✅ {label}: {drive_match}")
+        return str(drive_match)
     raise FileNotFoundError(
-        "minutes_training_dataset.csv not found. Upload it to Google Drive or place it in "
-        "backend/prop_modeling/generated/."
+        f"{label} not found. Checked:\n  " + "\n  ".join(checked)
+        + "\nAlso searched mounted Google Drive recursively for: "
+        + ", ".join(filenames)
     )
+
+
+REPO_ROOT = find_repo_root()
+PROP_MODELING_DIR = (
+    REPO_ROOT / "backend" / "prop_modeling"
+    if REPO_ROOT is not None
+    else Path.cwd().resolve()
+)
+ensure_colab_drive_mounted()
+print_dataset_search_roots()
+
+REG_CSV = resolve_dataset_path(
+    "Regression dataset",
+    [
+        "regression_training_dataset.csv",
+        "regression_dataset.csv",
+        "nba_regression_training_dataset.csv",
+        "stat_regression_training_dataset.csv",
+    ],
+    [
+        Path("/content/drive/MyDrive/regression_training_dataset.csv"),
+        Path("/content/drive/MyDrive/backend/prop_modeling/generated/regression_training_dataset.csv"),
+        Path("/content/drive/MyDrive/NBA_Dashboard/backend/prop_modeling/generated/regression_training_dataset.csv"),
+        Path("/content/drive/My Drive/regression_training_dataset.csv"),
+        Path("/content/drive/My Drive/backend/prop_modeling/generated/regression_training_dataset.csv"),
+        Path("/content/drive/My Drive/NBA_Dashboard/backend/prop_modeling/generated/regression_training_dataset.csv"),
+        PROP_MODELING_DIR / "generated" / "regression_training_dataset.csv",
+        Path.cwd() / "generated" / "regression_training_dataset.csv",
+        Path.cwd() / "regression_training_dataset.csv",
+    ],
+)
+MINUTES_CSV = resolve_dataset_path(
+    "Minutes dataset",
+    [
+        "minutes_training_dataset.csv",
+        "minutes_dataset.csv",
+        "nba_minutes_training_dataset.csv",
+    ],
+    [
+        Path("/content/drive/MyDrive/minutes_training_dataset.csv"),
+        Path("/content/drive/MyDrive/backend/prop_modeling/generated/minutes_training_dataset.csv"),
+        Path("/content/drive/MyDrive/NBA_Dashboard/backend/prop_modeling/generated/minutes_training_dataset.csv"),
+        Path("/content/drive/My Drive/minutes_training_dataset.csv"),
+        Path("/content/drive/My Drive/backend/prop_modeling/generated/minutes_training_dataset.csv"),
+        Path("/content/drive/My Drive/NBA_Dashboard/backend/prop_modeling/generated/minutes_training_dataset.csv"),
+        PROP_MODELING_DIR / "generated" / "minutes_training_dataset.csv",
+        Path.cwd() / "generated" / "minutes_training_dataset.csv",
+        Path.cwd() / "minutes_training_dataset.csv",
+    ],
+)
 
 # %%
 df = pd.read_csv(REG_CSV)
@@ -559,11 +663,25 @@ def train_minutes_model(
     return model, preds
 
 
+def split_minutes_oof_train_eval(train_block: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    unique_dates = sorted(train_block["game_date"].dt.date.unique())
+    eval_date_count = min(MINUTES_OOF_BLOCK_DATES, max(1, len(unique_dates) // 5))
+    if len(unique_dates) <= eval_date_count:
+        return train_block, train_block.iloc[0:0].copy()
+
+    eval_dates = set(unique_dates[-eval_date_count:])
+    fit_block = train_block[~train_block["game_date"].dt.date.isin(eval_dates)].copy()
+    eval_block = train_block[train_block["game_date"].dt.date.isin(eval_dates)].copy()
+    if fit_block.empty or eval_block.empty:
+        return train_block, train_block.iloc[0:0].copy()
+    return fit_block, eval_block
+
+
 def build_minutes_prediction_frame(
     input_df: pd.DataFrame,
     *,
     train_cutoff: pd.Timestamp,
-) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], CatBoostRegressor]:
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], Dict[str, Any], CatBoostRegressor]:
     oof_records: List[pd.DataFrame] = []
     all_dates = sorted(input_df["game_date"].dt.date.unique())
     cat_idx = [MINUTES_FEATURE_COLS.index(c) for c in MINUTES_CAT_FEATURES if c in MINUTES_FEATURE_COLS]
@@ -581,10 +699,11 @@ def build_minutes_prediction_frame(
         if train_block.empty or pred_block.empty:
             continue
 
-        X_tr = prepare(train_block, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
+        fit_block, eval_block = split_minutes_oof_train_eval(train_block)
+        X_tr = prepare(fit_block, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
         X_pr = prepare(pred_block, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
-        y_tr = train_block[MINUTES_TARGET].to_numpy()
-        w_tr = make_sample_weights(train_block)
+        y_tr = fit_block[MINUTES_TARGET].to_numpy()
+        w_tr = make_sample_weights(fit_block)
 
         tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_idx, weight=w_tr)
         pr_pool = Pool(X_pr, cat_features=cat_idx)
@@ -599,7 +718,16 @@ def build_minutes_prediction_frame(
             allow_writing_files=False,
             task_type=CATBOOST_MULTIQUANTILE_TASK_TYPE,
         )
-        model.fit(tr_pool, verbose=False)
+        if not eval_block.empty:
+            X_ev = prepare(eval_block, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
+            ev_pool = Pool(
+                X_ev,
+                label=eval_block[MINUTES_TARGET].to_numpy(),
+                cat_features=cat_idx,
+            )
+            model.fit(tr_pool, eval_set=ev_pool, use_best_model=True, early_stopping_rounds=50)
+        else:
+            model.fit(tr_pool, verbose=False)
         preds = model.predict(pr_pool)
 
         block_frame = pred_block[["game_date", "player_id", "game_id"]].copy()
@@ -629,19 +757,28 @@ def build_minutes_prediction_frame(
         test_preds[:, 1],
         test_preds[:, 2],
     )
+    train_key_count = len(train_minutes[["game_date", "player_id", "game_id"]].drop_duplicates())
+    oof_key_count = len(
+        minutes_pred_frame[minutes_pred_frame["game_date"] < train_cutoff][["game_date", "player_id", "game_id"]]
+        .drop_duplicates()
+    )
+    minutes_oof_metrics = {
+        "train_rows": int(len(train_minutes)),
+        "oof_rows": int(len(minutes_pred_frame[minutes_pred_frame["game_date"] < train_cutoff])),
+        "distinct_train_keys": int(train_key_count),
+        "distinct_oof_keys": int(oof_key_count),
+        "training_key_coverage": round((oof_key_count / float(train_key_count)), 4) if train_key_count else 0.0,
+    }
 
     baseline_pred = pd.to_numeric(test_minutes["recent5_minutes_avg"], errors="coerce").fillna(
         pd.to_numeric(test_minutes["season_minutes_avg"], errors="coerce")
     )
-    heuristic_pred = pd.to_numeric(test_minutes.get("recent5_minutes_avg"), errors="coerce").fillna(
-        pd.to_numeric(test_minutes.get("season_minutes_avg"), errors="coerce")
-    ) * 0.50
-    heuristic_pred += pd.to_numeric(test_minutes.get("recent10_minutes_avg"), errors="coerce").fillna(
-        pd.to_numeric(test_minutes.get("season_minutes_avg"), errors="coerce")
-    ) * 0.30
-    heuristic_pred += pd.to_numeric(test_minutes.get("season_minutes_avg"), errors="coerce").fillna(
-        pd.to_numeric(test_minutes.get("recent5_minutes_avg"), errors="coerce")
-    ) * 0.20
+    recent5 = pd.to_numeric(test_minutes.get("recent5_minutes_avg"), errors="coerce")
+    recent10 = pd.to_numeric(test_minutes.get("recent10_minutes_avg"), errors="coerce")
+    season = pd.to_numeric(test_minutes.get("season_minutes_avg"), errors="coerce")
+    heuristic_pred = recent5.fillna(season) * 0.50
+    heuristic_pred += recent10.fillna(season) * 0.30
+    heuristic_pred += season.fillna(recent5) * 0.20
     if "is_b2b" in test_minutes.columns:
         heuristic_pred *= 1.0 - 0.035 * pd.to_numeric(test_minutes["is_b2b"], errors="coerce").fillna(0.0)
     heuristic_pred = heuristic_pred.clip(lower=4.0, upper=42.0)
@@ -651,7 +788,7 @@ def build_minutes_prediction_frame(
         "r2_q50": round(float(r2_score(test_minutes[MINUTES_TARGET], heuristic_pred)), 4),
     }
 
-    return minutes_pred_frame, minutes_test_metrics, heuristic_metrics, final_model
+    return minutes_pred_frame, minutes_test_metrics, heuristic_metrics, minutes_oof_metrics, final_model
 
 
 def attach_modeled_minutes(input_df: pd.DataFrame, minutes_pred_frame: pd.DataFrame) -> pd.DataFrame:
@@ -669,20 +806,15 @@ def attach_modeled_minutes(input_df: pd.DataFrame, minutes_pred_frame: pd.DataFr
         how="left",
     )
 
-    fallback_q50 = pd.to_numeric(merged["predicted_minutes"], errors="coerce")
-    fallback_q50 = fallback_q50.fillna(
-        (
-            pd.to_numeric(merged.get("recent5_minutes_avg"), errors="coerce").fillna(
-                pd.to_numeric(merged.get("season_minutes_avg"), errors="coerce")
-            ) * 0.50
-            + pd.to_numeric(merged.get("recent10_minutes_avg"), errors="coerce").fillna(
-                pd.to_numeric(merged.get("season_minutes_avg"), errors="coerce")
-            ) * 0.30
-            + pd.to_numeric(merged.get("season_minutes_avg"), errors="coerce").fillna(
-                pd.to_numeric(merged.get("recent5_minutes_avg"), errors="coerce")
-            ) * 0.20
-        ).clip(lower=4.0, upper=42.0)
-    )
+    recent5 = pd.to_numeric(merged.get("recent5_minutes_avg"), errors="coerce")
+    recent10 = pd.to_numeric(merged.get("recent10_minutes_avg"), errors="coerce")
+    season = pd.to_numeric(merged.get("season_minutes_avg"), errors="coerce")
+    blended_fallback_q50 = (
+        recent5.fillna(season) * 0.50
+        + recent10.fillna(season) * 0.30
+        + season.fillna(recent5) * 0.20
+    ).clip(lower=4.0, upper=42.0)
+    fallback_q50 = pd.to_numeric(merged["predicted_minutes"], errors="coerce").fillna(blended_fallback_q50)
     fallback_iqr = estimate_minutes_iqr_series(
         merged.assign(modeled_minutes_q50=fallback_q50),
         "modeled_minutes_q50",
@@ -705,7 +837,7 @@ shared_dates = sorted(df["game_date"].dt.date.unique())
 shared_test_dates = shared_dates[-20:]
 shared_split_ts = pd.Timestamp(shared_test_dates[0])
 
-minutes_pred_frame, minutes_test_metrics, heuristic_minutes_metrics, minutes_model = build_minutes_prediction_frame(
+minutes_pred_frame, minutes_test_metrics, heuristic_minutes_metrics, minutes_oof_metrics, minutes_model = build_minutes_prediction_frame(
     minutes_df,
     train_cutoff=shared_split_ts,
 )
@@ -728,6 +860,7 @@ UNIFIED_CAT = ["stat_type"] + CAT_FEATURES
 
 print("Minutes model test metrics:", minutes_test_metrics)
 print("Heuristic minutes baseline:", heuristic_minutes_metrics)
+print("Minutes model OOF coverage:", minutes_oof_metrics)
 print(f"Total feature columns after modeled minutes: {len(FEATURE_COLS)}")
 
 # %% [markdown]
@@ -1755,6 +1888,7 @@ minutes_metadata_payload = {
     "model_file": minutes_model_file,
     "test_metrics": minutes_test_metrics,
     "heuristic_baseline_metrics": heuristic_minutes_metrics,
+    "oof_metrics": minutes_oof_metrics,
     "oof_block_dates": MINUTES_OOF_BLOCK_DATES,
     "oof_min_train_dates": MINUTES_OOF_MIN_TRAIN_DATES,
     "promotion_guardrail": promotion_guardrail_config,

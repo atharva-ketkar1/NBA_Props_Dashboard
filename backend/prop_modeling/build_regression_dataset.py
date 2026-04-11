@@ -100,8 +100,6 @@ REGRESSION_DATASET_COLUMNS = [
     "recent5_pts_per100",
     "recent10_target_per_min",
     "missing_same_pos_minutes_x_player_target_per_min",
-    "missing_playmaker_potential_ast_pg_x_player_target_per_min",
-    "missing_onball_drives_pg_x_player_target_per_min",
     # Half / quarter trends
     "recent5_1h_stat_share",
     # ── NEW v2: Opponent defensive features ──────────────────────────────────
@@ -1114,6 +1112,8 @@ def _aggregate_vacancy_stats_from_player_priors(
 
         if usage_pct is None and minutes is None:
             continue
+        if not is_key_teammate(usage_pct, minutes, ast_pct, potential_ast_pg, drives_pg):
+            continue
 
         team_stats["missing_team_usage_pct"] += usage_pct or 0.0
         team_stats["missing_team_minutes"] += minutes or 0.0
@@ -1371,20 +1371,41 @@ def _build_regression_row(
     if actual is None:
         return None
 
-    prior_rows = [row for _, row in player_history[:game_idx]]
-    if len(prior_rows) < min_prior:
+    team = str(target_row.get("TEAM_ABBREVIATION") or "").strip()
+    target_season_key = season_key_for_date(target_date)
+    prior_history = player_history[:game_idx]
+    prior_rows = [row for _, row in prior_history]
+    prior_same_team_season_rows = [
+        row
+        for game_date, row in prior_history
+        if (
+            str(row.get("TEAM_ABBREVIATION") or "").strip() == team
+            and game_date is not None
+            and season_key_for_date(game_date) == target_season_key
+        )
+    ]
+    if len(prior_same_team_season_rows) < min_prior:
         return None
+    prior_feature_rows = prior_same_team_season_rows
 
     # ── Rolling stat values ────────────────────────────────────────────────
-    vals = [_sum_stat(r, stat_type) for r in prior_rows]
+    vals = [_sum_stat(r, stat_type) for r in prior_feature_rows]
     v3, v5, v10, v20 = vals[-3:], vals[-5:], vals[-10:], vals[-20:]
     s_avg, r3_avg, r5_avg = _mean(vals), _mean(v3), _mean(v5)
     r10_avg, r20_avg = _mean(v10), _mean(v20)
     s_std, r5_std, r10_std = _std(vals), _std(v5), _std(v10)
     r5_ema = _ema(v5)
 
-    home_vals = [_sum_stat(r, stat_type) for r in prior_rows if _parse_matchup(r.get("MATCHUP"), str(r.get("TEAM_ABBREVIATION")).strip())[1] == 1]
-    away_vals = [_sum_stat(r, stat_type) for r in prior_rows if _parse_matchup(r.get("MATCHUP"), str(r.get("TEAM_ABBREVIATION")).strip())[1] == 0]
+    home_vals = [
+        _sum_stat(r, stat_type)
+        for r in prior_feature_rows
+        if _parse_matchup(r.get("MATCHUP"), str(r.get("TEAM_ABBREVIATION")).strip())[1] == 1
+    ]
+    away_vals = [
+        _sum_stat(r, stat_type)
+        for r in prior_feature_rows
+        if _parse_matchup(r.get("MATCHUP"), str(r.get("TEAM_ABBREVIATION")).strip())[1] == 0
+    ]
     home_avg = _mean(home_vals)
     away_avg = _mean(away_vals)
 
@@ -1394,27 +1415,25 @@ def _build_regression_row(
     r10_cv = None if r10_avg is None or r10_std is None or abs(r10_avg) < 0.01 else r10_std / abs(r10_avg)
 
     # ── Minutes ───────────────────────────────────────────────────────────
-    mins_all = [_safe_float(r.get("MIN")) for r in prior_rows]
-    m3  = [_safe_float(r.get("MIN")) for r in prior_rows[-3:]]
-    m5  = [_safe_float(r.get("MIN")) for r in prior_rows[-5:]]
-    m10 = [_safe_float(r.get("MIN")) for r in prior_rows[-10:]]
-    m20 = [_safe_float(r.get("MIN")) for r in prior_rows[-20:]]
+    mins_all = [_safe_float(r.get("MIN")) for r in prior_feature_rows]
+    m3  = [_safe_float(r.get("MIN")) for r in prior_feature_rows[-3:]]
+    m5  = [_safe_float(r.get("MIN")) for r in prior_feature_rows[-5:]]
+    m10 = [_safe_float(r.get("MIN")) for r in prior_feature_rows[-10:]]
+    m20 = [_safe_float(r.get("MIN")) for r in prior_feature_rows[-20:]]
     m5_avg, m20_avg, m5_std = _mean(m5), _mean(m20), _std(m5)
     min_trend = None if m5_avg is None or m20_avg is None else m5_avg - m20_avg
     min_cv    = None if m5_avg is None or m5_std is None or abs(m5_avg) < 0.01 else m5_std / abs(m5_avg)
 
     # ── Rest ──────────────────────────────────────────────────────────────
-    prior_dates = [_parse_date(r.get("GAME_DATE")) for r in prior_rows]
-    last_date = next((d for d in reversed(prior_dates) if d is not None), None)
+    last_date = next((game_date for game_date, _ in reversed(prior_history) if game_date is not None), None)
     days_rest = (target_date - last_date).days if last_date else None
 
     # ── Opponent / home ───────────────────────────────────────────────────
-    team = str(target_row.get("TEAM_ABBREVIATION") or "").strip()
     opp, is_home = _parse_matchup(target_row.get("MATCHUP"), team)
 
     # ── First-half share ─────────────────────────────────────────────────
     h1_shares = []
-    for r in prior_rows[-5:]:
+    for r in prior_feature_rows[-5:]:
         full_val = _sum_stat(r, stat_type)
         half_val = _1h_stat(r, stat_type)
         if full_val is not None and half_val is not None and full_val > 0:
@@ -1444,7 +1463,7 @@ def _build_regression_row(
 
     # Game margins for last 5 of this player's games (blowout context)
     recent_margins = []
-    for r in prior_rows[-5:]:
+    for r in prior_feature_rows[-5:]:
         gid  = str(r.get("GAME_ID") or "").strip()
         tm   = str(r.get("TEAM_ABBREVIATION") or "").strip()
         margin = enrichment.get_game_margin(gid, tm)
@@ -1472,7 +1491,7 @@ def _build_regression_row(
     r5_pts_per100 = None
     if stat_type in ["PTS", "AST", "REB"] and r5_avg is not None and m5_avg is not None and m5_avg > 0:
         pace_recent = []
-        for r in prior_rows[-5:]:
+        for r in prior_feature_rows[-5:]:
             opp_tm, _ = _parse_matchup(r.get("MATCHUP"), team)
             tm_ctx = enrichment.get_team_context(team, opp_tm)
             if tm_ctx.get("team_pace") is not None:
@@ -1481,7 +1500,7 @@ def _build_regression_row(
         if avg_pace and avg_pace > 0:
             r5_pts_per100 = (r5_avg / m5_avg) * 48.0 * 100.0 / avg_pace
 
-    recent10_target_per_min = _mean([_target_per_min(r, stat_type) for r in prior_rows[-10:]])
+    recent10_target_per_min = _mean([_target_per_min(r, stat_type) for r in prior_feature_rows[-10:]])
     same_pos_missing_minutes = (
         _safe_float((same_pos_missing_stats or {}).get("missing_same_pos_minutes")) or 0.0
     )
@@ -1522,22 +1541,22 @@ def _build_regression_row(
         "recent10_minutes_avg": _r(_mean(m10)),
         "minutes_trend_5v20": _r(min_trend),
         "minutes_cv_recent5": _r(min_cv),
-        "season_usage_pct_avg": _r(_mean([_safe_float(r.get("USG_PCT")) for r in prior_rows])),
-        "recent10_usage_pct_avg": _r(_mean([_safe_float(r.get("USG_PCT")) for r in prior_rows[-10:]])),
-        "season_ast_pct_avg": _r(_mean([_safe_float(r.get("AST_PCT")) for r in prior_rows])),
-        "recent10_ast_pct_avg": _r(_mean([_safe_float(r.get("AST_PCT")) for r in prior_rows[-10:]])),
-        "season_reb_pct_avg": _r(_mean([_safe_float(r.get("REB_PCT")) for r in prior_rows])),
-        "recent10_reb_pct_avg": _r(_mean([_safe_float(r.get("REB_PCT")) for r in prior_rows[-10:]])),
-        "season_ts_pct_avg": _r(_mean([_safe_float(r.get("TS_PCT")) for r in prior_rows])),
-        "recent10_ts_pct_avg": _r(_mean([_safe_float(r.get("TS_PCT")) for r in prior_rows[-10:]])),
-        "season_potential_ast_rate": _r(_mean([_metric_rate(r, "POTENTIAL_AST") for r in prior_rows])),
-        "recent10_potential_ast_rate": _r(_mean([_metric_rate(r, "POTENTIAL_AST") for r in prior_rows[-10:]])),
-        "season_reb_chance_rate": _r(_mean([_metric_rate(r, "REB_CHANCES") for r in prior_rows])),
-        "recent10_reb_chance_rate": _r(_mean([_metric_rate(r, "REB_CHANCES") for r in prior_rows[-10:]])),
-        "season_drive_rate": _r(_mean([_metric_rate(r, "DRIVES") for r in prior_rows])),
-        "recent10_drive_rate": _r(_mean([_metric_rate(r, "DRIVES") for r in prior_rows[-10:]])),
-        "season_fg3a_rate": _r(_mean([_metric_rate(r, "FG3A") for r in prior_rows])),
-        "recent10_fg3a_rate": _r(_mean([_metric_rate(r, "FG3A") for r in prior_rows[-10:]])),
+        "season_usage_pct_avg": _r(_mean([_safe_float(r.get("USG_PCT")) for r in prior_feature_rows])),
+        "recent10_usage_pct_avg": _r(_mean([_safe_float(r.get("USG_PCT")) for r in prior_feature_rows[-10:]])),
+        "season_ast_pct_avg": _r(_mean([_safe_float(r.get("AST_PCT")) for r in prior_feature_rows])),
+        "recent10_ast_pct_avg": _r(_mean([_safe_float(r.get("AST_PCT")) for r in prior_feature_rows[-10:]])),
+        "season_reb_pct_avg": _r(_mean([_safe_float(r.get("REB_PCT")) for r in prior_feature_rows])),
+        "recent10_reb_pct_avg": _r(_mean([_safe_float(r.get("REB_PCT")) for r in prior_feature_rows[-10:]])),
+        "season_ts_pct_avg": _r(_mean([_safe_float(r.get("TS_PCT")) for r in prior_feature_rows])),
+        "recent10_ts_pct_avg": _r(_mean([_safe_float(r.get("TS_PCT")) for r in prior_feature_rows[-10:]])),
+        "season_potential_ast_rate": _r(_mean([_metric_rate(r, "POTENTIAL_AST") for r in prior_feature_rows])),
+        "recent10_potential_ast_rate": _r(_mean([_metric_rate(r, "POTENTIAL_AST") for r in prior_feature_rows[-10:]])),
+        "season_reb_chance_rate": _r(_mean([_metric_rate(r, "REB_CHANCES") for r in prior_feature_rows])),
+        "recent10_reb_chance_rate": _r(_mean([_metric_rate(r, "REB_CHANCES") for r in prior_feature_rows[-10:]])),
+        "season_drive_rate": _r(_mean([_metric_rate(r, "DRIVES") for r in prior_feature_rows])),
+        "recent10_drive_rate": _r(_mean([_metric_rate(r, "DRIVES") for r in prior_feature_rows[-10:]])),
+        "season_fg3a_rate": _r(_mean([_metric_rate(r, "FG3A") for r in prior_feature_rows])),
+        "recent10_fg3a_rate": _r(_mean([_metric_rate(r, "FG3A") for r in prior_feature_rows[-10:]])),
         "recent5_pts_per100": _r(r5_pts_per100),
         "recent10_target_per_min": _r(recent10_target_per_min),
         "missing_same_pos_minutes_x_player_target_per_min": _r(
@@ -1632,6 +1651,14 @@ def _build_missing_team_stats(
                 avg_minutes = priors["minutes"]
                 pos_group = state["pos_group"]
                 if avg_usg is None and avg_minutes is None:
+                    continue
+                if not is_key_teammate(
+                    avg_usg,
+                    avg_minutes,
+                    priors["ast_pct"],
+                    priors["potential_ast_pg"],
+                    priors["drives_pg"],
+                ):
                     continue
                 current_missing_player_priors[pid] = {
                     **priors,
@@ -1975,6 +2002,19 @@ def main() -> int:
         for col in new_cols:
             filled = sum(1 for r in rows if r.get(col) is not None)
             print(f"  {col}: {filled/len(rows)*100:.1f}% filled ({filled:,}/{len(rows):,})")
+
+        injury_cols = [
+            "missing_team_usage_pct",
+            "missing_team_minutes",
+            "missing_same_pos_minutes",
+            "missing_guard_minutes",
+            "missing_key_teammate_count",
+            "missing_key_teammates_player_minutes_delta",
+        ]
+        print("\nInjury feature activation rates:")
+        for col in injury_cols:
+            active = sum(1 for r in rows if abs(float(r.get(col) or 0.0)) > 1e-9)
+            print(f"  {col}: {active/len(rows)*100:.1f}% active ({active:,}/{len(rows):,})")
 
     if minutes_rows:
         dates = sorted(set(r["game_date"] for r in minutes_rows))

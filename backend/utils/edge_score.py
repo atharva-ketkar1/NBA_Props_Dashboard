@@ -1,4 +1,5 @@
 import csv
+import copy
 import json
 import logging
 import os
@@ -130,6 +131,20 @@ BOOK_LABELS = {
     "fd": "FanDuel",
     "pp": "PrizePicks",
 }
+ACTION_NETWORK_CONTEXT_BOOK_IDS = (
+    "15",    # DraftKings
+    "30",    # FanDuel
+    "4556",
+    "4557",
+    "4559",
+    "4560",
+    "4562",
+    "4561",
+    "4558",
+    "79",
+    "2988",
+    "75",
+)
 DISCORD_ALERT_REFRESH_LABELS = {"intraday"}
 SIDE_MULTIPLIERS = {
     "over": 1.0,
@@ -319,6 +334,15 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if number != number or number in {float("inf"), float("-inf")}:
         return default
     return number
+
+
+def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _average(values: List[Optional[float]]) -> Optional[float]:
@@ -891,40 +915,117 @@ def _win_pct(wins: Any, losses: Any) -> Optional[float]:
     return wins_value / games_played
 
 
-def _resolve_entry_game_team_context(entry: Dict[str, Any]) -> Dict[str, Any]:
-    game = entry.get("game_context")
+def _pick_action_network_context_market(markets: Any) -> Dict[str, Any]:
+    if not isinstance(markets, dict):
+        return {}
+
+    for book_id in ACTION_NETWORK_CONTEXT_BOOK_IDS:
+        market = markets.get(book_id)
+        if market is None and book_id.isdigit():
+            market = markets.get(int(book_id))
+        if isinstance(market, dict):
+            return market
+
+    for book_id in sorted(str(key) for key in markets.keys()):
+        market = markets.get(book_id)
+        if market is None and book_id.isdigit():
+            market = markets.get(int(book_id))
+        if isinstance(market, dict):
+            return market
+    return {}
+
+
+def _market_total_line(market: Dict[str, Any]) -> Optional[float]:
+    total_market = market.get("total") if isinstance(market.get("total"), dict) else {}
+    total_line = _safe_float(total_market.get("line"))
+    if total_line is not None:
+        return total_line
+    over_line = _safe_float((total_market.get("over") or {}).get("line"))
+    under_line = _safe_float((total_market.get("under") or {}).get("line"))
+    return over_line if over_line is not None else under_line
+
+
+def _team_total_line_from_market(market: Dict[str, Any], team: str) -> Optional[float]:
+    team_total_market = (
+        market.get("team_total") if isinstance(market.get("team_total"), dict) else {}
+    )
+    team_offer = team_total_market.get(team)
+    if not isinstance(team_offer, dict):
+        return None
+    return _safe_float(team_offer.get("line"))
+
+
+def _resolve_game_team_context(game: Any, team: Any) -> Dict[str, Any]:
     if not isinstance(game, dict):
         return {}
 
-    team = str(entry.get("team") or "").strip().upper()
+    team_code = str(team or "").strip().upper()
     home_team = str(game.get("home_team_tricode") or "").strip().upper()
     away_team = str(game.get("away_team_tricode") or "").strip().upper()
-    vegas_spread = _safe_float(game.get("spread"))
-    vegas_total = _safe_float(game.get("total"))
+    if not team_code or team_code not in {home_team, away_team}:
+        return {}
 
-    if team == home_team:
-        return {
-            "is_home": True,
-            "team_win_pct": _win_pct(game.get("home_team_wins"), game.get("home_team_losses")),
-            "opponent_win_pct": _win_pct(game.get("away_team_wins"), game.get("away_team_losses")),
-            "current_score_differential": _safe_float(game.get("score_differential")),
-            "is_live": bool(game.get("is_live")),
-            "game_status": game.get("game_status"),
-            "vegas_spread": vegas_spread,
-            "vegas_total": vegas_total,
-        }
-    if team == away_team:
-        return {
-            "is_home": False,
-            "team_win_pct": _win_pct(game.get("away_team_wins"), game.get("away_team_losses")),
-            "opponent_win_pct": _win_pct(game.get("home_team_wins"), game.get("home_team_losses")),
-            "current_score_differential": _safe_float(game.get("score_differential")),
-            "is_live": bool(game.get("is_live")),
-            "game_status": game.get("game_status"),
-            "vegas_spread": vegas_spread,
-            "vegas_total": vegas_total,
-        }
-    return {}
+    is_home = team_code == home_team
+    opponent_team = away_team if is_home else home_team
+    team_side = "home" if is_home else "away"
+    market = _pick_action_network_context_market(
+        game.get("action_network_markets") or game.get("markets")
+    )
+    spread_market = market.get("spread") if isinstance(market.get("spread"), dict) else {}
+    team_spread_line = _safe_float((spread_market.get(team_side) or {}).get("line"))
+    raw_game_spread = _safe_float(game.get("spread"))
+    game_total_line = _market_total_line(market) if market else None
+    if game_total_line is None:
+        game_total_line = _safe_float(game.get("total"))
+
+    team_total_line = _team_total_line_from_market(market, team_code) if market else None
+    opponent_total_line = _team_total_line_from_market(market, opponent_team) if market else None
+    team_implied_total = team_total_line
+    opponent_implied_total = opponent_total_line
+    if (
+        team_implied_total is None
+        and team_spread_line is not None
+        and game_total_line is not None
+    ):
+        team_implied_total = (game_total_line - team_spread_line) / 2.0
+    if (
+        opponent_implied_total is None
+        and team_spread_line is not None
+        and game_total_line is not None
+    ):
+        opponent_implied_total = (game_total_line + team_spread_line) / 2.0
+
+    vegas_spread = team_spread_line if team_spread_line is not None else raw_game_spread
+    return {
+        "is_home": is_home,
+        "team_win_pct": _win_pct(
+            game.get("home_team_wins") if is_home else game.get("away_team_wins"),
+            game.get("home_team_losses") if is_home else game.get("away_team_losses"),
+        ),
+        "opponent_win_pct": _win_pct(
+            game.get("away_team_wins") if is_home else game.get("home_team_wins"),
+            game.get("away_team_losses") if is_home else game.get("home_team_losses"),
+        ),
+        "current_score_differential": _safe_float(game.get("score_differential")),
+        "is_live": bool(game.get("is_live")),
+        "game_status": game.get("game_status"),
+        "vegas_spread": vegas_spread,
+        "vegas_total": game_total_line,
+        "team_spread_line": team_spread_line,
+        "spread_abs": abs(vegas_spread) if vegas_spread is not None else None,
+        "team_is_favorite": None if team_spread_line is None else team_spread_line < 0,
+        "team_total_line": team_total_line,
+        "opponent_team_total_line": opponent_total_line,
+        "team_implied_total": team_implied_total,
+        "opponent_implied_total": opponent_implied_total,
+        "market_book_id": market.get("book_id") if isinstance(market, dict) else None,
+        "market_book_label": market.get("book_label") if isinstance(market, dict) else None,
+    }
+
+
+def _resolve_entry_game_team_context(entry: Dict[str, Any]) -> Dict[str, Any]:
+    game = entry.get("game_context")
+    return _resolve_game_team_context(game, entry.get("team"))
 
 
 def _legacy_projection_baseline(
@@ -1329,8 +1430,11 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
             g.get("away_team_tricode") == game.get("away_team_tricode")
         )), None)
         if an_match:
+            game["action_network_markets"] = an_match.get("markets")
+            game["has_action_network_markets"] = an_match.get("has_action_network_markets")
+            context_market = _pick_action_network_context_market(an_match.get("markets"))
             game["spread"] = an_match.get("spread")
-            game["total"] = an_match.get("total")
+            game["total"] = _market_total_line(context_market) or an_match.get("total")
 
     active_teams = set()
     active_dates = set()
@@ -1976,6 +2080,11 @@ def _compute_lineup_adjustment(
         "freed_usage_pct": 0.0,
         "absent_stars": [],
         "benefit_flags": [],
+        "context_multipliers": {},
+        "modeled_minutes_delta": None,
+        "severe_vacancy": False,
+        "returning_teammate_drag": False,
+        "vegas_context": {},
         "blowout_risk_boost": False,
         "b2b_rest_flip": False,
         "opponent_reb_context": None,
@@ -1988,6 +2097,7 @@ def _compute_lineup_adjustment(
     stats = player.get("stats", {}) if isinstance(player, dict) else {}
     player_season_minutes = _safe_float(stats.get("MIN"))
     player_position = str(player.get("position") or "").upper()
+    player_position_group = "G" if "G" in player_position else "C" if "C" in player_position else "F" if "F" in player_position else ""
     feature_snapshot = feature_snapshot if isinstance(feature_snapshot, dict) else {}
     absent_teammates = tonight_dnps.get(team, []) if isinstance(tonight_dnps, dict) else []
     
@@ -2020,6 +2130,25 @@ def _compute_lineup_adjustment(
     adjustment["absent_stars"] = absent_stars
 
     q50_multiplier = 1.0
+    reason_parts: List[str] = []
+    context_multipliers: Dict[str, float] = {}
+    if isinstance(game_context, dict) and (
+        "vegas_total" in game_context
+        or "team_implied_total" in game_context
+        or "team_spread_line" in game_context
+    ):
+        team_game_context = game_context
+    else:
+        team_game_context = _resolve_game_team_context(game_context, team)
+
+    def apply_context_multiplier(key: str, multiplier: float, reason: str) -> None:
+        nonlocal q50_multiplier
+        if multiplier <= 0:
+            return
+        q50_multiplier *= multiplier
+        context_multipliers[key] = round(multiplier, 4)
+        if reason:
+            reason_parts.append(reason)
 
     benefit_flags: List[str] = []
     recent5_minutes_avg = _safe_float(feature_snapshot.get("recent5_minutes_avg"))
@@ -2061,13 +2190,93 @@ def _compute_lineup_adjustment(
 
     adjustment["benefit_flags"] = benefit_flags
     if len(benefit_flags) == 1:
-        q50_multiplier *= OVERLAY_SINGLE_BENEFIT_MULTIPLIER
+        apply_context_multiplier(
+            "role_single_benefit",
+            OVERLAY_SINGLE_BENEFIT_MULTIPLIER,
+            benefit_flags[0].replace("_", " "),
+        )
         adjustment["adjustment_type"] = "beneficiary_boost"
-        adjustment["reason"] = benefit_flags[0].replace("_", " ")
     elif len(benefit_flags) >= 2:
-        q50_multiplier *= OVERLAY_MULTI_BENEFIT_MULTIPLIER
+        apply_context_multiplier(
+            "role_multi_benefit",
+            OVERLAY_MULTI_BENEFIT_MULTIPLIER,
+            ", ".join(flag.replace("_", " ") for flag in benefit_flags),
+        )
         adjustment["adjustment_type"] = "beneficiary_boost"
-        adjustment["reason"] = ", ".join(flag.replace("_", " ") for flag in benefit_flags)
+
+    missing_team_minutes = _safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0
+    missing_same_pos_minutes = _safe_float(feature_snapshot.get("missing_same_pos_minutes"), 0.0) or 0.0
+    missing_key_teammate_count = _safe_float(feature_snapshot.get("missing_key_teammate_count"), 0.0) or 0.0
+    modeled_minutes_delta = _safe_float(feature_snapshot.get("modeled_minutes_delta_vs_recent5"), 0.0) or 0.0
+    modeled_minutes_q50 = _safe_float(feature_snapshot.get("modeled_minutes_q50"))
+    returning_key_teammate_count = _safe_float(feature_snapshot.get("returning_key_teammate_count"), 0.0) or 0.0
+    returning_same_pos_key_count = _safe_float(feature_snapshot.get("returning_same_pos_key_count"), 0.0) or 0.0
+    adjustment["modeled_minutes_delta"] = round(modeled_minutes_delta, 2)
+
+    scoring_context_stats = {"PTS", "FG3M", "PTS+AST", "PTS+REB", "PTS+REB+AST"}
+    creation_context_stats = {"AST", "PTS+AST", "REB+AST", "PTS+REB+AST"}
+    rebound_context_stats = {"REB", "PTS+REB", "REB+AST", "PTS+REB+AST"}
+    defensive_context_stats = {"STL", "BLK", "STL+BLK"}
+    role_sensitive_stats = scoring_context_stats | creation_context_stats | rebound_context_stats
+
+    if (
+        modeled_minutes_delta >= 2.0
+        and (benefit_flags or missing_key_teammate_count >= 1.0)
+        and (recent5_minutes_avg is None or recent5_minutes_avg >= 8.0)
+    ):
+        max_minutes_boost = 0.04 if stat_type in defensive_context_stats else 0.065
+        minutes_boost_pct = min(max_minutes_boost, modeled_minutes_delta * 0.008)
+        if minutes_boost_pct > 0.0:
+            apply_context_multiplier(
+                "modeled_minutes_promotion",
+                1.0 + minutes_boost_pct,
+                f"modeled minutes +{modeled_minutes_delta:.1f}",
+            )
+            if adjustment["adjustment_type"] == "none":
+                adjustment["adjustment_type"] = "minutes_promotion_boost"
+
+    vacancy_pressure = max(
+        freed_usg / 75.0,
+        missing_team_minutes / 90.0,
+        missing_key_teammate_count / 3.0,
+    )
+    if benefit_flags and vacancy_pressure >= 1.0 and stat_type not in defensive_context_stats:
+        severe_boost_pct = min(0.05, 0.02 + (vacancy_pressure - 1.0) * 0.025)
+        apply_context_multiplier(
+            "severe_vacancy",
+            1.0 + severe_boost_pct,
+            "severe teammate vacancy",
+        )
+        adjustment["severe_vacancy"] = True
+        if adjustment["adjustment_type"] == "none":
+            adjustment["adjustment_type"] = "severe_vacancy_boost"
+
+    if (
+        "same_pos_benefit" in benefit_flags
+        and missing_same_pos_minutes >= 36.0
+        and stat_type in role_sensitive_stats
+    ):
+        same_pos_boost_pct = min(0.035, (missing_same_pos_minutes - 30.0) * 0.0015)
+        if same_pos_boost_pct > 0.0:
+            apply_context_multiplier(
+                "same_position_rotation_shock",
+                1.0 + same_pos_boost_pct,
+                "same-position rotation shock",
+            )
+
+    if returning_key_teammate_count > 0.0:
+        returning_drag_pct = 0.015 + min(0.025, returning_key_teammate_count * 0.01)
+        if returning_same_pos_key_count > 0.0 and stat_type in role_sensitive_stats:
+            returning_drag_pct += 0.01
+        if benefit_flags or modeled_minutes_delta >= 2.0:
+            returning_drag_pct *= 0.45
+        if returning_drag_pct > 0.0:
+            apply_context_multiplier(
+                "returning_key_teammate_drag",
+                1.0 - min(0.05, returning_drag_pct),
+                "returning key teammate tempers role",
+            )
+            adjustment["returning_teammate_drag"] = True
 
     if stat_type in {"REB", "PTS+REB+AST", "PTS+REB", "REB+AST"}:
         for dnp in tonight_opponent_dnps or []:
@@ -2081,28 +2290,86 @@ def _compute_lineup_adjustment(
                     opponent_reb_context = "starter_out"
                     
         if opponent_frontcourt_freed >= 24.0:
-            if opponent_reb_context == "star_out":
-                q50_multiplier *= 1.07
-            else:
-                q50_multiplier *= 1.04
+            opponent_reb_multiplier = 1.07 if opponent_reb_context == "star_out" else 1.04
+            apply_context_multiplier(
+                "opponent_frontcourt_absence",
+                opponent_reb_multiplier,
+                "easier rebounding context",
+            )
             adjustment["opponent_reb_context"] = opponent_reb_context
             if adjustment["adjustment_type"] == "none":
                 adjustment["adjustment_type"] = "opponent_reb_boost"
-            adjustment["reason"] = (adjustment.get("reason", "") + " (Easier rebounding context)").strip()
 
-    vegas_total = _safe_float(game_context.get("total")) if game_context else None
+    vegas_total = _safe_float(team_game_context.get("vegas_total")) if team_game_context else None
+    team_implied_total = _safe_float(team_game_context.get("team_implied_total")) if team_game_context else None
+    spread_abs = _safe_float(team_game_context.get("spread_abs")) if team_game_context else None
     if vegas_total is not None:
-        raw_reason = adjustment.get("reason", "")
-        if vegas_total >= 235.0 and player_position == "G" and stat_type in {"PTS", "AST", "PTS+AST", "PTS+REB+AST"}:
-            q50_multiplier *= 1.04
-            adjustment["reason"] = (raw_reason + " | High total favors pace/guards").strip(" |")
-        elif vegas_total <= 215.0 and player_position in {"C", "F"} and stat_type in {"REB", "REB+AST", "PTS+REB"}:
-            q50_multiplier *= 1.05
-            adjustment["reason"] = (raw_reason + " | Low total creates interior rebounding").strip(" |")
-        elif vegas_total <= 210.0 and stat_type == "PTS":
-            q50_multiplier *= 0.96
-            adjustment["reason"] = (raw_reason + " | Depressed scoring environment").strip(" |")
+        if vegas_total >= 230.0 and (
+            stat_type in scoring_context_stats
+            or stat_type in creation_context_stats
+        ):
+            total_boost_pct = min(0.04, (vegas_total - 228.0) * 0.003)
+            apply_context_multiplier(
+                "high_game_total",
+                1.0 + total_boost_pct,
+                f"high game total {vegas_total:.1f}",
+            )
+        elif vegas_total <= 214.0 and stat_type in scoring_context_stats:
+            total_drag_pct = min(0.045, (216.0 - vegas_total) * 0.004)
+            apply_context_multiplier(
+                "low_game_total",
+                1.0 - max(0.0, total_drag_pct),
+                f"low game total {vegas_total:.1f}",
+            )
 
+        if vegas_total <= 216.0 and player_position_group in {"C", "F"} and stat_type in rebound_context_stats:
+            rebound_total_boost_pct = min(0.035, (218.0 - vegas_total) * 0.003)
+            apply_context_multiplier(
+                "low_total_rebounding",
+                1.0 + max(0.0, rebound_total_boost_pct),
+                "low total favors rebound volume",
+            )
+
+    if team_implied_total is not None:
+        if team_implied_total >= 118.0 and (
+            stat_type in scoring_context_stats
+            or stat_type in creation_context_stats
+        ):
+            implied_boost_pct = min(0.035, (team_implied_total - 116.0) * 0.003)
+            apply_context_multiplier(
+                "high_team_implied_total",
+                1.0 + implied_boost_pct,
+                f"team implied total {team_implied_total:.1f}",
+            )
+        elif team_implied_total <= 106.0 and stat_type in scoring_context_stats:
+            implied_drag_pct = min(0.04, (108.0 - team_implied_total) * 0.004)
+            apply_context_multiplier(
+                "low_team_implied_total",
+                1.0 - max(0.0, implied_drag_pct),
+                f"low team implied total {team_implied_total:.1f}",
+            )
+
+    minutes_reference = modeled_minutes_q50 or player_season_minutes or recent5_minutes_avg
+    if spread_abs is not None and spread_abs >= 12.0 and minutes_reference is not None:
+        protected_promotion = bool(benefit_flags and modeled_minutes_delta >= 3.0)
+        if minutes_reference >= 26.0 and not protected_promotion:
+            blowout_drag_pct = min(0.055, (spread_abs - 10.0) * 0.006)
+            apply_context_multiplier(
+                "blowout_minutes_drag",
+                1.0 - max(0.0, blowout_drag_pct),
+                f"spread {spread_abs:.1f} adds blowout risk",
+            )
+            adjustment["blowout_risk_boost"] = True
+
+    adjustment["context_multipliers"] = context_multipliers
+    adjustment["vegas_context"] = {
+        "vegas_total": vegas_total,
+        "team_implied_total": team_implied_total,
+        "spread_abs": spread_abs,
+        "team_spread_line": _safe_float(team_game_context.get("team_spread_line")) if team_game_context else None,
+        "market_book_label": team_game_context.get("market_book_label") if team_game_context else None,
+    }
+    adjustment["reason"] = " | ".join(dict.fromkeys(reason_parts))
     adjustment["q50_multiplier"] = _clamp(q50_multiplier, 0.70, OVERLAY_MAX_MULTIPLIER)
     return adjustment
 
@@ -2446,7 +2713,21 @@ def _compute_ml_regression_context(
         "position": player.get("position"),
     }
 
-    res = _ml_predictor.predict(player_info, logs, stat_type, include_features=True)
+    if isinstance(game_context, dict) and (
+        "vegas_total" in game_context
+        or "team_implied_total" in game_context
+        or "team_spread_line" in game_context
+    ):
+        resolved_game_context = game_context
+    else:
+        resolved_game_context = _resolve_game_team_context(game_context, player.get("team"))
+    res = _ml_predictor.predict(
+        player_info,
+        logs,
+        stat_type,
+        include_features=True,
+        game_context=resolved_game_context,
+    )
     if not res:
         return {"available": False, "score": 0.0, "p_over": None, "details": {}}
     feature_snapshot = res.get("feature_snapshot", {}) if isinstance(res, dict) else {}
@@ -2468,7 +2749,7 @@ def _compute_ml_regression_context(
             tonight_opponent_dnps=tonight_opponent_dnps,
             logs=logs,
             team_recent_games=team_recent_games or {},
-            game_context=game_context,
+            game_context=resolved_game_context,
             feature_snapshot=feature_snapshot,
         )
         mult = adjustment.get("q50_multiplier", 1.0)
@@ -2575,8 +2856,11 @@ def _compute_ml_regression_context(
                     "modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta",
                 )
             },
-            "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
-            "vegas_spread": _safe_float(game_context.get("spread")) if game_context else None,
+            "vegas_total": _safe_float(resolved_game_context.get("vegas_total")),
+            "vegas_spread": _safe_float(resolved_game_context.get("vegas_spread")),
+            "team_implied_total": _safe_float(resolved_game_context.get("team_implied_total")),
+            "team_spread_line": _safe_float(resolved_game_context.get("team_spread_line")),
+            "spread_abs": _safe_float(resolved_game_context.get("spread_abs")),
         }
 
     # ── Legacy path (std_dev / Gaussian fallback) ────────────────────────────
@@ -2597,8 +2881,11 @@ def _compute_ml_regression_context(
             "injury_report_freshness": injury_report_freshness,
             "position_resolution_summary": position_resolution_summary,
             "runtime_context": runtime_context,
-            "vegas_total": _safe_float(game_context.get("total")) if game_context else None,
-            "vegas_spread": _safe_float(game_context.get("spread")) if game_context else None,
+            "vegas_total": _safe_float(resolved_game_context.get("vegas_total")),
+            "vegas_spread": _safe_float(resolved_game_context.get("vegas_spread")),
+            "team_implied_total": _safe_float(resolved_game_context.get("team_implied_total")),
+            "team_spread_line": _safe_float(resolved_game_context.get("team_spread_line")),
+            "spread_abs": _safe_float(resolved_game_context.get("spread_abs")),
         }
 
     # ── Score mapping: p_over → [-1, 1] ─────────────────────────────────────
@@ -3524,8 +3811,55 @@ def _state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -
             "line": recommendation.get("line"),
             "odds": recommendation.get("odds"),
             "display_edge_score": recommendation.get("display_edge_score"),
+            "rank": recommendation.get("rank"),
         }
     return snapshot
+
+
+def _load_preservable_previous_board(
+    previous_payload: Dict[str, Any],
+    *,
+    current_game_dates: List[str],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(previous_payload, dict):
+        return None
+    previous_recommendations = previous_payload.get("recommendations", [])
+    if not isinstance(previous_recommendations, list) or not previous_recommendations:
+        return None
+
+    normalized_current_dates = sorted({
+        _normalize_game_date(game_date)
+        for game_date in current_game_dates
+        if _normalize_game_date(game_date)
+    })
+    normalized_previous_dates = sorted({
+        _normalize_game_date(game_date)
+        for game_date in previous_payload.get("game_dates", [])
+        if _normalize_game_date(game_date)
+    })
+    if normalized_current_dates and normalized_previous_dates != normalized_current_dates:
+        return None
+
+    previous_summary = previous_payload.get("summary", {})
+    if not isinstance(previous_summary, dict):
+        previous_summary = {}
+    previous_freshness = previous_summary.get("injury_report_freshness", {})
+    if isinstance(previous_freshness, dict) and previous_freshness.get("is_stale"):
+        return None
+
+    preserved_recommendations = copy.deepcopy(previous_recommendations)
+    for rank, recommendation in enumerate(preserved_recommendations, start=1):
+        recommendation["rank"] = rank
+
+    preserved_boards = previous_summary.get("sportsbook_boards", {})
+    if not isinstance(preserved_boards, dict):
+        preserved_boards = {}
+
+    return {
+        "generated_at": previous_payload.get("generated_at"),
+        "recommendations": preserved_recommendations,
+        "sportsbook_boards": copy.deepcopy(preserved_boards),
+    }
 
 
 def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3624,6 +3958,22 @@ def _compute_notification_delta(
                 reason_flags.append("line moved")
             if abs((_safe_float(recommendation.get("odds"), 0.0) or 0.0) - (_safe_float(previous.get("odds"), 0.0) or 0.0)) >= EDGE_DISCORD_ODDS_MOVE_AMERICAN:
                 reason_flags.append("odds moved")
+            current_display_edge_score = _safe_float(recommendation.get("display_edge_score"))
+            previous_display_edge_score = _safe_float(previous.get("display_edge_score"))
+            if (
+                current_display_edge_score is not None
+                and previous_display_edge_score is not None
+                and abs(current_display_edge_score - previous_display_edge_score) >= EDGE_DISCORD_SCORE_DELTA
+            ):
+                reason_flags.append("score moved")
+            current_rank = _safe_int(recommendation.get("rank"))
+            previous_rank = _safe_int(previous.get("rank"))
+            if (
+                current_rank is not None
+                and previous_rank is not None
+                and abs(current_rank - previous_rank) >= EDGE_DISCORD_RANK_DELTA
+            ):
+                reason_flags.append("rank changed")
 
         if reason_flags:
             changes.append({
@@ -3635,6 +3985,10 @@ def _compute_notification_delta(
                 "sportsbook": recommendation.get("sportsbook"),
                 "line": recommendation.get("line"),
                 "edge_score": recommendation.get("edge_score"),
+                "previous_rank": previous.get("rank") if isinstance(previous, dict) else None,
+                "current_rank": recommendation.get("rank"),
+                "previous_display_edge_score": previous.get("display_edge_score") if isinstance(previous, dict) else None,
+                "current_display_edge_score": recommendation.get("display_edge_score"),
                 "reasons": reason_flags,
             })
 
@@ -4835,7 +5189,7 @@ def _build_discord_alert_payload(
         summary_fields.extend([
             {
                 "name": "Why this updated",
-                "value": "Only props with a new entrant, better book, line move, or price move are shown."[:1024],
+                "value": "Only props with a new entrant, better book, line move, price move, or meaningful score/rank change are shown."[:1024],
                 "inline": False,
             },
             {
@@ -5361,6 +5715,9 @@ def run_edge_score_refresh(
     action_network_path: str = ACTION_NETWORK_PATH,
 ) -> Dict[str, Any]:
     start_time = time.time()
+    previous_payload = _load_json(EDGE_SCORE_PATH, {})
+    if not isinstance(previous_payload, dict):
+        previous_payload = {}
     master_feed = _load_json(master_feed_path, [])
     schedule_payload = _load_json(schedule_path, {"games": []})
     action_network_payload = _load_json(action_network_path, {"games": []})
@@ -5417,7 +5774,7 @@ def run_edge_score_refresh(
     except Exception as exc:
         logger.warning("Discord message cleanup failed: %s", exc)
 
-    schedule_context = _build_schedule_context(schedule_payload)
+    schedule_context = _build_schedule_context(schedule_payload, action_network_payload)
     overlay_props_index = _build_overlay_props_index(current_players_data)
     overlay_props_index = _merge_overlay_indexes(
         overlay_props_index,
@@ -5552,6 +5909,24 @@ def run_edge_score_refresh(
 
     notification_delta = _compute_notification_delta(top_recommendations, state, refresh_label)
     official_recommendations = notification_delta.get("official_recommendations", [])
+    display_recommendations = top_recommendations
+    display_sportsbook_boards = sportsbook_boards
+    preserved_board_generated_at = None
+    board_preserved_from_previous = False
+    if not top_recommendations and blocked_stale_count > 0:
+        preserved_board = _load_preservable_previous_board(
+            previous_payload,
+            current_game_dates=sorted({
+                entry["game_date"]
+                for entry in active_entries
+                if entry.get("game_date")
+            }),
+        )
+        if preserved_board:
+            display_recommendations = preserved_board["recommendations"]
+            display_sportsbook_boards = preserved_board["sportsbook_boards"]
+            preserved_board_generated_at = preserved_board.get("generated_at")
+            board_preserved_from_previous = True
 
     payload = {
         "generated_at": get_et_now().isoformat(),
@@ -5562,18 +5937,21 @@ def run_edge_score_refresh(
             "candidate_count": len(candidates),
             "eligible_candidate_count": len(eligible_candidates),
             "blocked_candidate_count": len(blocked_candidates),
-            "top_count": len(top_recommendations),
+            "top_count": len(display_recommendations),
+            "actual_top_count": len(top_recommendations),
             "blocked_top_count": len(blocked_recommendations),
             "available_books": sorted(SUPPORTED_BOOKS),
             "sportsbook_board_limit": EDGE_SPORTSBOOK_BOARD_LIMIT,
-            "sportsbook_boards": sportsbook_boards,
+            "sportsbook_boards": display_sportsbook_boards,
             "injury_report_freshness": injury_report_freshness,
             "blocked_stale_injury_context_count": blocked_stale_count,
             "blocked_promotion_under_count": blocked_promotion_under_count,
+            "board_preserved_from_previous": board_preserved_from_previous,
+            "preserved_board_generated_at": preserved_board_generated_at,
             "duration_s": round(time.time() - start_time, 2),
             "scoring_model": "Signal Score",
         },
-        "recommendations": top_recommendations,
+        "recommendations": display_recommendations,
         "blocked_recommendations": blocked_recommendations,
         "notification": {
             "discord_configured": _has_discord_alert_target(),
@@ -5597,6 +5975,8 @@ def run_edge_score_refresh(
                 "best_book_changed": True,
                 "line_move_points": EDGE_DISCORD_LINE_MOVE_POINTS,
                 "odds_move_american": EDGE_DISCORD_ODDS_MOVE_AMERICAN,
+                "signal_score_delta": EDGE_DISCORD_SCORE_DELTA,
+                "rank_delta": EDGE_DISCORD_RANK_DELTA,
                 "min_interval_seconds": EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS,
             },
         },

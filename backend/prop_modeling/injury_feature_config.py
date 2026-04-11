@@ -10,8 +10,11 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 ACTIVE_ROSTER_LOOKBACK_DAYS = 30
 TRAILING_ABSENT_PRIOR_GAMES = 10
 MIN_LIVE_PRIOR_ACTIVE_GAMES = 3
-KEY_TEAMMATE_MIN_USAGE_PCT = 18.0
-KEY_TEAMMATE_MIN_MINUTES = 18.0
+# Keep "key teammate" focused on players whose absence can realistically move
+# role and usage. Lower thresholds made almost every historical DNP look like a
+# promotion event, which diluted the injury signal during retraining.
+KEY_TEAMMATE_MIN_USAGE_PCT = 22.0
+KEY_TEAMMATE_MIN_MINUTES = 24.0
 TEAMMATE_ONOFF_LOOKBACK_PLAYER_GAMES = 20
 TEAMMATE_ONOFF_MIN_PRESENT_GAMES = 5
 TEAMMATE_ONOFF_MIN_ABSENT_GAMES = 2
@@ -26,6 +29,8 @@ ONBALL_DRIVES_THRESHOLD = 8.0
 
 INJURY_FRESHNESS_NORMAL_MAX_AGE_MINUTES = 60
 INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES = 15
+# Treat the slate as lock-sensitive starting early ET on game day so stale
+# morning injury reports cannot silently drive promotion logic into the afternoon.
 INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET = 6
 
 OVERLAY_MIN_RECENT5_MINUTES = 12.0
@@ -33,9 +38,11 @@ SAME_POS_BENEFIT_MINUTES_THRESHOLD = 20.0
 CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD = 10.0
 ONBALL_BENEFIT_DRIVES_THRESHOLD = 10.0
 USAGE_BENEFIT_USAGE_THRESHOLD = 10.0
-OVERLAY_SINGLE_BENEFIT_MULTIPLIER = 1.02
-OVERLAY_MULTI_BENEFIT_MULTIPLIER = 1.04
-OVERLAY_MAX_MULTIPLIER = 1.05
+# Runtime overlay is intentionally bounded, but needs enough range to react to
+# true rotation shocks after the base quantile model has already spoken.
+OVERLAY_SINGLE_BENEFIT_MULTIPLIER = 1.03
+OVERLAY_MULTI_BENEFIT_MULTIPLIER = 1.07
+OVERLAY_MAX_MULTIPLIER = 1.12
 
 POSITION_GROUPS = ("G", "F", "C")
 PROMOTION_GUARDRAIL_SUPPORTED_STAT_TYPES = (
@@ -245,15 +252,10 @@ def is_key_teammate(
     potential_ast_pg: Optional[float],
     drives_pg: Optional[float],
 ) -> bool:
+    high_usage = usage_pct is not None and usage_pct >= KEY_TEAMMATE_MIN_USAGE_PCT
+    high_minutes = minutes is not None and minutes >= KEY_TEAMMATE_MIN_MINUTES
     playmaker_or_onball = is_playmaker(ast_pct, potential_ast_pg) or is_onball(drives_pg)
-    has_meaningful_rotation_minutes = (
-        minutes is not None and minutes >= (KEY_TEAMMATE_MIN_MINUTES / 2.0)
-    )
-    return (
-        (usage_pct is not None and usage_pct >= KEY_TEAMMATE_MIN_USAGE_PCT)
-        or (minutes is not None and minutes >= KEY_TEAMMATE_MIN_MINUTES)
-        or (playmaker_or_onball and has_meaningful_rotation_minutes)
-    )
+    return high_minutes and (high_usage or playmaker_or_onball)
 
 
 def choose_recent_over_season(recent_value: Optional[float], season_value: Optional[float]) -> Optional[float]:

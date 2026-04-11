@@ -44,6 +44,7 @@ from injury_feature_config import default_promotion_guardrail_config
 DEFAULT_REGRESSION_DATASET_PATH = GENERATED_DIR / "regression_training_dataset.csv"
 DEFAULT_REGRESSION_MODEL_DIR = GENERATED_DIR / "regression_models"
 TARGET_COLUMN = "actual_value"
+STAT_MODEL_QUANTILE_ALPHAS = [0.25, 0.5, 0.75]
 ENGINEERED_FEATURE_COLUMNS = [
     "momentum_diff_5v20",
     "momentum_diff_3v10",
@@ -242,11 +243,27 @@ def _train_minutes_quantile_model(
     return model, model.predict(test_pool)
 
 
+def _split_minutes_oof_train_eval(
+    train_block: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    unique_dates = sorted(train_block["game_date"].dt.date.unique())
+    eval_date_count = min(MINUTES_OOF_BLOCK_DATES, max(1, len(unique_dates) // 5))
+    if len(unique_dates) <= eval_date_count:
+        return train_block, train_block.iloc[0:0].copy()
+
+    eval_dates = set(unique_dates[-eval_date_count:])
+    fit_block = train_block[~train_block["game_date"].dt.date.isin(eval_dates)].copy()
+    eval_block = train_block[train_block["game_date"].dt.date.isin(eval_dates)].copy()
+    if fit_block.empty or eval_block.empty:
+        return train_block, train_block.iloc[0:0].copy()
+    return fit_block, eval_block
+
+
 def _build_minutes_prediction_frame(
     minutes_df: pd.DataFrame,
     *,
     split_date: pd.Timestamp,
-) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], CatBoostRegressor]:
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], Dict[str, Any], CatBoostRegressor]:
     oof_frames: List[pd.DataFrame] = []
     all_dates = sorted(minutes_df["game_date"].dt.date.unique())
     cat_indices = [
@@ -268,10 +285,11 @@ def _build_minutes_prediction_frame(
         if train_block.empty or pred_block.empty:
             continue
 
-        X_train = _prepare_features(train_block, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
+        fit_block, eval_block = _split_minutes_oof_train_eval(train_block)
+        X_train = _prepare_features(fit_block, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
         X_pred = _prepare_features(pred_block, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
-        y_train = train_block[MINUTES_MODEL_TARGET_COLUMN].to_numpy()
-        w_train = make_sample_weights(train_block)
+        y_train = fit_block[MINUTES_MODEL_TARGET_COLUMN].to_numpy()
+        w_train = make_sample_weights(fit_block)
 
         train_pool = Pool(X_train, label=y_train, cat_features=cat_indices, weight=w_train)
         pred_pool = Pool(X_pred, cat_features=cat_indices)
@@ -286,7 +304,21 @@ def _build_minutes_prediction_frame(
             allow_writing_files=False,
             task_type="CPU",
         )
-        model.fit(train_pool, verbose=False)
+        if not eval_block.empty:
+            X_eval = _prepare_features(eval_block, MINUTES_MODEL_FEATURE_COLUMNS, MINUTES_MODEL_CATEGORICAL_FEATURES)
+            eval_pool = Pool(
+                X_eval,
+                label=eval_block[MINUTES_MODEL_TARGET_COLUMN].to_numpy(),
+                cat_features=cat_indices,
+            )
+            model.fit(
+                train_pool,
+                eval_set=eval_pool,
+                use_best_model=True,
+                early_stopping_rounds=50,
+            )
+        else:
+            model.fit(train_pool, verbose=False)
         preds = model.predict(pred_pool)
 
         oof_frame = pred_block[["game_date", "player_id", "game_id"]].copy()
@@ -310,18 +342,27 @@ def _build_minutes_prediction_frame(
         q50_preds=final_preds[:, 1],
         q75_preds=final_preds[:, 2],
     )
+    train_key_count = len(train_minutes[["game_date", "player_id", "game_id"]].drop_duplicates())
+    oof_key_count = len(
+        pred_frame[pred_frame["game_date"] < split_date][["game_date", "player_id", "game_id"]]
+        .drop_duplicates()
+    )
+    oof_metrics = {
+        "train_rows": int(len(train_minutes)),
+        "oof_rows": int(len(pred_frame[pred_frame["game_date"] < split_date])),
+        "distinct_train_keys": int(train_key_count),
+        "distinct_oof_keys": int(oof_key_count),
+        "training_key_coverage": _safe_metric(oof_key_count / train_key_count) if train_key_count else 0.0,
+    }
 
     heuristic_source = test_minutes.copy()
+    recent5 = pd.to_numeric(heuristic_source.get("recent5_minutes_avg"), errors="coerce")
+    recent10 = pd.to_numeric(heuristic_source.get("recent10_minutes_avg"), errors="coerce")
+    season = pd.to_numeric(heuristic_source.get("season_minutes_avg"), errors="coerce")
     heuristic_pred = (
-        pd.to_numeric(heuristic_source.get("recent5_minutes_avg"), errors="coerce").fillna(
-            pd.to_numeric(heuristic_source.get("season_minutes_avg"), errors="coerce")
-        ) * 0.50
-        + pd.to_numeric(heuristic_source.get("recent10_minutes_avg"), errors="coerce").fillna(
-            pd.to_numeric(heuristic_source.get("season_minutes_avg"), errors="coerce")
-        ) * 0.30
-        + pd.to_numeric(heuristic_source.get("season_minutes_avg"), errors="coerce").fillna(
-            pd.to_numeric(heuristic_source.get("recent5_minutes_avg"), errors="coerce")
-        ) * 0.20
+        recent5.fillna(season) * 0.50
+        + recent10.fillna(season) * 0.30
+        + season.fillna(recent5) * 0.20
     )
     if "is_b2b" in heuristic_source.columns:
         heuristic_pred *= (
@@ -333,7 +374,7 @@ def _build_minutes_prediction_frame(
         "rmse_q50": _safe_metric(math.sqrt(mean_squared_error(test_minutes[MINUTES_MODEL_TARGET_COLUMN], heuristic_pred))),
         "r2_q50": _safe_metric(r2_score(test_minutes[MINUTES_MODEL_TARGET_COLUMN], heuristic_pred)),
     }
-    return pred_frame, minutes_metrics, heuristic_metrics, final_model
+    return pred_frame, minutes_metrics, heuristic_metrics, oof_metrics, final_model
 
 
 def _attach_modeled_minutes_features(
@@ -370,6 +411,7 @@ def _attach_modeled_minutes_features(
 
 
 def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+    residuals = y_true - y_pred
     return {
         "mae": _safe_metric(mean_absolute_error(y_true, y_pred)),
         "rmse": _safe_metric(math.sqrt(mean_squared_error(y_true, y_pred))),
@@ -377,6 +419,8 @@ def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any
         "median_ae": _safe_metric(float(np.median(np.abs(y_true - y_pred)))),
         "mean_actual": _safe_metric(float(y_true.mean())),
         "mean_predicted": _safe_metric(float(y_pred.mean())),
+        "bias": _safe_metric(float((y_pred - y_true).mean())),
+        "residual_std": _safe_metric(float(np.std(residuals))),
     }
 
 
@@ -553,6 +597,26 @@ def _walk_forward_regression(
     }
 
 
+def _build_feature_drift_baseline(
+    df: pd.DataFrame,
+    feature_cols: Sequence[str],
+    cat_cols: Sequence[str],
+) -> Dict[str, Dict[str, float]]:
+    baseline: Dict[str, Dict[str, float]] = {}
+    numeric_cols = [col for col in feature_cols if col not in cat_cols and col != "stat_type"]
+    for col in numeric_cols:
+        if col not in df.columns:
+            continue
+        series = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if series.empty:
+            continue
+        baseline[col] = {
+            "mean": round(float(series.mean()), 6),
+            "std": round(float(series.std(ddof=0)), 6),
+        }
+    return baseline
+
+
 def main() -> int:
     args = _parse_args()
     dataset_csv = Path(args.dataset_csv)
@@ -578,7 +642,7 @@ def main() -> int:
     split_idx = max(0, len(unique_dates) - args.test_date_count)
     split_date = pd.Timestamp(unique_dates[split_idx])
 
-    minutes_pred_frame, minutes_metrics, heuristic_minutes_metrics, minutes_model = _build_minutes_prediction_frame(
+    minutes_pred_frame, minutes_metrics, heuristic_minutes_metrics, minutes_oof_metrics, minutes_model = _build_minutes_prediction_frame(
         minutes_df,
         split_date=split_date,
     )
@@ -613,25 +677,33 @@ def main() -> int:
             "cat_features": MINUTES_MODEL_CATEGORICAL_FEATURES,
             "test_metrics": minutes_metrics,
             "heuristic_baseline_metrics": heuristic_minutes_metrics,
+            "oof_metrics": minutes_oof_metrics,
         },
         "promotion_guardrail": default_promotion_guardrail_config(),
         "stat_models": {},
     }
+    model_files: Dict[str, str] = {}
+    quantile_stats: Dict[str, Dict[str, Any]] = {}
+    per_stat_test_metrics: Dict[str, Dict[str, Any]] = {}
 
     _atomic_save_catboost_model(minutes_model, model_dir / MINUTES_MODEL_FILE_NAME)
     _atomic_write_json(model_dir / MINUTES_MODEL_QUANTILES_FILE_NAME, minutes_metrics)
     minutes_metadata_payload = {
+        "model_type": "minutes_multiquantile",
+        "quantile_alphas": STAT_MODEL_QUANTILE_ALPHAS,
         "target": MINUTES_MODEL_TARGET_COLUMN,
         "feature_columns": MINUTES_MODEL_FEATURE_COLUMNS,
         "cat_features": MINUTES_MODEL_CATEGORICAL_FEATURES,
         "model_file": MINUTES_MODEL_FILE_NAME,
         "test_metrics": minutes_metrics,
         "heuristic_baseline_metrics": heuristic_minutes_metrics,
+        "oof_metrics": minutes_oof_metrics,
         "modeled_minutes_features": MODELED_MINUTES_FEATURE_COLUMNS,
         "promotion_guardrail": default_promotion_guardrail_config(),
     }
     print(f"Minutes model test metrics: {minutes_metrics}")
     print(f"Heuristic minutes baseline: {heuristic_minutes_metrics}")
+    print(f"Minutes model OOF coverage: {minutes_oof_metrics}")
 
     # Optional: load prop lines for backtest hit-rate evaluation
     prop_df = None
@@ -676,6 +748,16 @@ def main() -> int:
             meta = {"stat_type": stat_type_label, "metrics": m, "feature_columns": feature_cols}
             _atomic_write_json(model_dir / "unified_regression.metadata.json", meta)
             manifest["stat_models"][stat_type_label] = {"metrics": m}
+            model_files[stat_type_label] = model_path.name
+            per_stat_test_metrics[stat_type_label] = m
+            quantile_stats[stat_type_label] = {
+                "std": m.get("residual_std"),
+                "mae": m.get("mae"),
+                "rmse": m.get("rmse"),
+                "bias": m.get("bias"),
+                "mean_actual": m.get("mean_actual"),
+                "mean_predicted": m.get("mean_predicted"),
+            }
     else:
         for stat_type in sorted(df["stat_type"].dropna().unique()):
             stat_df = df[df["stat_type"] == stat_type]
@@ -712,12 +794,58 @@ def main() -> int:
             meta = {"stat_type": stat_type, "metrics": m, "feature_columns": feature_cols}
             _atomic_write_json(model_dir / f"{slug}_regression.metadata.json", meta)
             manifest["stat_models"][stat_type] = {"metrics": m}
+            model_files[stat_type] = model_path.name
+            per_stat_test_metrics[stat_type] = m
+            quantile_stats[stat_type] = {
+                "std": m.get("residual_std"),
+                "mae": m.get("mae"),
+                "rmse": m.get("rmse"),
+                "bias": m.get("bias"),
+                "mean_actual": m.get("mean_actual"),
+                "mean_predicted": m.get("mean_predicted"),
+            }
+
+    manifest["model_files"] = model_files
+
+    drift_baseline_source = df[df["game_date"] < split_date].copy()
+    if drift_baseline_source.empty:
+        drift_baseline_source = df.copy()
+    feature_drift_baseline = _build_feature_drift_baseline(
+        drift_baseline_source,
+        feature_cols=feature_cols,
+        cat_cols=cat_cols_in_use,
+    )
+
+    export_meta = {
+        "model_type": "unified_rmse_legacy" if args.unified else "per_stat_rmse_legacy",
+        "target": "actual_stat_value",
+        "feature_columns": feature_cols,
+        "cat_features": cat_cols_in_use,
+        "engineered_features": [col for col in ENGINEERED_FEATURE_COLUMNS if col in feature_cols],
+        "modeled_minutes_features": MODELED_MINUTES_FEATURE_COLUMNS,
+        "model_files": model_files,
+        "minutes_model_file": MINUTES_MODEL_FILE_NAME,
+        "minutes_model_metadata_file": MINUTES_MODEL_METADATA_FILE_NAME,
+        "minutes_quantile_stats_file": MINUTES_MODEL_QUANTILES_FILE_NAME,
+        "minutes_test_metrics": minutes_metrics,
+        "promotion_guardrail": default_promotion_guardrail_config(),
+        "per_stat_test_metrics": per_stat_test_metrics,
+        "usage": (
+            "Load the per-stat .cbm for the relevant stat_type. "
+            "model.predict(pool) returns shape (n,) with a point estimate. "
+            "Use quantile_stats.json residual std as the uncertainty estimate "
+            "until a multiquantile export replaces this bundle."
+        ),
+    }
 
     _atomic_write_json(model_dir / MINUTES_MODEL_METADATA_FILE_NAME, minutes_metadata_payload)
+    _atomic_write_json(model_dir / "quantile_stats.json", quantile_stats)
+    _atomic_write_json(model_dir / "feature_drift_baseline.json", feature_drift_baseline)
 
     # Save manifest
     manifest_path = model_dir / "manifest.json"
     _atomic_write_json(manifest_path, manifest)
+    _atomic_write_json(model_dir / "model_metadata.json", export_meta)
     print(f"\nmanifest={manifest_path}")
     print(f"trained_models={len(manifest['stat_models'])}")
     return 0
