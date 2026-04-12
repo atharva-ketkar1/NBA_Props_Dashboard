@@ -440,20 +440,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
     const [expandedGames, setExpandedGames] = useState<Record<string, boolean>>({});
     const [searchTerm, setSearchTerm] = useState('');
+    const scheduleCacheRef = useRef(new Map<string, Game[]>());
+    const scheduleKeyRef = useRef('');
+    const scheduleMountedRef = useRef(true);
 
-    // Fetch live game data
     useEffect(() => {
-        if (games.length > 0) {
-            setScheduleData(sortGamesByTime(games));
-            return;
-        }
+        scheduleMountedRef.current = true;
+        return () => {
+            scheduleMountedRef.current = false;
+        };
+    }, []);
 
-        if (!players.length) {
-            setScheduleData([]);
-            return;
-        }
-
-        const propDates = Array.from(new Set(
+    // Fetch live game data. When no players have props yet, fall back to the
+    // game dates supplied by App, but still fetch full schedule rows for logos/time.
+    useEffect(() => {
+        const playerPropDates = Array.from(new Set(
             players.flatMap(p =>
                 Object.values(p.props_by_date ?? {}).flatMap(statEntry =>
                     Object.values(statEntry as Record<string, Record<string, any>>).flatMap(bookEntry =>
@@ -462,27 +463,66 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 )
             )
         )).sort();
+        const fallbackGameDates = Array.from(new Set(
+            games.map(game => game.game_date).filter(Boolean)
+        )).sort();
+        const propDates = playerPropDates.length > 0 ? playerPropDates : fallbackGameDates;
+        const scheduleKey = propDates.join('|');
 
-        if (!propDates.length) return;
+        if (scheduleKeyRef.current === scheduleKey) {
+            return;
+        }
+
+        if (!propDates.length) {
+            scheduleKeyRef.current = '';
+            setScheduleData([]);
+            return;
+        }
+
+        const cachedSchedule = scheduleCacheRef.current.get(scheduleKey);
+        if (cachedSchedule) {
+            scheduleKeyRef.current = scheduleKey;
+            setScheduleData(cachedSchedule);
+            return;
+        }
+
+        // Players/games arrays are refreshed often; guard by the derived date
+        // key so schedule hydration does not spam /api/games for the same slate.
+        scheduleKeyRef.current = scheduleKey;
 
         if (USE_DB) {
             fetchDashboardGames(propDates)
                 .then(({ games }) => {
-                    setScheduleData(sortGamesByTime(games ?? []));
+                    if (!scheduleMountedRef.current || scheduleKeyRef.current !== scheduleKey) return;
+                    const nextGames = sortGamesByTime(games ?? []);
+                    scheduleCacheRef.current.set(scheduleKey, nextGames);
+                    setScheduleData(nextGames);
                 })
                 .catch((error) => {
+                    if (scheduleKeyRef.current === scheduleKey) {
+                        scheduleKeyRef.current = '';
+                    }
                     console.error('[api] games error:', error);
                 });
         } else {
             fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
                 .then(data => {
+                    if (!scheduleMountedRef.current || scheduleKeyRef.current !== scheduleKey) return;
                     const sortedGames = sortGamesByTime((data as Game[])
                         .filter(g => propDates.includes(g.game_date))
                     );
+                    scheduleCacheRef.current.set(scheduleKey, sortedGames);
                     setScheduleData(sortedGames);
                 })
-                .catch(err => console.error("Error loading schedule:", err));
+                .catch(err => {
+                    if (scheduleKeyRef.current === scheduleKey) {
+                        scheduleKeyRef.current = '';
+                    }
+                    console.error("Error loading schedule:", err);
+                });
         }
+
+        return undefined;
     }, [games, players]);
 
     // Dynamically generate prop options and game options

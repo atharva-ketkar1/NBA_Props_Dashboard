@@ -1,6 +1,8 @@
 import React from 'react';
-import { Book, Copy, Menu, TrendingUp, User } from 'lucide-react';
+import { Copy, Info, Menu, TrendingUp, User } from 'lucide-react';
 import { ASSETS_BASE } from '../utils/config';
+import { GlossaryModal } from './GlossaryModal';
+import { createPortal } from 'react-dom';
 
 interface LeagueButtonProps {
     label: string;
@@ -86,10 +88,12 @@ export const TopNav: React.FC<TopNavProps> = ({
     edgeSummary,
     dashboardUpdatedAt,
 }) => {
+    const [showGlossary, setShowGlossary] = React.useState(false);
     const BASE_URL = `${ASSETS_BASE}/assets/sport_logos`;
     return (
-        <div className="relative z-50 flex h-16 shrink-0 items-center justify-between border-b border-bgElevation0 bg-bgElevation0 px-4 lg:px-6">
-            <div className="hidden flex-1 items-center gap-2 lg:flex">
+        <>
+            <div className="relative z-50 flex h-16 shrink-0 items-center justify-between border-b border-bgElevation0 bg-bgElevation0 px-4 lg:px-6">
+                <div className="hidden flex-1 items-center gap-2 lg:flex">
                 <div className="flex items-center gap-1 rounded-lg bg-bgCanvas p-1">
                     <LeagueButton
                         label="NBA"
@@ -121,61 +125,72 @@ export const TopNav: React.FC<TopNavProps> = ({
                         Today&apos;s Best Props
                     </button>
                 )}
-            </div>
-
-            <button className="text-gray-400 hover:text-white lg:hidden" onClick={onMenuClick} type="button">
-                <Menu className="h-6 w-6" />
-            </button>
-
-            <div className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 select-none items-center gap-2">
-                <div className="relative flex h-7 w-7 items-center justify-center drop-shadow-lg">
-                    <svg viewBox="0 0 100 100" className="h-full w-full" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M 25 20 L 25 80" stroke="#3B82F6" strokeWidth="14" strokeLinecap="round" />
-                        <path d="M 25 25 C 60 25 60 55 25 55" stroke="#3B82F6" strokeWidth="14" strokeLinecap="round" />
-                        <path d="M 45 45 L 80 80" stroke="#10B981" strokeWidth="14" strokeLinecap="round" />
-                        <path d="M 80 45 L 55 70" stroke="#10B981" strokeWidth="14" strokeLinecap="round" />
-                    </svg>
-                </div>
-                <span className="text-[20px] font-black uppercase tracking-widest text-white">
-                    Prop<span className="text-blue500">X</span>
-                </span>
-            </div>
-
-            <div className="flex flex-1 items-center justify-end gap-3">
-                <div className="hidden items-center gap-1.5 rounded-lg border border-borderMedium bg-bgCanvas px-3 py-2 text-[11px] text-fgSubtle xl:flex">
-                    <span className="font-bold uppercase tracking-[0.12em] text-fgSubtle">Updated</span>
-                    <span className="font-semibold text-white">{formatNavTimestamp(dashboardUpdatedAt ?? edgeSummary?.updatedAt)}</span>
                 </div>
 
-                {onOpenEdgeBoard && (
+                <button className="text-gray-400 hover:text-white lg:hidden" onClick={onMenuClick} type="button">
+                    <Menu className="h-6 w-6" />
+                </button>
+
+                <div className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 select-none items-center gap-2">
+                    <div className="relative flex h-7 w-7 items-center justify-center drop-shadow-lg">
+                        <svg viewBox="0 0 100 100" className="h-full w-full" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M 25 20 L 25 80" stroke="#3B82F6" strokeWidth="14" strokeLinecap="round" />
+                            <path d="M 25 25 C 60 25 60 55 25 55" stroke="#3B82F6" strokeWidth="14" strokeLinecap="round" />
+                            <path d="M 45 45 L 80 80" stroke="#10B981" strokeWidth="14" strokeLinecap="round" />
+                            <path d="M 80 45 L 55 70" stroke="#10B981" strokeWidth="14" strokeLinecap="round" />
+                        </svg>
+                    </div>
+                    <span className="text-[20px] font-black uppercase tracking-widest text-white">
+                        Prop<span className="text-blue500">X</span>
+                    </span>
+                </div>
+
+                <div className="flex flex-1 items-center justify-end gap-3">
+                    <div className="hidden items-center gap-1.5 rounded-lg border border-borderMedium bg-bgCanvas px-3 py-2 text-[11px] text-fgSubtle xl:flex">
+                        <span className="font-bold uppercase tracking-[0.12em] text-fgSubtle">Updated</span>
+                        <span className="font-semibold text-white">{formatNavTimestamp(dashboardUpdatedAt ?? edgeSummary?.updatedAt)}</span>
+                    </div>
+
+                    {onOpenEdgeBoard && (
+                        <button
+                            type="button"
+                            onClick={onOpenEdgeBoard}
+                            className={`rounded-lg border p-2 transition-colors lg:hidden ${isEdgeBoardOpen
+                                ? 'border-borderMedium bg-bgCanvas text-white'
+                                : 'border-borderMedium bg-transparent text-gray-400 hover:text-white'
+                                }`}
+                        >
+                            <TrendingUp className="h-4 w-4" />
+                        </button>
+                    )}
+
                     <button
                         type="button"
-                        onClick={onOpenEdgeBoard}
-                        className={`rounded-lg border p-2 transition-colors lg:hidden ${isEdgeBoardOpen
-                            ? 'border-borderMedium bg-bgCanvas text-white'
-                            : 'border-borderMedium bg-transparent text-gray-400 hover:text-white'
-                            }`}
+                        onClick={() => setShowGlossary(true)}
+                        aria-label="Open abbreviations"
+                        title="Abbreviations"
+                        className="hidden rounded-lg p-2 text-gray-400 transition-colors hover:bg-borderMedium/50 hover:text-white sm:block"
                     >
-                        <TrendingUp className="h-4 w-4" />
+                        <Info className="h-5 w-5" />
                     </button>
-                )}
 
-                <button type="button" className="hidden p-2 text-gray-400 transition-colors hover:text-white sm:block">
-                    <Book className="h-5 w-5" />
-                </button>
+                    <button type="button" className="group relative flex items-center gap-2 rounded-lg border border-borderMedium bg-bgCanvas px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-borderMedium">
+                        <Copy className="h-3.5 w-3.5" />
+                        <span className="hidden sm:inline">Check My Prop</span>
+                        <span className="absolute -right-2 -top-2 rounded bg-green500 px-1.5 py-0.5 text-[9px] font-extrabold leading-none text-neutral950 shadow-sm">
+                            NEW
+                        </span>
+                    </button>
 
-                <button type="button" className="group relative flex items-center gap-2 rounded-lg border border-borderMedium bg-bgCanvas px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-borderMedium">
-                    <Copy className="h-3.5 w-3.5" />
-                    <span className="hidden sm:inline">Check My Prop</span>
-                    <span className="absolute -right-2 -top-2 rounded bg-green500 px-1.5 py-0.5 text-[9px] font-extrabold leading-none text-neutral950 shadow-sm">
-                        NEW
-                    </span>
-                </button>
-
-                <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-borderMedium bg-bgCanvas text-gray-400 transition-colors hover:bg-borderMedium hover:text-white">
-                    <User className="h-5 w-5" />
-                </button>
+                    <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-borderMedium bg-bgCanvas text-gray-400 transition-colors hover:bg-borderMedium hover:text-white">
+                        <User className="h-5 w-5" />
+                    </button>
+                </div>
             </div>
-        </div>
+            {showGlossary && createPortal(
+                <GlossaryModal onClose={() => setShowGlossary(false)} />,
+                document.body,
+            )}
+        </>
     );
 };

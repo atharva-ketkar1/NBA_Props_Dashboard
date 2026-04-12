@@ -1905,7 +1905,6 @@ function App() {
   return (
     <Layout topNavProps={topNavProps} sidebarProps={{
       players: playersWithProps,
-      games: currentSlateGames,
       activePlayerId: displayPlayer?.id,
       activeGameDate: resolvedSelectedGameDate,
       pendingPlayerId: pendingSelection?.id,

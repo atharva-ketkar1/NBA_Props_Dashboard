@@ -1,54 +1,138 @@
 # PropX NBA Dashboard
 
-An end-to-end NBA player prop analytics dashboard that collects sportsbook and league data, cleans it into one player view, scores opportunities with machine learning, and presents the results in a fast React interface.
+An end-to-end basketball analytics product that turns fragmented sportsbook and league data into a fast, research-friendly decision surface.
 
-Live project: https://propx-dashboard.vercel.app/
+**Live app:** https://propx-dashboard.vercel.app/
 
-## Preview
+**Discord alerts:** https://discord.gg/HV3aG7qw
 
-Add a screenshot or GIF of the app here:
+<!-- ![Dashboard preview](docs/assets/dashboard-preview.gif) -->
 
-![PropX Dashboard preview](docs/assets/dashboard-preview.gif)
+This project combines scheduled data collection, entity resolution, feature engineering, historical market capture, and a React dashboard tuned for high-density exploration. It is built like a small analytics platform rather than a one-off frontend: the same pipeline can publish a static JSON feed for local/offline use or upsert structured records into Supabase for hosted delivery.
 
-Tip: create `docs/assets/dashboard-preview.gif` or replace the image path above with a GitHub-uploaded image URL.
+## Current App Status
 
-## Why This Project Matters
+### What Works
 
-This project is more than a frontend dashboard. It is a full-stack data product built around a real-world problem: sports data arrives from different sources, changes throughout the day, and is often messy or incomplete.
+- Live dashboard browsing for the current NBA slate.
+- Player prop exploration across supported sportsbooks.
+- Signal Score ranking, matchup context, recent-game history, and player detail views.
+- Filtering by team, game, stat type, sportsbook, line value, and teammate availability context.
+- Supabase-backed hosted reads plus static JSON mode for local development.
 
-For recruiters, this project demonstrates:
+### What Does Not Work Yet
 
-- Full-stack ownership across React, TypeScript, Python, Supabase, and Vercel
-- Data engineering with scheduled scraping, normalization, artifact generation, and database upserts
-- Practical machine learning with CatBoost models used in a live scoring pipeline
-- Product thinking through a dashboard designed for fast filtering, comparison, and decision support
-- Production-minded safeguards such as fallback data, non-fatal database writes, deduped alerts, and runtime-friendly payloads
+- **Check My Prop** is visible in the navigation, but the full user-facing workflow is not wired up yet.
+- **User profiles/accounts** are not implemented yet.
+- Saved picks, personalized dashboards, and account-specific history are not available yet.
+- Some advanced analysis panels depend on available upstream data and may show empty or partial states when a feed is missing.
 
-## What It Does
+## Why This Project Stands Out
 
-PropX helps users research NBA player props by combining current market lines with basketball context.
+- Built a production-minded ETL workflow around unreliable third-party sports data sources.
+- Normalized player identities across sportsbooks and NBA datasets with fuzzy matching plus team-aware disambiguation.
+- Enriched raw prop lines with contextual analytics: recent form, opponent tendencies, shot diet, assist zones, play types, and line movement history.
+- Designed the frontend to feel instant by shifting heavy work into scheduled preprocessing rather than runtime API calls.
+- Added operational safeguards that matter in real systems: lock files, idempotent daily state, fallback snapshots, non-fatal DB writes, and memory-aware execution order.
 
-The dashboard can show:
+## What The Dashboard Does
 
-- Current NBA player prop lines from supported books
-- Player season stats, recent game logs, and matchup context
-- Shooting zones, assist zones, shot type splits, and play type analysis
-- Line movement and market history throughout the day
-- Similar-player comparisons
-- Ranked prop opportunities through an explainable Edge Score
-- Optional Discord alerts for high-confidence recommendations
+- Aggregates live NBA player props from DraftKings and FanDuel.
+- Builds a canonical player feed with season stats, recent game logs, boxscore-derived context, and opponent matchup overlays.
+- Captures intraday line movement snapshots and near-tip closing lines.
+- Visualizes shot zones, assist zones, shot type splits, play type scoring mix, and prop hit-rate history.
+- Ranks the current slate with an explainable Signal Score powered by a fast, in-memory **CatBoost Regression Pipeline**. The model predicts prop probability via residual analysis over 69+ features (expected minutes, rolling EMAs, spatial matchup zones), and blends those inferences with live market numbers and recent form.
+- Supports two delivery modes:
+  - Static JSON feed for local development and low-latency browsing
+  - Supabase-backed reads for hosted deployments
 
-The goal is not to blindly tell users what to bet. The goal is to organize a large amount of changing information into a clear research surface.
+## End-to-End Pipeline
 
-## Beginner-Friendly Overview
+### 1. Extract
 
-If you are new to full-stack projects, here is the simple version:
+`backend/run_pipeline.py` runs a scheduled sequence of scrapers that pull:
 
-- The backend collects raw NBA and sportsbook data.
-- The backend cleans that data so player names, teams, stats, and games match across sources.
-- The model estimates how attractive each prop looks based on historical and live context.
-- The frontend turns the processed data into a dashboard that is quick to explore.
-- The deployed app is hosted on Vercel and can read from either static JSON files or Supabase-backed API routes.
+- Sportsbook odds from DraftKings and FanDuel
+- NBA schedule and game metadata
+- Season-level player stats
+- Rolling game logs
+- Boxscores for margin and DNP context
+- Shooting zones
+- Assist zones
+- Opponent defensive zone rankings
+- Shot type and play type datasets
+
+Several scrapers include proxy/fallback logic because some upstream providers rate-limit aggressively or fail intermittently.
+
+### 2. Transform
+
+`backend/utils/aggregator.py` is the core modeling layer. It:
+
+- Builds a canonical player record keyed by NBA player ID
+- Reconciles mismatched naming conventions with `PlayerMatcher`
+- Calculates compound stats such as `PTS+REB+AST`, `PTS+AST`, `REB+AST`, and `STL+BLK`
+- Injects opponent context for both current and historical matchups
+- Merges spatial and play-style features into the same player object
+- Shapes a frontend-friendly prop tree by stat type and sportsbook
+
+This is the step that turns a group of unrelated CSV/JSON artifacts into a single analytical object model.
+
+### 3. Load
+
+The pipeline writes to two targets:
+
+- Local artifacts in `backend/data/current/` and `backend/data/archive/`
+- Supabase tables when credentials are present
+
+Primary outputs:
+
+- `master_feed.json`
+- `nba_dashboard_games.json`
+- `line_movements_today.json`
+- `historical_odds.json`
+- `edge_scores_top15.json`
+
+Database upserts are intentionally non-fatal so local feed generation still succeeds if cloud persistence is temporarily unavailable.
+
+### 4. Orchestrate
+
+`backend/cron_jobs/master_cron.py` runs every 5 minutes in production and coordinates three priorities:
+
+1. Daily full pipeline refresh after 6:00 AM ET
+2. Closing-line capture inside the pre-tip window
+3. Intraday line-movement snapshots every 30 minutes
+
+Signal Score recomputes inside the same refresh owners:
+
+- after the daily pipeline
+- after each intraday odds refresh
+- after each pre-tip closing refresh
+
+Its V1 projection layer is no longer just season average plus rolling box-score windows. We have introduced a **V3 ML Inference Engine**: a hyper-optimized CatBoost singleton loading a 30MB+ `.cbm` model that natively merges 69 predictive features (defensive ranks, home/away splits, score context, pacing) in pure-NumPy for 1ms predictions.
+
+#### Dynamic Lineup Adjustments & Discord Delivery
+The ML model predicts how a player historically performs, but the pipeline makes it aware of tonight's conditions in real time before creating an edge:
+
+1. **Usage Vacuums:** It cross-references the hourly NBA injury report. If a star teammate is ruled OUT, the pipeline actively intercepts the ML projection and mathematically multiplies the player's performance cap based on freed usage percent.
+2. **Blowout Penalties:** If the opposing team is missing stars, it penalizes role players to actively avoid garbage-time risks.
+3. **Rest Bounces:** It identifies phantom 'DNP - Rest' games within back-to-back schedules to flip fatigue penalties to freshness bonuses.
+
+If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, the system acts as a highly curated prop alert stream. When the modified ML Edge Score crosses a high-conviction threshold (72.5+), it fires a visual Discord snippet explaining exactly *why* the mathematical edge triggered (e.g., *"The regression model projects 16.5 (lineup-adjusted +20%: Cade Cunningham out)..."*). 
+
+The Discord integration includes full intraday deduplication (it only alerts you when lines or odds officially shift), automated game-finalization cleanup, 429 webhook retry safety, and tracker grading recaps that retry dynamically once prior-day box scores are available.
+
+To manually verify the tracker webhook target, run `python3 test_tracker_discord.py --message "manual tracker test"` from [backend/](/Users/atharvaketkar/Desktop/NBA_Dashboard/backend). The script posts a one-off test message to the tracker webhook and prints the returned Discord `channel_id`/`message_id`.
+
+It uses a lock file plus persisted state to avoid duplicate runs and stale overlap.
+
+### 5. Serve And Consume
+
+The React frontend (`frontend/`) is intentionally thin at runtime:
+
+- In JSON mode, it fetches prebuilt files and performs all exploration from in-memory state
+- In DB mode, it hydrates lighter player records first and lazily fetches heavier detail fields
+
+That split keeps the interface responsive while still allowing a hosted deployment path.
 
 ## How The System Works
 
