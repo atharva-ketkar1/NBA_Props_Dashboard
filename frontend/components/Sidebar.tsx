@@ -441,19 +441,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
     const [expandedGames, setExpandedGames] = useState<Record<string, boolean>>({});
     const [searchTerm, setSearchTerm] = useState('');
 
-    // Fetch live game data
+    // Fetch live game data. When no players have props yet, fall back to the
+    // game dates supplied by App, but still fetch full schedule rows for logos/time.
     useEffect(() => {
-        if (games.length > 0) {
-            setScheduleData(sortGamesByTime(games));
-            return;
-        }
-
-        if (!players.length) {
-            setScheduleData([]);
-            return;
-        }
-
-        const propDates = Array.from(new Set(
+        const playerPropDates = Array.from(new Set(
             players.flatMap(p =>
                 Object.values(p.props_by_date ?? {}).flatMap(statEntry =>
                     Object.values(statEntry as Record<string, Record<string, any>>).flatMap(bookEntry =>
@@ -462,8 +453,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 )
             )
         )).sort();
+        const fallbackGameDates = Array.from(new Set(
+            games.map(game => game.game_date).filter(Boolean)
+        )).sort();
+        const propDates = playerPropDates.length > 0 ? playerPropDates : fallbackGameDates;
 
-        if (!propDates.length) return;
+        if (!propDates.length) {
+            setScheduleData([]);
+            return;
+        }
 
         if (USE_DB) {
             fetchDashboardGames(propDates)
