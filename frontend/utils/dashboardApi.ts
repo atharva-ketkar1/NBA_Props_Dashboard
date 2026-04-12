@@ -2,8 +2,10 @@ import { fetchAppJson } from './network';
 import { EdgeScorePayload, SimilarPlayerCandidate, SportsbookId } from '../types';
 
 type BootstrapResponse = {
+  effectiveSportsbook?: SportsbookId;
   playersRows: any[];
   propsRows: any[];
+  requestedSportsbook?: SportsbookId;
   availabilityRows: any[];
   gamesRows: any[];
   lineRows: any[];
@@ -11,7 +13,9 @@ type BootstrapResponse = {
 };
 
 type HotResponse = {
+  effectiveSportsbook?: SportsbookId;
   propsRows: any[];
+  requestedSportsbook?: SportsbookId;
   availabilityRows: any[];
   lineVersion: string;
   lineRows?: any[];

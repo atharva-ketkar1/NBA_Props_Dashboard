@@ -57,6 +57,8 @@ const LEGACY_HISTORICAL_BOOK_MAP: Record<string, string> = {
   fanduel: 'fanduel',
   prizepicks: 'pp',
 };
+const SUPPORTED_SPORTSBOOK_IDS: SportsbookId[] = ['dk', 'fd', 'mgm', 'cz', 'pp'];
+const FALLBACK_SPORTSBOOK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
 
 declare global {
   // eslint-disable-next-line no-var
@@ -97,6 +99,10 @@ function getServerBooleanEnv(name: string, fallbackValue: boolean) {
     return false;
   }
   return fallbackValue;
+}
+
+function isSportsbookId(value: unknown): value is SportsbookId {
+  return typeof value === 'string' && SUPPORTED_SPORTSBOOK_IDS.includes(value as SportsbookId);
 }
 
 function clampPropDayWindow(days: number) {
@@ -491,6 +497,75 @@ async function fetchAllPlayerPropsForDates(
   );
 }
 
+function chooseFallbackSportsbook(
+  availabilityRows: any[] = [],
+  requestedSportsbook?: SportsbookId | null,
+): SportsbookId | null {
+  const rowCounts = new Map<SportsbookId, number>();
+
+  for (const row of availabilityRows ?? []) {
+    const sportsbook = row?.sportsbook;
+    if (!isSportsbookId(sportsbook)) {
+      continue;
+    }
+    rowCounts.set(sportsbook, (rowCounts.get(sportsbook) ?? 0) + 1);
+  }
+
+  if (!rowCounts.size) {
+    return requestedSportsbook ?? null;
+  }
+
+  if (requestedSportsbook && (rowCounts.get(requestedSportsbook) ?? 0) > 0) {
+    return requestedSportsbook;
+  }
+
+  const priorityIndex = (sportsbook: SportsbookId) => {
+    const index = FALLBACK_SPORTSBOOK_PRIORITY.indexOf(sportsbook);
+    return index >= 0 ? index : FALLBACK_SPORTSBOOK_PRIORITY.length;
+  };
+
+  return Array.from(rowCounts.entries())
+    .sort(([leftBook, leftCount], [rightBook, rightCount]) => {
+      if (rightCount !== leftCount) {
+        return rightCount - leftCount;
+      }
+      return priorityIndex(leftBook) - priorityIndex(rightBook);
+    })[0]?.[0] ?? requestedSportsbook ?? null;
+}
+
+async function resolvePropsRowsForSportsbook(
+  gameDates: string[],
+  requestedSportsbook: SportsbookId,
+  availabilityRows: any[] = [],
+  prefetchedRequestedRows?: any[] | null,
+) {
+  const requestedRows = prefetchedRequestedRows
+    ?? await fetchAllPlayerPropsForDates(gameDates, PLAYER_PROP_SELECT, requestedSportsbook);
+  if (requestedRows.length > 0) {
+    return {
+      effectiveSportsbook: requestedSportsbook,
+      propsRows: requestedRows,
+      requestedSportsbook,
+    };
+  }
+
+  const fallbackSportsbook = chooseFallbackSportsbook(availabilityRows, requestedSportsbook);
+  if (!fallbackSportsbook || fallbackSportsbook === requestedSportsbook) {
+    return {
+      effectiveSportsbook: requestedSportsbook,
+      propsRows: requestedRows,
+      requestedSportsbook,
+    };
+  }
+
+  const fallbackRows = await fetchAllPlayerPropsForDates(gameDates, PLAYER_PROP_SELECT, fallbackSportsbook);
+  return {
+    effectiveSportsbook: fallbackRows.length > 0 ? fallbackSportsbook : requestedSportsbook,
+    propsRows: fallbackRows.length > 0 ? fallbackRows : requestedRows,
+    requestedSportsbook,
+  };
+}
+
 async function fetchPlayers(selectClause: string) {
   return readCached(
     buildCacheKey(['players', selectClause]),
@@ -718,7 +793,7 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
   const fastRefreshDates = getFastRefreshDates(null);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [playersRows, propsRows, availabilityRows, lineRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
+  const [playersRows, requestedPropsRows, availabilityRows, lineRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
     fetchPlayers(PLAYER_BASE_SELECT),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT, activeSportsbook),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_AVAIL_SELECT),
@@ -729,13 +804,21 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
     fetchGameMarketsForDates([today]),
     fetchGameInjuryReportsForDates([today]),
   ]);
+  const resolvedProps = await resolvePropsRowsForSportsbook(
+    futureDates,
+    activeSportsbook,
+    availabilityRows,
+    requestedPropsRows,
+  );
 
   return {
+    requestedSportsbook: activeSportsbook,
+    effectiveSportsbook: resolvedProps.effectiveSportsbook,
     playersRows: (playersRows ?? []).map((row: any) => ({
       ...row,
       play_type_analysis: undefined,
     })),
-    propsRows,
+    propsRows: resolvedProps.propsRows,
     availabilityRows,
     gamesRows: mergeGamesWithInjuries(
       mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),
@@ -769,6 +852,12 @@ export async function fetchHotPayload(
     fetchGameMarketsForDates(activeDates),
     fetchGameInjuryReportsForDates(activeDates),
   ]);
+  const resolvedProps = await resolvePropsRowsForSportsbook(
+    activeDates,
+    activeSportsbook,
+    availabilityRows,
+    propsRows,
+  );
 
   const mergedGamesRows = mergeGamesWithInjuries(
     mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),
@@ -779,7 +868,9 @@ export async function fetchHotPayload(
 
   if (!includeLineMovements) {
     return {
-      propsRows,
+      requestedSportsbook: activeSportsbook,
+      effectiveSportsbook: resolvedProps.effectiveSportsbook,
+      propsRows: resolvedProps.propsRows,
       availabilityRows,
       gamesRows: mergedGamesRows,
       lineVersion: currentLineVersion,
@@ -788,7 +879,9 @@ export async function fetchHotPayload(
 
   if (nextVersion === currentLineVersion) {
     return {
-      propsRows,
+      requestedSportsbook: activeSportsbook,
+      effectiveSportsbook: resolvedProps.effectiveSportsbook,
+      propsRows: resolvedProps.propsRows,
       availabilityRows,
       gamesRows: mergedGamesRows,
       lineVersion: nextVersion,
@@ -803,7 +896,9 @@ export async function fetchHotPayload(
   );
 
   return {
-    propsRows,
+    requestedSportsbook: activeSportsbook,
+    effectiveSportsbook: resolvedProps.effectiveSportsbook,
+    propsRows: resolvedProps.propsRows,
     availabilityRows,
     gamesRows: mergedGamesRows,
     lineVersion: nextVersion,

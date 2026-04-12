@@ -2757,7 +2757,7 @@ def _compute_ml_regression_context(
             q25 *= mult
             q50 *= mult
             q75 *= mult
-            logger.info(
+            logger.debug(
                 "Lineup adjustment applied | player=%s stat=%s mult=%.3f reason=%s",
                 player.get("name"), stat_type, mult, adjustment.get("reason"),
             )
@@ -6138,6 +6138,10 @@ def run_edge_score_refresh(
             "OK",
             "Edge Score refresh complete",
             refresh_label=refresh_label,
+            active_players=len(active_entries),
+            candidates=len(candidates),
+            eligible=len(eligible_candidates),
+            blocked=len(blocked_candidates),
             top=len(top_recommendations),
             discord_sent=True,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),
@@ -6150,6 +6154,10 @@ def run_edge_score_refresh(
             "OK",
             "Edge Score refresh complete",
             refresh_label=refresh_label,
+            active_players=len(active_entries),
+            candidates=len(candidates),
+            eligible=len(eligible_candidates),
+            blocked=len(blocked_candidates),
             top=len(top_recommendations),
             discord_sent=False,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),

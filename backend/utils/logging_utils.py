@@ -11,6 +11,7 @@ LOGGER_ALIASES = {
     "PipelineStdout": "pipe-out",
     "CronSimulator": "simulator",
     "ClosingLineSkips": "skip-log",
+    "EdgeScore": "edge-score",
     "scrapers.fetch_odds_draftkings": "draftkings",
     "scrapers.fetch_odds_fanduel": "fanduel",
     "utils.upsert_props": "props-sync",

@@ -78,6 +78,7 @@ const EDGE_STAT_TO_TAB: Record<string, string> = {
 
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
+const SPORTSBOOK_FALLBACK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
 
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   const parsed = Number(rawValue);
@@ -664,8 +665,24 @@ function App() {
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
     const feed = Array.isArray(rawData) ? rawData : [];
-    return feed.filter(playerHasAnyProp);
-  }, [rawData]);
+    const slateTeams = new Set(currentSlateTeams);
+    const slatePlayers = slateTeams.size > 0
+      ? feed.filter((player) => slateTeams.has(player.team))
+      : [];
+    const playersWithAvailableLines = feed.filter(playerHasAnyProp);
+    if (playersWithAvailableLines.length > 0) {
+      const mergedPlayers = new Map<number, Player>();
+      for (const player of slatePlayers) {
+        mergedPlayers.set(player.id, player);
+      }
+      for (const player of playersWithAvailableLines) {
+        mergedPlayers.set(player.id, player);
+      }
+      return Array.from(mergedPlayers.values());
+    }
+
+    return slatePlayers.length > 0 ? slatePlayers : feed;
+  }, [currentSlateTeams, rawData]);
 
   const currentPlayer = useMemo(() => {
     if (!playersWithProps.length) {
@@ -786,6 +803,45 @@ function App() {
   }, [rawData]);
 
   useEffect(() => {
+    const counts: Partial<Record<SportsbookId, number>> = {};
+    const addCount = (sportsbook: string, increment = 1) => {
+      if (!SPORTSBOOK_FALLBACK_PRIORITY.includes(sportsbook as SportsbookId)) {
+        return;
+      }
+      const key = sportsbook as SportsbookId;
+      counts[key] = (counts[key] ?? 0) + increment;
+    };
+
+    for (const player of rawData ?? []) {
+      Object.values(player.props_by_date ?? {}).forEach((sportsbookMap) => {
+        Object.entries(sportsbookMap ?? {}).forEach(([sportsbook, dateMap]) => {
+          addCount(sportsbook, Math.max(1, Object.keys(dateMap ?? {}).length));
+        });
+      });
+    }
+
+    Object.values(propsAvailabilityByDate ?? {}).forEach((statMap) => {
+      Object.values(statMap ?? {}).forEach((sportsbookMap) => {
+        Object.entries(sportsbookMap ?? {}).forEach(([sportsbook, dateMap]) => {
+          addCount(sportsbook, Math.max(1, Object.keys(dateMap ?? {}).length));
+        });
+      });
+    });
+
+    if ((counts[activeSportsbook] ?? 0) > 0) {
+      return;
+    }
+
+    const fallbackSportsbook = SPORTSBOOK_FALLBACK_PRIORITY
+      .filter((sportsbook) => (counts[sportsbook] ?? 0) > 0)
+      .sort((left, right) => (counts[right] ?? 0) - (counts[left] ?? 0))[0];
+
+    if (fallbackSportsbook && fallbackSportsbook !== activeSportsbook) {
+      setActiveSportsbook(fallbackSportsbook);
+    }
+  }, [activeSportsbook, propsAvailabilityByDate, rawData]);
+
+  useEffect(() => {
     selectionAnchorRef.current = {
       playerId: currentPlayer?.id ?? null,
       gameDate: resolvedSelectedGameDate ?? selectedGameDate ?? null,
@@ -865,6 +921,12 @@ function App() {
           const nextGameStatusById = buildGameStatusById(snapshot.gamesRows ?? []);
           const nextOpponentByTeamDate = buildSlateOpponentByTeamDate(snapshot.gamesRows ?? []);
           const nextTeamInjuryByTeamDate = buildTeamInjuryByTeamDate(snapshot.gamesRows ?? []);
+          if (
+            snapshot.effectiveSportsbook
+            && snapshot.effectiveSportsbook !== activeSportsbook
+          ) {
+            setActiveSportsbook(snapshot.effectiveSportsbook);
+          }
           const mergedFeed = mergeFeedFromDB(
             snapshot.playersRows ?? [],
             snapshot.propsRows ?? [],
@@ -1048,6 +1110,13 @@ function App() {
 
         if ((hotSnapshot.propsRows ?? []).length > 0) {
           setRawData(prev => mergePropsIntoPlayers(prev, hotSnapshot.propsRows ?? []));
+        }
+
+        if (
+          hotSnapshot.effectiveSportsbook
+          && hotSnapshot.effectiveSportsbook !== activeSportsbook
+        ) {
+          setActiveSportsbook(hotSnapshot.effectiveSportsbook);
         }
 
         if ((hotSnapshot.availabilityRows ?? []).length > 0) {
@@ -1761,7 +1830,7 @@ function App() {
     return (
       <Layout sidebarProps={{ players: [], activePlayerId: null, onSelectPlayer: () => { } }} topNavProps={topNavProps}>
         <div className="flex items-center justify-center h-full text-white">
-          No active props found.
+          No player data available.
         </div>
       </Layout>
     );
