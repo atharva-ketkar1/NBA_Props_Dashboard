@@ -80,6 +80,7 @@ const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Re
 const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
 const SPORTSBOOK_FALLBACK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
 const RESEARCH_MINUTES_FLOOR = 12;
+const RESEARCH_ONLY_HIDE_LINE_COVERAGE = 0.6;
 
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   const parsed = Number(rawValue);
@@ -195,6 +196,13 @@ function playerHasKnownAvailableProp(
   return Object.values(availability).some((sportsbookMap) => (
     Object.values(sportsbookMap ?? {}).some((dateMap) => Object.keys(dateMap ?? {}).length > 0)
   ));
+}
+
+function playerHasAnyKnownLine(
+  player: Player,
+  availabilityByPlayer: PlayerPropAvailabilityByDate,
+) {
+  return playerHasAnyProp(player) || playerHasKnownAvailableProp(player, availabilityByPlayer);
 }
 
 function mergePropsByDateMaps(existing: PlayerPropsByDate = {}, incoming: PlayerPropsByDate = {}): PlayerPropsByDate {
@@ -729,10 +737,21 @@ function App() {
         && isResearchEligibleSlatePlayer(player, teamInjuryByTeamDate)
       ))
       : [];
-    const playersWithAvailableLines = feed.filter((player) => (
-      playerHasAnyProp(player) || playerHasKnownAvailableProp(player, propsAvailabilityByDate)
+    const playersWithAvailableLines = feed.filter((player) => playerHasAnyKnownLine(
+      player,
+      propsAvailabilityByDate,
     ));
     if (playersWithAvailableLines.length > 0) {
+      const linedSlatePlayerCount = feed.filter((player) => (
+        (slateTeams.size === 0 || slateTeams.has(player.team))
+        && playerHasAnyKnownLine(player, propsAvailabilityByDate)
+      )).length;
+      const researchPoolSize = Math.max(slatePlayers.length, 1);
+      const lineCoverage = linedSlatePlayerCount / researchPoolSize;
+      if (lineCoverage >= RESEARCH_ONLY_HIDE_LINE_COVERAGE) {
+        return playersWithAvailableLines;
+      }
+
       const mergedPlayers = new Map<number, Player>();
       for (const player of slatePlayers) {
         mergedPlayers.set(player.id, player);
