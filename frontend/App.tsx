@@ -79,6 +79,7 @@ const EDGE_STAT_TO_TAB: Record<string, string> = {
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
 const SPORTSBOOK_FALLBACK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
+const RESEARCH_MINUTES_FLOOR = 12;
 
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   const parsed = Number(rawValue);
@@ -184,6 +185,16 @@ function mergeAvailabilityMaps(
   });
 
   return merged;
+}
+
+function playerHasKnownAvailableProp(
+  player: Player,
+  availabilityByPlayer: PlayerPropAvailabilityByDate,
+) {
+  const availability = availabilityByPlayer[player.id] ?? {};
+  return Object.values(availability).some((sportsbookMap) => (
+    Object.values(sportsbookMap ?? {}).some((dateMap) => Object.keys(dateMap ?? {}).length > 0)
+  ));
 }
 
 function mergePropsByDateMaps(existing: PlayerPropsByDate = {}, incoming: PlayerPropsByDate = {}): PlayerPropsByDate {
@@ -572,6 +583,52 @@ function teammateSelectionMatches(
   return normalizePersonName(selection.playerName) === normalizePersonName(card.playerName);
 }
 
+function getPlayerInjuryStatus(
+  player: Player,
+  injuryByTeamDate: TeamInjuryReportByTeamDate,
+) {
+  const playerNameKey = normalizePersonName(player.name);
+  const playerTeam = String(player.team ?? '').trim();
+  if (!playerNameKey || !playerTeam) {
+    return null;
+  }
+
+  for (const [teamDateKey, teamReport] of Object.entries(injuryByTeamDate ?? {})) {
+    if (!teamDateKey.endsWith(`:${playerTeam}`)) {
+      continue;
+    }
+
+    const reportPlayer = (teamReport?.players ?? []).find((injuryPlayer) => (
+      normalizePersonName(injuryPlayer.player_name ?? injuryPlayer.report_player_name) === playerNameKey
+    ));
+
+    if (reportPlayer?.current_status) {
+      return String(reportPlayer.current_status).trim();
+    }
+  }
+
+  return null;
+}
+
+function isOutOnInjuryReport(
+  player: Player,
+  injuryByTeamDate: TeamInjuryReportByTeamDate,
+) {
+  return String(getPlayerInjuryStatus(player, injuryByTeamDate) ?? '').toLowerCase().startsWith('out');
+}
+
+function hasResearchEligibleMinutes(player: Player) {
+  const minutes = Number(player?.stats?.MIN);
+  return Number.isFinite(minutes) && minutes >= RESEARCH_MINUTES_FLOOR;
+}
+
+function isResearchEligibleSlatePlayer(
+  player: Player,
+  injuryByTeamDate: TeamInjuryReportByTeamDate,
+) {
+  return hasResearchEligibleMinutes(player) && !isOutOnInjuryReport(player, injuryByTeamDate);
+}
+
 function resolveSlateOpponent(
   player: Player | null | undefined,
   selectedGameDate: string | null,
@@ -667,9 +724,14 @@ function App() {
     const feed = Array.isArray(rawData) ? rawData : [];
     const slateTeams = new Set(currentSlateTeams);
     const slatePlayers = slateTeams.size > 0
-      ? feed.filter((player) => slateTeams.has(player.team))
+      ? feed.filter((player) => (
+        slateTeams.has(player.team)
+        && isResearchEligibleSlatePlayer(player, teamInjuryByTeamDate)
+      ))
       : [];
-    const playersWithAvailableLines = feed.filter(playerHasAnyProp);
+    const playersWithAvailableLines = feed.filter((player) => (
+      playerHasAnyProp(player) || playerHasKnownAvailableProp(player, propsAvailabilityByDate)
+    ));
     if (playersWithAvailableLines.length > 0) {
       const mergedPlayers = new Map<number, Player>();
       for (const player of slatePlayers) {
@@ -682,7 +744,7 @@ function App() {
     }
 
     return slatePlayers.length > 0 ? slatePlayers : feed;
-  }, [currentSlateTeams, rawData]);
+  }, [currentSlateTeams, propsAvailabilityByDate, rawData, teamInjuryByTeamDate]);
 
   const currentPlayer = useMemo(() => {
     if (!playersWithProps.length) {
