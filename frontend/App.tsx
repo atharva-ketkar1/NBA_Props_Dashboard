@@ -1,4 +1,4 @@
-import React, { startTransition, useState, useEffect, useMemo, useRef } from 'react';
+import React, { startTransition, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { Header } from './components/Header';
 import { BarChart } from './components/BarChart';
@@ -9,7 +9,18 @@ import { PlayTypeAnalysis } from './components/PlayTypeAnalysis';
 import { SimilarPlayers } from './components/SimilarPlayers';
 import { AssistZones } from './components/AssistZones';
 import { FiltersPanel } from './components/FiltersPanel';
-import { EdgeScorePayload, EdgeScoreRecommendation, Player, PlayerPropsByDate, SimilarPlayerCandidate, SportsbookId } from './types';
+import {
+  ActiveTeammateFilter,
+  EdgeScorePayload,
+  EdgeScoreRecommendation,
+  Player,
+  PlayerPropsByDate,
+  SimilarPlayerCandidate,
+  SportsbookId,
+  TeamInjuryReport,
+  TeammateFilterMode,
+  TeammateInjuryCard,
+} from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
 import { EdgeBoardPanel } from './components/EdgeBoardPanel';
 import { getDashboardDate } from './utils/dashboardDate';
@@ -67,6 +78,9 @@ const EDGE_STAT_TO_TAB: Record<string, string> = {
 
 const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
+const SPORTSBOOK_FALLBACK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
+const RESEARCH_MINUTES_FLOOR = 12;
+const RESEARCH_ONLY_HIDE_LINE_COVERAGE = 0.6;
 
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   const parsed = Number(rawValue);
@@ -135,6 +149,8 @@ function buildPropsByDateMap(props: any[]): Record<number, PlayerPropsByDate> {
 }
 
 type PlayerPropAvailabilityByDate = Record<number, Record<string, Record<string, Record<string, boolean>>>>;
+type SlateOpponentByTeamDate = Record<string, string>;
+type TeamInjuryReportByTeamDate = Record<string, TeamInjuryReport>;
 
 function buildAvailabilityByDateMap(rows: any[]): PlayerPropAvailabilityByDate {
   const availabilityMap: PlayerPropAvailabilityByDate = {};
@@ -172,6 +188,23 @@ function mergeAvailabilityMaps(
   return merged;
 }
 
+function playerHasKnownAvailableProp(
+  player: Player,
+  availabilityByPlayer: PlayerPropAvailabilityByDate,
+) {
+  const availability = availabilityByPlayer[player.id] ?? {};
+  return Object.values(availability).some((sportsbookMap) => (
+    Object.values(sportsbookMap ?? {}).some((dateMap) => Object.keys(dateMap ?? {}).length > 0)
+  ));
+}
+
+function playerHasAnyKnownLine(
+  player: Player,
+  availabilityByPlayer: PlayerPropAvailabilityByDate,
+) {
+  return playerHasAnyProp(player) || playerHasKnownAvailableProp(player, availabilityByPlayer);
+}
+
 function mergePropsByDateMaps(existing: PlayerPropsByDate = {}, incoming: PlayerPropsByDate = {}): PlayerPropsByDate {
   const merged: PlayerPropsByDate = { ...existing };
 
@@ -206,6 +239,415 @@ function buildGameStatusById(games: any[]) {
         },
       ]),
   ) as Record<string, { is_live: boolean; is_final: boolean }>;
+}
+
+function buildSlateOpponentByTeamDate(games: any[]) {
+  const opponentMap: SlateOpponentByTeamDate = {};
+
+  for (const game of games ?? []) {
+    const gameDate = String(game?.game_date ?? '').trim();
+    const homeTeam = String(game?.home_team_tricode ?? '').trim();
+    const awayTeam = String(game?.away_team_tricode ?? '').trim();
+
+    if (!gameDate || !homeTeam || !awayTeam) {
+      continue;
+    }
+
+    opponentMap[`${gameDate}:${homeTeam}`] = awayTeam;
+    opponentMap[`${gameDate}:${awayTeam}`] = homeTeam;
+  }
+
+  return opponentMap;
+}
+
+function normalizePersonName(value?: string | null) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function formatCompactPlayerName(value?: string | null) {
+  const name = String(value ?? '').trim();
+  if (!name) {
+    return 'N/A';
+  }
+
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) {
+    return parts[0] ?? name;
+  }
+
+  return `${parts[0][0]}. ${parts.slice(1).join(' ')}`;
+}
+
+function getStatValueFromGameLog(game: Record<string, any>, statKey: string) {
+  const directValue = game?.[statKey];
+  if (directValue !== undefined && directValue !== null && directValue !== '') {
+    const parsedDirectValue = Number(directValue);
+    return Number.isFinite(parsedDirectValue) ? parsedDirectValue : null;
+  }
+
+  if (statKey === 'PTS+REB+AST') {
+    return Number(game?.PTS || 0) + Number(game?.REB || 0) + Number(game?.AST || 0);
+  }
+  if (statKey === 'PTS+REB') {
+    return Number(game?.PTS || 0) + Number(game?.REB || 0);
+  }
+  if (statKey === 'PTS+AST') {
+    return Number(game?.PTS || 0) + Number(game?.AST || 0);
+  }
+  if (statKey === 'REB+AST') {
+    return Number(game?.REB || 0) + Number(game?.AST || 0);
+  }
+  if (statKey === 'STL+BLK') {
+    return Number(game?.STL || 0) + Number(game?.BLK || 0);
+  }
+
+  return null;
+}
+
+function getStatValueFromSeasonStats(stats: Record<string, any>, statKey: string) {
+  const directValue = stats?.[statKey];
+  if (directValue !== undefined && directValue !== null && directValue !== '') {
+    const parsedDirectValue = Number(directValue);
+    return Number.isFinite(parsedDirectValue) ? parsedDirectValue : null;
+  }
+
+  if (statKey === 'FAN') {
+    const fantasyValue = Number(stats?.FANTASY_PTS);
+    return Number.isFinite(fantasyValue) ? fantasyValue : null;
+  }
+
+  if (statKey === 'PTS+REB+AST') {
+    return Number(stats?.PTS || 0) + Number(stats?.REB || 0) + Number(stats?.AST || 0);
+  }
+  if (statKey === 'PTS+REB') {
+    return Number(stats?.PTS || 0) + Number(stats?.REB || 0);
+  }
+  if (statKey === 'PTS+AST') {
+    return Number(stats?.PTS || 0) + Number(stats?.AST || 0);
+  }
+  if (statKey === 'REB+AST') {
+    return Number(stats?.REB || 0) + Number(stats?.AST || 0);
+  }
+  if (statKey === 'STL+BLK') {
+    return Number(stats?.STL || 0) + Number(stats?.BLK || 0);
+  }
+
+  return null;
+}
+
+function getDefaultTeammateFilterMode(currentStatus?: string | null): TeammateFilterMode {
+  const cleanStatus = String(currentStatus ?? '').trim();
+  if (cleanStatus === 'Out' || cleanStatus === 'Doubtful' || cleanStatus === 'Questionable') {
+    return 'without';
+  }
+
+  return 'with';
+}
+
+function calculateTeammateStatImpact(
+  selectedPlayer: Player,
+  teammatePlayer: Player | null,
+  statKey: string,
+  gameCount: number,
+) {
+  if (!teammatePlayer?.game_log?.length || !selectedPlayer?.game_log?.length) {
+    return {
+      statImpact: null,
+      impactSampleLabel: null,
+      activeGameIds: [],
+    };
+  }
+
+  const selectedTeam = String(selectedPlayer.team ?? '').trim();
+  const selectedLogs = selectedPlayer.game_log
+    .slice(0, Math.max(1, gameCount))
+    .filter((game) => {
+      const teamAbbreviation = String(game?.TEAM_ABBREVIATION ?? selectedTeam).trim();
+      return !selectedTeam || teamAbbreviation === selectedTeam;
+    });
+  const teammateActiveGameIds = teammatePlayer.game_log
+      .filter((game) => {
+        const teammateTeam = String(game?.TEAM_ABBREVIATION ?? teammatePlayer.team ?? '').trim();
+        const gameId = String(game?.GAME_ID ?? '').trim();
+        return (
+          gameId
+          && Number(game?.MIN ?? 0) > 0
+          && (!selectedTeam || teammateTeam === selectedTeam)
+        );
+      })
+      .map((game) => String(game.GAME_ID).trim());
+  const teammateActiveGameIdSet = new Set(teammateActiveGameIds);
+
+  let teammateOnSum = 0;
+  let teammateOnCount = 0;
+  let teammateOffSum = 0;
+  let teammateOffCount = 0;
+
+  selectedLogs.forEach((game) => {
+    const gameId = String(game?.GAME_ID ?? '').trim();
+    const statValue = getStatValueFromGameLog(game, statKey);
+    if (!gameId || statValue === null) {
+      return;
+    }
+
+    if (teammateActiveGameIdSet.has(gameId)) {
+      teammateOnSum += statValue;
+      teammateOnCount += 1;
+    } else {
+      teammateOffSum += statValue;
+      teammateOffCount += 1;
+    }
+  });
+
+  if (!teammateOnCount || !teammateOffCount) {
+    return {
+      statImpact: null,
+      impactSampleLabel: `On ${teammateOnCount} / Off ${teammateOffCount}`,
+      activeGameIds: teammateActiveGameIds,
+    };
+  }
+
+  const teammateOnAvg = teammateOnSum / teammateOnCount;
+  const teammateOffAvg = teammateOffSum / teammateOffCount;
+
+  return {
+    statImpact: teammateOffAvg - teammateOnAvg,
+    impactSampleLabel: `On ${teammateOnCount} / Off ${teammateOffCount}`,
+    activeGameIds: teammateActiveGameIds,
+  };
+}
+
+function buildTeamInjuryByTeamDate(games: any[]) {
+  const injuryMap: TeamInjuryReportByTeamDate = {};
+
+  for (const game of games ?? []) {
+    const gameDate = String(game?.game_date ?? '').trim();
+    const teams = (
+      game?.injury_teams && typeof game.injury_teams === 'object'
+        ? game.injury_teams
+        : game?.teams && typeof game.teams === 'object'
+          ? game.teams
+          : {}
+    ) as Record<string, any>;
+
+    if (!gameDate) {
+      continue;
+    }
+
+    Object.values(teams).forEach((teamPayload: any) => {
+      const teamTricode = String(teamPayload?.team_tricode ?? '').trim();
+      if (!teamTricode) {
+        return;
+      }
+
+      injuryMap[`${gameDate}:${teamTricode}`] = {
+        team_tricode: teamTricode,
+        team_name: teamPayload?.team_name ?? null,
+        report_status: teamPayload?.report_status ?? null,
+        report_timestamp_et: game?.injury_report_timestamp_et ?? null,
+        source_generated_at: game?.injury_source_generated_at ?? null,
+        updated_at: game?.injury_updated_at ?? null,
+        players: Array.isArray(teamPayload?.players) ? teamPayload.players : [],
+      };
+    });
+  }
+
+  return injuryMap;
+}
+
+function mergeTeamInjuryByTeamDate(
+  existing: TeamInjuryReportByTeamDate = {},
+  incoming: TeamInjuryReportByTeamDate = {},
+) {
+  return {
+    ...existing,
+    ...incoming,
+  };
+}
+
+function buildTeammateInjuryCards(
+  selectedPlayer: Player | null,
+  teamPlayers: Player[],
+  teamInjuryReport: TeamInjuryReport | null,
+  statKey: string,
+  gameCount: number,
+  activeSeason: string,
+) {
+  if (!selectedPlayer?.team) {
+    return [];
+  }
+
+  const reportPlayersByName = new Map(
+    (teamInjuryReport?.players ?? [])
+      .map((reportPlayer) => {
+        const key = normalizePersonName(reportPlayer.player_name ?? reportPlayer.report_player_name);
+        return key ? [key, reportPlayer] as const : null;
+      })
+      .filter((entry): entry is readonly [string, any] => Boolean(entry)),
+  );
+  const selectedNameKey = normalizePersonName(selectedPlayer.name);
+  const seenNameKeys = new Set<string>();
+  const cards: TeammateInjuryCard[] = [];
+  const submittedReport = teamInjuryReport?.report_status === 'submitted';
+
+  teamPlayers
+    .filter((player) => player.team === selectedPlayer.team && player.id !== selectedPlayer.id)
+    .forEach((teamPlayer) => {
+      const nameKey = normalizePersonName(teamPlayer.name);
+      if (!nameKey || seenNameKeys.has(nameKey)) {
+        return;
+      }
+
+      const reportPlayer = reportPlayersByName.get(nameKey) ?? null;
+      const teammateImpact = calculateTeammateStatImpact(
+        selectedPlayer,
+        teamPlayer,
+        statKey,
+        gameCount,
+      );
+      const minutesPerGame = Number(teamPlayer?.stats?.MIN);
+      const statPerGame = getStatValueFromSeasonStats(teamPlayer?.stats ?? {}, statKey);
+      const safeMinutesPerGame = Number.isFinite(minutesPerGame) ? minutesPerGame : null;
+      const safeStatPerGame = statPerGame !== null && Number.isFinite(statPerGame) ? statPerGame : null;
+      const currentStatus = reportPlayer?.current_status ?? (submittedReport ? 'Available' : null);
+      const isImpactLoading = activeSeason === '25/26' && teamPlayer.detail_loaded === false;
+
+      seenNameKeys.add(nameKey);
+      cards.push({
+        playerId: teamPlayer.id ?? null,
+        playerName: teamPlayer.name,
+        displayName: formatCompactPlayerName(teamPlayer.name),
+        position: teamPlayer.position ?? teamPlayer?.stats?.POSITION ?? null,
+        currentStatus,
+        reportStatus: teamInjuryReport?.report_status ?? null,
+        reason: reportPlayer?.reason ?? null,
+        minutesPerGame: safeMinutesPerGame,
+        statPerGame: safeStatPerGame,
+        statImpact: teammateImpact.statImpact,
+        impactSampleLabel: teammateImpact.impactSampleLabel,
+        isImpactLoading,
+        activeGameIds: teammateImpact.activeGameIds,
+        defaultFilterMode: getDefaultTeammateFilterMode(currentStatus),
+        prominenceScore: (
+          Number(safeMinutesPerGame ?? 0) * 1.5
+          + Number(safeStatPerGame ?? 0)
+          + Math.abs(Number(teammateImpact.statImpact ?? 0)) * 0.2
+        ),
+      });
+    });
+
+  (teamInjuryReport?.players ?? []).forEach((reportPlayer) => {
+    const playerName = String(reportPlayer?.player_name ?? reportPlayer?.report_player_name ?? '').trim();
+    const nameKey = normalizePersonName(playerName);
+    if (!playerName || !nameKey || nameKey === selectedNameKey || seenNameKeys.has(nameKey)) {
+      return;
+    }
+
+    seenNameKeys.add(nameKey);
+    const currentStatus = reportPlayer?.current_status ?? (submittedReport ? 'Available' : null);
+    cards.push({
+      playerId: null,
+      playerName,
+      displayName: formatCompactPlayerName(playerName),
+      position: null,
+      currentStatus,
+      reportStatus: teamInjuryReport?.report_status ?? null,
+      reason: reportPlayer?.reason ?? null,
+      minutesPerGame: null,
+      statPerGame: null,
+      statImpact: null,
+      impactSampleLabel: null,
+      isImpactLoading: false,
+      activeGameIds: [],
+      defaultFilterMode: getDefaultTeammateFilterMode(currentStatus),
+      prominenceScore: 0,
+    });
+  });
+
+  return cards.sort((left, right) => {
+    if (right.prominenceScore !== left.prominenceScore) {
+      return right.prominenceScore - left.prominenceScore;
+    }
+    return left.playerName.localeCompare(right.playerName);
+  });
+}
+
+function teammateSelectionMatches(
+  selection: { playerId: number | null; playerName: string } | null,
+  card: TeammateInjuryCard,
+) {
+  if (!selection) {
+    return false;
+  }
+
+  if (selection.playerId !== null && card.playerId !== null) {
+    return selection.playerId === card.playerId;
+  }
+
+  return normalizePersonName(selection.playerName) === normalizePersonName(card.playerName);
+}
+
+function getPlayerInjuryStatus(
+  player: Player,
+  injuryByTeamDate: TeamInjuryReportByTeamDate,
+) {
+  const playerNameKey = normalizePersonName(player.name);
+  const playerTeam = String(player.team ?? '').trim();
+  if (!playerNameKey || !playerTeam) {
+    return null;
+  }
+
+  for (const [teamDateKey, teamReport] of Object.entries(injuryByTeamDate ?? {})) {
+    if (!teamDateKey.endsWith(`:${playerTeam}`)) {
+      continue;
+    }
+
+    const reportPlayer = (teamReport?.players ?? []).find((injuryPlayer) => (
+      normalizePersonName(injuryPlayer.player_name ?? injuryPlayer.report_player_name) === playerNameKey
+    ));
+
+    if (reportPlayer?.current_status) {
+      return String(reportPlayer.current_status).trim();
+    }
+  }
+
+  return null;
+}
+
+function isOutOnInjuryReport(
+  player: Player,
+  injuryByTeamDate: TeamInjuryReportByTeamDate,
+) {
+  return String(getPlayerInjuryStatus(player, injuryByTeamDate) ?? '').toLowerCase().startsWith('out');
+}
+
+function hasResearchEligibleMinutes(player: Player) {
+  const minutes = Number(player?.stats?.MIN);
+  return Number.isFinite(minutes) && minutes >= RESEARCH_MINUTES_FLOOR;
+}
+
+function isResearchEligibleSlatePlayer(
+  player: Player,
+  injuryByTeamDate: TeamInjuryReportByTeamDate,
+) {
+  return hasResearchEligibleMinutes(player) && !isOutOnInjuryReport(player, injuryByTeamDate);
+}
+
+function resolveSlateOpponent(
+  player: Player | null | undefined,
+  selectedGameDate: string | null,
+  opponentByTeamDate: SlateOpponentByTeamDate,
+) {
+  if (!player?.team) {
+    return null;
+  }
+
+  const gameDate = selectedGameDate ?? player.active_game_date ?? getDashboardDate();
+  return opponentByTeamDate[`${gameDate}:${player.team}`] ?? null;
 }
 
 function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
@@ -262,6 +704,13 @@ function App() {
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>('graph');
   const [currentSlateTeams, setCurrentSlateTeams] = useState<string[]>([]);
+  const [slateOpponentByTeamDate, setSlateOpponentByTeamDate] = useState<SlateOpponentByTeamDate>({});
+  const [teamInjuryByTeamDate, setTeamInjuryByTeamDate] = useState<TeamInjuryReportByTeamDate>({});
+  const [selectedTeammateFilter, setSelectedTeammateFilter] = useState<{
+    playerId: number | null;
+    playerName: string;
+    mode: TeammateFilterMode;
+  } | null>(null);
   const [gameStatusById, setGameStatusById] = useState<Record<string, { is_live: boolean; is_final: boolean }>>({});
   const [similarCandidatesByProp, setSimilarCandidatesByProp] = useState<SimilarPlayerCandidate[]>([]);
   const [similarCandidatesByPosition, setSimilarCandidatesByPosition] = useState<SimilarPlayerCandidate[]>([]);
@@ -281,8 +730,40 @@ function App() {
   const playersWithProps = useMemo(() => {
     if (!rawData) return [];
     const feed = Array.isArray(rawData) ? rawData : [];
-    return feed.filter(playerHasAnyProp);
-  }, [rawData]);
+    const slateTeams = new Set(currentSlateTeams);
+    const slatePlayers = slateTeams.size > 0
+      ? feed.filter((player) => (
+        slateTeams.has(player.team)
+        && isResearchEligibleSlatePlayer(player, teamInjuryByTeamDate)
+      ))
+      : [];
+    const playersWithAvailableLines = feed.filter((player) => playerHasAnyKnownLine(
+      player,
+      propsAvailabilityByDate,
+    ));
+    if (playersWithAvailableLines.length > 0) {
+      const linedSlatePlayerCount = feed.filter((player) => (
+        (slateTeams.size === 0 || slateTeams.has(player.team))
+        && playerHasAnyKnownLine(player, propsAvailabilityByDate)
+      )).length;
+      const researchPoolSize = Math.max(slatePlayers.length, 1);
+      const lineCoverage = linedSlatePlayerCount / researchPoolSize;
+      if (lineCoverage >= RESEARCH_ONLY_HIDE_LINE_COVERAGE) {
+        return playersWithAvailableLines;
+      }
+
+      const mergedPlayers = new Map<number, Player>();
+      for (const player of slatePlayers) {
+        mergedPlayers.set(player.id, player);
+      }
+      for (const player of playersWithAvailableLines) {
+        mergedPlayers.set(player.id, player);
+      }
+      return Array.from(mergedPlayers.values());
+    }
+
+    return slatePlayers.length > 0 ? slatePlayers : feed;
+  }, [currentSlateTeams, propsAvailabilityByDate, rawData, teamInjuryByTeamDate]);
 
   const currentPlayer = useMemo(() => {
     if (!playersWithProps.length) {
@@ -403,6 +884,45 @@ function App() {
   }, [rawData]);
 
   useEffect(() => {
+    const counts: Partial<Record<SportsbookId, number>> = {};
+    const addCount = (sportsbook: string, increment = 1) => {
+      if (!SPORTSBOOK_FALLBACK_PRIORITY.includes(sportsbook as SportsbookId)) {
+        return;
+      }
+      const key = sportsbook as SportsbookId;
+      counts[key] = (counts[key] ?? 0) + increment;
+    };
+
+    for (const player of rawData ?? []) {
+      Object.values(player.props_by_date ?? {}).forEach((sportsbookMap) => {
+        Object.entries(sportsbookMap ?? {}).forEach(([sportsbook, dateMap]) => {
+          addCount(sportsbook, Math.max(1, Object.keys(dateMap ?? {}).length));
+        });
+      });
+    }
+
+    Object.values(propsAvailabilityByDate ?? {}).forEach((statMap) => {
+      Object.values(statMap ?? {}).forEach((sportsbookMap) => {
+        Object.entries(sportsbookMap ?? {}).forEach(([sportsbook, dateMap]) => {
+          addCount(sportsbook, Math.max(1, Object.keys(dateMap ?? {}).length));
+        });
+      });
+    });
+
+    if ((counts[activeSportsbook] ?? 0) > 0) {
+      return;
+    }
+
+    const fallbackSportsbook = SPORTSBOOK_FALLBACK_PRIORITY
+      .filter((sportsbook) => (counts[sportsbook] ?? 0) > 0)
+      .sort((left, right) => (counts[right] ?? 0) - (counts[left] ?? 0))[0];
+
+    if (fallbackSportsbook && fallbackSportsbook !== activeSportsbook) {
+      setActiveSportsbook(fallbackSportsbook);
+    }
+  }, [activeSportsbook, propsAvailabilityByDate, rawData]);
+
+  useEffect(() => {
     selectionAnchorRef.current = {
       playerId: currentPlayer?.id ?? null,
       gameDate: resolvedSelectedGameDate ?? selectedGameDate ?? null,
@@ -480,6 +1000,14 @@ function App() {
           if (cancelled) return;
 
           const nextGameStatusById = buildGameStatusById(snapshot.gamesRows ?? []);
+          const nextOpponentByTeamDate = buildSlateOpponentByTeamDate(snapshot.gamesRows ?? []);
+          const nextTeamInjuryByTeamDate = buildTeamInjuryByTeamDate(snapshot.gamesRows ?? []);
+          if (
+            snapshot.effectiveSportsbook
+            && snapshot.effectiveSportsbook !== activeSportsbook
+          ) {
+            setActiveSportsbook(snapshot.effectiveSportsbook);
+          }
           const mergedFeed = mergeFeedFromDB(
             snapshot.playersRows ?? [],
             snapshot.propsRows ?? [],
@@ -488,6 +1016,8 @@ function App() {
           const availabilityMap = buildAvailabilityByDateMap(snapshot.availabilityRows ?? []);
           const slateTeams = Array.from(new Set((snapshot.gamesRows ?? []).flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+          setSlateOpponentByTeamDate((prev) => ({ ...prev, ...nextOpponentByTeamDate }));
+          setTeamInjuryByTeamDate((prev) => mergeTeamInjuryByTeamDate(prev, nextTeamInjuryByTeamDate));
           setGameStatusById((prev) => ({ ...prev, ...nextGameStatusById }));
           setPropsAvailabilityByDate(prev => mergeAvailabilityMaps(prev, availabilityMap));
 
@@ -592,16 +1122,20 @@ function App() {
         fetchApiJson<Record<string, any>>('/data/archive/historical_odds.json').catch(() => ({})),
         fetchApiJson<{ snapshots?: any[] }>('/data/current/line_movements_today.json').catch(() => ({ snapshots: [] })),
         fetchApiJson<any[]>('/data/current/nba_dashboard_games.json').catch(() => ([])),
+        fetchApiJson<{ games?: any[] }>('/data/current/nba_injury_report.json').catch(() => ({ games: [] })),
         fetchApiJson<EdgeScorePayload>('/data/current/edge_scores_top15.json').catch(() => null),
       ])
-        .then(([masterFeed, historicalOdds, lineMovements, games, edgeSnapshot]) => {
+        .then(([masterFeed, historicalOdds, lineMovements, games, injuryReport, edgeSnapshot]) => {
           const today = getDashboardDate();
+          const nextGames = Array.isArray(games) ? games : [];
           const nextGameStatusById = buildGameStatusById(Array.isArray(games) ? games : []);
-          const slateTeams = Array.from(new Set((Array.isArray(games) ? games : [])
+          const slateTeams = Array.from(new Set(nextGames
             .filter((g: any) => g?.game_date === today)
             .flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode])
             .filter(Boolean)));
           setCurrentSlateTeams(slateTeams);
+          setSlateOpponentByTeamDate(buildSlateOpponentByTeamDate(nextGames));
+          setTeamInjuryByTeamDate(buildTeamInjuryByTeamDate(injuryReport?.games ?? []));
           setGameStatusById(nextGameStatusById);
           const enhancedFeed = (Array.isArray(masterFeed) ? masterFeed : []).map((player: Player) => ({
             ...materializePlayerForGameDate({
@@ -659,6 +1193,13 @@ function App() {
           setRawData(prev => mergePropsIntoPlayers(prev, hotSnapshot.propsRows ?? []));
         }
 
+        if (
+          hotSnapshot.effectiveSportsbook
+          && hotSnapshot.effectiveSportsbook !== activeSportsbook
+        ) {
+          setActiveSportsbook(hotSnapshot.effectiveSportsbook);
+        }
+
         if ((hotSnapshot.availabilityRows ?? []).length > 0) {
           const availabilityMap = buildAvailabilityByDateMap(hotSnapshot.availabilityRows ?? []);
           setPropsAvailabilityByDate(prev => mergeAvailabilityMaps(prev, availabilityMap));
@@ -666,7 +1207,11 @@ function App() {
 
         if ((hotSnapshot.gamesRows ?? []).length > 0) {
           const nextGameStatusById = buildGameStatusById(hotSnapshot.gamesRows ?? []);
+          const nextOpponentByTeamDate = buildSlateOpponentByTeamDate(hotSnapshot.gamesRows ?? []);
+          const nextTeamInjuryByTeamDate = buildTeamInjuryByTeamDate(hotSnapshot.gamesRows ?? []);
           setGameStatusById((prev) => ({ ...prev, ...nextGameStatusById }));
+          setSlateOpponentByTeamDate((prev) => ({ ...prev, ...nextOpponentByTeamDate }));
+          setTeamInjuryByTeamDate((prev) => mergeTeamInjuryByTeamDate(prev, nextTeamInjuryByTeamDate));
           setRawData(prev => prev.map((player) => ({
             ...player,
             game_status_by_id: {
@@ -821,6 +1366,7 @@ function App() {
     setSelectedPlayerId(id);
     setSelectedGameDate(nextGameDate);
     setCustomLineValue(null);
+    setSelectedTeammateFilter(null);
 
     if (!needsDetailLoad && !needsArchiveLoad) {
       setPendingSelection(null);
@@ -907,6 +1453,9 @@ function App() {
     }
     return materializedPlayer;
   }, [currentPlayer, resolvedSelectedGameDate, activeSeason, archiveGameLogs]);
+  const displayPlayerOpponent = useMemo(() => (
+    resolveSlateOpponent(displayPlayer, resolvedSelectedGameDate, slateOpponentByTeamDate)
+  ), [displayPlayer, resolvedSelectedGameDate, slateOpponentByTeamDate]);
   const displayPlayerAvailability = useMemo(() => {
     if (!displayPlayer) {
       return {};
@@ -914,6 +1463,112 @@ function App() {
 
     return propsAvailabilityByDate[displayPlayer.id] ?? {};
   }, [displayPlayer, propsAvailabilityByDate]);
+  const maxAvailableHistoricalGames = displayPlayer?.game_log?.length ?? 0;
+  const defaultFilterGameCount = maxAvailableHistoricalGames > 0
+    ? Math.min(19, maxAvailableHistoricalGames)
+    : 19;
+  const defaultHistoricalGameCount = maxAvailableHistoricalGames > 0
+    ? Math.min(29, maxAvailableHistoricalGames)
+    : 29;
+  const effectiveFilterGameCount = maxAvailableHistoricalGames > 0
+    ? Math.min(filterGameCount, maxAvailableHistoricalGames)
+    : filterGameCount;
+  const appliedHistoricalGameCount = isFiltersOpen
+    ? effectiveFilterGameCount
+    : defaultHistoricalGameCount;
+  const displayTeamInjuryReport = useMemo(() => {
+    if (!displayPlayer?.team) {
+      return null;
+    }
+
+    const gameDate = resolvedSelectedGameDate ?? displayPlayer.active_game_date ?? getDashboardDate();
+    return teamInjuryByTeamDate[`${gameDate}:${displayPlayer.team}`] ?? null;
+  }, [displayPlayer, resolvedSelectedGameDate, teamInjuryByTeamDate]);
+  const displayTeammateInjuryCards = useMemo(() => (
+    buildTeammateInjuryCards(
+      displayPlayer,
+      rawData,
+      displayTeamInjuryReport,
+      activeStatKey,
+      effectiveFilterGameCount,
+      activeSeason,
+    )
+  ), [
+    displayPlayer,
+    rawData,
+    displayTeamInjuryReport,
+    activeStatKey,
+    effectiveFilterGameCount,
+    activeSeason,
+  ]);
+
+  const displayActiveTeammateFilter = useMemo<ActiveTeammateFilter | null>(() => {
+    if (!selectedTeammateFilter) {
+      return null;
+    }
+
+    const card = displayTeammateInjuryCards.find((teammate) => (
+      teammateSelectionMatches(selectedTeammateFilter, teammate)
+    ));
+
+    if (!card) {
+      return null;
+    }
+
+    return {
+      playerId: card.playerId,
+      playerName: card.playerName,
+      displayName: card.displayName,
+      currentStatus: card.currentStatus,
+      mode: selectedTeammateFilter.mode,
+      activeGameIds: card.activeGameIds,
+      isImpactLoading: card.isImpactLoading,
+    };
+  }, [displayTeammateInjuryCards, selectedTeammateFilter]);
+
+  const handlePreviewTeammateToggle = useCallback((teammate: TeammateInjuryCard) => {
+    setSelectedTeammateFilter((current) => {
+      if (!teammateSelectionMatches(current, teammate)) {
+        return {
+          playerId: teammate.playerId,
+          playerName: teammate.playerName,
+          mode: teammate.defaultFilterMode,
+        };
+      }
+
+      if (current?.mode !== teammate.defaultFilterMode) {
+        return null;
+      }
+
+      return {
+        playerId: teammate.playerId,
+        playerName: teammate.playerName,
+        mode: current?.mode === 'with' ? 'without' : 'with',
+      };
+    });
+  }, []);
+
+  const handleTeammateModeSelect = useCallback((
+    teammate: TeammateInjuryCard,
+    mode: TeammateFilterMode,
+  ) => {
+    setSelectedTeammateFilter((current) => {
+      if (teammateSelectionMatches(current, teammate) && current?.mode === mode) {
+        return null;
+      }
+
+      return {
+        playerId: teammate.playerId,
+        playerName: teammate.playerName,
+        mode,
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    setSelectedTeammateFilter(null);
+  }, [displayPlayer?.id, displayPlayer?.team, resolvedSelectedGameDate, activeSeason]);
+
   const activeEdgeRecommendationKey = useMemo(() => {
     if (!displayPlayer || !edgePayload?.recommendations?.length) {
       return null;
@@ -980,19 +1635,6 @@ function App() {
       cancelled = true;
     };
   }, [USE_DB, displayPlayer?.id, activeStatKey, resolvedSelectedGameDate]);
-  const maxAvailableHistoricalGames = displayPlayer?.game_log?.length ?? 0;
-  const defaultFilterGameCount = maxAvailableHistoricalGames > 0
-    ? Math.min(19, maxAvailableHistoricalGames)
-    : 19;
-  const defaultHistoricalGameCount = maxAvailableHistoricalGames > 0
-    ? Math.min(29, maxAvailableHistoricalGames)
-    : 29;
-  const effectiveFilterGameCount = maxAvailableHistoricalGames > 0
-    ? Math.min(filterGameCount, maxAvailableHistoricalGames)
-    : filterGameCount;
-  const appliedHistoricalGameCount = isFiltersOpen
-    ? effectiveFilterGameCount
-    : defaultHistoricalGameCount;
   const isSelectionPending = Boolean(pendingSelection);
   const similarRankingKey = `${displayPlayer?.id ?? 'none'}:${activeSeason}:${activeTab}:${activeSportsbook}:${resolvedSelectedGameDate ?? ''}`;
   const areSimilarCandidatesCurrent = similarCandidatesKey === similarRankingKey;
@@ -1051,6 +1693,57 @@ function App() {
         console.error('[api] player detail error:', error);
       });
   }, [selectedPlayerId, USE_DB, currentPlayer]);
+
+  useEffect(() => {
+    if (
+      !USE_DB
+      || !isFiltersOpen
+      || activeSeason !== '25/26'
+      || !displayPlayer?.team
+      || !rawDataRef.current.length
+    ) {
+      return undefined;
+    }
+
+    const teammateIds = rawDataRef.current
+      .filter((player) => (
+        player.team === displayPlayer.team
+        && player.id !== displayPlayer.id
+        && !hasLoadedPlayerDetail(player)
+      ))
+      .map((player) => player.id);
+
+    if (!teammateIds.length) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const loadTeammateDetails = async () => {
+      for (const teammateId of teammateIds) {
+        if (cancelled) {
+          return;
+        }
+
+        try {
+          await ensurePlayerDetailLoaded(teammateId);
+        } catch (error) {
+          if (!cancelled) {
+            console.error('[api] teammate detail error:', error);
+          }
+        }
+      }
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      void loadTeammateDetails();
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [USE_DB, isFiltersOpen, activeSeason, displayPlayer?.id, displayPlayer?.team]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1218,7 +1911,7 @@ function App() {
     return (
       <Layout sidebarProps={{ players: [], activePlayerId: null, onSelectPlayer: () => { } }} topNavProps={topNavProps}>
         <div className="flex items-center justify-center h-full text-white">
-          No active props found.
+          No player data available.
         </div>
       </Layout>
     );
@@ -1287,6 +1980,7 @@ function App() {
                 customLine={customLineValue}
                 onCustomLineChange={setCustomLineValue}
                 activeFilterOverlay={activeFilter}
+                activeTeammateFilter={displayActiveTeammateFilter}
                 isFiltersOpen={isFiltersOpen}
                 historicalGameCount={appliedHistoricalGameCount}
                 activeSeason={activeSeason}
@@ -1303,6 +1997,12 @@ function App() {
                 activeFilter={activeFilter}
                 onFilterChange={setActiveFilter}
                 player={displayPlayer}
+                teammateInjuryCards={displayTeammateInjuryCards}
+                teamInjuryReport={displayTeamInjuryReport}
+                selectedTeammateFilter={displayActiveTeammateFilter}
+                teammateStatLabel={activeStatKey}
+                onPreviewTeammateToggle={handlePreviewTeammateToggle}
+                onTeammateModeSelect={handleTeammateModeSelect}
                 gameCount={effectiveFilterGameCount}
                 onGameCountChange={(count) => {
                   const maxGameCount = maxAvailableHistoricalGames || count;
@@ -1338,6 +2038,7 @@ function App() {
                 activeTab={activeTab}
                 activeSportsbook={activeSportsbook}
                 activeSeason={activeSeason}
+                targetOpponent={displayPlayerOpponent}
                 isLoadingCandidates={shouldShowSimilarLoading}
                 similarCandidatesByProp={readySimilarCandidatesByProp}
                 similarCandidatesByPosition={readySimilarCandidatesByPosition}
@@ -1416,6 +2117,7 @@ function App() {
                     activeTab={activeTab}
                     activeSportsbook={activeSportsbook}
                     activeSeason={activeSeason}
+                    targetOpponent={displayPlayerOpponent}
                     isLoadingCandidates={shouldShowSimilarLoading}
                     similarCandidatesByProp={readySimilarCandidatesByProp}
                     similarCandidatesByPosition={readySimilarCandidatesByPosition}

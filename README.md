@@ -18,7 +18,7 @@ This project combines scheduled data collection, entity resolution, feature engi
 - Builds a canonical player feed with season stats, recent game logs, boxscore-derived context, and opponent matchup overlays.
 - Captures intraday line movement snapshots and near-tip closing lines.
 - Visualizes shot zones, assist zones, shot type splits, play type scoring mix, and prop hit-rate history.
-- Ranks the current slate with an explainable Signal Score that blends market numbers, recent form, matchup texture, similar-player context, and rest/back-to-back signals.
+- Ranks the current slate with an explainable Signal Score powered by a fast, in-memory **CatBoost Regression Pipeline**. The model predicts prop probability via residual analysis over 69+ features (expected minutes, rolling EMAs, spatial matchup zones), and blends those inferences with live market numbers and recent form.
 - Supports two delivery modes:
   - Static JSON feed for local development and low-latency browsing
   - Supabase-backed reads for hosted deployments
@@ -85,7 +85,20 @@ Signal Score recomputes inside the same refresh owners:
 - after each intraday odds refresh
 - after each pre-tip closing refresh
 
-If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, Discord acts as a narrower daily-props alert stream rather than mirroring every refresh. By default it sends up to 2 props per sportsbook with Signal Score 72.5+, but only on intraday refreshes. The first intraday alert for a slate sends the current grouped board, while later intraday updates only show props that actually changed because of a new entrant, better book, line move, or odds move. If `EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL` is also configured, a second tracker channel logs only the highest-signal new qualifiers from that daily-props feed, freezes their first book/line/time, and receives the next-morning graded recap. Discord sportsbook thumbnails now expect a public asset base from `EDGE_SCORE_DISCORD_ASSETS_BASE_URL`; otherwise the messages stay text-only rather than depending on brittle external logo links. The backend still grades only tracked picks, persists local artifacts first, and keeps Supabase sync best-effort.
+Its V1 projection layer is no longer just season average plus rolling box-score windows. We have introduced a **V3 ML Inference Engine**: a hyper-optimized CatBoost singleton loading a 30MB+ `.cbm` model that natively merges 69 predictive features (defensive ranks, home/away splits, score context, pacing) in pure-NumPy for 1ms predictions.
+
+#### Dynamic Lineup Adjustments & Discord Delivery
+The ML model predicts how a player historically performs, but the pipeline makes it aware of tonight's conditions in real time before creating an edge:
+
+1. **Usage Vacuums:** It cross-references the hourly NBA injury report. If a star teammate is ruled OUT, the pipeline actively intercepts the ML projection and mathematically multiplies the player's performance cap based on freed usage percent.
+2. **Blowout Penalties:** If the opposing team is missing stars, it penalizes role players to actively avoid garbage-time risks.
+3. **Rest Bounces:** It identifies phantom 'DNP - Rest' games within back-to-back schedules to flip fatigue penalties to freshness bonuses.
+
+If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, the system acts as a highly curated prop alert stream. When the modified ML Edge Score crosses a high-conviction threshold (72.5+), it fires a visual Discord snippet explaining exactly *why* the mathematical edge triggered (e.g., *"The regression model projects 16.5 (lineup-adjusted +20%: Cade Cunningham out)..."*). 
+
+The Discord integration includes full intraday deduplication (it only alerts you when lines or odds officially shift), automated game-finalization cleanup, 429 webhook retry safety, and tracker grading recaps that retry dynamically once prior-day box scores are available.
+
+To manually verify the tracker webhook target, run `python3 test_tracker_discord.py --message "manual tracker test"` from [backend/](/Users/atharvaketkar/Desktop/NBA_Dashboard/backend). The script posts a one-off test message to the tracker webhook and prints the returned Discord `channel_id`/`message_id`.
 
 It uses a lock file plus persisted state to avoid duplicate runs and stale overlap.
 
@@ -211,7 +224,8 @@ Those checks confirm the frontend and API TypeScript compile cleanly and the Vit
 ### Backend
 
 - Python
-- pandas / numpy
+- pandas / numpy / scipy
+- catboost (ML Regression Inference)
 - requests / nba_api / pbpstats
 - RapidFuzz
 - APScheduler-compatible scheduling patterns plus cron orchestration

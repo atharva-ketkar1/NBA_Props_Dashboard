@@ -1,4 +1,5 @@
 import csv
+import copy
 import json
 import logging
 import os
@@ -6,11 +7,27 @@ import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
 
+from prop_modeling.injury_feature_config import (
+    CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
+    INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
+    INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET,
+    INJURY_FRESHNESS_NORMAL_MAX_AGE_MINUTES,
+    ONBALL_BENEFIT_DRIVES_THRESHOLD,
+    OVERLAY_MAX_MULTIPLIER,
+    OVERLAY_MIN_RECENT5_MINUTES,
+    OVERLAY_MULTI_BENEFIT_MULTIPLIER,
+    OVERLAY_SINGLE_BENEFIT_MULTIPLIER,
+    PROMOTION_GUARDRAIL_SUPPORTED_STAT_TYPES,
+    SAME_POS_BENEFIT_MINUTES_THRESHOLD,
+    USAGE_BENEFIT_USAGE_THRESHOLD,
+    resolve_promotion_guardrail_config,
+)
 from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
 
@@ -39,12 +56,27 @@ ARCHIVE_DIR = os.path.join(BASE_DIR, "data", "archive")
 
 MASTER_FEED_PATH = os.path.join(CURRENT_DIR, "master_feed.json")
 SCHEDULE_PATH = os.path.join(CURRENT_DIR, "today_schedule.json")
+ACTION_NETWORK_PATH = os.path.join(CURRENT_DIR, "action_network_odds.json")
 LINE_MOVEMENTS_PATH = os.path.join(CURRENT_DIR, "line_movements_today.json")
 PRIZEPICKS_PATH = os.path.join(CURRENT_DIR, "prizepicks.csv")
 EDGE_SCORE_PATH = os.path.join(CURRENT_DIR, "edge_scores_top15.json")
 EDGE_SCORE_STATE_PATH = os.path.join(CURRENT_DIR, "edge_score_notification_state.json")
 EDGE_SCORE_HISTORY_PATH = os.path.join(ARCHIVE_DIR, "edge_scores_history.json")
 EDGE_SCORE_RESULTS_HISTORY_PATH = os.path.join(ARCHIVE_DIR, "edge_score_results_history.json")
+BOXSCORE_CDN_BASE_URL = "https://cdn.nba.com/static/json/liveData/boxscore"
+BOXSCORE_CDN_HEADERS = {
+    "accept": "application/json, text/plain, */*",
+    "origin": "https://www.nba.com",
+    "referer": "https://www.nba.com/",
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    ),
+}
+ISO8601_DURATION_RE = re.compile(
+    r"^PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?$"
+)
+DISCORD_WEBHOOK_MESSAGE_PATH_RE = re.compile(r"/messages/\d+$")
 
 EDGE_SCORE_TABLE = "edge_scores_current"
 EDGE_LIMIT = max(1, _env_int("EDGE_SCORE_LIMIT", 15))
@@ -66,13 +98,23 @@ EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
 EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
 EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = max(
     1.0,
-    min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 77.5)),
+    min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 72.5)),
 )
 EDGE_SPORTSBOOK_BOARD_LIMIT = max(1, _env_int("EDGE_SPORTSBOOK_BOARD_LIMIT", 10))
 EDGE_DISCORD_LINE_MOVE_POINTS = max(0.25, _env_float("EDGE_SCORE_DISCORD_LINE_MOVE_POINTS", 1.0))
 EDGE_DISCORD_ODDS_MOVE_AMERICAN = max(5, _env_int("EDGE_SCORE_DISCORD_ODDS_MOVE_AMERICAN", 25))
 EDGE_DISCORD_SCORE_DELTA = max(1.0, _env_float("EDGE_SCORE_DISCORD_SCORE_DELTA", 6.0))
 EDGE_DISCORD_RANK_DELTA = max(1, _env_int("EDGE_SCORE_DISCORD_RANK_DELTA", 4))
+EDGE_DISCORD_HTTP_MAX_ATTEMPTS = max(1, _env_int("EDGE_SCORE_DISCORD_HTTP_MAX_ATTEMPTS", 5))
+EDGE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS = max(
+    0.25,
+    _env_float("EDGE_SCORE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS", 1.5),
+)
+EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = max(
+    0.25,
+    _env_float("EDGE_SCORE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS", 30.0),
+)
+_DISCORD_WEBHOOK_RATE_LIMIT_UNTIL: Dict[str, float] = {}
 UNDATED_PROP_KEY = "__undated__"
 
 SUPPORTED_BOOKS = {"dk", "fd", "pp"}
@@ -89,17 +131,32 @@ BOOK_LABELS = {
     "fd": "FanDuel",
     "pp": "PrizePicks",
 }
+ACTION_NETWORK_CONTEXT_BOOK_IDS = (
+    "15",    # DraftKings
+    "30",    # FanDuel
+    "4556",
+    "4557",
+    "4559",
+    "4560",
+    "4562",
+    "4561",
+    "4558",
+    "79",
+    "2988",
+    "75",
+)
 DISCORD_ALERT_REFRESH_LABELS = {"intraday"}
 SIDE_MULTIPLIERS = {
     "over": 1.0,
     "under": -1.0,
 }
 COMPONENT_WEIGHTS = {
-    "projection": 0.34,
-    "recent_form": 0.18,
-    "matchup": 0.16,
-    "market": 0.12,
-    "line_movement": 0.07,
+    "projection": 0.19,
+    "recent_form": 0.15,
+    "matchup": 0.13,
+    "market": 0.09,
+    "ml_regression": 0.25,
+    "line_movement": 0.06,
     "similar_players": 0.07,
     "head_to_head": 0.04,
     "back_to_back": 0.02,
@@ -279,6 +336,15 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     return number
 
 
+def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _average(values: List[Optional[float]]) -> Optional[float]:
     cleaned = [value for value in values if value is not None]
     if not cleaned:
@@ -376,16 +442,168 @@ def _results_recap_webhook_url() -> str:
     return EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL or EDGE_SCORE_DISCORD_WEBHOOK_URL
 
 
-def _post_discord_webhook(webhook_url: str, payload: Dict[str, Any]) -> bool:
+def _webhook_url_with_query(webhook_url: str, extra_query: Optional[Dict[str, str]] = None) -> str:
+    if not extra_query:
+        return webhook_url
+    split = urlsplit(webhook_url)
+    query = dict(parse_qsl(split.query, keep_blank_values=True))
+    query.update({key: value for key, value in extra_query.items() if value is not None})
+    return urlunsplit((split.scheme, split.netloc, split.path, urlencode(query), split.fragment))
+
+
+def _webhook_message_url(webhook_url: str, message_id: str) -> str:
+    split = urlsplit(webhook_url)
+    base_path = split.path.rstrip("/")
+    message_path = f"{base_path}/messages/{message_id}"
+    return urlunsplit((split.scheme, split.netloc, message_path, split.query, split.fragment))
+
+
+def _discord_retry_after_seconds(response: requests.Response) -> float:
+    retry_after = _safe_float(response.headers.get("Retry-After"))
+    if retry_after is not None and retry_after > 0:
+        return min(retry_after, EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS)
+
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if isinstance(body, dict):
+        retry_after = _safe_float(body.get("retry_after"))
+        if retry_after is not None and retry_after > 0:
+            return min(retry_after, EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS)
+
+    return EDGE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS
+
+
+def _discord_rate_limit_bucket_key(method: str, url: str) -> str:
+    split = urlsplit(url)
+    normalized_path = DISCORD_WEBHOOK_MESSAGE_PATH_RE.sub("", split.path.rstrip("/"))
+    return f"{method.upper()} {split.scheme}://{split.netloc}{normalized_path}"
+
+
+def _wait_for_discord_rate_limit_window(method: str, url: str) -> None:
+    bucket_key = _discord_rate_limit_bucket_key(method, url)
+    wait_until = _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.get(bucket_key)
+    if wait_until is None:
+        return
+
+    now = time.monotonic()
+    if wait_until <= now:
+        _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.pop(bucket_key, None)
+        return
+
+    time.sleep(wait_until - now)
+
+
+def _record_discord_rate_limit_window(method: str, url: str, response: requests.Response) -> None:
+    bucket_key = _discord_rate_limit_bucket_key(method, url)
+    now = time.monotonic()
+    cooldown_seconds: Optional[float] = None
+
+    if response.status_code == 429:
+        cooldown_seconds = _discord_retry_after_seconds(response)
+    else:
+        remaining = str(response.headers.get("X-RateLimit-Remaining") or "").strip()
+        if remaining == "0":
+            cooldown_seconds = _safe_float(response.headers.get("X-RateLimit-Reset-After"))
+
+    if cooldown_seconds is None or cooldown_seconds <= 0:
+        if _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.get(bucket_key, 0.0) <= now:
+            _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.pop(bucket_key, None)
+        return
+
+    _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL[bucket_key] = max(
+        _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL.get(bucket_key, 0.0),
+        now + min(cooldown_seconds, EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS),
+    )
+
+
+def _discord_webhook_request(method: str, url: str, *, payload: Optional[Dict[str, Any]] = None) -> requests.Response:
+    last_response: Optional[requests.Response] = None
+    for attempt_index in range(EDGE_DISCORD_HTTP_MAX_ATTEMPTS):
+        _wait_for_discord_rate_limit_window(method, url)
+        response = requests.request(method, url, json=payload, timeout=10)
+        _record_discord_rate_limit_window(method, url, response)
+        if response.status_code != 429:
+            return response
+
+        last_response = response
+        if attempt_index >= EDGE_DISCORD_HTTP_MAX_ATTEMPTS - 1:
+            break
+
+        sleep_seconds = _discord_retry_after_seconds(response)
+        logger.warning(
+            "Discord webhook rate limited; retrying | method=%s path=%s sleep_s=%.3f attempt=%s/%s",
+            method,
+            urlsplit(url).path,
+            sleep_seconds,
+            attempt_index + 1,
+            EDGE_DISCORD_HTTP_MAX_ATTEMPTS,
+        )
+
+    if last_response is not None:
+        return last_response
+    return requests.request(method, url, json=payload, timeout=10)
+
+
+def _execute_discord_webhook(webhook_url: str, payload: Dict[str, Any], *, wait: bool = False) -> Optional[Dict[str, Any]]:
     if not webhook_url:
-        return False
-    response = requests.post(
-        webhook_url,
-        json=payload,
-        timeout=10,
+        return None
+    response = _discord_webhook_request(
+        "POST",
+        _webhook_url_with_query(webhook_url, {"wait": "true"} if wait else None),
+        payload=payload,
     )
     response.raise_for_status()
-    return True
+    if not wait:
+        return {}
+    try:
+        return response.json()
+    except ValueError:
+        return {}
+
+
+def _post_discord_webhook(webhook_url: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return _execute_discord_webhook(webhook_url, payload, wait=True)
+
+
+def _edit_discord_webhook_message(
+    webhook_url: str,
+    message_id: str,
+    payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not webhook_url or not message_id:
+        return None
+    edit_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"username", "avatar_url"}
+    }
+    response = _discord_webhook_request(
+        "PATCH",
+        _webhook_message_url(webhook_url, message_id),
+        payload=edit_payload,
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError:
+        return {}
+
+
+def _delete_discord_webhook_message(webhook_url: str, message_id: str) -> str:
+    if not webhook_url or not message_id:
+        return "missing"
+    response = _discord_webhook_request(
+        "DELETE",
+        _webhook_message_url(webhook_url, message_id),
+    )
+    if response.status_code == 404:
+        return "missing"
+    response.raise_for_status()
+    return "deleted"
 
 
 def _format_discord_timestamp(raw_value: Any) -> str:
@@ -396,7 +614,9 @@ def _format_discord_timestamp(raw_value: Any) -> str:
 
 
 def _format_tracker_time(raw_value: Any) -> str:
-    dt = _parse_dt(raw_value) or get_et_now()
+    dt = _parse_dt(raw_value)
+    if dt is None:
+        return "Unknown ET"
     return dt.strftime("%I:%M %p ET").lstrip("0")
 
 
@@ -507,10 +727,21 @@ def _book_sort_key(book: Any) -> Tuple[int, str]:
 
 def _candidate_sort_key(candidate: Dict[str, Any]) -> Tuple[float, float, float]:
     return (
-        candidate.get("edge_score", 0.0),
-        candidate.get("confidence", 0.0),
+        _ranking_edge_score(candidate),
+        _ranking_confidence(candidate),
         candidate.get("signal_score", 0.0),
     )
+
+
+def _ranking_edge_score(candidate: Dict[str, Any]) -> float:
+    return _safe_float(candidate.get("display_edge_score"), _safe_float(candidate.get("edge_score"), 0.0)) or 0.0
+
+
+def _ranking_confidence(candidate: Dict[str, Any]) -> float:
+    return _safe_float(
+        candidate.get("display_confidence"),
+        _safe_float(candidate.get("confidence"), 0.0),
+    ) or 0.0
 
 
 def _format_signal_score_threshold(value: float) -> str:
@@ -568,7 +799,582 @@ def _weighted_average(pairs: List[Tuple[Optional[float], float]]) -> Optional[fl
     return numerator / denominator
 
 
-def _build_schedule_context(schedule_payload: Any) -> Dict[str, Any]:
+def _safe_divide(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+    if numerator is None or denominator is None or abs(denominator) < 1e-9:
+        return None
+    return numerator / denominator
+
+
+def _normalize_fraction(raw_value: Any) -> Optional[float]:
+    value = _safe_float(raw_value)
+    if value is None:
+        return None
+    if value > 1.5:
+        value /= 100.0
+    return _clamp(value, 0.0, 2.0)
+
+
+def _clamp_optional(value: Optional[float], low: float, high: float) -> Optional[float]:
+    if value is None:
+        return None
+    return _clamp(value, low, high)
+
+
+def _average_log_metric(
+    logs: List[Dict[str, Any]],
+    key: str,
+    limit: int,
+    *,
+    percent: bool = False,
+) -> Optional[float]:
+    values: List[Optional[float]] = []
+    for game in logs[:limit]:
+        raw_value = game.get(key)
+        value = _normalize_fraction(raw_value) if percent else _safe_float(raw_value)
+        if value is not None:
+            values.append(value)
+    return _average(values)
+
+
+def _sum_log_metric(logs: List[Dict[str, Any]], key: str, limit: int) -> Optional[float]:
+    total = 0.0
+    seen = False
+    for game in logs[:limit]:
+        value = _safe_float(game.get(key))
+        if value is None:
+            continue
+        total += value
+        seen = True
+    return total if seen else None
+
+
+def _sum_log_minutes(logs: List[Dict[str, Any]], limit: int) -> Optional[float]:
+    total = 0.0
+    seen = False
+    for game in logs[:limit]:
+        minutes = _safe_float(game.get("MIN"))
+        if minutes is None or minutes <= 0:
+            continue
+        total += minutes
+        seen = True
+    return total if seen else None
+
+
+def _paired_metric_sums(
+    logs: List[Dict[str, Any]],
+    numerator_key: str,
+    denominator_key: str,
+    limit: int,
+) -> Tuple[Optional[float], Optional[float]]:
+    numerator_total = 0.0
+    denominator_total = 0.0
+    seen = False
+    for game in logs[:limit]:
+        numerator_value = _safe_float(game.get(numerator_key))
+        denominator_value = _safe_float(game.get(denominator_key))
+        if numerator_value is None or denominator_value is None or denominator_value <= 0:
+            continue
+        numerator_total += numerator_value
+        denominator_total += denominator_value
+        seen = True
+    if not seen:
+        return None, None
+    return numerator_total, denominator_total
+
+
+def _metric_rate_from_logs(logs: List[Dict[str, Any]], key: str, limit: int) -> Optional[float]:
+    numerator_total, denominator_total = _paired_metric_sums(logs, key, "MIN", limit)
+    return _safe_divide(numerator_total, denominator_total)
+
+
+def _stat_rate_from_logs(logs: List[Dict[str, Any]], stat_type: str, limit: int) -> Optional[float]:
+    numerator = 0.0
+    denominator = 0.0
+    seen = False
+    for game in logs[:limit]:
+        stat_value = _stat_value_from_game(game, stat_type)
+        minutes = _safe_float(game.get("MIN"))
+        if stat_value is None or minutes is None or minutes <= 0:
+            continue
+        numerator += stat_value
+        denominator += minutes
+        seen = True
+    if not seen:
+        return None
+    return _safe_divide(numerator, denominator)
+
+
+def _win_pct(wins: Any, losses: Any) -> Optional[float]:
+    wins_value = _safe_float(wins)
+    losses_value = _safe_float(losses)
+    if wins_value is None or losses_value is None:
+        return None
+    games_played = wins_value + losses_value
+    if games_played <= 0:
+        return None
+    return wins_value / games_played
+
+
+def _pick_action_network_context_market(markets: Any) -> Dict[str, Any]:
+    if not isinstance(markets, dict):
+        return {}
+
+    for book_id in ACTION_NETWORK_CONTEXT_BOOK_IDS:
+        market = markets.get(book_id)
+        if market is None and book_id.isdigit():
+            market = markets.get(int(book_id))
+        if isinstance(market, dict):
+            return market
+
+    for book_id in sorted(str(key) for key in markets.keys()):
+        market = markets.get(book_id)
+        if market is None and book_id.isdigit():
+            market = markets.get(int(book_id))
+        if isinstance(market, dict):
+            return market
+    return {}
+
+
+def _market_total_line(market: Dict[str, Any]) -> Optional[float]:
+    total_market = market.get("total") if isinstance(market.get("total"), dict) else {}
+    total_line = _safe_float(total_market.get("line"))
+    if total_line is not None:
+        return total_line
+    over_line = _safe_float((total_market.get("over") or {}).get("line"))
+    under_line = _safe_float((total_market.get("under") or {}).get("line"))
+    return over_line if over_line is not None else under_line
+
+
+def _team_total_line_from_market(market: Dict[str, Any], team: str) -> Optional[float]:
+    team_total_market = (
+        market.get("team_total") if isinstance(market.get("team_total"), dict) else {}
+    )
+    team_offer = team_total_market.get(team)
+    if not isinstance(team_offer, dict):
+        return None
+    return _safe_float(team_offer.get("line"))
+
+
+def _resolve_game_team_context(game: Any, team: Any) -> Dict[str, Any]:
+    if not isinstance(game, dict):
+        return {}
+
+    team_code = str(team or "").strip().upper()
+    home_team = str(game.get("home_team_tricode") or "").strip().upper()
+    away_team = str(game.get("away_team_tricode") or "").strip().upper()
+    if not team_code or team_code not in {home_team, away_team}:
+        return {}
+
+    is_home = team_code == home_team
+    opponent_team = away_team if is_home else home_team
+    team_side = "home" if is_home else "away"
+    market = _pick_action_network_context_market(
+        game.get("action_network_markets") or game.get("markets")
+    )
+    spread_market = market.get("spread") if isinstance(market.get("spread"), dict) else {}
+    team_spread_line = _safe_float((spread_market.get(team_side) or {}).get("line"))
+    raw_game_spread = _safe_float(game.get("spread"))
+    game_total_line = _market_total_line(market) if market else None
+    if game_total_line is None:
+        game_total_line = _safe_float(game.get("total"))
+
+    team_total_line = _team_total_line_from_market(market, team_code) if market else None
+    opponent_total_line = _team_total_line_from_market(market, opponent_team) if market else None
+    team_implied_total = team_total_line
+    opponent_implied_total = opponent_total_line
+    if (
+        team_implied_total is None
+        and team_spread_line is not None
+        and game_total_line is not None
+    ):
+        team_implied_total = (game_total_line - team_spread_line) / 2.0
+    if (
+        opponent_implied_total is None
+        and team_spread_line is not None
+        and game_total_line is not None
+    ):
+        opponent_implied_total = (game_total_line + team_spread_line) / 2.0
+
+    vegas_spread = team_spread_line if team_spread_line is not None else raw_game_spread
+    return {
+        "is_home": is_home,
+        "team_win_pct": _win_pct(
+            game.get("home_team_wins") if is_home else game.get("away_team_wins"),
+            game.get("home_team_losses") if is_home else game.get("away_team_losses"),
+        ),
+        "opponent_win_pct": _win_pct(
+            game.get("away_team_wins") if is_home else game.get("home_team_wins"),
+            game.get("away_team_losses") if is_home else game.get("home_team_losses"),
+        ),
+        "current_score_differential": _safe_float(game.get("score_differential")),
+        "is_live": bool(game.get("is_live")),
+        "game_status": game.get("game_status"),
+        "vegas_spread": vegas_spread,
+        "vegas_total": game_total_line,
+        "team_spread_line": team_spread_line,
+        "spread_abs": abs(vegas_spread) if vegas_spread is not None else None,
+        "team_is_favorite": None if team_spread_line is None else team_spread_line < 0,
+        "team_total_line": team_total_line,
+        "opponent_team_total_line": opponent_total_line,
+        "team_implied_total": team_implied_total,
+        "opponent_implied_total": opponent_implied_total,
+        "market_book_id": market.get("book_id") if isinstance(market, dict) else None,
+        "market_book_label": market.get("book_label") if isinstance(market, dict) else None,
+    }
+
+
+def _resolve_entry_game_team_context(entry: Dict[str, Any]) -> Dict[str, Any]:
+    game = entry.get("game_context")
+    return _resolve_game_team_context(game, entry.get("team"))
+
+
+def _legacy_projection_baseline(
+    season_avg: Optional[float],
+    recent10_avg: Optional[float],
+    recent5_avg: Optional[float],
+    season_minutes: Optional[float],
+    recent_minutes: Optional[float],
+) -> Optional[float]:
+    minute_delta_ratio = None
+    if season_minutes and recent_minutes:
+        minute_delta_ratio = (recent_minutes - season_minutes) / max(season_minutes, 1.0)
+
+    baseline_projection = _weighted_average([
+        (season_avg, 0.48),
+        (recent10_avg, 0.32),
+        (recent5_avg, 0.20),
+    ])
+    if baseline_projection is not None and minute_delta_ratio is not None:
+        baseline_projection += baseline_projection * _clamp(minute_delta_ratio, -0.20, 0.20) * 0.18
+    return baseline_projection
+
+
+def _compute_expected_minutes_context(entry: Dict[str, Any], logs: List[Dict[str, Any]], blowout_risk_boost: bool = False) -> Dict[str, Any]:
+    player = entry.get("player") if isinstance(entry, dict) else {}
+    stats = player.get("stats") if isinstance(player, dict) and isinstance(player.get("stats"), dict) else {}
+    season_minutes = _safe_float(stats.get("MIN"))
+    recent_5_minutes = _average([_safe_float(game.get("MIN")) for game in logs[:5]])
+    recent_10_minutes = _average([_safe_float(game.get("MIN")) for game in logs[:10]])
+    minutes_baseline = _weighted_average([
+        (season_minutes, 0.48),
+        (recent_10_minutes, 0.32),
+        (recent_5_minutes, 0.20),
+    ])
+
+    game_team_context = _resolve_entry_game_team_context(entry)
+    team_win_pct = _safe_float(game_team_context.get("team_win_pct"))
+    opponent_win_pct = _safe_float(game_team_context.get("opponent_win_pct"))
+    win_pct_gap = None
+    if team_win_pct is not None and opponent_win_pct is not None:
+        win_pct_gap = abs(team_win_pct - opponent_win_pct)
+
+    competitive_minutes: List[float] = []
+    blowout_minutes: List[float] = []
+    for game in logs[:25]:
+        minutes = _safe_float(game.get("MIN"))
+        margin = _safe_float(game.get("margin"))
+        if minutes is None or minutes <= 0 or margin is None:
+            continue
+        if abs(margin) >= 15:
+            blowout_minutes.append(minutes)
+        elif abs(margin) <= 8:
+            competitive_minutes.append(minutes)
+
+    competitive_avg = _average(competitive_minutes)
+    blowout_avg = _average(blowout_minutes)
+    historical_adjustment_ratio = None
+    if (
+        competitive_avg is not None
+        and competitive_avg > 0
+        and blowout_avg is not None
+        and len(competitive_minutes) >= 5
+        and len(blowout_minutes) >= 3
+    ):
+        historical_adjustment_ratio = (blowout_avg - competitive_avg) / competitive_avg
+
+    blowout_risk = 0.0
+    vegas_spread = game_team_context.get("vegas_spread")
+    if vegas_spread is not None:
+        blowout_risk = _clamp((abs(vegas_spread) - 8.0) / 7.0, 0.0, 1.0)
+    elif win_pct_gap is not None:
+        blowout_risk = _clamp((win_pct_gap - 0.08) / 0.28, 0.0, 1.0)
+
+    if blowout_risk_boost:
+        blowout_risk = min(1.0, blowout_risk + 0.20)
+
+    live_score_differential = _safe_float(game_team_context.get("current_score_differential"))
+    if game_team_context.get("is_live") and live_score_differential is not None:
+        blowout_risk = max(blowout_risk, _clamp((abs(live_score_differential) - 10.0) / 12.0, 0.0, 1.0))
+
+    generic_adjustment_ratio = None
+    role_minutes = minutes_baseline or recent_10_minutes or season_minutes or recent_5_minutes
+    if blowout_risk > 0 and role_minutes is not None:
+        if role_minutes >= 34.0:
+            generic_adjustment_ratio = -0.04
+        elif role_minutes >= 28.0:
+            generic_adjustment_ratio = -0.025
+
+    raw_adjustment_ratio = _weighted_average([
+        (historical_adjustment_ratio, 0.70),
+        (generic_adjustment_ratio, 0.30),
+    ])
+    minutes_adjustment_ratio = None
+    if raw_adjustment_ratio is not None and blowout_risk > 0:
+        minutes_adjustment_ratio = _clamp(raw_adjustment_ratio * blowout_risk, -0.12, 0.03)
+
+    expected_minutes = minutes_baseline
+    if expected_minutes is not None and minutes_adjustment_ratio is not None:
+        expected_minutes *= (1.0 + minutes_adjustment_ratio)
+    if expected_minutes is not None:
+        expected_minutes = _clamp(expected_minutes, 4.0, 42.0)
+
+    return {
+        "expected_minutes": expected_minutes,
+        "season_minutes": season_minutes,
+        "recent_5_minutes": recent_5_minutes,
+        "recent_10_minutes": recent_10_minutes,
+        "minutes_baseline": minutes_baseline,
+        "minutes_adjustment_ratio": minutes_adjustment_ratio,
+        "blowout_risk": blowout_risk if blowout_risk > 0 else None,
+        "team_win_pct": team_win_pct,
+        "opponent_win_pct": opponent_win_pct,
+        "competitive_minutes_avg": competitive_avg,
+        "blowout_minutes_avg": blowout_avg,
+        "blowout_sample_size": len(blowout_minutes),
+        "competitive_sample_size": len(competitive_minutes),
+    }
+
+
+def _estimate_stat_rate_context(player: Dict[str, Any], logs: List[Dict[str, Any]], stat_type: str) -> Dict[str, Any]:
+    stats = player.get("stats") if isinstance(player.get("stats"), dict) else {}
+    season_minutes = _safe_float(stats.get("MIN"))
+    season_stat = _stat_value_from_stats(stats, stat_type)
+    season_rate = _safe_divide(season_stat, season_minutes)
+    recent_10_rate = _stat_rate_from_logs(logs, stat_type, 10)
+    recent_5_rate = _stat_rate_from_logs(logs, stat_type, 5)
+    base_rate = _weighted_average([
+        (season_rate, 0.48),
+        (recent_10_rate, 0.32),
+        (recent_5_rate, 0.20),
+    ])
+
+    profile = STAT_PROFILES.get(stat_type, {})
+    component_rates: Dict[str, Any] = {}
+    expected_rate = base_rate
+    rate_model = "per_minute_blend"
+
+    if stat_type in {"PTS+REB+AST", "PTS+REB", "PTS+AST", "REB+AST"}:
+        component_rate_total = 0.0
+        components_available = 0
+        for component_stat, _ in (profile.get("components") or {}).items():
+            component_context = _estimate_stat_rate_context(player, logs, component_stat)
+            component_rates[component_stat] = component_context.get("details", {})
+            component_rate = _safe_float(component_context.get("expected_rate"))
+            if component_rate is not None:
+                component_rate_total += component_rate
+                components_available += 1
+        component_rate_projection = component_rate_total if components_available > 0 else None
+        expected_rate = _weighted_average([
+            (component_rate_projection, 0.85),
+            (base_rate, 0.15),
+        ])
+        rate_model = "component_sum"
+    elif stat_type == "PTS":
+        season_usage = _normalize_fraction(stats.get("USG_PCT"))
+        recent_10_usage = _average_log_metric(logs, "USG_PCT", 10, percent=True)
+        recent_5_usage = _average_log_metric(logs, "USG_PCT", 5, percent=True)
+        expected_usage = _weighted_average([
+            (season_usage, 0.42),
+            (recent_10_usage, 0.35),
+            (recent_5_usage, 0.23),
+        ])
+
+        season_drive_rate = _safe_divide(_safe_float(stats.get("DRIVES")), season_minutes)
+        recent_10_drive_rate = _metric_rate_from_logs(logs, "DRIVES", 10)
+        recent_5_drive_rate = _metric_rate_from_logs(logs, "DRIVES", 5)
+        expected_drive_rate = _weighted_average([
+            (season_drive_rate, 0.45),
+            (recent_10_drive_rate, 0.35),
+            (recent_5_drive_rate, 0.20),
+        ])
+
+        recent_10_ts = _average_log_metric(logs, "TS_PCT", 10, percent=True)
+        usage_shift = None
+        if expected_usage is not None and season_usage is not None and season_usage > 0:
+            usage_shift = (expected_usage - season_usage) / max(season_usage, 0.12)
+        drive_shift = None
+        if expected_drive_rate is not None and season_drive_rate is not None and season_drive_rate > 0:
+            drive_shift = (expected_drive_rate - season_drive_rate) / max(season_drive_rate, 0.05)
+
+        opportunity_rate = base_rate
+        if opportunity_rate is not None:
+            if usage_shift is not None:
+                opportunity_rate *= 1.0 + (_clamp(usage_shift, -0.30, 0.30) * 0.22)
+            if drive_shift is not None:
+                opportunity_rate *= 1.0 + (_clamp(drive_shift, -0.30, 0.30) * 0.14)
+            if recent_10_ts is not None:
+                opportunity_rate *= 1.0 + (_clamp((recent_10_ts - 0.57) / 0.12, -0.10, 0.10) * 0.10)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.60),
+            (opportunity_rate, 0.40),
+        ])
+        rate_model = "usage_drive_rate"
+        component_rates = {
+            "season_usage": _round(season_usage, 3),
+            "recent_10_usage": _round(recent_10_usage, 3),
+            "recent_5_usage": _round(recent_5_usage, 3),
+            "expected_usage": _round(expected_usage, 3),
+            "season_drive_rate": _round(season_drive_rate, 3),
+            "recent_10_drive_rate": _round(recent_10_drive_rate, 3),
+            "recent_5_drive_rate": _round(recent_5_drive_rate, 3),
+            "expected_drive_rate": _round(expected_drive_rate, 3),
+            "recent_10_ts_pct": _round(recent_10_ts, 3),
+        }
+    elif stat_type == "AST":
+        season_potential_rate = _safe_divide(_safe_float(stats.get("POTENTIAL_AST")), season_minutes)
+        recent_10_potential_rate = _metric_rate_from_logs(logs, "POTENTIAL_AST", 10)
+        recent_5_potential_rate = _metric_rate_from_logs(logs, "POTENTIAL_AST", 5)
+        expected_potential_rate = _weighted_average([
+            (season_potential_rate, 0.45),
+            (recent_10_potential_rate, 0.33),
+            (recent_5_potential_rate, 0.22),
+        ])
+
+        season_conversion = _clamp_optional(_safe_divide(season_stat, _safe_float(stats.get("POTENTIAL_AST"))), 0.10, 0.65)
+        recent_10_ast_total, recent_10_potential_total = _paired_metric_sums(logs, "AST", "POTENTIAL_AST", 10)
+        recent_5_ast_total, recent_5_potential_total = _paired_metric_sums(logs, "AST", "POTENTIAL_AST", 5)
+        recent_10_conversion = _clamp_optional(_safe_divide(recent_10_ast_total, recent_10_potential_total), 0.10, 0.65)
+        recent_5_conversion = _clamp_optional(_safe_divide(recent_5_ast_total, recent_5_potential_total), 0.10, 0.65)
+        expected_conversion = _weighted_average([
+            (season_conversion, 0.45),
+            (recent_10_conversion, 0.35),
+            (recent_5_conversion, 0.20),
+        ])
+
+        opportunity_rate = None
+        if expected_potential_rate is not None and expected_conversion is not None:
+            opportunity_rate = expected_potential_rate * _clamp(expected_conversion, 0.05, 0.55)
+
+        recent_drive_pass_rate = _metric_rate_from_logs(logs, "DRIVE_PASSES", 10)
+        if opportunity_rate is not None and recent_drive_pass_rate is not None:
+            opportunity_rate *= 1.0 + (_clamp((recent_drive_pass_rate - 0.10) / 0.10, -0.10, 0.10) * 0.08)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.35),
+            (opportunity_rate, 0.65),
+        ])
+        rate_model = "potential_assists"
+        component_rates = {
+            "season_potential_rate": _round(season_potential_rate, 3),
+            "recent_10_potential_rate": _round(recent_10_potential_rate, 3),
+            "recent_5_potential_rate": _round(recent_5_potential_rate, 3),
+            "expected_potential_rate": _round(expected_potential_rate, 3),
+            "season_conversion": _round(season_conversion, 3),
+            "recent_10_conversion": _round(recent_10_conversion, 3),
+            "recent_5_conversion": _round(recent_5_conversion, 3),
+            "expected_conversion": _round(expected_conversion, 3),
+        }
+    elif stat_type == "REB":
+        season_chance_rate = _safe_divide(_safe_float(stats.get("REB_CHANCES")), season_minutes)
+        recent_10_chance_rate = _metric_rate_from_logs(logs, "REB_CHANCES", 10)
+        recent_5_chance_rate = _metric_rate_from_logs(logs, "REB_CHANCES", 5)
+        expected_chance_rate = _weighted_average([
+            (season_chance_rate, 0.45),
+            (recent_10_chance_rate, 0.33),
+            (recent_5_chance_rate, 0.22),
+        ])
+
+        season_conversion = _clamp_optional(_safe_divide(season_stat, _safe_float(stats.get("REB_CHANCES"))), 0.10, 0.75)
+        recent_10_reb_total, recent_10_chances_total = _paired_metric_sums(logs, "REB", "REB_CHANCES", 10)
+        recent_5_reb_total, recent_5_chances_total = _paired_metric_sums(logs, "REB", "REB_CHANCES", 5)
+        recent_10_conversion = _clamp_optional(_safe_divide(recent_10_reb_total, recent_10_chances_total), 0.10, 0.75)
+        recent_5_conversion = _clamp_optional(_safe_divide(recent_5_reb_total, recent_5_chances_total), 0.10, 0.75)
+        expected_conversion = _weighted_average([
+            (season_conversion, 0.45),
+            (recent_10_conversion, 0.35),
+            (recent_5_conversion, 0.20),
+        ])
+
+        opportunity_rate = None
+        if expected_chance_rate is not None and expected_conversion is not None:
+            opportunity_rate = expected_chance_rate * _clamp(expected_conversion, 0.08, 0.55)
+
+        recent_reb_pct = _average_log_metric(logs, "REB_PCT", 10, percent=True)
+        if opportunity_rate is not None and recent_reb_pct is not None:
+            opportunity_rate *= 1.0 + (_clamp((recent_reb_pct - 0.15) / 0.10, -0.10, 0.10) * 0.08)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.30),
+            (opportunity_rate, 0.70),
+        ])
+        rate_model = "rebound_chances"
+        component_rates = {
+            "season_rebound_chance_rate": _round(season_chance_rate, 3),
+            "recent_10_rebound_chance_rate": _round(recent_10_chance_rate, 3),
+            "recent_5_rebound_chance_rate": _round(recent_5_chance_rate, 3),
+            "expected_rebound_chance_rate": _round(expected_chance_rate, 3),
+            "season_conversion": _round(season_conversion, 3),
+            "recent_10_conversion": _round(recent_10_conversion, 3),
+            "recent_5_conversion": _round(recent_5_conversion, 3),
+            "expected_conversion": _round(expected_conversion, 3),
+        }
+    elif stat_type == "FG3M":
+        season_attempt_rate = _safe_divide(_safe_float(stats.get("FG3A")), season_minutes)
+        recent_10_attempt_rate = _metric_rate_from_logs(logs, "FG3A", 10)
+        recent_5_attempt_rate = _metric_rate_from_logs(logs, "FG3A", 5)
+        expected_attempt_rate = _weighted_average([
+            (season_attempt_rate, 0.45),
+            (recent_10_attempt_rate, 0.33),
+            (recent_5_attempt_rate, 0.22),
+        ])
+
+        season_conversion = _clamp_optional(_normalize_fraction(stats.get("FG3_PCT")), 0.15, 0.60)
+        recent_10_fg3m_total, recent_10_fg3a_total = _paired_metric_sums(logs, "FG3M", "FG3A", 10)
+        recent_5_fg3m_total, recent_5_fg3a_total = _paired_metric_sums(logs, "FG3M", "FG3A", 5)
+        recent_10_conversion = _clamp_optional(_safe_divide(recent_10_fg3m_total, recent_10_fg3a_total), 0.15, 0.60)
+        recent_5_conversion = _clamp_optional(_safe_divide(recent_5_fg3m_total, recent_5_fg3a_total), 0.15, 0.60)
+        expected_conversion = _weighted_average([
+            (season_conversion, 0.42),
+            (recent_10_conversion, 0.35),
+            (recent_5_conversion, 0.23),
+        ])
+
+        opportunity_rate = None
+        if expected_attempt_rate is not None and expected_conversion is not None:
+            opportunity_rate = expected_attempt_rate * _clamp(expected_conversion, 0.08, 0.60)
+
+        expected_rate = _weighted_average([
+            (base_rate, 0.25),
+            (opportunity_rate, 0.75),
+        ])
+        rate_model = "three_point_volume"
+        component_rates = {
+            "season_attempt_rate": _round(season_attempt_rate, 3),
+            "recent_10_attempt_rate": _round(recent_10_attempt_rate, 3),
+            "recent_5_attempt_rate": _round(recent_5_attempt_rate, 3),
+            "expected_attempt_rate": _round(expected_attempt_rate, 3),
+            "season_conversion": _round(season_conversion, 3),
+            "recent_10_conversion": _round(recent_10_conversion, 3),
+            "recent_5_conversion": _round(recent_5_conversion, 3),
+            "expected_conversion": _round(expected_conversion, 3),
+        }
+
+    return {
+        "expected_rate": expected_rate,
+        "details": {
+            "rate_model": rate_model,
+            "season_rate": _round(season_rate, 3),
+            "recent_10_rate": _round(recent_10_rate, 3),
+            "recent_5_rate": _round(recent_5_rate, 3),
+            "base_rate": _round(base_rate, 3),
+            "expected_rate": _round(expected_rate, 3),
+            "components": component_rates,
+        },
+    }
+
+
+def _build_schedule_context(schedule_payload: Any, action_network_payload: Any = None) -> Dict[str, Any]:
     if isinstance(schedule_payload, dict):
         games = schedule_payload.get("games", [])
     elif isinstance(schedule_payload, list):
@@ -616,6 +1422,19 @@ def _build_schedule_context(schedule_payload: Any) -> Dict[str, Any]:
                 game for _, game in future_games
                 if _normalize_game_date(game.get("game_date")) == target_date
             ]
+
+    an_games = action_network_payload.get("games", []) if isinstance(action_network_payload, dict) else []
+    for game in active_games:
+        an_match = next((g for g in an_games if g.get("game_id") == game.get("game_id") or (
+            g.get("home_team_tricode") == game.get("home_team_tricode") and
+            g.get("away_team_tricode") == game.get("away_team_tricode")
+        )), None)
+        if an_match:
+            game["action_network_markets"] = an_match.get("markets")
+            game["has_action_network_markets"] = an_match.get("has_action_network_markets")
+            context_market = _pick_action_network_context_market(an_match.get("markets"))
+            game["spread"] = an_match.get("spread")
+            game["total"] = _market_total_line(context_market) or an_match.get("total")
 
     active_teams = set()
     active_dates = set()
@@ -1162,6 +1981,933 @@ def _compute_matchup_context(player: Dict[str, Any], stat_type: str, side: str) 
     }
 
 
+def _classify_player_role(season_minutes: Optional[float], season_usage_pct: Optional[float]) -> str:
+    mins = season_minutes or 0.0
+    usg = season_usage_pct or 0.0
+    if mins >= 30.0 and usg >= 0.24:
+        return "star"
+    if mins >= 24.0:
+        return "starter"
+    if mins >= 16.0:
+        return "rotation"
+    return "bench"
+
+
+def _load_tonight_dnps(master_feed: Any, injury_report: Any, schedule_context: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    if not isinstance(injury_report, dict):
+        return {}
+    
+    matcher, id_to_team = _build_master_feed_matcher(master_feed)
+    if not matcher:
+        return {}
+        
+    master_stats = {}
+    if isinstance(master_feed, list):
+        for player in master_feed:
+            if isinstance(player, dict) and player.get("id"):
+                master_stats[str(player["id"])] = player
+            
+    dnps_by_team: Dict[str, List[Dict[str, Any]]] = {}
+    
+    games = injury_report.get("games", [])
+    if isinstance(games, list):
+        for game in games:
+            if not isinstance(game, dict):
+                continue
+            team_player_entries: List[Tuple[str, Dict[str, Any]]] = []
+            teams_payload = game.get("teams", {})
+            if isinstance(teams_payload, dict):
+                for team_abbrev, team_data in teams_payload.items():
+                    if not isinstance(team_data, dict):
+                        continue
+                    for player_entry in team_data.get("players", []):
+                        if isinstance(player_entry, dict):
+                            team_player_entries.append((str(team_abbrev or "").strip().upper(), player_entry))
+
+            for player_entry in game.get("players", []):
+                if isinstance(player_entry, dict):
+                    team_player_entries.append(("", player_entry))
+
+            for team_context, player_entry in team_player_entries:
+                status = str(player_entry.get("current_status") or "").lower()
+                if status not in {"out", "doubtful"}:
+                    continue
+
+                raw_name = player_entry.get("player_name") or player_entry.get("report_player_name") or ""
+
+                player_id = matcher.match_player(raw_name, team_context or "UNK")
+                if not player_id:
+                    continue
+
+                canonical_team = team_context or id_to_team.get(str(player_id))
+                if not canonical_team:
+                    continue
+
+                master_player = master_stats.get(str(player_id), {})
+                stats = master_player.get("stats", {})
+                season_minutes = _safe_float(stats.get("MIN"))
+                season_usage = _normalize_fraction(stats.get("USG_PCT"))
+
+                role = _classify_player_role(season_minutes, season_usage)
+
+                dnps_by_team.setdefault(canonical_team, []).append({
+                    "player_id": str(player_id),
+                    "player_name": master_player.get("name", raw_name),
+                    "season_usage_pct": season_usage * 100.0 if season_usage is not None else None,
+                    "season_minutes": season_minutes,
+                    "position": master_player.get("position"),
+                    "role": role,
+                })
+                
+    return dnps_by_team
+
+
+def _compute_lineup_adjustment(
+    player: Dict[str, Any],
+    stat_type: str,
+    side: str,
+    tonight_dnps: Optional[Dict[str, List[Dict[str, Any]]]],
+    tonight_opponent_dnps: Optional[List[Dict[str, Any]]],
+    logs: List[Dict[str, Any]],
+    team_recent_games: Dict[str, str],
+    game_context: Optional[Dict[str, Any]] = None,
+    feature_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    adjustment = {
+        "q50_multiplier": 1.0,
+        "adjustment_type": "none",
+        "reason": "",
+        "freed_usage_pct": 0.0,
+        "absent_stars": [],
+        "benefit_flags": [],
+        "context_multipliers": {},
+        "modeled_minutes_delta": None,
+        "severe_vacancy": False,
+        "returning_teammate_drag": False,
+        "vegas_context": {},
+        "blowout_risk_boost": False,
+        "b2b_rest_flip": False,
+        "opponent_reb_context": None,
+    }
+
+    team = player.get("team")
+    if not team:
+        return adjustment
+
+    stats = player.get("stats", {}) if isinstance(player, dict) else {}
+    player_season_minutes = _safe_float(stats.get("MIN"))
+    player_position = str(player.get("position") or "").upper()
+    player_position_group = "G" if "G" in player_position else "C" if "C" in player_position else "F" if "F" in player_position else ""
+    feature_snapshot = feature_snapshot if isinstance(feature_snapshot, dict) else {}
+    absent_teammates = tonight_dnps.get(team, []) if isinstance(tonight_dnps, dict) else []
+    
+    team_recent_date_str = team_recent_games.get(team)
+    if team_recent_date_str:
+        team_recent_date = _parse_date(team_recent_date_str)
+        now = get_et_now()
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        if team_recent_date_str == yesterday and logs:
+            latest_logged_date = _parse_date(logs[0].get("GAME_DATE"))
+            if team_recent_date and latest_logged_date and (team_recent_date - latest_logged_date).days >= 1:
+                adjustment["b2b_rest_flip"] = True
+                
+    if tonight_opponent_dnps and (player_season_minutes is None or player_season_minutes < 28.0):
+        if any(dnp.get("role") == "star" for dnp in tonight_opponent_dnps):
+            adjustment["blowout_risk_boost"] = True
+
+    absent_stars = []
+    freed_usg = _safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0
+    opponent_frontcourt_freed = 0.0
+    opponent_reb_context = None
+
+    for dnp in absent_teammates:
+        role = dnp.get("role")
+        if role in {"star", "starter", "rotation"}:
+            if role in {"star", "starter"}:
+                absent_stars.append(dnp.get("player_name") or "Unknown")
+
+    adjustment["freed_usage_pct"] = freed_usg
+    adjustment["absent_stars"] = absent_stars
+
+    q50_multiplier = 1.0
+    reason_parts: List[str] = []
+    context_multipliers: Dict[str, float] = {}
+    if isinstance(game_context, dict) and (
+        "vegas_total" in game_context
+        or "team_implied_total" in game_context
+        or "team_spread_line" in game_context
+    ):
+        team_game_context = game_context
+    else:
+        team_game_context = _resolve_game_team_context(game_context, team)
+
+    def apply_context_multiplier(key: str, multiplier: float, reason: str) -> None:
+        nonlocal q50_multiplier
+        if multiplier <= 0:
+            return
+        q50_multiplier *= multiplier
+        context_multipliers[key] = round(multiplier, 4)
+        if reason:
+            reason_parts.append(reason)
+
+    benefit_flags: List[str] = []
+    recent5_minutes_avg = _safe_float(feature_snapshot.get("recent5_minutes_avg"))
+    if recent5_minutes_avg is not None and recent5_minutes_avg >= OVERLAY_MIN_RECENT5_MINUTES:
+        missing_same_pos_minutes = _safe_float(feature_snapshot.get("missing_same_pos_minutes"), 0.0) or 0.0
+        missing_playmaker_potential_ast_pg = _safe_float(
+            feature_snapshot.get("missing_playmaker_potential_ast_pg"),
+            0.0,
+        ) or 0.0
+        playmaker_interaction = _safe_float(
+            feature_snapshot.get("playmaker_vacuum_x_player_ast_rate"),
+            0.0,
+        ) or 0.0
+        missing_onball_drives_pg = _safe_float(feature_snapshot.get("missing_onball_drives_pg"), 0.0) or 0.0
+        onball_interaction = _safe_float(
+            feature_snapshot.get("onball_vacuum_x_player_drive_rate"),
+            0.0,
+        ) or 0.0
+        missing_high_usage_usage_pct = _safe_float(
+            feature_snapshot.get("missing_high_usage_usage_pct"),
+            0.0,
+        ) or 0.0
+        usage_interaction = _safe_float(
+            feature_snapshot.get("usage_vacuum_x_player_usage_pct"),
+            0.0,
+        ) or 0.0
+
+        if missing_same_pos_minutes >= SAME_POS_BENEFIT_MINUTES_THRESHOLD:
+            benefit_flags.append("same_pos_benefit")
+        if (
+            missing_playmaker_potential_ast_pg >= CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD
+            and playmaker_interaction > 0.0
+        ):
+            benefit_flags.append("creation_benefit")
+        if missing_onball_drives_pg >= ONBALL_BENEFIT_DRIVES_THRESHOLD and onball_interaction > 0.0:
+            benefit_flags.append("onball_benefit")
+        if missing_high_usage_usage_pct >= USAGE_BENEFIT_USAGE_THRESHOLD and usage_interaction > 0.0:
+            benefit_flags.append("usage_benefit")
+
+    adjustment["benefit_flags"] = benefit_flags
+    if len(benefit_flags) == 1:
+        apply_context_multiplier(
+            "role_single_benefit",
+            OVERLAY_SINGLE_BENEFIT_MULTIPLIER,
+            benefit_flags[0].replace("_", " "),
+        )
+        adjustment["adjustment_type"] = "beneficiary_boost"
+    elif len(benefit_flags) >= 2:
+        apply_context_multiplier(
+            "role_multi_benefit",
+            OVERLAY_MULTI_BENEFIT_MULTIPLIER,
+            ", ".join(flag.replace("_", " ") for flag in benefit_flags),
+        )
+        adjustment["adjustment_type"] = "beneficiary_boost"
+
+    missing_team_minutes = _safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0
+    missing_same_pos_minutes = _safe_float(feature_snapshot.get("missing_same_pos_minutes"), 0.0) or 0.0
+    missing_key_teammate_count = _safe_float(feature_snapshot.get("missing_key_teammate_count"), 0.0) or 0.0
+    modeled_minutes_delta = _safe_float(feature_snapshot.get("modeled_minutes_delta_vs_recent5"), 0.0) or 0.0
+    modeled_minutes_q50 = _safe_float(feature_snapshot.get("modeled_minutes_q50"))
+    returning_key_teammate_count = _safe_float(feature_snapshot.get("returning_key_teammate_count"), 0.0) or 0.0
+    returning_same_pos_key_count = _safe_float(feature_snapshot.get("returning_same_pos_key_count"), 0.0) or 0.0
+    adjustment["modeled_minutes_delta"] = round(modeled_minutes_delta, 2)
+
+    scoring_context_stats = {"PTS", "FG3M", "PTS+AST", "PTS+REB", "PTS+REB+AST"}
+    creation_context_stats = {"AST", "PTS+AST", "REB+AST", "PTS+REB+AST"}
+    rebound_context_stats = {"REB", "PTS+REB", "REB+AST", "PTS+REB+AST"}
+    defensive_context_stats = {"STL", "BLK", "STL+BLK"}
+    role_sensitive_stats = scoring_context_stats | creation_context_stats | rebound_context_stats
+
+    if (
+        modeled_minutes_delta >= 2.0
+        and (benefit_flags or missing_key_teammate_count >= 1.0)
+        and (recent5_minutes_avg is None or recent5_minutes_avg >= 8.0)
+    ):
+        max_minutes_boost = 0.04 if stat_type in defensive_context_stats else 0.065
+        minutes_boost_pct = min(max_minutes_boost, modeled_minutes_delta * 0.008)
+        if minutes_boost_pct > 0.0:
+            apply_context_multiplier(
+                "modeled_minutes_promotion",
+                1.0 + minutes_boost_pct,
+                f"modeled minutes +{modeled_minutes_delta:.1f}",
+            )
+            if adjustment["adjustment_type"] == "none":
+                adjustment["adjustment_type"] = "minutes_promotion_boost"
+
+    vacancy_pressure = max(
+        freed_usg / 75.0,
+        missing_team_minutes / 90.0,
+        missing_key_teammate_count / 3.0,
+    )
+    if benefit_flags and vacancy_pressure >= 1.0 and stat_type not in defensive_context_stats:
+        severe_boost_pct = min(0.05, 0.02 + (vacancy_pressure - 1.0) * 0.025)
+        apply_context_multiplier(
+            "severe_vacancy",
+            1.0 + severe_boost_pct,
+            "severe teammate vacancy",
+        )
+        adjustment["severe_vacancy"] = True
+        if adjustment["adjustment_type"] == "none":
+            adjustment["adjustment_type"] = "severe_vacancy_boost"
+
+    if (
+        "same_pos_benefit" in benefit_flags
+        and missing_same_pos_minutes >= 36.0
+        and stat_type in role_sensitive_stats
+    ):
+        same_pos_boost_pct = min(0.035, (missing_same_pos_minutes - 30.0) * 0.0015)
+        if same_pos_boost_pct > 0.0:
+            apply_context_multiplier(
+                "same_position_rotation_shock",
+                1.0 + same_pos_boost_pct,
+                "same-position rotation shock",
+            )
+
+    if returning_key_teammate_count > 0.0:
+        returning_drag_pct = 0.015 + min(0.025, returning_key_teammate_count * 0.01)
+        if returning_same_pos_key_count > 0.0 and stat_type in role_sensitive_stats:
+            returning_drag_pct += 0.01
+        if benefit_flags or modeled_minutes_delta >= 2.0:
+            returning_drag_pct *= 0.45
+        if returning_drag_pct > 0.0:
+            apply_context_multiplier(
+                "returning_key_teammate_drag",
+                1.0 - min(0.05, returning_drag_pct),
+                "returning key teammate tempers role",
+            )
+            adjustment["returning_teammate_drag"] = True
+
+    if stat_type in {"REB", "PTS+REB+AST", "PTS+REB", "REB+AST"}:
+        for dnp in tonight_opponent_dnps or []:
+            role = dnp.get("role")
+            pos = str(dnp.get("position") or "").upper()
+            if role in {"star", "starter"} and ("C" in pos or "F" in pos):
+                opponent_frontcourt_freed += (dnp.get("season_minutes") or 0.0)
+                if role == "star":
+                    opponent_reb_context = "star_out"
+                elif role == "starter" and opponent_reb_context != "star_out":
+                    opponent_reb_context = "starter_out"
+                    
+        if opponent_frontcourt_freed >= 24.0:
+            opponent_reb_multiplier = 1.07 if opponent_reb_context == "star_out" else 1.04
+            apply_context_multiplier(
+                "opponent_frontcourt_absence",
+                opponent_reb_multiplier,
+                "easier rebounding context",
+            )
+            adjustment["opponent_reb_context"] = opponent_reb_context
+            if adjustment["adjustment_type"] == "none":
+                adjustment["adjustment_type"] = "opponent_reb_boost"
+
+    vegas_total = _safe_float(team_game_context.get("vegas_total")) if team_game_context else None
+    team_implied_total = _safe_float(team_game_context.get("team_implied_total")) if team_game_context else None
+    spread_abs = _safe_float(team_game_context.get("spread_abs")) if team_game_context else None
+    if vegas_total is not None:
+        if vegas_total >= 230.0 and (
+            stat_type in scoring_context_stats
+            or stat_type in creation_context_stats
+        ):
+            total_boost_pct = min(0.04, (vegas_total - 228.0) * 0.003)
+            apply_context_multiplier(
+                "high_game_total",
+                1.0 + total_boost_pct,
+                f"high game total {vegas_total:.1f}",
+            )
+        elif vegas_total <= 214.0 and stat_type in scoring_context_stats:
+            total_drag_pct = min(0.045, (216.0 - vegas_total) * 0.004)
+            apply_context_multiplier(
+                "low_game_total",
+                1.0 - max(0.0, total_drag_pct),
+                f"low game total {vegas_total:.1f}",
+            )
+
+        if vegas_total <= 216.0 and player_position_group in {"C", "F"} and stat_type in rebound_context_stats:
+            rebound_total_boost_pct = min(0.035, (218.0 - vegas_total) * 0.003)
+            apply_context_multiplier(
+                "low_total_rebounding",
+                1.0 + max(0.0, rebound_total_boost_pct),
+                "low total favors rebound volume",
+            )
+
+    if team_implied_total is not None:
+        if team_implied_total >= 118.0 and (
+            stat_type in scoring_context_stats
+            or stat_type in creation_context_stats
+        ):
+            implied_boost_pct = min(0.035, (team_implied_total - 116.0) * 0.003)
+            apply_context_multiplier(
+                "high_team_implied_total",
+                1.0 + implied_boost_pct,
+                f"team implied total {team_implied_total:.1f}",
+            )
+        elif team_implied_total <= 106.0 and stat_type in scoring_context_stats:
+            implied_drag_pct = min(0.04, (108.0 - team_implied_total) * 0.004)
+            apply_context_multiplier(
+                "low_team_implied_total",
+                1.0 - max(0.0, implied_drag_pct),
+                f"low team implied total {team_implied_total:.1f}",
+            )
+
+    minutes_reference = modeled_minutes_q50 or player_season_minutes or recent5_minutes_avg
+    if spread_abs is not None and spread_abs >= 12.0 and minutes_reference is not None:
+        protected_promotion = bool(benefit_flags and modeled_minutes_delta >= 3.0)
+        if minutes_reference >= 26.0 and not protected_promotion:
+            blowout_drag_pct = min(0.055, (spread_abs - 10.0) * 0.006)
+            apply_context_multiplier(
+                "blowout_minutes_drag",
+                1.0 - max(0.0, blowout_drag_pct),
+                f"spread {spread_abs:.1f} adds blowout risk",
+            )
+            adjustment["blowout_risk_boost"] = True
+
+    adjustment["context_multipliers"] = context_multipliers
+    adjustment["vegas_context"] = {
+        "vegas_total": vegas_total,
+        "team_implied_total": team_implied_total,
+        "spread_abs": spread_abs,
+        "team_spread_line": _safe_float(team_game_context.get("team_spread_line")) if team_game_context else None,
+        "market_book_label": team_game_context.get("market_book_label") if team_game_context else None,
+    }
+    adjustment["reason"] = " | ".join(dict.fromkeys(reason_parts))
+    adjustment["q50_multiplier"] = _clamp(q50_multiplier, 0.70, OVERLAY_MAX_MULTIPLIER)
+    return adjustment
+
+
+def _injury_refresh_target_age_minutes(schedule_payload: Dict[str, Any]) -> int:
+    now = get_et_now()
+    rows = schedule_payload.get("games", []) if isinstance(schedule_payload, dict) else []
+    today_str = now.date().isoformat()
+    has_today_games = any(
+        isinstance(row, dict) and _normalize_game_date(row.get("game_date")) == today_str
+        for row in rows
+    )
+    if has_today_games and now.hour >= INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET:
+        return INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES
+    return INJURY_FRESHNESS_NORMAL_MAX_AGE_MINUTES
+
+
+def _refresh_injury_report_for_scoring(
+    schedule_payload: Dict[str, Any],
+    *,
+    refresh_label: str,
+) -> None:
+    target_age_minutes = _injury_refresh_target_age_minutes(schedule_payload)
+    try:
+        from pathlib import Path
+        from scrapers import fetch_nba_injury_report
+
+        result = fetch_nba_injury_report.refresh_nba_injury_report_if_needed(
+            output_path=Path(os.path.join(CURRENT_DIR, "nba_injury_report.json")),
+            schedule_path=Path(SCHEDULE_PATH),
+            min_refresh_interval_seconds=int(target_age_minutes * 60),
+        )
+        payload = result.get("payload") if isinstance(result, dict) else {}
+        logger.info(
+            "Edge Score injury refresh | label=%s refreshed=%s age_target_min=%s games=%s players=%s",
+            refresh_label,
+            bool(result.get("refreshed")) if isinstance(result, dict) else False,
+            target_age_minutes,
+            (payload or {}).get("game_count", 0),
+            (payload or {}).get("player_row_count", 0),
+        )
+    except Exception as exc:
+        logger.warning("Edge Score injury pre-refresh failed: %s", exc)
+
+
+def _injury_artifact_freshness(
+    injury_report: Dict[str, Any],
+    *,
+    schedule_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    generated_at = str((injury_report or {}).get("generated_at") or "").strip()
+    age_minutes = None
+    if generated_at:
+        try:
+            generated_dt = datetime.fromisoformat(generated_at)
+            if generated_dt.tzinfo is None:
+                generated_dt = generated_dt.replace(tzinfo=ET_ZONE)
+            age_minutes = round(
+                max(0.0, (get_et_now() - generated_dt.astimezone(ET_ZONE)).total_seconds() / 60.0),
+                2,
+            )
+        except ValueError:
+            age_minutes = None
+    max_age_minutes = _injury_refresh_target_age_minutes(schedule_payload)
+    return {
+        "generated_at": generated_at or None,
+        "report_timestamp_et": (injury_report or {}).get("report_timestamp_et"),
+        "query_date": (injury_report or {}).get("query_date"),
+        "age_minutes": age_minutes,
+        "max_age_minutes": float(max_age_minutes),
+        "is_stale": age_minutes is None or age_minutes > max_age_minutes,
+    }
+
+
+def _get_promotion_guardrail_config() -> Dict[str, float]:
+    global _ml_predictor
+    raw_config = {}
+    if _ml_predictor is not None and isinstance(getattr(_ml_predictor, "meta", None), dict):
+        raw_config = _ml_predictor.meta.get("promotion_guardrail", {}) or {}
+    return resolve_promotion_guardrail_config(raw_config)
+
+
+def _is_combo_stat_type(stat_type: str) -> bool:
+    return "+" in str(stat_type or "")
+
+
+def _has_positive_creator_interaction(feature_snapshot: Dict[str, Any]) -> bool:
+    return any(
+        (_safe_float(feature_snapshot.get(key), 0.0) or 0.0) > 0.0
+        for key in (
+            "playmaker_vacuum_x_player_ast_rate",
+            "onball_vacuum_x_player_drive_rate",
+            "missing_playmaker_potential_ast_pg_x_player_ast_rate",
+            "missing_onball_drives_pg_x_player_drive_rate",
+        )
+    )
+
+
+def _is_injury_sensitive_recommendation(feature_snapshot: Dict[str, Any]) -> bool:
+    return any(
+        (
+            (_safe_float(feature_snapshot.get("missing_key_teammate_count"), 0.0) or 0.0) > 0.0,
+            (_safe_float(feature_snapshot.get("returning_key_teammate_count"), 0.0) or 0.0) > 0.0,
+            (_safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0) >= 25.0,
+            (_safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0) >= 30.0,
+        )
+    )
+
+
+def _compute_recommendation_eligibility(
+    *,
+    side: str,
+    ml_details: Dict[str, Any],
+) -> Dict[str, Any]:
+    feature_snapshot = ml_details.get("injury_feature_snapshot") or {}
+    injury_sensitive = _is_injury_sensitive_recommendation(feature_snapshot)
+    injury_freshness = ml_details.get("injury_report_freshness") or {}
+    if injury_sensitive and injury_freshness.get("is_stale"):
+        return {
+            "injury_sensitive": True,
+            "eligibility_blocked": True,
+            "eligibility_block_reason": "blocked_stale_injury_context",
+        }
+
+    missing_team_usage_pct = _safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0
+    missing_team_minutes = _safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0
+    missing_key_teammate_count = _safe_float(feature_snapshot.get("missing_key_teammate_count"), 0.0) or 0.0
+    returning_key_teammate_count = _safe_float(feature_snapshot.get("returning_key_teammate_count"), 0.0) or 0.0
+    modeled_minutes_delta = _safe_float(feature_snapshot.get("modeled_minutes_delta_vs_recent5"), 0.0) or 0.0
+    teammate_minutes_delta = _safe_float(
+        feature_snapshot.get("missing_key_teammates_player_minutes_delta"),
+        0.0,
+    ) or 0.0
+    teammate_stat_delta = _safe_float(
+        feature_snapshot.get("missing_key_teammates_player_stat_delta"),
+        0.0,
+    ) or 0.0
+
+    if (
+        side == "under"
+        and injury_sensitive
+        and missing_team_usage_pct >= 45.0
+        and missing_team_minutes >= 60.0
+        and (
+            missing_key_teammate_count >= 2.0
+            or returning_key_teammate_count >= 2.0
+        )
+        and (
+            modeled_minutes_delta >= 3.0
+            or teammate_minutes_delta >= 2.0
+        )
+        and (
+            teammate_stat_delta > 0.0
+            or _has_positive_creator_interaction(feature_snapshot)
+        )
+    ):
+        return {
+            "injury_sensitive": True,
+            "eligibility_blocked": True,
+            "eligibility_block_reason": "blocked_promotion_under",
+        }
+
+    return {
+        "injury_sensitive": injury_sensitive,
+        "eligibility_blocked": False,
+        "eligibility_block_reason": "",
+    }
+
+
+def _compute_promotion_guardrail(
+    *,
+    player: Dict[str, Any],
+    stat_type: str,
+    side: str,
+    line: float,
+    ml_details: Dict[str, Any],
+    edge_score: float,
+    confidence: float,
+) -> Dict[str, Any]:
+    guardrail = {
+        "active": False,
+        "reason": "",
+        "edge_score_penalty": 0.0,
+        "confidence_penalty": 0.0,
+        "display_edge_score": edge_score,
+        "display_confidence": confidence,
+        "gap_pct": None,
+        "gap_threshold_pct": None,
+    }
+    if side != "under" or stat_type not in PROMOTION_GUARDRAIL_SUPPORTED_STAT_TYPES:
+        return guardrail
+
+    injury_freshness = ml_details.get("injury_report_freshness") or {}
+    if injury_freshness.get("is_stale"):
+        guardrail["reason"] = "injury_context_stale"
+        return guardrail
+
+    feature_snapshot = ml_details.get("injury_feature_snapshot") or {}
+    q50 = _safe_float(ml_details.get("q50"), _safe_float(ml_details.get("prediction_val")))
+    if q50 is None or q50 >= line:
+        return guardrail
+
+    config = _get_promotion_guardrail_config()
+    missing_team_usage_pct = _safe_float(feature_snapshot.get("missing_team_usage_pct"), 0.0) or 0.0
+    missing_team_minutes = _safe_float(feature_snapshot.get("missing_team_minutes"), 0.0) or 0.0
+    recent5_minutes_avg = _safe_float(feature_snapshot.get("recent5_minutes_avg"), 0.0) or 0.0
+    modeled_minutes_delta = _safe_float(feature_snapshot.get("modeled_minutes_delta_vs_recent5"), 0.0) or 0.0
+    teammate_minutes_delta = _safe_float(
+        feature_snapshot.get("missing_key_teammates_player_minutes_delta"),
+        0.0,
+    ) or 0.0
+    if (
+        missing_team_usage_pct < config["min_missing_team_usage_pct"]
+        or missing_team_minutes < config["min_missing_team_minutes"]
+        or recent5_minutes_avg < config["min_recent5_minutes_avg"]
+        or (
+            modeled_minutes_delta < config["min_modeled_minutes_delta_vs_recent5"]
+            and teammate_minutes_delta < config["min_missing_key_teammates_player_minutes_delta"]
+        )
+    ):
+        return guardrail
+
+    pos_group = str(
+        feature_snapshot.get("resolved_pos_group")
+        or _simple_position(player.get("position"))
+        or "G"
+    ).upper()
+    missing_same_pos_minutes = _safe_float(feature_snapshot.get("missing_same_pos_minutes"), 0.0) or 0.0
+    missing_guard_minutes = _safe_float(feature_snapshot.get("missing_guard_minutes"), 0.0) or 0.0
+    missing_playmaker_potential_ast_pg = _safe_float(
+        feature_snapshot.get("missing_playmaker_potential_ast_pg"),
+        0.0,
+    ) or 0.0
+    missing_onball_drives_pg = _safe_float(feature_snapshot.get("missing_onball_drives_pg"), 0.0) or 0.0
+    playmaker_interaction = _safe_float(
+        feature_snapshot.get("missing_playmaker_potential_ast_pg_x_player_ast_rate"),
+        _safe_float(feature_snapshot.get("playmaker_vacuum_x_player_ast_rate"), 0.0),
+    ) or 0.0
+    onball_interaction = _safe_float(
+        feature_snapshot.get("missing_onball_drives_pg_x_player_drive_rate"),
+        _safe_float(feature_snapshot.get("onball_vacuum_x_player_drive_rate"), 0.0),
+    ) or 0.0
+
+    role_reasons: List[str] = []
+    role_aligned = False
+    if pos_group == "G":
+        if (
+            missing_guard_minutes >= config["min_missing_guard_minutes"]
+            or missing_same_pos_minutes >= config["min_missing_same_pos_minutes"]
+        ):
+            role_aligned = True
+            role_reasons.append("guard vacancy")
+    else:
+        if missing_same_pos_minutes >= config["min_missing_same_pos_minutes"]:
+            role_aligned = True
+            role_reasons.append("same-position vacancy")
+        elif (
+            (
+                missing_playmaker_potential_ast_pg >= config["min_cross_position_creator_metric"]
+                and playmaker_interaction > 0.0
+            )
+            or (
+                missing_onball_drives_pg >= config["min_cross_position_creator_metric"]
+                and onball_interaction > 0.0
+            )
+        ):
+            role_aligned = True
+            role_reasons.append("cross-position creator vacancy")
+
+    if not role_aligned:
+        return guardrail
+
+    gap_pct = max(0.0, (line - q50) / max(abs(line), 1.0))
+    gap_threshold_pct = (
+        config["combo_stat_gap_pct"]
+        if _is_combo_stat_type(stat_type)
+        else config["single_stat_gap_pct"]
+    )
+    guardrail["gap_pct"] = round(gap_pct, 4)
+    guardrail["gap_threshold_pct"] = round(gap_threshold_pct, 4)
+    if gap_pct >= gap_threshold_pct:
+        return guardrail
+
+    display_edge_score = min(
+        edge_score - config["edge_score_penalty_points"],
+        config["display_edge_score_cap"],
+    )
+    display_confidence = max(0.0, confidence - config["confidence_penalty_points"])
+    guardrail.update({
+        "active": True,
+        "reason": ", ".join(role_reasons),
+        "edge_score_penalty": round(max(0.0, edge_score - display_edge_score), 2),
+        "confidence_penalty": round(max(0.0, confidence - display_confidence), 2),
+        "display_edge_score": round(max(1.0, display_edge_score), 1),
+        "display_confidence": round(display_confidence, 1),
+    })
+    return guardrail
+
+
+_ml_predictor = None
+
+def _compute_ml_regression_context(
+    player: Dict[str, Any],
+    opponent: str,
+    stat_type: str,
+    line: float,
+    side: str,
+    tonight_dnps: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    tonight_opponent_dnps: Optional[List[Dict[str, Any]]] = None,
+    team_recent_games: Optional[Dict[str, str]] = None,
+    game_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Compute the ML regression component score for a player/stat/line/side combination.
+
+    Consumes quantile outputs (q25, q50, q75) from the predictor when available,
+    falling back to the legacy (prediction + std_dev) interface if the predictor
+    has not yet been updated to emit quantiles.
+
+    The quantile spread is used to derive p_over via a simple linear interpolation
+    across the [q25, q75] interval, which avoids the Gaussian assumption of the old
+    norm.cdf approach and is robust to skewed distributions.
+
+    p_over is exposed in the returned details dict so it flows through to the
+    candidate output and can be used by the edge score boost logic.
+    """
+    global _ml_predictor
+    if _ml_predictor is None:
+        from utils.ml_inference import get_ml_predictor
+        _ml_predictor = get_ml_predictor()
+
+    logs = _extract_logs(player)
+    if not logs:
+        return {"available": False, "score": 0.0, "p_over": None, "details": {}}
+
+    player_info = {
+        "player_id": player.get("id"),
+        "player_name": player.get("name"),
+        "team": player.get("team"),
+        "opponent_abbrev": opponent,
+        "position": player.get("position"),
+    }
+
+    if isinstance(game_context, dict) and (
+        "vegas_total" in game_context
+        or "team_implied_total" in game_context
+        or "team_spread_line" in game_context
+    ):
+        resolved_game_context = game_context
+    else:
+        resolved_game_context = _resolve_game_team_context(game_context, player.get("team"))
+    res = _ml_predictor.predict(
+        player_info,
+        logs,
+        stat_type,
+        include_features=True,
+        game_context=resolved_game_context,
+    )
+    if not res:
+        return {"available": False, "score": 0.0, "p_over": None, "details": {}}
+    feature_snapshot = res.get("feature_snapshot", {}) if isinstance(res, dict) else {}
+    injury_report_freshness = res.get("injury_report_freshness", {}) if isinstance(res, dict) else {}
+    position_resolution_summary = res.get("position_resolution_summary", {}) if isinstance(res, dict) else {}
+    runtime_context = res.get("runtime_context", {}) if isinstance(res, dict) else {}
+
+    # ── Quantile path (preferred) ────────────────────────────────────────────
+    q25 = _safe_float(res.get("q25"))
+    q50 = _safe_float(res.get("q50"))
+    q75 = _safe_float(res.get("q75"))
+
+    if q25 is not None and q50 is not None and q75 is not None:
+        adjustment = _compute_lineup_adjustment(
+            player=player,
+            stat_type=stat_type,
+            side=side,
+            tonight_dnps=tonight_dnps,
+            tonight_opponent_dnps=tonight_opponent_dnps,
+            logs=logs,
+            team_recent_games=team_recent_games or {},
+            game_context=resolved_game_context,
+            feature_snapshot=feature_snapshot,
+        )
+        mult = adjustment.get("q50_multiplier", 1.0)
+        if mult != 1.0:
+            q25 *= mult
+            q50 *= mult
+            q75 *= mult
+            logger.debug(
+                "Lineup adjustment applied | player=%s stat=%s mult=%.3f reason=%s",
+                player.get("name"), stat_type, mult, adjustment.get("reason"),
+            )
+            
+        # Linear interpolation across [q25, q75] to estimate p_over.
+        # - line <= q25  → ~75% of outcomes are above  → p_over ≈ 0.75
+        # - line == q50  → 50% of outcomes are above   → p_over = 0.50
+        # - line >= q75  → ~25% of outcomes are above  → p_over ≈ 0.25
+        # We clamp to [0.10, 0.90] to avoid extreme scores from extrapolation.
+        iqr = q75 - q25
+        if iqr > 1e-6:
+            # Fraction of the IQR that the line sits above q25
+            frac = _clamp((line - q25) / iqr, 0.0, 1.0)
+            # frac=0 → line is at/below q25 → p_over=0.75; frac=1 → p_over=0.25
+            p_over = _clamp(0.75 - frac * 0.50, 0.10, 0.90)
+        else:
+            # Zero-width IQR (degenerate prediction) — fall back to median comparison
+            p_over = 0.60 if q50 > line else 0.40
+
+        prediction_val = q50
+        spread = round(q75 - q25, 2)
+        details = {
+            "prediction_val": round(q50, 2),
+            "q25": round(q25, 2),
+            "q50": round(q50, 2),
+            "q75": round(q75, 2),
+            "quantile_spread": spread,
+            "hit_probability": round(p_over * 100.0, 1),
+            "p_over": round(p_over, 4),
+            "calibration": "quantile_iqr",
+            "ml_lineup_adjustment": adjustment,
+            "injury_report_freshness": injury_report_freshness,
+            "position_resolution_summary": position_resolution_summary,
+            "runtime_context": runtime_context,
+            "injury_feature_snapshot": {
+                key: feature_snapshot.get(key)
+                for key in (
+                    "resolved_pos_group",
+                    "position_resolution_tier",
+                    "recent5_minutes_avg",
+                    "predicted_minutes",
+                    "modeled_minutes_q50",
+                    "modeled_minutes_iqr",
+                    "modeled_minutes_delta_vs_recent5",
+                    "modeled_minutes_x_recent10_target_per_min",
+                    "recent10_target_per_min",
+                    "same_team_current_season_games",
+                    "recent_team_games_missed_10",
+                    "inactive_streak_team_games",
+                    "games_since_return",
+                    "previous_absence_streak_team_games",
+                    "missing_team_usage_pct",
+                    "missing_team_minutes",
+                    "missing_same_pos_usage_pct",
+                    "missing_same_pos_minutes",
+                    "missing_guard_usage_pct",
+                    "missing_guard_minutes",
+                    "missing_high_usage_usage_pct",
+                    "missing_high_usage_minutes",
+                    "missing_playmaker_potential_ast_pg",
+                    "missing_playmaker_minutes",
+                    "missing_onball_drives_pg",
+                    "missing_onball_minutes",
+                    "playmaker_vacuum_x_player_ast_rate",
+                    "onball_vacuum_x_player_drive_rate",
+                    "usage_vacuum_x_player_usage_pct",
+                    "missing_playmaker_potential_ast_pg_x_player_ast_rate",
+                    "missing_onball_drives_pg_x_player_drive_rate",
+                    "missing_high_usage_usage_pct_x_player_usage_rate",
+                    "missing_same_pos_minutes_x_player_target_per_min",
+                    "missing_playmaker_potential_ast_pg_x_player_target_per_min",
+                    "missing_onball_drives_pg_x_player_target_per_min",
+                    "missing_key_teammates_player_stat_delta",
+                    "missing_key_teammates_player_minutes_delta",
+                    "missing_key_teammates_player_usage_pct_delta",
+                    "missing_key_teammates_player_potential_ast_rate_delta",
+                    "missing_key_teammates_player_drive_rate_delta",
+                    "missing_key_teammates_player_target_per_min_delta",
+                    "missing_key_teammates_effective_support",
+                    "missing_key_teammate_count",
+                    "missing_same_pos_key_count",
+                    "missing_guard_key_count",
+                    "missing_playmaker_key_count",
+                    "returning_key_teammates_player_stat_delta",
+                    "returning_key_teammates_player_minutes_delta",
+                    "returning_key_teammates_player_usage_pct_delta",
+                    "returning_key_teammates_player_potential_ast_rate_delta",
+                    "returning_key_teammates_player_drive_rate_delta",
+                    "returning_key_teammates_player_target_per_min_delta",
+                    "returning_key_teammates_effective_support",
+                    "returning_key_teammate_count",
+                    "returning_same_pos_key_count",
+                    "returning_guard_key_count",
+                    "returning_playmaker_key_count",
+                    "modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta",
+                    "modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta",
+                )
+            },
+            "vegas_total": _safe_float(resolved_game_context.get("vegas_total")),
+            "vegas_spread": _safe_float(resolved_game_context.get("vegas_spread")),
+            "team_implied_total": _safe_float(resolved_game_context.get("team_implied_total")),
+            "team_spread_line": _safe_float(resolved_game_context.get("team_spread_line")),
+            "spread_abs": _safe_float(resolved_game_context.get("spread_abs")),
+        }
+
+    # ── Legacy path (std_dev / Gaussian fallback) ────────────────────────────
+    else:
+        prediction_val = _safe_float(res.get("prediction"))
+        std_dev = _safe_float(res.get("std_dev"))
+        if prediction_val is None:
+            return {"available": False, "score": 0.0, "p_over": None, "details": {}}
+
+        p_over = _ml_predictor.hit_probability(prediction_val, std_dev, line, "over")
+        p_over = _clamp(p_over, 0.10, 0.90)
+        details = {
+            "prediction_val": round(prediction_val, 2),
+            "hit_probability": round(p_over * 100.0, 1),
+            "p_over": round(p_over, 4),
+            "std_dev": round(std_dev, 2) if std_dev is not None else None,
+            "calibration": "gaussian_legacy",
+            "injury_report_freshness": injury_report_freshness,
+            "position_resolution_summary": position_resolution_summary,
+            "runtime_context": runtime_context,
+            "vegas_total": _safe_float(resolved_game_context.get("vegas_total")),
+            "vegas_spread": _safe_float(resolved_game_context.get("vegas_spread")),
+            "team_implied_total": _safe_float(resolved_game_context.get("team_implied_total")),
+            "team_spread_line": _safe_float(resolved_game_context.get("team_spread_line")),
+            "spread_abs": _safe_float(resolved_game_context.get("spread_abs")),
+        }
+
+    # ── Score mapping: p_over → [-1, 1] ─────────────────────────────────────
+    # p_over > 0.5 leans towards +1.0 (over signal)
+    # p_over < 0.5 leans towards -1.0 (under signal)
+    # We use the requested side to orient the score correctly.
+    if side == "over":
+        prob_for_side = p_over
+    else:
+        prob_for_side = 1.0 - p_over
+
+    score = _clamp((prob_for_side - 0.5) * 2.0, -1.0, 1.0)
+
+    return {
+        "available": True,
+        "raw_score": score,
+        "score": score,
+        "p_over": round(p_over, 4),
+        "details": details,
+    }
+
+
 def _compute_recent_form_context(player: Dict[str, Any], stat_type: str, line: float, side: str) -> Dict[str, Any]:
     profile = STAT_PROFILES.get(stat_type, {})
     scale = profile.get("scale", 5.0)
@@ -1229,7 +2975,14 @@ def _compute_recent_form_context(player: Dict[str, Any], stat_type: str, line: f
     }
 
 
-def _compute_projection_context(player: Dict[str, Any], stat_type: str, line: float, side: str) -> Dict[str, Any]:
+def _compute_projection_context(
+    entry: Dict[str, Any],
+    stat_type: str,
+    line: float,
+    side: str,
+    blowout_risk_boost: bool = False,
+) -> Dict[str, Any]:
+    player = entry.get("player") if isinstance(entry, dict) else {}
     profile = STAT_PROFILES.get(stat_type, {})
     scale = profile.get("scale", 5.0)
     season_avg = _stat_value_from_stats(player.get("stats", {}), stat_type)
@@ -1238,21 +2991,29 @@ def _compute_projection_context(player: Dict[str, Any], stat_type: str, line: fl
     recent5_avg = _average(values[:5])
     recent10_avg = _average(values[:10])
 
-    season_minutes = _safe_float((player.get("stats") or {}).get("MIN"))
-    recent_minutes = _average([
-        _safe_float(game.get("MIN")) for game in logs[:5]
-    ])
-    minute_delta_ratio = None
-    if season_minutes and recent_minutes:
-        minute_delta_ratio = (recent_minutes - season_minutes) / max(season_minutes, 1.0)
+    minutes_context = _compute_expected_minutes_context(entry, logs, blowout_risk_boost=blowout_risk_boost)
+    expected_minutes = _safe_float(minutes_context.get("expected_minutes"))
+    season_minutes = _safe_float(minutes_context.get("season_minutes"))
+    recent_minutes = _safe_float(minutes_context.get("recent_5_minutes"))
+    rate_context = _estimate_stat_rate_context(player, logs, stat_type)
+    expected_rate = _safe_float(rate_context.get("expected_rate"))
 
+    opportunity_projection = None
+    if expected_minutes is not None and expected_rate is not None:
+        opportunity_projection = expected_minutes * expected_rate
+
+    legacy_projection = _legacy_projection_baseline(
+        season_avg,
+        recent10_avg,
+        recent5_avg,
+        season_minutes,
+        recent_minutes,
+    )
     baseline_projection = _weighted_average([
-        (season_avg, 0.48),
-        (recent10_avg, 0.32),
-        (recent5_avg, 0.20),
+        (opportunity_projection, 0.78),
+        (legacy_projection, 0.22),
     ])
-    if baseline_projection is not None and minute_delta_ratio is not None:
-        baseline_projection += baseline_projection * _clamp(minute_delta_ratio, -0.20, 0.20) * 0.18
+    projection_method = "opportunity_v1" if opportunity_projection is not None else "legacy_average"
 
     projection_gap = None if baseline_projection is None else SIDE_MULTIPLIERS[side] * (baseline_projection - line)
     score = _normalize_score_by_scale(projection_gap, scale)
@@ -1262,13 +3023,30 @@ def _compute_projection_context(player: Dict[str, Any], stat_type: str, line: fl
         "score": score if available else 0.0,
         "raw_score": score if available else 0.0,
         "details": {
+            "model_type": projection_method,
             "season_avg": _round(season_avg),
             "recent_5_avg": _round(recent5_avg),
             "recent_10_avg": _round(recent10_avg),
             "recent_minutes": _round(recent_minutes),
             "season_minutes": _round(season_minutes),
+            "expected_minutes": _round(expected_minutes),
+            "expected_rate": _round(expected_rate, 3),
+            "opportunity_projection": _round(opportunity_projection),
+            "legacy_projection": _round(legacy_projection),
             "baseline_projection": _round(baseline_projection),
             "projection_gap": _round(projection_gap),
+            "minutes_context": {
+                "minutes_baseline": _round(minutes_context.get("minutes_baseline")),
+                "minutes_adjustment_ratio": _round(minutes_context.get("minutes_adjustment_ratio"), 3),
+                "blowout_risk": _round(minutes_context.get("blowout_risk"), 3),
+                "team_win_pct": _round(minutes_context.get("team_win_pct"), 3),
+                "opponent_win_pct": _round(minutes_context.get("opponent_win_pct"), 3),
+                "competitive_minutes_avg": _round(minutes_context.get("competitive_minutes_avg")),
+                "blowout_minutes_avg": _round(minutes_context.get("blowout_minutes_avg")),
+                "competitive_sample_size": minutes_context.get("competitive_sample_size"),
+                "blowout_sample_size": minutes_context.get("blowout_sample_size"),
+            },
+            "rate_context": rate_context.get("details", {}),
         },
     }
 
@@ -1314,6 +3092,7 @@ def _compute_back_to_back_context(
     stat_type: str,
     game_date: str,
     side: str,
+    b2b_rest_flip: bool = False,
 ) -> Dict[str, Any]:
     logs = _extract_logs(player)
     if not logs:
@@ -1323,6 +3102,21 @@ def _compute_back_to_back_context(
     latest_logged_date = _parse_date(logs[0].get("GAME_DATE"))
     if current_game_date is None or latest_logged_date is None:
         return {"available": False, "score": 0.0, "raw_score": 0.0, "details": {}}
+
+    profile = STAT_PROFILES.get(stat_type, {})
+    if b2b_rest_flip:
+        base_bias = profile.get("b2b_bias", -0.08)
+        score = _clamp(abs(base_bias) * 0.5 * SIDE_MULTIPLIERS[side], -0.25, 0.25)
+        return {
+            "available": True,
+            "score": score,
+            "raw_score": score,
+            "details": {
+                "current_is_b2b": False,
+                "b2b_rest_flip": True,
+                "fallback_bias": _round(abs(base_bias) * 0.5),
+            },
+        }
 
     current_is_b2b = (current_game_date - latest_logged_date).days == 1
     if not current_is_b2b:
@@ -1695,12 +3489,22 @@ def _build_reason_strings(
     components: Dict[str, Dict[str, Any]],
 ) -> List[str]:
     reasons = []
+    profile = STAT_PROFILES.get(stat_type, {})
     projection_details = components["projection"]["details"]
     projection_gap = projection_details.get("projection_gap")
     if projection_gap is not None:
         direction_word = "above" if projection_gap >= 0 else "below"
+        model_label = "Opportunity-based baseline" if projection_details.get("model_type") == "opportunity_v1" else "Baseline projection"
         reasons.append(
-            f"Baseline projection sits {abs(projection_gap):.1f} {direction_word} the line."
+            f"{model_label} sits {abs(projection_gap):.1f} {direction_word} the line."
+        )
+
+    expected_minutes = _safe_float(projection_details.get("expected_minutes"))
+    expected_rate = _safe_float(projection_details.get("expected_rate"))
+    if expected_minutes is not None and expected_rate is not None:
+        rate_label = str(profile.get("display") or stat_type).lower()
+        reasons.append(
+            f"Expected role is about {expected_minutes:.1f} minutes at {expected_rate:.2f} {rate_label} per minute."
         )
 
     recent_details = components["recent_form"]["details"]
@@ -1750,6 +3554,8 @@ def _build_candidate(
     active_entries: List[Dict[str, Any]],
     style_cache: Dict[int, Dict[str, float]],
     line_lookup: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]],
+    tonight_dnps: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    team_recent_games: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     player = entry["player"]
     profile = STAT_PROFILES.get(stat_type)
@@ -1767,10 +3573,21 @@ def _build_candidate(
     opponent = entry.get("opponent")
 
     components = {
-        "projection": _compute_projection_context(player, stat_type, line, side),
+        "projection": _compute_projection_context(entry, stat_type, line, side),
         "recent_form": _compute_recent_form_context(player, stat_type, line, side),
         "matchup": _compute_matchup_context(player, stat_type, side),
         "market": _compute_market_context(market_selection, side),
+        "ml_regression": _compute_ml_regression_context(
+            player=player,
+            opponent=opponent,
+            stat_type=stat_type,
+            line=line,
+            side=side,
+            tonight_dnps=tonight_dnps,
+            tonight_opponent_dnps=tonight_dnps.get(opponent, []) if tonight_dnps and opponent else [],
+            team_recent_games=team_recent_games,
+            game_context=entry.get("game_context"),
+        ),
         "line_movement": _compute_line_movement_context(
             line_lookup,
             player_id=player_id,
@@ -1799,8 +3616,47 @@ def _build_candidate(
 
     available_weight = _component_available_weight(components)
     confidence = round((available_weight / TOTAL_COMPONENT_WEIGHT) * 100.0, 1) if TOTAL_COMPONENT_WEIGHT else 0.0
+
+    # ── ML p_over soft boost ─────────────────────────────────────────────────
+    # When the ML model has high directional conviction (p_over >= 0.60 for an
+    # over pick, or p_over <= 0.40 for an under pick) we apply a small additive
+    # boost to the weighted score before it is converted to an edge_score.
+    # The boost is intentionally modest (+0.04 max) so it cannot override weak
+    # signals from other components — it only amplifies already-strong edges.
+    # We also apply a soft penalty (-0.03) when the ML model disagrees with
+    # the pick direction, to discount edges where the ML and other signals diverge.
+    p_over = _safe_float(components["ml_regression"].get("p_over"))
+    ml_boost = 0.0
+    if p_over is not None and components["ml_regression"].get("available"):
+        if side == "over":
+            if p_over >= 0.60:
+                ml_boost = _clamp((p_over - 0.60) / 0.30 * 0.04, 0.0, 0.04)
+            elif p_over <= 0.40:
+                ml_boost = _clamp((p_over - 0.40) / 0.30 * 0.03, -0.03, 0.0)
+        else:  # under
+            p_under = 1.0 - p_over
+            if p_under >= 0.60:
+                ml_boost = _clamp((p_under - 0.60) / 0.30 * 0.04, 0.0, 0.04)
+            elif p_under <= 0.40:
+                ml_boost = _clamp((p_under - 0.40) / 0.30 * 0.03, -0.03, 0.0)
+    weighted_score = _clamp(weighted_score + ml_boost, -1.0, 1.0)
     confidence_multiplier = 0.85 + (min(confidence, 100.0) / 100.0) * 0.15
     edge_score = round(_clamp(50.0 + (weighted_score * 45.0 * confidence_multiplier), 1.0, 99.0), 1)
+    promotion_guardrail = _compute_promotion_guardrail(
+        player=player,
+        stat_type=stat_type,
+        side=side,
+        line=line,
+        ml_details=components["ml_regression"].get("details", {}) or {},
+        edge_score=edge_score,
+        confidence=confidence,
+    )
+    eligibility = _compute_recommendation_eligibility(
+        side=side,
+        ml_details=components["ml_regression"].get("details", {}) or {},
+    )
+    display_edge_score = promotion_guardrail.get("display_edge_score", edge_score)
+    display_confidence = promotion_guardrail.get("display_confidence", confidence)
 
     reasons = _build_reason_strings(side, line, stat_type, components)
     recommendation_key = f"{player_id}|{game_date}|{stat_type}|{side}"
@@ -1826,14 +3682,28 @@ def _build_candidate(
         "odds_display": _format_odds(chosen.get("odds")),
         "opposite_odds": _safe_float(chosen.get("opposite_odds")),
         "edge_score": edge_score,
+        "display_edge_score": round(float(display_edge_score), 1),
         "confidence": confidence,
+        "display_confidence": round(float(display_confidence), 1),
         "signal_score": round(weighted_score, 3),
+        "ml_p_over": p_over,
+        "ml_boost_applied": round(ml_boost, 4) if ml_boost != 0.0 else None,
+        "guardrail_active": bool(promotion_guardrail.get("active")),
+        "guardrail_reason": promotion_guardrail.get("reason"),
+        "guardrail_confidence_penalty": promotion_guardrail.get("confidence_penalty"),
+        "guardrail_edge_score_penalty": promotion_guardrail.get("edge_score_penalty"),
+        "injury_sensitive": bool(eligibility.get("injury_sensitive")),
+        "eligibility_blocked": bool(eligibility.get("eligibility_blocked")),
+        "eligibility_block_reason": str(eligibility.get("eligibility_block_reason") or ""),
         "reasons": reasons,
         "inputs": {
             "projection": components["projection"]["details"],
             "recent_form": components["recent_form"]["details"],
             "matchup": components["matchup"]["details"],
             "market": components["market"]["details"],
+            "ml_regression": components["ml_regression"]["details"],
+            "promotion_guardrail": promotion_guardrail,
+            "eligibility": eligibility,
             "line_movement": components["line_movement"]["details"],
             "similar_players": components["similar_players"]["details"],
             "head_to_head": components["head_to_head"]["details"],
@@ -1921,6 +3791,7 @@ def _write_history_snapshot(payload: Dict[str, Any]) -> None:
                 "sportsbook": recommendation.get("sportsbook"),
                 "line": recommendation.get("line"),
                 "edge_score": recommendation.get("edge_score"),
+                "display_edge_score": recommendation.get("display_edge_score"),
             }
             for recommendation in payload.get("recommendations", [])
         ],
@@ -1939,6 +3810,80 @@ def _state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -
             "sportsbook": recommendation.get("sportsbook"),
             "line": recommendation.get("line"),
             "odds": recommendation.get("odds"),
+            "display_edge_score": recommendation.get("display_edge_score"),
+            "rank": recommendation.get("rank"),
+        }
+    return snapshot
+
+
+def _load_preservable_previous_board(
+    previous_payload: Dict[str, Any],
+    *,
+    current_game_dates: List[str],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(previous_payload, dict):
+        return None
+    previous_recommendations = previous_payload.get("recommendations", [])
+    if not isinstance(previous_recommendations, list) or not previous_recommendations:
+        return None
+
+    normalized_current_dates = sorted({
+        _normalize_game_date(game_date)
+        for game_date in current_game_dates
+        if _normalize_game_date(game_date)
+    })
+    normalized_previous_dates = sorted({
+        _normalize_game_date(game_date)
+        for game_date in previous_payload.get("game_dates", [])
+        if _normalize_game_date(game_date)
+    })
+    if normalized_current_dates and normalized_previous_dates != normalized_current_dates:
+        return None
+
+    previous_summary = previous_payload.get("summary", {})
+    if not isinstance(previous_summary, dict):
+        previous_summary = {}
+    previous_freshness = previous_summary.get("injury_report_freshness", {})
+    if isinstance(previous_freshness, dict) and previous_freshness.get("is_stale"):
+        return None
+
+    preserved_recommendations = copy.deepcopy(previous_recommendations)
+    for rank, recommendation in enumerate(preserved_recommendations, start=1):
+        recommendation["rank"] = rank
+
+    preserved_boards = previous_summary.get("sportsbook_boards", {})
+    if not isinstance(preserved_boards, dict):
+        preserved_boards = {}
+
+    return {
+        "generated_at": previous_payload.get("generated_at"),
+        "recommendations": preserved_recommendations,
+        "sportsbook_boards": copy.deepcopy(preserved_boards),
+    }
+
+
+def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    snapshot = {}
+    for recommendation in recommendations:
+        snapshot[recommendation["recommendation_key"]] = {
+            "recommendation_key": recommendation.get("recommendation_key"),
+            "player_name": recommendation.get("player_name"),
+            "player_id": recommendation.get("player_id"),
+            "stat_type": recommendation.get("stat_type"),
+            "stat_label": recommendation.get("stat_label"),
+            "pick": recommendation.get("pick"),
+            "pick_label": recommendation.get("pick_label"),
+            "sportsbook": recommendation.get("sportsbook"),
+            "sportsbook_label": recommendation.get("sportsbook_label"),
+            "line": recommendation.get("line"),
+            "odds": recommendation.get("odds"),
+            "odds_display": recommendation.get("odds_display"),
+            "edge_score": recommendation.get("edge_score"),
+            "display_edge_score": recommendation.get("display_edge_score"),
+            "guardrail_active": recommendation.get("guardrail_active"),
+            "game_date": _normalize_game_date(recommendation.get("game_date")),
+            "first_logged_at": recommendation.get("first_logged_at"),
+            "why_summary": recommendation.get("why_summary") or _discord_signal_summary(recommendation),
         }
     return snapshot
 
@@ -1947,7 +3892,9 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
     per_book_counts: Dict[str, int] = {}
     filtered = []
     for recommendation in recommendations:
-        signal_score = _safe_float(recommendation.get("edge_score"), 0.0) or 0.0
+        if recommendation.get("eligibility_blocked"):
+            continue
+        signal_score = _ranking_edge_score(recommendation)
         book = str(recommendation.get("sportsbook") or "").strip().lower()
         if book not in SUPPORTED_BOOKS:
             continue
@@ -1963,7 +3910,9 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
 def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     filtered = []
     for recommendation in recommendations:
-        signal_score = _safe_float(recommendation.get("edge_score"), 0.0) or 0.0
+        if recommendation.get("eligibility_blocked"):
+            continue
+        signal_score = _ranking_edge_score(recommendation)
         if signal_score < EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE:
             continue
         filtered.append(recommendation)
@@ -2009,6 +3958,22 @@ def _compute_notification_delta(
                 reason_flags.append("line moved")
             if abs((_safe_float(recommendation.get("odds"), 0.0) or 0.0) - (_safe_float(previous.get("odds"), 0.0) or 0.0)) >= EDGE_DISCORD_ODDS_MOVE_AMERICAN:
                 reason_flags.append("odds moved")
+            current_display_edge_score = _safe_float(recommendation.get("display_edge_score"))
+            previous_display_edge_score = _safe_float(previous.get("display_edge_score"))
+            if (
+                current_display_edge_score is not None
+                and previous_display_edge_score is not None
+                and abs(current_display_edge_score - previous_display_edge_score) >= EDGE_DISCORD_SCORE_DELTA
+            ):
+                reason_flags.append("score moved")
+            current_rank = _safe_int(recommendation.get("rank"))
+            previous_rank = _safe_int(previous.get("rank"))
+            if (
+                current_rank is not None
+                and previous_rank is not None
+                and abs(current_rank - previous_rank) >= EDGE_DISCORD_RANK_DELTA
+            ):
+                reason_flags.append("rank changed")
 
         if reason_flags:
             changes.append({
@@ -2020,6 +3985,10 @@ def _compute_notification_delta(
                 "sportsbook": recommendation.get("sportsbook"),
                 "line": recommendation.get("line"),
                 "edge_score": recommendation.get("edge_score"),
+                "previous_rank": previous.get("rank") if isinstance(previous, dict) else None,
+                "current_rank": recommendation.get("rank"),
+                "previous_display_edge_score": previous.get("display_edge_score") if isinstance(previous, dict) else None,
+                "current_display_edge_score": recommendation.get("display_edge_score"),
                 "reasons": reason_flags,
             })
 
@@ -2123,6 +4092,18 @@ RESULT_STATUS_LABELS = {
     "void": "Void",
 }
 
+REASON_LABELS = {
+    "restricted_area": "rim",
+    "paint": "paint",
+    "mid_range": "mid-range",
+    "left_corner": "left corner",
+    "right_corner": "right corner",
+    "top_key": "above the break",
+    "catch_and_shoot": "catch-and-shoot",
+    "pull_up": "pull-up",
+    "less_than_10_ft": "inside 10 feet",
+}
+
 
 def _long_stat_label(stat_type: Any, fallback: Any = None) -> str:
     normalized = str(stat_type or "").strip().upper()
@@ -2142,59 +4123,309 @@ def _discord_book_label(recommendation: Dict[str, Any]) -> str:
     odds_display = recommendation.get("odds_display") or _format_odds(recommendation.get("odds"))
     if recommendation.get("sportsbook") == "pp" or odds_display == "-":
         return f"{sportsbook_label} line"
+    if str(odds_display).strip().lower().startswith(str(sportsbook_label).strip().lower()):
+        return str(odds_display)
     return f"{sportsbook_label} {odds_display}"
 
 
-def _discord_signal_summary(recommendation: Dict[str, Any]) -> str:
-    inputs = recommendation.get("inputs", {})
+def _discord_tracker_odds_label(recommendation: Dict[str, Any]) -> str:
+    odds_display = str(recommendation.get("odds_display") or _format_odds(recommendation.get("odds")) or "").strip()
+    sportsbook_label = str(recommendation.get("sportsbook_label") or BOOK_LABELS.get(
+        recommendation.get("sportsbook"),
+        "",
+    )).strip()
+    if recommendation.get("sportsbook") == "pp" or odds_display in {"", "-"}:
+        return "line"
+    if sportsbook_label and odds_display.lower().startswith(sportsbook_label.lower()):
+        odds_display = odds_display[len(sportsbook_label):].strip()
+    return odds_display or "line"
+
+
+def _reason_label(raw_key: Any) -> str:
+    key = str(raw_key or "").strip()
+    if not key:
+        return "this area"
+    return REASON_LABELS.get(key, key.replace("_", " "))
+
+
+def _top_weight_detail(weights: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(weights, dict):
+        return None
+    best_entry = None
+    for raw_key, entry in weights.items():
+        if not isinstance(entry, dict):
+            continue
+        player_pct = _safe_float(entry.get("player_pct") or entry.get("percentage"))
+        opp_rank = _safe_float(entry.get("opp_rank") or entry.get("rank"))
+        if player_pct is None or player_pct <= 0:
+            continue
+        candidate = {
+            "key": str(raw_key),
+            "label": _reason_label(raw_key),
+            "player_pct": player_pct,
+            "opp_rank": opp_rank,
+        }
+        if best_entry is None or player_pct > best_entry["player_pct"]:
+            best_entry = candidate
+    return best_entry
+
+
+def _component_reason_snippet(recommendation: Dict[str, Any], component_name: str) -> Optional[str]:
+    stat_type = str(recommendation.get("stat_type") or "")
     side = str(recommendation.get("pick") or "").lower()
-
-    snippets: List[str] = []
     line = _safe_float(recommendation.get("line"))
-    baseline_projection = _safe_float(inputs.get("projection", {}).get("baseline_projection"))
-    projection_gap = _safe_float(inputs.get("projection", {}).get("projection_gap"))
-    projection_delta = None
-    if baseline_projection is not None and line is not None:
-        projection_delta = baseline_projection - line
-    elif projection_gap is not None and side in SIDE_MULTIPLIERS:
-        projection_delta = projection_gap * SIDE_MULTIPLIERS[side]
+    inputs = recommendation.get("inputs", {}) or {}
 
-    if projection_delta is not None and abs(projection_delta) >= 0.5:
-        direction = "above" if projection_delta >= 0 else "below"
-        snippets.append(f"baseline projection sits {abs(projection_delta):.1f} {direction} the line")
+    if component_name == "projection":
+        projection = inputs.get("projection", {}) or {}
+        baseline_projection = _safe_float(projection.get("baseline_projection"))
+        expected_minutes = _safe_float(projection.get("expected_minutes"))
+        expected_rate = _safe_float(projection.get("expected_rate"))
+        rate_context = projection.get("rate_context", {}) or {}
+        rate_model = str(rate_context.get("rate_model") or "")
+        components = rate_context.get("components", {}) or {}
+        if baseline_projection is None or line is None:
+            return None
+        direction = "above" if baseline_projection >= line else "below"
+        if stat_type == "PTS" and rate_model == "usage_drive_rate":
+            expected_usage = _safe_float(components.get("expected_usage"))
+            expected_drive_rate = _safe_float(components.get("expected_drive_rate"))
+            if expected_minutes is not None and expected_usage is not None and expected_drive_rate is not None:
+                return (
+                    f"usage ({expected_usage * 100:.1f}%) and drive volume ({expected_drive_rate:.2f}/min) "
+                    f"point to about {expected_minutes:.1f} minutes and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if stat_type == "AST" and rate_model == "potential_assists":
+            potential_rate = _safe_float(components.get("expected_potential_rate"))
+            if expected_minutes is not None and potential_rate is not None:
+                return (
+                    f"potential assists are supporting about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if stat_type == "REB" and rate_model == "rebound_chances":
+            chance_rate = _safe_float(components.get("expected_rebound_chance_rate"))
+            if expected_minutes is not None and chance_rate is not None:
+                return (
+                    f"rebound chances are supporting about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if stat_type == "FG3M" and rate_model == "three_point_volume":
+            attempt_rate = _safe_float(components.get("expected_attempt_rate"))
+            if expected_minutes is not None and attempt_rate is not None:
+                return (
+                    f"3-point volume ({attempt_rate:.2f} attempts/min) supports about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if rate_model == "component_sum" and isinstance(components, dict):
+            component_names = [
+                _long_stat_label(component_stat).lower()
+                for component_stat, component_detail in components.items()
+                if _safe_float((component_detail or {}).get("expected_rate")) is not None
+            ][:2]
+            if component_names and expected_minutes is not None:
+                joined = " and ".join(component_names)
+                return (
+                    f"{joined} are carrying about {expected_minutes:.1f} minutes "
+                    f"and a {baseline_projection:.1f} baseline {direction} {line:.1f}"
+                )
+        if expected_minutes is not None and expected_rate is not None:
+            rate_label = _long_stat_label(stat_type).lower()
+            return (
+                f"expected role is about {expected_minutes:.1f} minutes at {expected_rate:.2f} {rate_label} per minute, "
+                f"which puts the baseline {direction} {line:.1f}"
+            )
+        return f"baseline projection still lands {direction} the line"
 
-    recent_avg = _safe_float(inputs.get("recent_form", {}).get("averages", {}).get("last_10"))
-    recent_hit_rate = _safe_float(inputs.get("recent_form", {}).get("hit_rates", {}).get("last_10"))
-    if recent_avg is not None and recent_hit_rate is not None and recent_hit_rate >= 55:
-        snippets.append(
-            f"last 10 average is {recent_avg:.1f} with a {recent_hit_rate:.0f}% {_side_name(side).lower()} hit rate"
+    if component_name == "ml_regression":
+        ml_inputs = inputs.get("ml_regression", {})
+        prediction_val = ml_inputs.get("prediction_val")
+        if prediction_val is not None:
+            adj = ml_inputs.get("ml_lineup_adjustment", {})
+            adj_type = adj.get("adjustment_type", "none")
+            
+            vegas_total = _safe_float(ml_inputs.get("vegas_total"))
+            vegas_spread = _safe_float(ml_inputs.get("vegas_spread"))
+            
+            if vegas_total is not None and vegas_total >= 235.0 and stat_type == "PTS":
+                return f"the massive total ({vegas_total}) implies a fast-paced game script, shifting the regression projection to {prediction_val:.1f}"
+            if vegas_spread is not None and abs(vegas_spread) >= 12.0:
+                return f"the point spread ({vegas_spread}) signals massive blowout risk, threatening 4th-quarter minutes and capping the regression projection to {prediction_val:.1f}"
+
+            if adj_type != "none":
+                pct_boost = (adj.get("q50_multiplier", 1.0) - 1.0) * 100.0
+                if adj.get("absent_stars", []):
+                    stars_out = ", ".join(adj.get("absent_stars"))
+                    return f"the regression model projects {prediction_val:.1f} (lineup-adjusted +{pct_boost:.0f}%: {stars_out} out)"
+                if adj.get("reason"):
+                    return f"the regression model projects {prediction_val:.1f} (lineup-adjusted +{pct_boost:.0f}%: {adj.get('reason')})"
+                
+            return f"the regression model projects {prediction_val:.1f}"
+
+    if component_name == "recent_form":
+        recent_form = inputs.get("recent_form", {}) or {}
+        averages = recent_form.get("averages", {}) or {}
+        hit_rates = recent_form.get("hit_rates", {}) or {}
+        recent_10_avg = _safe_float(averages.get("last_10"))
+        recent_5_avg = _safe_float(averages.get("last_5"))
+        recent_10_hit_rate = _safe_float(hit_rates.get("last_10"))
+        trend = _safe_float(recent_form.get("trend"))
+        if recent_10_avg is not None and recent_10_hit_rate is not None and line is not None and recent_10_hit_rate >= 65:
+            return (
+                f"last 10 is averaging {recent_10_avg:.1f} against a {line:.1f} line "
+                f"with a {recent_10_hit_rate:.0f}% {_side_name(side).lower()} hit rate"
+            )
+        if recent_5_avg is not None and recent_10_avg is not None and trend is not None:
+            if side == "over" and trend > 0.4:
+                return f"recent form is rising too: last 5 is {recent_5_avg:.1f} versus {recent_10_avg:.1f} over the last 10"
+            if side == "under" and trend < -0.4:
+                return f"recent form is cooling too: last 5 is {recent_5_avg:.1f} versus {recent_10_avg:.1f} over the last 10"
+        return None
+
+    if component_name == "matchup":
+        matchup = inputs.get("matchup", {}) or {}
+        focus = (STAT_PROFILES.get(stat_type) or {}).get("focus")
+        if focus == "points":
+            shot_leader = _top_weight_detail((matchup.get("shot_type") or {}).get("weights"))
+            play_leader = _top_weight_detail((matchup.get("play_type") or {}).get("weights"))
+            zone_leader = _top_weight_detail((matchup.get("shooting_zones") or {}).get("weights"))
+            leader = shot_leader or play_leader or zone_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"{leader['label']} volume ({leader['player_pct']:.0f}%) lines up with an opponent rank of {leader['opp_rank']:.0f} there"
+        if focus == "assists":
+            assist_leader = _top_weight_detail((matchup.get("assist_zones") or {}).get("weights"))
+            play_leader = _top_weight_detail((matchup.get("play_type") or {}).get("weights"))
+            leader = assist_leader or play_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"assist creation leans through {leader['label']} ({leader['player_pct']:.0f}%), where the opponent ranks {leader['opp_rank']:.0f}"
+        if focus == "rebounds":
+            paint_rank = _safe_float(matchup.get("paint_rank"))
+            if paint_rank is not None:
+                return f"the interior matchup is notable here too, with the opponent ranking {paint_rank:.0f} in the paint"
+        if focus == "threes":
+            zone_leader = _top_weight_detail((matchup.get("three_zones") or {}).get("weights"))
+            shot_leader = _top_weight_detail((matchup.get("shot_type") or {}).get("weights"))
+            leader = zone_leader or shot_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"{leader['label']} 3-point volume ({leader['player_pct']:.0f}%) lines up with an opponent rank of {leader['opp_rank']:.0f}"
+        if focus == "combo":
+            assist_leader = _top_weight_detail((matchup.get("assist_zones") or {}).get("weights"))
+            shot_leader = _top_weight_detail((matchup.get("shot_type") or {}).get("weights"))
+            play_leader = _top_weight_detail((matchup.get("play_type") or {}).get("weights"))
+            leader = assist_leader or shot_leader or play_leader
+            if leader and leader.get("opp_rank") is not None:
+                return f"the matchup fits this combo through {leader['label']} usage ({leader['player_pct']:.0f}%) and an opponent rank of {leader['opp_rank']:.0f}"
+        return None
+
+    if component_name == "market":
+        market = inputs.get("market", {}) or {}
+        line_delta = _safe_float(market.get("line_delta_vs_consensus"))
+        price_delta = _safe_float(market.get("price_delta"))
+        chosen_book = recommendation.get("sportsbook_label") or BOOK_LABELS.get(recommendation.get("sportsbook"))
+        if line_delta is not None and line_delta >= 0.25:
+            return f"{chosen_book} is hanging a line that is {line_delta:.1f} better than consensus"
+        if price_delta is not None and price_delta >= 0.015:
+            return f"{chosen_book} is also offering a friendlier price than the market average"
+        return None
+
+    if component_name == "line_movement":
+        movement = inputs.get("line_movement", {}) or {}
+        line_change = _safe_float(movement.get("favorable_line_change"))
+        price_change = _safe_float(movement.get("favorable_price_change"))
+        if line_change is not None and line_change >= 0.5:
+            return f"the market has already moved {line_change:.1f} points toward the {_side_name(side).lower()}"
+        if price_change is not None and price_change >= 0.02:
+            return f"the price has already moved toward this {_side_name(side).lower()} side"
+        return None
+
+    if component_name == "similar_players":
+        similar = inputs.get("similar_players", {}) or {}
+        comp_sample = int(_safe_float(similar.get("sample_size"), 0.0) or 0)
+        average_gap = _safe_float(similar.get("average_gap_vs_line"))
+        directional_gap = None
+        if average_gap is not None:
+            directional_gap = average_gap if side == "over" else -average_gap
+        if comp_sample >= 3 and directional_gap is not None and directional_gap >= 0.2:
+            if side == "over":
+                return f"{comp_sample} similar-player comps cleared their lines by {directional_gap:.1f} on average"
+            return f"{comp_sample} similar-player comps stayed {directional_gap:.1f} below their lines on average"
+        return None
+
+    if component_name == "head_to_head":
+        h2h = inputs.get("head_to_head", {}) or {}
+        sample_size = int(_safe_float(h2h.get("sample_size"), 0.0) or 0)
+        average = _safe_float(h2h.get("average"))
+        if sample_size >= 2 and average is not None and line is not None:
+            direction = "above" if average >= line else "below"
+            return f"in {sample_size} recent meetings, this matchup has averaged {average:.1f}, which is {direction} the line"
+        return None
+
+    if component_name == "back_to_back":
+        b2b = inputs.get("back_to_back", {}) or {}
+        if stat_type == "STL" or stat_type == "BLK" or stat_type == "STL+BLK":
+            return None
+        if b2b.get("current_is_b2b"):
+            delta = _safe_float(b2b.get("delta_vs_overall"))
+            if delta is not None:
+                direction = "up" if delta >= 0 else "down"
+                return f"back-to-back history matters here too, with this stat trending {direction} by {abs(delta):.1f}"
+            return "back-to-back context is part of the read here"
+        return None
+
+    if component_name == "ml_regression":
+        ml = inputs.get("ml_regression", {}) or {}
+        p_over_val = _safe_float(ml.get("p_over"))
+        prediction_val = _safe_float(ml.get("prediction_val"))
+        hit_prob = _safe_float(ml.get("hit_probability"))
+        if p_over_val is None or prediction_val is None or hit_prob is None:
+            return None
+        if side == "over" and p_over_val >= 0.60:
+            return (
+                f"the regression model projects {prediction_val:.1f} with a "
+                f"{hit_prob:.0f}% over probability"
+            )
+        if side == "under" and p_over_val <= 0.40:
+            under_prob = round((1.0 - p_over_val) * 100.0, 0)
+            return (
+                f"the regression model projects {prediction_val:.1f} with a "
+                f"{under_prob:.0f}% under probability"
+            )
+        return None
+
+    return None
+
+
+def _discord_signal_summary(recommendation: Dict[str, Any]) -> str:
+    component_scores = recommendation.get("component_scores", {}) or {}
+    ranked_components = [
+        component_name
+        for component_name, score in sorted(
+            component_scores.items(),
+            key=lambda item: item[1],
+            reverse=True,
         )
-    elif recent_hit_rate is not None and recent_hit_rate >= 55:
-        snippets.append(f"last 10 {_side_name(side).lower()} hit rate is {recent_hit_rate:.0f}%")
-
-    chosen_book = recommendation.get("sportsbook_label") or BOOK_LABELS.get(recommendation.get("sportsbook"))
-    line_delta = _safe_float(inputs.get("market", {}).get("line_delta_vs_consensus"))
-    if line_delta is not None and abs(line_delta) >= 0.25:
-        snippets.append(f"{chosen_book} is {abs(line_delta):.1f} better than consensus")
-
-    average_gap = _safe_float(inputs.get("similar_players", {}).get("average_gap_vs_line"))
-    comp_sample = int(_safe_float(inputs.get("similar_players", {}).get("sample_size"), 0.0) or 0)
-    if comp_sample >= 3 and average_gap is not None:
-        direction = "above" if average_gap >= 0 else "below"
-        snippets.append(f"{comp_sample} similar-player comps averaged {abs(average_gap):.1f} {direction} their lines")
-
-    line_change = _safe_float(inputs.get("line_movement", {}).get("favorable_line_change"))
-    if line_change is not None and abs(line_change) >= 0.25:
-        snippets.append(f"market moved {abs(line_change):.1f} points toward the {_side_name(side).lower()}")
+        if _safe_float(score, 0.0) is not None and (_safe_float(score, 0.0) or 0.0) > 0.04
+    ]
 
     deduped_snippets: List[str] = []
-    for snippet in snippets:
-        if snippet not in deduped_snippets:
+    for component_name in ranked_components:
+        snippet = _component_reason_snippet(recommendation, component_name)
+        if snippet and snippet not in deduped_snippets:
             deduped_snippets.append(snippet)
+        if len(deduped_snippets) >= 3:
+            break
+
+    if not deduped_snippets:
+        fallback_projection = _component_reason_snippet(recommendation, "projection")
+        fallback_market = _component_reason_snippet(recommendation, "market")
+        fallback_recent = _component_reason_snippet(recommendation, "recent_form")
+        for snippet in (fallback_projection, fallback_market, fallback_recent):
+            if snippet and snippet not in deduped_snippets:
+                deduped_snippets.append(snippet)
+            if len(deduped_snippets) >= 3:
+                break
 
     if not deduped_snippets:
         return "projection, form, and matchup data are generally aligned."
-    deduped_snippets = deduped_snippets[:3]
     if len(deduped_snippets) == 1:
         return f"{deduped_snippets[0]}."
     if len(deduped_snippets) == 2:
@@ -2222,7 +4453,7 @@ def _serialize_recommendation_for_results(recommendation: Dict[str, Any]) -> Dic
         "line": _safe_float(recommendation.get("line")),
         "odds": _safe_float(recommendation.get("odds")),
         "odds_display": recommendation.get("odds_display"),
-        "edge_score": _safe_float(recommendation.get("edge_score")),
+        "edge_score": _safe_float(recommendation.get("display_edge_score"), _safe_float(recommendation.get("edge_score"))),
         "first_logged_at": recommendation.get("first_logged_at"),
     }
 
@@ -2260,19 +4491,30 @@ def _queue_results_recap_payload(
 
         for recommendation in recommendations_for_date:
             recommendation_key = recommendation.get("recommendation_key")
-            if not recommendation_key or recommendation_key in tracked:
+            if not recommendation_key:
                 continue
-            tracked[recommendation_key] = {
-                **recommendation,
-                "first_alerted_at": generated_at,
-                "first_alert_kind": alert_kind,
-            }
+            existing_recommendation = tracked.get(recommendation_key)
+            if not isinstance(existing_recommendation, dict):
+                tracked[recommendation_key] = {
+                    **recommendation,
+                    "first_alerted_at": generated_at,
+                    "first_alert_kind": alert_kind,
+                }
+                continue
+
+            if alert_kind == "tracker" and not existing_recommendation.get("first_logged_at"):
+                tracked[recommendation_key] = {
+                    **existing_recommendation,
+                    **recommendation,
+                    "first_logged_at": recommendation.get("first_logged_at") or generated_at,
+                    "first_alert_kind": "tracker",
+                }
 
         ordered_recommendations = sorted(
             tracked.values(),
             key=lambda recommendation: (
                 int(recommendation.get("rank") or 999),
-                str(recommendation.get("first_alerted_at") or ""),
+                str(recommendation.get("first_logged_at") or recommendation.get("first_alerted_at") or ""),
             ),
         )
 
@@ -2295,20 +4537,20 @@ def _compute_tracker_delta(
     generated_at: Any,
 ) -> Dict[str, Any]:
     tracker_candidates = _filter_tracker_recommendations(recommendations)
-    pending = state.get("pending_result_recaps", {})
-    if not isinstance(pending, dict):
-        pending = {}
-    existing_entry = pending.get(slate_date, {}) if slate_date else {}
+    tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
+    if not isinstance(tracker_state_by_date, dict):
+        tracker_state_by_date = {}
+    existing_entry = tracker_state_by_date.get(slate_date, {}) if slate_date else {}
     if not isinstance(existing_entry, dict):
         existing_entry = {}
-    tracked = existing_entry.get("tracked_recommendations", {})
-    if not isinstance(tracked, dict):
-        tracked = {}
+    sent_snapshot = existing_entry.get("sent_snapshot", {})
+    if not isinstance(sent_snapshot, dict):
+        sent_snapshot = {}
 
     new_recommendations = []
     for recommendation in tracker_candidates:
         recommendation_key = str(recommendation.get("recommendation_key") or "").strip()
-        if not recommendation_key or recommendation_key in tracked:
+        if not recommendation_key or recommendation_key in sent_snapshot:
             continue
         tracker_recommendation = dict(recommendation)
         tracker_recommendation["first_logged_at"] = generated_at
@@ -2319,7 +4561,69 @@ def _compute_tracker_delta(
         "new_recommendations": new_recommendations,
         "should_send": bool(new_recommendations),
         "slate_date": slate_date,
+        "current_snapshot": _tracker_state_snapshot_for_recommendations(new_recommendations),
     }
+
+
+def _tracker_running_recommendations(
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    tracker_delta: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
+    if not isinstance(tracker_state_by_date, dict):
+        tracker_state_by_date = {}
+    existing_entry = tracker_state_by_date.get(slate_date, {}) if slate_date else {}
+    if not isinstance(existing_entry, dict):
+        existing_entry = {}
+    sent_snapshot = existing_entry.get("sent_snapshot", {})
+    if not isinstance(sent_snapshot, dict):
+        sent_snapshot = {}
+
+    pending_recaps = state.get("pending_result_recaps", {})
+    if not isinstance(pending_recaps, dict):
+        pending_recaps = {}
+    pending_entry = pending_recaps.get(slate_date, {}) if slate_date else {}
+    if not isinstance(pending_entry, dict):
+        pending_entry = {}
+    pending_tracked = pending_entry.get("tracked_recommendations", {})
+    if not isinstance(pending_tracked, dict):
+        pending_tracked = {}
+    pending_snapshot = _tracker_state_snapshot_for_recommendations([
+        recommendation
+        for recommendation in pending_tracked.values()
+        if isinstance(recommendation, dict)
+    ])
+    candidate_snapshot = _tracker_state_snapshot_for_recommendations(
+        tracker_delta.get("tracker_candidates", [])
+    )
+
+    merged_snapshot = {}
+    for recommendation_key, existing_recommendation in sent_snapshot.items():
+        key = str(recommendation_key or "").strip()
+        if not key or not isinstance(existing_recommendation, dict):
+            continue
+        merged_snapshot[key] = {
+            **pending_snapshot.get(key, {}),
+            **candidate_snapshot.get(key, {}),
+            **existing_recommendation,
+            "recommendation_key": key,
+        }
+    merged_snapshot.update(_tracker_state_snapshot_for_recommendations(tracker_delta.get("new_recommendations", [])))
+    recommendations = list(merged_snapshot.values())
+    first_sent_at = existing_entry.get("first_sent_at") or existing_entry.get("last_sent_at")
+    for recommendation in recommendations:
+        if isinstance(recommendation, dict) and not recommendation.get("first_logged_at") and first_sent_at:
+            recommendation["first_logged_at"] = first_sent_at
+    recommendations.sort(
+        key=lambda recommendation: (
+            str(recommendation.get("first_logged_at") or ""),
+            -_ranking_edge_score(recommendation),
+            str(recommendation.get("player_name") or ""),
+        ),
+    )
+    return recommendations
 
 
 def _write_results_recap_history(entry: Dict[str, Any]) -> None:
@@ -2344,6 +4648,153 @@ def _find_game_log_for_date(player: Dict[str, Any], game_date: str) -> Optional[
             continue
         if _normalize_game_date(game.get("GAME_DATE")) == target_date:
             return game
+    return None
+
+
+def _iso8601_duration_minutes(raw_value: Any) -> float:
+    if raw_value is None:
+        return 0.0
+    if isinstance(raw_value, (int, float)):
+        return max(0.0, float(raw_value))
+
+    raw_text = str(raw_value).strip()
+    if not raw_text:
+        return 0.0
+
+    parsed_direct = _safe_float(raw_text)
+    if parsed_direct is not None:
+        return max(0.0, parsed_direct)
+
+    match = ISO8601_DURATION_RE.match(raw_text)
+    if not match:
+        return 0.0
+
+    hours = float(match.group("hours") or 0.0)
+    minutes = float(match.group("minutes") or 0.0)
+    seconds = float(match.group("seconds") or 0.0)
+    return max(0.0, hours * 60.0 + minutes + (seconds / 60.0))
+
+
+def _boxscore_player_to_game_log(player_entry: Dict[str, Any]) -> Dict[str, Any]:
+    statistics = player_entry.get("statistics", {})
+    if not isinstance(statistics, dict):
+        statistics = {}
+
+    minutes = _iso8601_duration_minutes(
+        statistics.get("minutes") or statistics.get("minutesCalculated")
+    )
+    game_log = {
+        "MIN": minutes,
+        "PTS": _safe_float(statistics.get("points"), 0.0) or 0.0,
+        "REB": _safe_float(statistics.get("reboundsTotal"), 0.0) or 0.0,
+        "AST": _safe_float(statistics.get("assists"), 0.0) or 0.0,
+        "FG3M": _safe_float(statistics.get("threePointersMade"), 0.0) or 0.0,
+        "BLK": _safe_float(statistics.get("blocks"), 0.0) or 0.0,
+        "STL": _safe_float(statistics.get("steals"), 0.0) or 0.0,
+        "TOV": _safe_float(statistics.get("turnovers"), 0.0) or 0.0,
+    }
+    not_playing_reason = (
+        player_entry.get("notPlayingDescription")
+        or player_entry.get("notPlayingReason")
+        or (
+            player_entry.get("status")
+            if str(player_entry.get("played") or "").strip() != "1"
+            else None
+        )
+    )
+    if not_playing_reason:
+        game_log["_not_playing_reason"] = str(not_playing_reason)
+    return game_log
+
+
+def _boxscore_cache_for_game(
+    game_id: str,
+    boxscore_cache: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    cached = boxscore_cache.get(game_id)
+    if isinstance(cached, dict):
+        return cached
+
+    cache_entry: Dict[str, Dict[str, Dict[str, Any]]] = {
+        "by_player_id": {},
+        "by_name": {},
+    }
+    boxscore_cache[game_id] = cache_entry
+
+    if not game_id:
+        return cache_entry
+
+    url = f"{BOXSCORE_CDN_BASE_URL}/boxscore_{game_id}.json"
+    try:
+        response = requests.get(url, headers=BOXSCORE_CDN_HEADERS, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        logger.warning("Boxscore fallback fetch failed for %s: %s", game_id, exc)
+        return cache_entry
+
+    game_payload = payload.get("game", {})
+    if not isinstance(game_payload, dict):
+        return cache_entry
+
+    game_status = int(_safe_float(game_payload.get("gameStatus"), 0.0) or 0.0)
+    if game_status < 3:
+        return cache_entry
+
+    for team_key in ("homeTeam", "awayTeam", "gameTeam"):
+        team_payload = game_payload.get(team_key, {})
+        if not isinstance(team_payload, dict):
+            continue
+        for player_entry in team_payload.get("players", []):
+            if not isinstance(player_entry, dict):
+                continue
+            player_id = str(player_entry.get("personId") or "").strip()
+            player_name = (
+                player_entry.get("name")
+                or " ".join(
+                    part
+                    for part in (
+                        str(player_entry.get("firstName") or "").strip(),
+                        str(player_entry.get("familyName") or "").strip(),
+                    )
+                    if part
+                )
+            )
+            game_log = _boxscore_player_to_game_log(player_entry)
+            if player_id:
+                cache_entry["by_player_id"][player_id] = game_log
+            normalized_name = _normalize_person_name(player_name)
+            if normalized_name and normalized_name not in cache_entry["by_name"]:
+                cache_entry["by_name"][normalized_name] = game_log
+
+    return cache_entry
+
+
+def _find_boxscore_player_game_log(
+    recommendation: Dict[str, Any],
+    boxscore_cache: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
+) -> Optional[Dict[str, Any]]:
+    game_id = str(recommendation.get("game_id") or "").strip()
+    if not game_id:
+        return None
+
+    cache_entry = _boxscore_cache_for_game(game_id, boxscore_cache)
+    by_player_id = cache_entry.get("by_player_id", {})
+    if isinstance(by_player_id, dict):
+        player_id = str(recommendation.get("player_id") or "").strip()
+        if player_id:
+            player_game = by_player_id.get(player_id)
+            if isinstance(player_game, dict):
+                return dict(player_game)
+
+    by_name = cache_entry.get("by_name", {})
+    if isinstance(by_name, dict):
+        player_name = _normalize_person_name(recommendation.get("player_name"))
+        if player_name:
+            player_game = by_name.get(player_name)
+            if isinstance(player_game, dict):
+                return dict(player_game)
+
     return None
 
 
@@ -2394,6 +4845,7 @@ def _grade_results_recap(
         if isinstance(player, dict) and player.get("id") is not None
     }
     dnp_lookup = _build_dnp_lookup(master_feed)
+    boxscore_cache: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {}
 
     graded_recommendations = []
     unresolved = []
@@ -2409,18 +4861,20 @@ def _grade_results_recap(
         line = _safe_float(recommendation.get("line"))
         side = str(recommendation.get("pick") or "").lower()
 
-        player = player_lookup.get(player_id)
-        if player is None or not game_date or line is None or side not in SIDE_MULTIPLIERS:
+        if not game_date or line is None or side not in SIDE_MULTIPLIERS:
             unresolved.append(recommendation.get("recommendation_key"))
             continue
 
-        game_log = _find_game_log_for_date(player, game_date)
+        player = player_lookup.get(player_id)
+        game_log = _find_game_log_for_date(player, game_date) if player is not None else None
+        if game_log is None:
+            game_log = _find_boxscore_player_game_log(recommendation, boxscore_cache)
         if game_log is not None:
             minutes = _safe_float(game_log.get("MIN"), 0.0) or 0.0
             if minutes <= 0:
                 status = "void"
                 final_value = None
-                result_note = "No logged minutes"
+                result_note = str(game_log.get("_not_playing_reason") or "No logged minutes")
             else:
                 final_value = _stat_value_from_game(game_log, stat_type)
                 if final_value is None:
@@ -2485,10 +4939,10 @@ def _result_status_emoji(status: str) -> str:
     return "⚪"
 
 
-def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: Dict[str, Any]) -> bool:
+def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     webhook_url = _results_recap_webhook_url()
     if not webhook_url:
-        return False
+        return None
 
     summary = graded_results.get("summary", {})
     lines = []
@@ -2496,7 +4950,7 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         final_value = recommendation.get("final_value")
         final_text = f"{final_value:.1f}" if isinstance(final_value, (float, int)) else (recommendation.get("result_note") or "Void")
-        tracked_at = _format_tracker_time(recommendation.get("first_alerted_at") or recommendation.get("first_logged_at"))
+        tracked_at = _format_tracker_time(recommendation.get("first_logged_at") or recommendation.get("first_alerted_at"))
         status_emoji = _result_status_emoji(str(recommendation.get("result_status") or ""))
         lines.append(
             f"**#{display_rank} {status_emoji} {recommendation.get('player_name')}** — "
@@ -2573,6 +5027,14 @@ def _changed_books_summary(groups: List[Dict[str, Any]]) -> str:
     ) or "No changed sportsbook groups."
 
 
+def _book_labels_summary(book_keys: List[str]) -> str:
+    labels = [
+        BOOK_LABELS.get(book, str(book).title())
+        for book in sorted({str(book or "").strip().lower() for book in book_keys if str(book or "").strip()}, key=_book_sort_key)
+    ]
+    return ", ".join(labels) or "None"
+
+
 def _build_discord_book_embed(
     group: Dict[str, Any],
     *,
@@ -2583,7 +5045,25 @@ def _build_discord_book_embed(
     book_recommendations = group["recommendations"]
     lines = []
     for display_rank, recommendation in enumerate(book_recommendations, start=1):
+        player_name = recommendation.get("player_name") or "Unknown Player"
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
+        pick_label = recommendation.get("pick_label") or _side_name(str(recommendation.get("pick") or "").lower())
+        line_value = _safe_float(recommendation.get("line"))
+        line_text = f"{line_value:.1f}" if line_value is not None else "-"
+        edge_score = _safe_float(recommendation.get("display_edge_score"), _safe_float(recommendation.get("edge_score")))
+        edge_text = f"{edge_score:.1f}" if edge_score is not None else "n/a"
+
+        if channel_variant == "tracker":
+            first_logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
+            stat_token = str(recommendation.get("stat_type") or stat_label or "PROP").strip().upper()
+            side_token = "O" if str(recommendation.get("pick") or "").lower() == "over" else "U"
+            odds_text = _discord_tracker_odds_label(recommendation)
+            lines.append(
+                f"**{display_rank}. [{first_logged_at}] {player_name}** — "
+                f"{stat_token} {side_token}{line_text} | {odds_text} | SS {edge_text}"
+            )
+            continue
+
         reason_prefix = ""
         change = change_lookup.get(str(recommendation.get("recommendation_key") or "").strip())
         if alert_kind == "update" and change:
@@ -2592,14 +5072,14 @@ def _build_discord_book_embed(
                 for reason in (change.get("reasons", []) or ["updated"])
             ]
             reason_prefix = f"Change: {', '.join(pretty_reasons)}\n"
-        if channel_variant == "tracker":
-            first_logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
-            reason_prefix = f"First logged: {first_logged_at}\n"
+        why_summary = str(recommendation.get("why_summary") or "").strip()
+        if not why_summary:
+            why_summary = _discord_signal_summary(recommendation)
         lines.append(
-            f"**{display_rank}.** {recommendation['player_name']} — "
-            f"{stat_label} {recommendation['pick_label']} {recommendation['line']:.1f}\n"
-            f"{_discord_book_label(recommendation)} | Signal Score {recommendation['edge_score']:.1f}\n"
-            f"{reason_prefix}Why: {_discord_signal_summary(recommendation)}"
+            f"**{display_rank}.** {player_name} — "
+            f"{stat_label} {pick_label} {line_text}\n"
+            f"{_discord_book_label(recommendation)} | Signal Score {edge_text}\n"
+            f"{reason_prefix}Why: {why_summary}"
         )
 
     overflow_count = max(0, int(group.get("total_count", 0)) - len(book_recommendations))
@@ -2631,6 +5111,7 @@ def _build_discord_alert_payload(
     alert_kind = notification_delta.get("alert_kind", "update")
     changes = notification_delta.get("changes", [])
     removed = notification_delta.get("removed", [])
+    official_recommendations = notification_delta.get("official_recommendations", [])
     grouped_books = _group_recommendations_by_sportsbook(
         recommendations,
         limit_per_book=EDGE_DISCORD_PER_BOOK_LIMIT,
@@ -2652,6 +5133,17 @@ def _build_discord_alert_payload(
         f"Up to {EDGE_DISCORD_PER_BOOK_LIMIT} props per sportsbook at Signal Score {threshold_text}+."
     )
     books_summary = _changed_books_summary(grouped_books)
+    visible_books = {
+        str(group.get("sportsbook") or "").strip().lower()
+        for group in grouped_books
+        if str(group.get("sportsbook") or "").strip()
+    }
+    official_books = {
+        str(recommendation.get("sportsbook") or "").strip().lower()
+        for recommendation in official_recommendations
+        if str(recommendation.get("sportsbook") or "").strip()
+    }
+    omitted_books = sorted(official_books - visible_books, key=_book_sort_key)
     removed_lines = [
         (
             f"{removed_item.get('player_name')} — "
@@ -2697,7 +5189,7 @@ def _build_discord_alert_payload(
         summary_fields.extend([
             {
                 "name": "Why this updated",
-                "value": "Only props with a new entrant, better book, line move, or price move are shown."[:1024],
+                "value": "Only props with a new entrant, better book, line move, price move, or meaningful score/rank change are shown."[:1024],
                 "inline": False,
             },
             {
@@ -2706,6 +5198,12 @@ def _build_discord_alert_payload(
                 "inline": False,
             },
         ])
+        if omitted_books:
+            summary_fields.append({
+                "name": "Unchanged books omitted",
+                "value": _book_labels_summary(omitted_books)[:1024],
+                "inline": False,
+            })
         if removed_lines:
             summary_fields.append({
                 "name": "Dropped",
@@ -2749,14 +5247,16 @@ def _build_discord_alert_payload(
 def _build_discord_tracker_payload(
     payload: Dict[str, Any],
     tracker_delta: Dict[str, Any],
+    *,
+    running_recommendations: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    recommendations = tracker_delta.get("new_recommendations", [])
+    recommendations = running_recommendations or tracker_delta.get("new_recommendations", [])
     if not recommendations:
         return None
 
     grouped_books = _group_recommendations_by_sportsbook(
         recommendations,
-        limit_per_book=max(EDGE_DISCORD_PER_BOOK_LIMIT, 1),
+        limit_per_book=max(len(recommendations), EDGE_DISCORD_PER_BOOK_LIMIT, 1),
     )
     if not grouped_books:
         return None
@@ -2768,7 +5268,7 @@ def _build_discord_tracker_payload(
     books_summary = _changed_books_summary(grouped_books)
     summary_fields: List[Dict[str, Any]] = [
         {
-            "name": "Logged",
+            "name": "Updated",
             "value": _format_discord_timestamp(payload.get("generated_at")),
             "inline": False,
         },
@@ -2783,16 +5283,13 @@ def _build_discord_tracker_payload(
             "inline": True,
         },
         {
-            "name": "Books in this log",
-            "value": books_summary[:1024],
-            "inline": False,
+            "name": "Tracked picks",
+            "value": str(len(recommendations)),
+            "inline": True,
         },
         {
-            "name": "How this works",
-            "value": (
-                "This tracker logs a prop once when it first clears the threshold, freezes that first book/line, "
-                "and grades that exact entry in tomorrow's results recap."
-            )[:1024],
+            "name": "Books in this log",
+            "value": books_summary[:1024],
             "inline": False,
         },
     ]
@@ -2800,7 +5297,10 @@ def _build_discord_tracker_payload(
     embeds = [
         {
             "title": f"Daily Prop Tracker • {refresh_label_text}",
-            "description": "Running ledger of the highest-signal props from the live daily props feed.",
+            "description": (
+                "Running ledger of the day’s tracked props. This message updates in place as new plays are logged, "
+                "and each play keeps the time it first entered the tracker."
+            ),
             "color": 0x3B82F6,
             "timestamp": payload.get("generated_at"),
             "fields": summary_fields,
@@ -2820,6 +5320,245 @@ def _build_discord_tracker_payload(
         "username": "NBA Dashboard Prop Tracker",
         "embeds": embeds,
     }
+
+
+def _recommendation_game_ids(recommendations: Any) -> List[str]:
+    game_ids: List[str] = []
+    seen_ids = set()
+    if not isinstance(recommendations, list):
+        return game_ids
+    for recommendation in recommendations:
+        if not isinstance(recommendation, dict):
+            continue
+        game_id = str(recommendation.get("game_id") or "").strip()
+        if not game_id or game_id in seen_ids:
+            continue
+        seen_ids.add(game_id)
+        game_ids.append(game_id)
+    return game_ids
+
+
+def _normalize_ref_game_ids(raw_game_ids: Any) -> List[str]:
+    normalized_ids = []
+    seen_ids = set()
+    if not isinstance(raw_game_ids, list):
+        return normalized_ids
+    for raw_game_id in raw_game_ids:
+        game_id = str(raw_game_id or "").strip()
+        if not game_id or game_id in seen_ids:
+            continue
+        seen_ids.add(game_id)
+        normalized_ids.append(game_id)
+    return normalized_ids
+
+
+def _store_discord_message_ref(
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    channel: str,
+    message: Dict[str, Any],
+    webhook_url: str,
+    alert_kind: str,
+    sent_at: Any,
+    game_ids: Optional[List[str]] = None,
+) -> bool:
+    message_id = str((message or {}).get("id") or "").strip()
+    if not slate_date or not channel or not message_id:
+        return False
+    normalized_game_ids = _normalize_ref_game_ids(game_ids or [])
+    messages_by_date = state.get("discord_messages_by_date", {})
+    if not isinstance(messages_by_date, dict):
+        messages_by_date = {}
+    date_bucket = messages_by_date.get(slate_date, {})
+    if not isinstance(date_bucket, dict):
+        date_bucket = {}
+    channel_bucket = date_bucket.get(channel, [])
+    if not isinstance(channel_bucket, list):
+        channel_bucket = []
+    updated_bucket = []
+    state_changed = False
+    current_ref_found = False
+
+    for ref in channel_bucket:
+        if not isinstance(ref, dict):
+            state_changed = True
+            continue
+        ref_message_id = str(ref.get("message_id") or "").strip()
+        if ref_message_id != message_id:
+            updated_bucket.append(ref)
+            continue
+        if current_ref_found:
+            state_changed = True
+            continue
+
+        current_ref_found = True
+        existing_game_ids = _normalize_ref_game_ids(ref.get("game_ids", []))
+        merged_game_ids = _normalize_ref_game_ids([*existing_game_ids, *normalized_game_ids])
+        if merged_game_ids != existing_game_ids:
+            ref["game_ids"] = merged_game_ids
+            state_changed = True
+        if webhook_url and not str(ref.get("webhook_url") or "").strip():
+            ref["webhook_url"] = webhook_url
+            state_changed = True
+        if alert_kind and str(ref.get("alert_kind") or "").strip() != alert_kind:
+            ref["alert_kind"] = alert_kind
+            state_changed = True
+        if sent_at and str(ref.get("sent_at") or "").strip() != str(sent_at):
+            ref["sent_at"] = sent_at
+            state_changed = True
+        updated_bucket.append(ref)
+
+    if not current_ref_found:
+        new_ref = {
+            "message_id": message_id,
+            "webhook_url": webhook_url,
+            "alert_kind": alert_kind,
+            "sent_at": sent_at,
+        }
+        if normalized_game_ids:
+            new_ref["game_ids"] = normalized_game_ids
+        updated_bucket.append(new_ref)
+        state_changed = True
+
+    channel_bucket = updated_bucket
+    date_bucket[channel] = channel_bucket[-60:]
+    messages_by_date[slate_date] = date_bucket
+    state["discord_messages_by_date"] = messages_by_date
+    return state_changed
+
+
+def _latest_discord_message_ref(
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    channel: str,
+) -> Optional[Dict[str, Any]]:
+    if not slate_date or not channel:
+        return None
+    messages_by_date = state.get("discord_messages_by_date", {})
+    if not isinstance(messages_by_date, dict):
+        return None
+    date_bucket = messages_by_date.get(slate_date, {})
+    if not isinstance(date_bucket, dict):
+        return None
+    channel_bucket = date_bucket.get(channel, [])
+    if not isinstance(channel_bucket, list) or not channel_bucket:
+        return None
+    for entry in reversed(channel_bucket):
+        if isinstance(entry, dict) and str(entry.get("message_id") or "").strip():
+            return entry
+    return None
+
+
+def _completed_schedule_game_ids(schedule_payload: Any) -> set:
+    if isinstance(schedule_payload, dict):
+        games = schedule_payload.get("games", [])
+    elif isinstance(schedule_payload, list):
+        games = schedule_payload
+    else:
+        games = []
+
+    completed_game_ids = set()
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        game_id = str(game.get("game_id") or "").strip()
+        if not game_id:
+            continue
+        game_status = int(_safe_float(game.get("game_status"), 0.0) or 0.0)
+        if bool(game.get("is_final")) or game_status >= 3:
+            completed_game_ids.add(game_id)
+    return completed_game_ids
+
+
+def _should_cleanup_main_message_ref(
+    ref: Dict[str, Any],
+    *,
+    slate_date: str,
+    today_str: str,
+    completed_game_ids: set,
+) -> bool:
+    if slate_date < today_str:
+        return True
+    ref_game_ids = _normalize_ref_game_ids(ref.get("game_ids", []))
+    return bool(ref_game_ids) and all(game_id in completed_game_ids for game_id in ref_game_ids)
+
+
+def _cleanup_completed_discord_messages(state: Dict[str, Any], schedule_payload: Optional[Any] = None) -> Dict[str, Any]:
+    messages_by_date = state.get("discord_messages_by_date", {})
+    if not isinstance(messages_by_date, dict) or not messages_by_date:
+        messages_by_date = {}
+
+    now = get_et_now()
+    today_str = now.strftime("%Y-%m-%d")
+    completed_game_ids = _completed_schedule_game_ids(schedule_payload)
+    deleted_count = 0
+    state_changed = False
+    remaining_messages_by_date: Dict[str, Any] = {}
+
+    for slate_date, channel_map in messages_by_date.items():
+        normalized_date = _normalize_game_date(slate_date)
+        if not normalized_date:
+            continue
+        if not isinstance(channel_map, dict):
+            state_changed = True
+            continue
+
+        remaining_channel_map: Dict[str, Any] = {}
+        for channel, refs in channel_map.items():
+            if not isinstance(refs, list):
+                state_changed = True
+                continue
+            if channel != "main":
+                remaining_channel_map[channel] = [
+                    ref for ref in refs if isinstance(ref, dict)
+                ]
+                if len(remaining_channel_map[channel]) != len(refs):
+                    state_changed = True
+                continue
+
+            default_webhook_url = EDGE_SCORE_DISCORD_WEBHOOK_URL
+            remaining_refs = []
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    state_changed = True
+                    continue
+                message_id = str(ref.get("message_id") or "").strip()
+                webhook_url = str(ref.get("webhook_url") or default_webhook_url or "").strip()
+                should_delete_ref = _should_cleanup_main_message_ref(
+                    ref,
+                    slate_date=normalized_date,
+                    today_str=today_str,
+                    completed_game_ids=completed_game_ids,
+                )
+
+                if not should_delete_ref:
+                    remaining_refs.append(ref)
+                    continue
+                if not webhook_url or not message_id:
+                    state_changed = True
+                    continue
+                try:
+                    delete_status = _delete_discord_webhook_message(webhook_url, message_id)
+                except Exception as exc:
+                    logger.warning("Discord message cleanup failed for %s/%s: %s", normalized_date, channel, exc)
+                    remaining_refs.append(ref)
+                    continue
+                if delete_status in {"deleted", "missing"}:
+                    deleted_count += 1
+                    state_changed = True
+                else:
+                    remaining_refs.append(ref)
+            if remaining_refs:
+                remaining_channel_map[channel] = remaining_refs
+        if remaining_channel_map:
+            remaining_messages_by_date[normalized_date] = remaining_channel_map
+        elif normalized_date in messages_by_date:
+            state_changed = True
+    if state_changed:
+        state["discord_messages_by_date"] = remaining_messages_by_date
+    return {"deleted": deleted_count, "state_changed": state_changed}
 
 
 def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, Any]) -> Dict[str, Any]:
@@ -2854,12 +5593,15 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             remaining_pending[normalized_date] = recap_payload
             continue
 
-        if _send_discord_results_recap(recap_payload, graded_results):
+        recap_message = _send_discord_results_recap(recap_payload, graded_results)
+        if recap_message:
             sent_at = get_et_now().isoformat()
             sent_history[normalized_date] = {
                 "sent_at": sent_at,
                 "record": _results_record_text(graded_results.get("summary", {})),
                 "graded_count": graded_results.get("summary", {}).get("graded_count", 0),
+                "message_id": str(recap_message.get("id") or "").strip(),
+                "webhook_url": _results_recap_webhook_url(),
             }
             _write_results_recap_history({
                 "game_date": normalized_date,
@@ -2889,11 +5631,18 @@ def _send_discord_webhook(
     *,
     webhook_url: str,
     channel_variant: str,
-) -> bool:
+    existing_message_id: Optional[str] = None,
+    existing_message_webhook_url: Optional[str] = None,
+    running_recommendations: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
     if not webhook_url:
-        return False
+        return None
     if channel_variant == "tracker":
-        discord_payload = _build_discord_tracker_payload(payload, notification_delta)
+        discord_payload = _build_discord_tracker_payload(
+            payload,
+            notification_delta,
+            running_recommendations=running_recommendations,
+        )
     else:
         discord_payload = _build_discord_alert_payload(
             payload,
@@ -2901,7 +5650,12 @@ def _send_discord_webhook(
             channel_variant=channel_variant,
         )
     if not discord_payload:
-        return False
+        return None
+    if existing_message_id and channel_variant == "tracker":
+        edit_webhook_url = str(existing_message_webhook_url or webhook_url or "").strip()
+        edited = _edit_discord_webhook_message(edit_webhook_url, existing_message_id, discord_payload)
+        if edited is not None:
+            return edited
     return _post_discord_webhook(webhook_url, discord_payload)
 
 
@@ -2958,10 +5712,15 @@ def run_edge_score_refresh(
     schedule_path: str = SCHEDULE_PATH,
     line_movements_path: str = LINE_MOVEMENTS_PATH,
     prizepicks_path: str = PRIZEPICKS_PATH,
+    action_network_path: str = ACTION_NETWORK_PATH,
 ) -> Dict[str, Any]:
     start_time = time.time()
+    previous_payload = _load_json(EDGE_SCORE_PATH, {})
+    if not isinstance(previous_payload, dict):
+        previous_payload = {}
     master_feed = _load_json(master_feed_path, [])
     schedule_payload = _load_json(schedule_path, {"games": []})
+    action_network_payload = _load_json(action_network_path, {"games": []})
     line_movements_payload = _load_json(line_movements_path, {"snapshots": []})
     state = _load_json(EDGE_SCORE_STATE_PATH, {})
     if not isinstance(state, dict):
@@ -2970,14 +5729,52 @@ def run_edge_score_refresh(
     if not isinstance(master_feed, list):
         master_feed = []
 
+    team_recent_games = {}
+    for player in master_feed:
+        if not isinstance(player, dict): continue
+        t = player.get("team")
+        logs = _extract_logs(player)
+        if t and logs:
+            ld = _normalize_game_date(logs[0].get("GAME_DATE"))
+            if ld and (t not in team_recent_games or ld > team_recent_games[t]):
+                team_recent_games[t] = ld
+
+    schedule_context = _build_schedule_context(schedule_payload, action_network_payload)
+
+    _refresh_injury_report_for_scoring(schedule_payload, refresh_label=refresh_label)
+
+    injury_report = _load_json(os.path.join(CURRENT_DIR, "nba_injury_report.json"), {})
+    injury_report_freshness = _injury_artifact_freshness(
+        injury_report if isinstance(injury_report, dict) else {},
+        schedule_payload=schedule_payload if isinstance(schedule_payload, dict) else {},
+    )
+    tonight_dnps = _load_tonight_dnps(master_feed, injury_report, schedule_context)
+    if tonight_dnps:
+        logger.info("Tonight DNPs loaded | teams_with_absences=%d", len(tonight_dnps))
+    if injury_report_freshness.get("is_stale"):
+        logger.warning(
+            "Edge Score using stale injury artifact | age_minutes=%s max_age_minutes=%s generated_at=%s",
+            injury_report_freshness.get("age_minutes"),
+            injury_report_freshness.get("max_age_minutes"),
+            injury_report_freshness.get("generated_at"),
+        )
+
     recap_result = {"sent_dates": [], "state_changed": False}
-    if refresh_label == "pipeline" and _results_recap_webhook_url():
+    if _results_recap_webhook_url():
         try:
             recap_result = _process_results_recaps(master_feed, state)
         except Exception as exc:
             logger.warning("Edge Score results recap failed: %s", exc)
+    try:
+        cleanup_result = _cleanup_completed_discord_messages(state, schedule_payload=schedule_payload)
+        recap_result["deleted_messages"] = cleanup_result.get("deleted", 0)
+        recap_result["state_changed"] = bool(
+            recap_result.get("state_changed") or cleanup_result.get("state_changed")
+        )
+    except Exception as exc:
+        logger.warning("Discord message cleanup failed: %s", exc)
 
-    schedule_context = _build_schedule_context(schedule_payload)
+    schedule_context = _build_schedule_context(schedule_payload, action_network_payload)
     overlay_props_index = _build_overlay_props_index(current_players_data)
     overlay_props_index = _merge_overlay_indexes(
         overlay_props_index,
@@ -3037,6 +5834,7 @@ def run_edge_score_refresh(
             "game_date": game_date,
             "game_time_et": game.get("game_time_et"),
             "opponent": schedule_context["opponent_by_team"].get(team),
+            "game_context": game,
         })
 
     style_cache = {
@@ -3063,6 +5861,8 @@ def run_edge_score_refresh(
                     active_entries,
                     style_cache,
                     line_lookup,
+                    tonight_dnps=tonight_dnps,
+                    team_recent_games=team_recent_games,
                 )
                 if candidate is not None:
                     side_candidates.append(candidate)
@@ -3073,21 +5873,60 @@ def run_edge_score_refresh(
             best_candidate = max(
                 side_candidates,
                 key=lambda candidate: (
-                    candidate.get("edge_score", 0.0),
-                    candidate.get("confidence", 0.0),
+                    _ranking_edge_score(candidate),
+                    _ranking_confidence(candidate),
                     candidate.get("signal_score", 0.0),
                 ),
             )
             candidates.append(best_candidate)
 
     candidates.sort(key=_candidate_sort_key, reverse=True)
-    top_recommendations = _diversify_candidates(candidates, EDGE_LIMIT)
+    eligible_candidates = [
+        candidate for candidate in candidates
+        if not candidate.get("eligibility_blocked")
+    ]
+    blocked_candidates = [
+        candidate for candidate in candidates
+        if candidate.get("eligibility_blocked")
+    ]
+    top_recommendations = _diversify_candidates(eligible_candidates, EDGE_LIMIT)
+    blocked_recommendations = _diversify_candidates(blocked_candidates, EDGE_LIMIT)
     for rank, recommendation in enumerate(top_recommendations, start=1):
         recommendation["rank"] = rank
-    sportsbook_boards = _build_sportsbook_boards(candidates, EDGE_SPORTSBOOK_BOARD_LIMIT)
+    for blocked_rank, recommendation in enumerate(blocked_recommendations, start=1):
+        recommendation["blocked_rank"] = blocked_rank
+    sportsbook_boards = _build_sportsbook_boards(eligible_candidates, EDGE_SPORTSBOOK_BOARD_LIMIT)
+    blocked_stale_count = sum(
+        1
+        for candidate in blocked_candidates
+        if candidate.get("eligibility_block_reason") == "blocked_stale_injury_context"
+    )
+    blocked_promotion_under_count = sum(
+        1
+        for candidate in blocked_candidates
+        if candidate.get("eligibility_block_reason") == "blocked_promotion_under"
+    )
 
     notification_delta = _compute_notification_delta(top_recommendations, state, refresh_label)
     official_recommendations = notification_delta.get("official_recommendations", [])
+    display_recommendations = top_recommendations
+    display_sportsbook_boards = sportsbook_boards
+    preserved_board_generated_at = None
+    board_preserved_from_previous = False
+    if not top_recommendations and blocked_stale_count > 0:
+        preserved_board = _load_preservable_previous_board(
+            previous_payload,
+            current_game_dates=sorted({
+                entry["game_date"]
+                for entry in active_entries
+                if entry.get("game_date")
+            }),
+        )
+        if preserved_board:
+            display_recommendations = preserved_board["recommendations"]
+            display_sportsbook_boards = preserved_board["sportsbook_boards"]
+            preserved_board_generated_at = preserved_board.get("generated_at")
+            board_preserved_from_previous = True
 
     payload = {
         "generated_at": get_et_now().isoformat(),
@@ -3096,14 +5935,24 @@ def run_edge_score_refresh(
         "summary": {
             "active_players": len(active_entries),
             "candidate_count": len(candidates),
-            "top_count": len(top_recommendations),
+            "eligible_candidate_count": len(eligible_candidates),
+            "blocked_candidate_count": len(blocked_candidates),
+            "top_count": len(display_recommendations),
+            "actual_top_count": len(top_recommendations),
+            "blocked_top_count": len(blocked_recommendations),
             "available_books": sorted(SUPPORTED_BOOKS),
             "sportsbook_board_limit": EDGE_SPORTSBOOK_BOARD_LIMIT,
-            "sportsbook_boards": sportsbook_boards,
+            "sportsbook_boards": display_sportsbook_boards,
+            "injury_report_freshness": injury_report_freshness,
+            "blocked_stale_injury_context_count": blocked_stale_count,
+            "blocked_promotion_under_count": blocked_promotion_under_count,
+            "board_preserved_from_previous": board_preserved_from_previous,
+            "preserved_board_generated_at": preserved_board_generated_at,
             "duration_s": round(time.time() - start_time, 2),
             "scoring_model": "Signal Score",
         },
-        "recommendations": top_recommendations,
+        "recommendations": display_recommendations,
+        "blocked_recommendations": blocked_recommendations,
         "notification": {
             "discord_configured": _has_discord_alert_target(),
             "discord_main_configured": bool(EDGE_SCORE_DISCORD_WEBHOOK_URL),
@@ -3126,12 +5975,16 @@ def run_edge_score_refresh(
                 "best_book_changed": True,
                 "line_move_points": EDGE_DISCORD_LINE_MOVE_POINTS,
                 "odds_move_american": EDGE_DISCORD_ODDS_MOVE_AMERICAN,
+                "signal_score_delta": EDGE_DISCORD_SCORE_DELTA,
+                "rank_delta": EDGE_DISCORD_RANK_DELTA,
                 "min_interval_seconds": EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS,
             },
         },
     }
+    # The tracker intentionally backfills from the current official daily-props board,
+    # not from hidden overflow candidates outside the surfaced alert set.
     tracker_delta = _compute_tracker_delta(
-        notification_delta.get("send_recommendations", []),
+        notification_delta.get("official_recommendations", []),
         state,
         slate_date=notification_delta.get("slate_date", ""),
         generated_at=payload["generated_at"],
@@ -3144,36 +5997,62 @@ def run_edge_score_refresh(
     discord_sent = False
     discord_main_sent = False
     discord_tracker_sent = False
+    main_message_response: Optional[Dict[str, Any]] = None
+    tracker_message_response: Optional[Dict[str, Any]] = None
     state_changed = bool(recap_result.get("state_changed"))
-    if (
-        refresh_label in DISCORD_ALERT_REFRESH_LABELS
-        and notification_delta.get("should_send")
-        and _has_discord_alert_target()
-    ):
-        if EDGE_SCORE_DISCORD_WEBHOOK_URL:
+    tracker_delta_sent_snapshot = {}
+    slate_date = notification_delta.get("slate_date") or ""
+    tracker_running_recommendations = _tracker_running_recommendations(
+        state,
+        slate_date=slate_date,
+        tracker_delta=tracker_delta,
+    )
+    tracker_message_ref = _latest_discord_message_ref(
+        state,
+        slate_date=slate_date,
+        channel="tracker",
+    )
+    tracker_existing_message_id = str((tracker_message_ref or {}).get("message_id") or "").strip() or None
+    tracker_existing_webhook_url = str((tracker_message_ref or {}).get("webhook_url") or "").strip() or None
+    tracker_message_missing = bool(
+        EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+        and slate_date
+        and tracker_running_recommendations
+        and not tracker_existing_message_id
+    )
+    if refresh_label in DISCORD_ALERT_REFRESH_LABELS and _has_discord_alert_target():
+        if EDGE_SCORE_DISCORD_WEBHOOK_URL and notification_delta.get("should_send"):
             try:
-                discord_main_sent = _send_discord_webhook(
+                main_message_response = _send_discord_webhook(
                     payload,
                     notification_delta,
                     webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
                     channel_variant="main",
                 )
+                discord_main_sent = bool(main_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score webhook failed: %s", exc)
-        if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and tracker_delta.get("should_send"):
+        if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and (
+            tracker_delta.get("should_send") or tracker_message_missing
+        ):
             try:
-                discord_tracker_sent = _send_discord_webhook(
+                tracker_message_response = _send_discord_webhook(
                     payload,
                     tracker_delta,
                     webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
                     channel_variant="tracker",
+                    existing_message_id=tracker_existing_message_id,
+                    existing_message_webhook_url=tracker_existing_webhook_url,
+                    running_recommendations=tracker_running_recommendations,
                 )
+                discord_tracker_sent = bool(tracker_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score tracker webhook failed: %s", exc)
+        if discord_tracker_sent:
+            tracker_delta_sent_snapshot = tracker_delta.get("current_snapshot", {})
         discord_sent = bool(discord_main_sent or discord_tracker_sent)
 
-    if discord_sent:
-        slate_date = notification_delta.get("slate_date") or ""
+    if discord_main_sent:
         alert_state_by_date = state.get("discord_alert_state_by_date", {})
         if not isinstance(alert_state_by_date, dict):
             alert_state_by_date = {}
@@ -3192,19 +6071,62 @@ def run_edge_score_refresh(
         if slate_date:
             alert_state_by_date[slate_date] = date_state
             state["discord_alert_state_by_date"] = alert_state_by_date
+            state_changed = True
 
-        tracker_visible_sent = bool(discord_tracker_sent or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and discord_main_sent))
-        if tracker_visible_sent and tracker_delta.get("new_recommendations"):
-            _queue_results_recap_payload(
+        if slate_date and discord_main_sent and isinstance(main_message_response, dict):
+            if _store_discord_message_ref(
                 state,
-                tracker_delta.get("new_recommendations", []),
-                generated_at=payload["generated_at"],
-                refresh_label=refresh_label,
-                alert_kind="tracker",
-            )
+                slate_date=slate_date,
+                channel="main",
+                message=main_message_response,
+                webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
+                alert_kind=notification_delta.get("alert_kind", "update"),
+                sent_at=payload["generated_at"],
+                game_ids=_recommendation_game_ids(notification_delta.get("send_recommendations", [])),
+            ):
+                state_changed = True
+
+    if discord_tracker_sent and slate_date:
+        tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
+        if not isinstance(tracker_state_by_date, dict):
+            tracker_state_by_date = {}
+        tracker_date_state = tracker_state_by_date.get(slate_date, {})
+        if not isinstance(tracker_date_state, dict):
+            tracker_date_state = {}
+        sent_snapshot = tracker_date_state.get("sent_snapshot", {})
+        if not isinstance(sent_snapshot, dict):
+            sent_snapshot = {}
+        sent_snapshot.update(tracker_delta_sent_snapshot)
+        tracker_date_state["sent_snapshot"] = sent_snapshot
+        tracker_date_state.setdefault("first_sent_at", payload["generated_at"])
+        tracker_date_state["last_sent_at"] = payload["generated_at"]
+        tracker_state_by_date[slate_date] = tracker_date_state
+        state["discord_tracker_state_by_date"] = tracker_state_by_date
+        state_changed = True
+
+    if slate_date and discord_tracker_sent and isinstance(tracker_message_response, dict):
+        if _store_discord_message_ref(
+            state,
+            slate_date=slate_date,
+            channel="tracker",
+            message=tracker_message_response,
+            webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
+            alert_kind="tracker",
+            sent_at=payload["generated_at"],
+            game_ids=_recommendation_game_ids(tracker_running_recommendations),
+        ):
             state_changed = True
-        elif discord_sent:
-            state_changed = True
+
+    tracker_visible_sent = bool(discord_tracker_sent or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and discord_main_sent))
+    if tracker_visible_sent and tracker_delta.get("new_recommendations"):
+        _queue_results_recap_payload(
+            state,
+            tracker_delta.get("new_recommendations", []),
+            generated_at=payload["generated_at"],
+            refresh_label=refresh_label,
+            alert_kind="tracker",
+        )
+        state_changed = True
 
     if state_changed or (not os.path.exists(EDGE_SCORE_STATE_PATH)):
         _write_json_atomic(EDGE_SCORE_STATE_PATH, state if isinstance(state, dict) else {})
@@ -3216,9 +6138,14 @@ def run_edge_score_refresh(
             "OK",
             "Edge Score refresh complete",
             refresh_label=refresh_label,
+            active_players=len(active_entries),
+            candidates=len(candidates),
+            eligible=len(eligible_candidates),
+            blocked=len(blocked_candidates),
             top=len(top_recommendations),
             discord_sent=True,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),
+            deleted_discord_messages=recap_result.get("deleted_messages", 0),
             supabase_sync_ok=sync_ok,
         )
     else:
@@ -3227,9 +6154,14 @@ def run_edge_score_refresh(
             "OK",
             "Edge Score refresh complete",
             refresh_label=refresh_label,
+            active_players=len(active_entries),
+            candidates=len(candidates),
+            eligible=len(eligible_candidates),
+            blocked=len(blocked_candidates),
             top=len(top_recommendations),
             discord_sent=False,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),
+            deleted_discord_messages=recap_result.get("deleted_messages", 0),
             supabase_sync_ok=sync_ok,
         )
 

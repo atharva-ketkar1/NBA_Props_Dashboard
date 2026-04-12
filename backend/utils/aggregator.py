@@ -42,7 +42,13 @@ def _safe_json(obj):
     elif isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
+        if not np.isfinite(obj):
+            return None
         return float(obj)
+    elif isinstance(obj, float):
+        if not np.isfinite(obj):
+            return None
+        return obj
     elif isinstance(obj, np.bool_):
         return bool(obj)
     return obj
@@ -148,9 +154,31 @@ def get_best_match_id(name, name_to_id_map):
 def safe_float(x):
     """Converts to float safely, handling errors."""
     try:
-        return float(x)
+        number = float(x)
     except:
         return 0.0
+    if not np.isfinite(number):
+        return 0.0
+    return number
+
+
+def safe_prop_number(value, *, default=None, as_int=False):
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(number):
+        return default
+    if as_int:
+        return int(number)
+    return number
 
 def load_csv(path):
     """Loads a CSV if it exists, else empty DF."""
@@ -661,11 +689,15 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             raw_prop = row.get('prop_type', '')
             clean_key = PROP_MAP.get(raw_prop, raw_prop).upper()
             prop_date_key = row_game_date or UNDATED_PROP_KEY
+            line = safe_prop_number(row.get('line'))
+            if line is None:
+                continue
+
             prop_payload = {
-                "line": row.get('line'),
-                "over": row.get('over_odds'),
-                "under": row.get('under_odds'),
-                "implied": row.get('implied_prob', 0),
+                "line": line,
+                "over": safe_prop_number(row.get('over_odds'), as_int=True),
+                "under": safe_prop_number(row.get('under_odds'), as_int=True),
+                "implied": safe_prop_number(row.get('implied_prob')),
                 "game_date": row_game_date or None,
             }
 
@@ -707,7 +739,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     try:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
-            json.dump(final_output, f, indent=4)
+            json.dump(_safe_json(final_output), f, indent=4, allow_nan=False)
         print(f"   Saved Master Feed ({len(final_output)} players) to {output_path}")
     except Exception as e:
         print(f"   Error saving JSON: {e}")

@@ -53,3 +53,9 @@ sql/
 Agents.md
 backend/Agents.md
 frontend/Agents.md
+
+# ML Generated Files & Notebooks
+backend/prop_modeling/generated/
+catboost_info/
+backend/prop_modeling/*.ipynb
+backend/prop_modeling/*test*.py

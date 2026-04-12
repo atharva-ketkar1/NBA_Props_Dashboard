@@ -9,6 +9,7 @@ interface SimilarPlayersProps {
    activeTab: string;
    activeSportsbook: SportsbookId;
    activeSeason: '25/26' | '24/25';
+   targetOpponent?: string | null;
    isLoadingCandidates?: boolean;
    similarCandidatesByProp: SimilarPlayerCandidate[];
    similarCandidatesByPosition: SimilarPlayerCandidate[];
@@ -37,6 +38,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    activeTab,
    activeSportsbook,
    activeSeason,
+   targetOpponent,
    isLoadingCandidates = false,
    similarCandidatesByProp,
    similarCandidatesByPosition,
@@ -51,12 +53,13 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       candidates: activeCandidates,
       activeTab,
       activeSportsbook,
+      targetOpponent,
       rowLimit: PAGE_SIZE * MAX_PAGES,
-   }), [activeCandidates, activeSportsbook, activeTab, player, players]);
+   }), [activeCandidates, activeSportsbook, activeTab, player, players, targetOpponent]);
 
    useEffect(() => {
       setPage(0);
-   }, [mode, player?.id, activeTab, activeSportsbook, dataset.rows.length]);
+   }, [mode, player?.id, activeTab, activeSportsbook, targetOpponent, dataset.rows.length]);
 
    const pagedRows = useMemo(
       () => dataset.rows.slice(0, PAGE_SIZE * MAX_PAGES),
@@ -67,8 +70,8 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    const currentPage = Math.min(page, pageCount - 1);
    const visibleRows = pagedRows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
    const modeDescription = mode === 'prop'
-      ? 'Closest current lines plus matching production profile on the active slate.'
-      : 'Closest position archetypes, then filtered by line and role profile.';
+      ? `Closest current lines plus matching production profile, then filtered to past games${targetOpponent ? ` vs ${targetOpponent}` : ''}.`
+      : `Closest position archetypes, then filtered by line, role profile, and past games${targetOpponent ? ` vs ${targetOpponent}` : ''}.`;
    const ppHistoryUnavailable = activeSportsbook === 'pp';
    const summary = dataset.summary;
    const candidatePreview = dataset.candidateNames.join(', ');
@@ -80,7 +83,12 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       && Boolean(player)
       && (
          isLoadingCandidates
-         || (activeCandidates.length > 0 && dataset.rows.length === 0 && dataset.hasPendingCandidates)
+         || (
+            activeCandidates.length > 0
+            && dataset.rows.length === 0
+            && dataset.loadedCandidateCount === 0
+            && dataset.hasPendingCandidates
+         )
       );
 
    const renderEmptyState = () => {
@@ -111,16 +119,24 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       }
 
       if (dataset.hasPendingCandidates) {
+         if (dataset.loadedCandidateCount > 0) {
+            return (
+               <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
+                  Comparable players were found, but the prefetched histories do not include enough games{targetOpponent ? ` vs ${targetOpponent}` : ''} near the current {dataset.statLabel} number yet.
+               </div>
+            );
+         }
+
          return (
             <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
-               Loading comparable-player histories ({dataset.loadedCandidateCount}/{dataset.totalCandidateCount} ready) to replace the placeholder table with real historical lines.
+               Loading comparable-player histories ({dataset.loadedCandidateCount}/{dataset.totalCandidateCount} ready) to replace the placeholder table with real historical lines{targetOpponent ? ` vs ${targetOpponent}` : ''}.
             </div>
          );
       }
 
       return (
          <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
-            Comparable players were found, but there were not enough historical lines near the current {dataset.statLabel} number to build a stable sample.
+            Comparable players were found, but there were not enough historical lines{targetOpponent ? ` vs ${targetOpponent}` : ''} near the current {dataset.statLabel} number to build a stable sample.
          </div>
       );
    };
@@ -143,13 +159,14 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                   <h3 className="text-sm font-bold text-white">Similar Players</h3>
                   <span
                      className="shrink-0"
-                     title="Comps are ranked from the current slate, then historical rows are filtered to past lines that were close to the selected player's current number."
+                     title="Comps are ranked from the current slate, then historical rows are filtered to the selected player's opponent and past lines that were close to the current number."
                   >
                      <Info className="w-3.5 h-3.5 text-gray-400" />
                   </span>
                </div>
                <p className="text-xs text-gray-500">
                   {activeSeason === '25/26' ? '25/26 live-slate comps' : 'Current-season comps only'}
+                  {targetOpponent ? ` • vs ${targetOpponent}` : ''}
                   {dataset.currentLine !== null ? ` • Current line ${formatValue(dataset.currentLine)}` : ''}
                </p>
                <p className="text-[11px] text-gray-400 mt-1 max-w-[34rem]">
@@ -212,7 +229,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                   <div className="min-w-[600px]">
                      <div className="grid grid-cols-[1fr_1fr_2fr_1fr_1fr_1fr] text-[10px] text-fgSubtle font-bold uppercase mb-3 px-2">
                         <div>Date</div>
-                        <div>Team</div>
+                        <div>Opp</div>
                         <div>Player</div>
                         <div className="text-center">Line</div>
                         <div className="text-center">Result</div>
@@ -223,7 +240,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                         {visibleRows.map((game) => (
                            <div key={`${game.playerId}-${game.gameDate}-${game.line}-${game.result}`} className="grid grid-cols-[1fr_1fr_2fr_1fr_1fr_1fr] text-xs items-center py-2.5 px-2 hover:bg-bgElevation1 rounded transition-colors border-b border-borderMedium/40 last:border-0">
                               <div className="text-gray-300 font-medium">{game.date}</div>
-                              <div className="text-gray-300">{game.team}</div>
+                              <div className="text-gray-300">{game.opponent ?? 'N/A'}</div>
                               <div className="text-white font-medium truncate pr-2">{game.player}</div>
                               <div className="text-center">
                                  <span className={`px-1.5 py-0.5 rounded font-bold font-chakra border text-[11px] ${game.line === null ? 'text-gray-300 bg-bgElevation1 border-borderMedium/60' : 'text-white bg-borderMedium border-borderMuted'}`}>

@@ -4,6 +4,11 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
+from prop_modeling.injury_feature_config import (
+    INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
+    INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET,
+)
+
 ET_ZONE = ZoneInfo("America/New_York")
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
@@ -99,8 +104,34 @@ def is_active_intraday_window(schedule_path: str, now=None) -> bool:
     return False
 
 
+def _has_same_day_games(games: list, now: datetime) -> bool:
+    today_key = now.strftime("%Y-%m-%d")
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        game_date = str(game.get("game_date") or "").strip()
+        if game_date == today_key:
+            return True
+        deadline_dt = _parse_schedule_datetime(game.get("closing_scrape_deadline"))
+        if deadline_dt is not None and deadline_dt.date() == now.date():
+            return True
+    return False
+
+
 def get_schedule_aware_intraday_interval_seconds(schedule_path: str, now=None) -> int:
+    now = now or get_et_now()
     config = get_intraday_window_config()
-    if is_active_intraday_window(schedule_path, now=now):
-        return config["active_seconds"]
-    return config["quiet_seconds"]
+    interval_seconds = (
+        config["active_seconds"]
+        if is_active_intraday_window(schedule_path, now=now)
+        else config["quiet_seconds"]
+    )
+    games = _load_schedule_games(schedule_path)
+    if (
+        games
+        and now.hour >= INJURY_FRESHNESS_LOCK_SENSITIVE_START_HOUR_ET
+        and _has_same_day_games(games, now)
+    ):
+        freshness_cap_seconds = max(300, INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES * 60)
+        return min(interval_seconds, freshness_cap_seconds)
+    return interval_seconds

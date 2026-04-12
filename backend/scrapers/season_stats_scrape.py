@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -6,6 +7,15 @@ import pandas as pd
 import concurrent.futures
 import time
 import random
+from pathlib import Path
+
+
+def _atomic_write_csv(df: pd.DataFrame, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.name}.tmp")
+    df.to_csv(temp_path, index=False)
+    os.replace(temp_path, output_path)
+
 
 class NBAStatsEngine:
     def __init__(self):
@@ -142,11 +152,94 @@ class NBAStatsEngine:
 
         if not dfs.get("Index", pd.DataFrame()).empty:
             index_df = dfs["Index"].rename(columns={'PERSON_ID': 'PLAYER_ID'})
-            if 'POSITION' in index_df.columns:
-                main_df = main_df.merge(index_df[['PLAYER_ID', 'POSITION']], on='PLAYER_ID', how='left')
+            position_source_col = None
+            for candidate in ("POSITION", "PlayerPosition", "PLAYER_POSITION"):
+                if candidate in index_df.columns:
+                    position_source_col = candidate
+                    break
+            if position_source_col:
+                position_df = (
+                    index_df[["PLAYER_ID", position_source_col]]
+                    .rename(columns={position_source_col: "POSITION"})
+                )
+                main_df = main_df.merge(position_df, on='PLAYER_ID', how='left')
+
+        if "POSITION" not in main_df.columns:
+            main_df["POSITION"] = pd.NA
+
+        unresolved_mask = main_df["POSITION"].replace("", pd.NA).isna()
+        if unresolved_mask.any():
+            current_dir = Path(__file__).resolve().parent.parent / "data" / "current"
+            log_frames = []
+            for gamelog_path in current_dir.glob("gamelogs_*.csv"):
+                try:
+                    logs_df = pd.read_csv(
+                        gamelog_path,
+                        usecols=lambda column: column in {"PLAYER_ID", "TEAM_ABBREVIATION", "START_POSITION"},
+                    )
+                except Exception:
+                    continue
+                if "START_POSITION" not in logs_df.columns:
+                    continue
+                logs_df["PLAYER_ID"] = logs_df["PLAYER_ID"].astype(str)
+                logs_df["TEAM_ABBREVIATION"] = logs_df["TEAM_ABBREVIATION"].astype(str).str.upper()
+                logs_df["START_POSITION"] = logs_df["START_POSITION"].fillna("").astype(str).str.upper()
+                logs_df = logs_df[logs_df["START_POSITION"] != ""].copy()
+                if not logs_df.empty:
+                    log_frames.append(logs_df)
+
+            if log_frames:
+                logs_df = pd.concat(log_frames, ignore_index=True)
+                modal_positions = (
+                    logs_df.groupby(["PLAYER_ID", "TEAM_ABBREVIATION", "START_POSITION"])
+                    .size()
+                    .reset_index(name="count")
+                    .sort_values(["PLAYER_ID", "TEAM_ABBREVIATION", "count"], ascending=[True, True, False])
+                    .drop_duplicates(["PLAYER_ID", "TEAM_ABBREVIATION"])
+                    .rename(columns={"START_POSITION": "LOG_MODAL_POSITION"})
+                )
+                main_df["PLAYER_ID"] = main_df["PLAYER_ID"].astype(str)
+                main_df["TEAM_ABBREVIATION"] = main_df["TEAM_ABBREVIATION"].astype(str).str.upper()
+                main_df = main_df.merge(
+                    modal_positions[["PLAYER_ID", "TEAM_ABBREVIATION", "LOG_MODAL_POSITION"]],
+                    on=["PLAYER_ID", "TEAM_ABBREVIATION"],
+                    how="left",
+                )
+                main_df["POSITION"] = main_df["POSITION"].fillna(main_df["LOG_MODAL_POSITION"])
+                main_df = main_df.drop(columns=["LOG_MODAL_POSITION"], errors="ignore")
+
+        unresolved_mask = main_df["POSITION"].replace("", pd.NA).isna()
+        if unresolved_mask.any():
+            current_dir = Path(__file__).resolve().parent.parent / "data" / "current"
+            master_feed_path = current_dir / "master_feed.json"
+            if master_feed_path.exists():
+                try:
+                    master_feed = json.loads(master_feed_path.read_text())
+                except Exception:
+                    master_feed = []
+                if isinstance(master_feed, list):
+                    master_position_map = {
+                        str(player.get("id")): str(player.get("position")).strip().upper()
+                        for player in master_feed
+                        if isinstance(player, dict)
+                        and str(player.get("id") or "").strip()
+                        and str(player.get("position") or "").strip()
+                    }
+                    if master_position_map:
+                        main_df["MASTER_FEED_POSITION"] = main_df["PLAYER_ID"].map(master_position_map)
+                        main_df["POSITION"] = main_df["POSITION"].fillna(main_df["MASTER_FEED_POSITION"])
+                        main_df = main_df.drop(columns=["MASTER_FEED_POSITION"], errors="ignore")
 
         # 5. Calculate Edge Metrics
         main_df = main_df.fillna(0)
+        if "POSITION" in main_df.columns:
+            main_df["POSITION"] = (
+                main_df["POSITION"]
+                .replace({0: "", "0": ""})
+                .fillna("")
+                .astype(str)
+                .str.upper()
+            )
 
         main_df['AST_CONVERSION_PCT'] = main_df.apply(
             lambda x: round(x['AST'] / x['POTENTIAL_AST'], 3) if x['POTENTIAL_AST'] > 0 else 0, axis=1
@@ -169,14 +262,13 @@ if __name__ == "__main__":
     engine = NBAStatsEngine()
     final_stats = engine.get_player_data()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_path = os.path.join(script_dir, "..", "data", "current", "season_stats.csv")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    output_path = script_dir.parent / "data" / "current" / "season_stats.csv"
 
     
     if not final_stats.empty:
         print(f"Total Players Processed: {len(final_stats)}")
-        final_stats.to_csv(output_path, index=False)
+        _atomic_write_csv(final_stats, output_path)
         print(f"Saved to: {output_path}")
         print(list(final_stats.columns))
     else:

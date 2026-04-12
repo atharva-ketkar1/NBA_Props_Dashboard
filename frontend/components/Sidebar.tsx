@@ -3,7 +3,7 @@ import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-reac
 import { Player, Game, SportsbookId } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
-import { getSportsbookProp, playerHasSportsbookPropForDate } from '../utils/propResolution';
+import { getSportsbookProp } from '../utils/propResolution';
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
 
@@ -487,22 +487,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 game.home_team_tricode.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 game.away_team_tricode.toLowerCase().includes(searchTerm.toLowerCase());
 
-            // Find players for this game who HAVE the prop
+            // Keep the slate explorable even before every book posts lines.
             const gamePlayers = players.filter(p => {
                 // Team Match
                 const isInGame = p.team === game.home_team_tricode || p.team === game.away_team_tricode;
                 if (!isInGame) return false;
-
-                // Prop Match
-                const hasResolvedProp = playerHasSportsbookPropForDate(p, statFilter, activeSportsbook, game.game_date);
-                const hasAvailableProp = playerHasAvailableSportsbookPropForDate(
-                    propsAvailabilityByDate,
-                    p.id,
-                    statFilter,
-                    activeSportsbook,
-                    game.game_date,
-                );
-                if (!hasResolvedProp && !hasAvailableProp) return false;
 
                 // Search Match (Player Name)
                 if (searchTerm && !gameMatchesSearch) {

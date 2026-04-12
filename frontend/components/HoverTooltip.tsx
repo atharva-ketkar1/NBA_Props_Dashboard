@@ -1,5 +1,5 @@
 import React from 'react';
-import { SportsbookId } from '../types';
+import { Player, SportsbookId } from '../types';
 import { ASSETS_BASE } from '../utils/config';
 
 // Represents the data structure parsed by BarChart when hovering over a game
@@ -14,24 +14,163 @@ export interface HoveredGameData {
 
 interface TooltipProps {
     data: HoveredGameData | null;
-    player?: import('../types').Player;
+    player?: Player;
 }
+
+const ACTION_NETWORK_BOOK_IDS: Partial<Record<SportsbookId, string>> = {
+    dk: '15',
+    fd: '30',
+    mgm: '79',
+    cz: '75',
+};
+
+const ACTION_NETWORK_BOOK_FALLBACKS = ['15', '30', '79', '75'];
+
+const formatOdds = (value: any) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 'N/A';
+    return num > 0 ? `+${num}` : String(num);
+};
+
+const formatSignedLine = (value: any) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 'N/A';
+    return num > 0 ? `+${num}` : String(num);
+};
+
+const formatZoneLabel = (zoneKey: string) =>
+    String(zoneKey || '')
+        .split('_')
+        .filter(Boolean)
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ') || 'N/A';
+
+const parsePercentValue = (value: any) => {
+    const parsed = Number(String(value ?? '').replace('%', ''));
+    return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const formatRankValue = (label: string, rank: any) => {
+    const parsedRank = Number(rank);
+    if (!label && !Number.isFinite(parsedRank)) return 'N/A';
+    if (!Number.isFinite(parsedRank)) return label;
+    return label ? `${label} (#${Math.round(parsedRank)})` : `#${Math.round(parsedRank)}`;
+};
+
+const getUpcomingMarketBook = (game: any, activeSportsbook: SportsbookId) => {
+    const markets = game?.markets && typeof game.markets === 'object' ? game.markets : {};
+    const preferredBookId = ACTION_NETWORK_BOOK_IDS[activeSportsbook];
+    const bookOrder = Array.from(new Set([
+        ...(preferredBookId ? [preferredBookId] : []),
+        ...ACTION_NETWORK_BOOK_FALLBACKS,
+        ...Object.keys(markets),
+    ]));
+
+    for (const bookId of bookOrder) {
+        const market = markets?.[bookId];
+        if (market && typeof market === 'object') {
+            return {
+                bookId,
+                isFallback: Boolean(preferredBookId && bookId !== preferredBookId) || !preferredBookId,
+                market,
+            };
+        }
+    }
+
+    return null;
+};
+
+const getPrimaryPlayType = (player?: Player) => {
+    const plays = Array.isArray(player?.play_type_analysis) ? [...player.play_type_analysis] : [];
+    if (!plays.length) return null;
+
+    plays.sort((a: any, b: any) => parsePercentValue(b?.percent) - parsePercentValue(a?.percent));
+    const topPlay = plays[0];
+    if (!topPlay) return null;
+
+    return {
+        label: String(topPlay.type ?? '').trim() || 'N/A',
+        rank: topPlay.rank,
+    };
+};
+
+const getTopShootingZone = (player: Player | undefined, zoneIndex: number) => {
+    const zones = Object.entries(player?.shooting_zones ?? {})
+        .map(([zone, zoneData]: any) => ({
+            zone,
+            pct: parsePercentValue(zoneData?.percentage),
+        }))
+        .sort((a, b) => b.pct - a.pct);
+
+    const zoneEntry = zones[zoneIndex];
+    if (!zoneEntry?.zone) return null;
+
+    return {
+        label: formatZoneLabel(zoneEntry.zone),
+        rank: player?.opp_def_zones?.[zoneEntry.zone]?.rank,
+    };
+};
+
+const getUpcomingTableRows = (
+    game: any,
+    player: Player | undefined,
+    activeSportsbook: SportsbookId,
+) => {
+    const selectedMarket = getUpcomingMarketBook(game, activeSportsbook);
+    const market = selectedMarket?.market;
+    const isHomePlayer = player?.team && game?.home_team_tricode === player.team;
+    const spreadSide = isHomePlayer ? market?.spread?.home : market?.spread?.away;
+    const totalMarket = market?.total;
+    const bookSuffix = selectedMarket?.isFallback && market?.book_label
+        ? ` [${market.book_label}]`
+        : '';
+    const dpt = getPrimaryPlayType(player);
+    const dsz = getTopShootingZone(player, 0);
+    const dsz2 = getTopShootingZone(player, 1);
+
+    return [
+        { label: 'Tip Time', value: game?.game_time_et ? String(game.game_time_et).trim() : 'N/A' },
+        {
+            label: 'Spread',
+            value: spreadSide
+                ? `${formatSignedLine(spreadSide.line)} (${formatOdds(spreadSide.odds)})${bookSuffix}`
+                : 'N/A',
+        },
+        {
+            label: 'Total',
+            value: totalMarket?.line !== null && totalMarket?.line !== undefined
+                ? `${Number(totalMarket.line)} (O ${formatOdds(totalMarket.over?.odds)} / U ${formatOdds(totalMarket.under?.odds)})${bookSuffix}`
+                : 'N/A',
+        },
+        { label: 'DPT', value: dpt ? formatRankValue(dpt.label, dpt.rank) : 'N/A' },
+        { label: 'DSZ', value: dsz ? formatRankValue(dsz.label, dsz.rank) : 'N/A' },
+        { label: 'DSZ2', value: dsz2 ? formatRankValue(dsz2.label, dsz2.rank) : 'N/A' },
+        { label: 'Pull Up', value: formatRankValue('', player?.shot_type_analysis?.opp_def?.pull_up?.rank) },
+        { label: 'Paint', value: formatRankValue('', player?.opp_def_zones?.paint?.rank) },
+    ];
+};
 
 export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
     if (!data) return null;
 
     const { game, x, y, lineValue, statKey, activeSportsbook } = data;
 
-    if (!game || game.isUpcoming) return null;
+    if (!game) return null;
+
+    const isUpcoming = Boolean(game.isUpcoming);
 
     const isGameWin = game.WL === 'W' || (game.margin !== undefined && game.margin > 0);
     const hasMargin = game.margin !== undefined && game.margin !== null;
     const diff = hasMargin ? Math.abs(game.margin) : 0;
 
-    const badgeText = hasMargin && diff > 0 
-        ? (isGameWin ? `Won by ${diff}` : `Lost by ${diff}`) 
-        : (isGameWin ? 'Won' : 'Lost');
-    const badgeColor = isGameWin ? 'bg-green600' : 'bg-red600';
+    const badgeText = isUpcoming
+        ? 'UPCOMING'
+        : hasMargin && diff > 0
+            ? (isGameWin ? `Won by ${diff}` : `Lost by ${diff}`)
+            : (isGameWin ? 'Won' : 'Lost');
+    const badgeColor = isUpcoming
+        ? 'bg-blue500'
+        : isGameWin ? 'bg-green600' : 'bg-red600';
 
     // Remove default mock odds and start with clean fallbacks
     let displayLine: string | number = 'N/A';
@@ -49,12 +188,12 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
 
     const logoSrc = `${ASSETS_BASE}${sbLogo}`;
 
-    if (isPrizePicks) {
+    if (isPrizePicks || isUpcoming) {
         displayLine = lineValue;
     }
 
     // Extract historical odds if available
-    if (!isPrizePicks && player && player.historical_odds && game.GAME_DATE) {
+    if (!isUpcoming && !isPrizePicks && player && player.historical_odds && game.GAME_DATE) {
         // Find the record for this exact date
         const dateRecord = player.historical_odds[game.GAME_DATE];
         if (dateRecord) {
@@ -79,11 +218,6 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
 
                     if (fallbackProp) {
                         displayLine = fallbackProp.line;
-                        const formatOdds = (val: any) => {
-                            const num = Number(val);
-                            if (isNaN(num)) return String(val);
-                            return num > 0 ? `+${num}` : String(num);
-                        };
                         O_ODDS = formatOdds(fallbackProp.over);
                         U_ODDS = formatOdds(fallbackProp.under);
                         hasHistoricalData = true;
@@ -96,6 +230,15 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
 
     // --- Dynamic Stat Row Configuration based on current Tab (statKey) ---
     const renderTableRows = () => {
+        if (isUpcoming) {
+            return getUpcomingTableRows(game, player, activeSportsbook).map((row, index) => (
+                <div key={`${row.label}-${index}`} className="flex justify-between items-center gap-3 text-[11px] leading-tight py-[3px]">
+                    <span className="text-neutral400 font-medium">{row.label}</span>
+                    <span className="text-white font-bold text-right">{row.value}</span>
+                </div>
+            ));
+        }
+
         // Format helper for minutes (handles decimals from the NBA API)
         const formatMin = (min: any) => Math.round(Number(min || 0));
 
@@ -287,7 +430,11 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
         top: `${Math.max(y - 80, 20)}px`,
     };
 
-    const displayDate = game.GAME_DATE ? game.GAME_DATE.replace(/-/g, '/').substring(5) : 'Unknown Date';
+    const displayDate = game.GAME_DATE
+        ? game.GAME_DATE.replace(/-/g, '/').substring(5)
+        : game.dateMonth && game.dateDay
+            ? `${game.dateMonth} ${game.dateDay}`
+            : 'Unknown Date';
 
     return (
         <div
@@ -308,7 +455,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                             <span className="text-white uppercase">{activeSportsbook}</span>
                         )}
                         <span className="text-white relative">
-                            {isPrizePicks ? `Line ${displayLine}` : `CL ${displayLine}`}
+                            {isUpcoming || isPrizePicks ? `Line ${displayLine}` : `CL ${displayLine}`}
                             {isFallback && <span className="text-yellow-400 align-top text-[10px] ml-[1px] absolute -top-1">*</span>}
                         </span>
                         {hasHistoricalData && (
@@ -318,7 +465,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                             </>
                         )}
                     </div>
-                    {isPrizePicks && (
+                    {isPrizePicks && !isUpcoming && (
                         <div className="text-[9px] text-gray-400 font-medium -mt-1 opacity-80">
                             PrizePicks closing-line history unavailable in v1.
                         </div>
@@ -341,7 +488,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
             </div>
 
             {/* DID NOT PLAY block */}
-            {inactivePlayers.length > 0 && (
+            {!isUpcoming && inactivePlayers.length > 0 && (
                 <div className="bg-bgElevation1 border-t border-borderMedium">
                     <div className="w-full text-center py-2 bg-borderMedium/50 border-b border-borderMedium">
                         <span className="text-neutral400 font-bold text-[9px] uppercase tracking-wider">{getDnpTitle()}</span>

@@ -118,4 +118,14 @@ tls-client
 python-dotenv
 apscheduler
 psutil
+pypdf
 supabase
+
+# Prop modeling / backtesting
+catboost
+scipy
+joblib
+lightgbm
+scikit-learn
+shap
+xgboost

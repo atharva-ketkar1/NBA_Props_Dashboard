@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { Player, Game, SportsbookId } from '../types';
+import { ActiveTeammateFilter, Player, Game, SportsbookId } from '../types';
 import { TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
@@ -23,6 +23,7 @@ interface BarChartProps {
     customLine?: number | null;
     onCustomLineChange?: (line: number | null) => void;
     activeFilterOverlay?: string | null;
+    activeTeammateFilter?: ActiveTeammateFilter | null;
     isFiltersOpen?: boolean;
     historicalGameCount?: number;
     activeSeason?: string;
@@ -44,13 +45,63 @@ const STAT_LABELS: Record<string, string> = {
 };
 
 const CHART_MODE_FILTERS = new Set(['H2H', 'Home', 'Away', 'B2B']);
+const ACTION_NETWORK_ODDS_PATH = '/data/current/action_network_odds.json';
 
 const getGameKey = (game: any) => `${game?.GAME_ID ?? game?.GAME_DATE ?? ''}-${game?.MATCHUP ?? ''}`;
 
 const getIsHomeGame = (game: any) => String(game?.MATCHUP || '').includes('vs.');
 const getIsAwayGame = (game: any) => String(game?.MATCHUP || '').includes('@');
 
-export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, isFiltersOpen, historicalGameCount, activeSeason }) => {
+const getScheduleMarketKey = (game: any) => {
+    const gameDate = String(game?.game_date ?? '').trim();
+    const awayTeam = String(game?.away_team_tricode ?? '').trim().toUpperCase();
+    const homeTeam = String(game?.home_team_tricode ?? '').trim().toUpperCase();
+    if (!gameDate || !awayTeam || !homeTeam) return null;
+    return `${gameDate}:${awayTeam}@${homeTeam}`;
+};
+
+const mergeActionNetworkMarkets = (
+    scheduleRows: Game[],
+    oddsRows?: Game[] | null,
+) => {
+    if (!Array.isArray(oddsRows) || !oddsRows.length) {
+        return scheduleRows;
+    }
+
+    const oddsByGameId = new Map<string, Game>();
+    const oddsByMatchup = new Map<string, Game>();
+
+    oddsRows.forEach((game) => {
+        const gameId = String(game?.game_id ?? '').trim();
+        if (gameId) {
+            oddsByGameId.set(gameId, game);
+        }
+
+        const matchupKey = getScheduleMarketKey(game);
+        if (matchupKey) {
+            oddsByMatchup.set(matchupKey, game);
+        }
+    });
+
+    return scheduleRows.map((game) => {
+        const gameId = String(game?.game_id ?? '').trim();
+        const matchupKey = getScheduleMarketKey(game);
+        const marketGame = (gameId ? oddsByGameId.get(gameId) : null)
+            ?? (matchupKey ? oddsByMatchup.get(matchupKey) : null);
+
+        if (!marketGame) {
+            return game;
+        }
+
+        return {
+            ...game,
+            has_action_network_markets: marketGame.has_action_network_markets ?? Boolean(marketGame.markets),
+            markets: marketGame.markets ?? game.markets,
+        };
+    });
+};
+
+export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, activeTeammateFilter, isFiltersOpen, historicalGameCount, activeSeason }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
     const chartMode = CHART_MODE_FILTERS.has(activeFilterOverlay ?? '') ? activeFilterOverlay : null;
     const overlayDefinition = useMemo(
@@ -83,7 +134,17 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
     useEffect(() => {
         setHoverData(null);
-    }, [player?.id, activeTab, activeSportsbook, activeSeason, activeFilterOverlay]);
+    }, [
+        player?.id,
+        activeTab,
+        activeSportsbook,
+        activeSeason,
+        activeFilterOverlay,
+        activeTeammateFilter?.playerId,
+        activeTeammateFilter?.playerName,
+        activeTeammateFilter?.mode,
+        activeTeammateFilter?.isImpactLoading,
+    ]);
 
     useEffect(() => {
         if (!player) {
@@ -177,10 +238,17 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     console.error('[api] games error:', error);
                 });
         } else {
-            fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
-                .then(data => {
+            const actionOddsPromise = fetchApiJson<{ games?: Game[] }>(ACTION_NETWORK_ODDS_PATH)
+                .catch(() => ({ games: [] }));
+
+            Promise.all([
+                fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json'),
+                actionOddsPromise,
+            ])
+                .then(([data, actionOdds]) => {
                     if (cancelled) return;
-                    const nextGames = (data as Game[]).filter(g => relevantDates.includes(g.game_date));
+                    const filteredGames = (data as Game[]).filter(g => relevantDates.includes(g.game_date));
+                    const nextGames = mergeActionNetworkMarkets(filteredGames, actionOdds?.games ?? []);
                     scheduleCacheRef.current.set(scheduleKey, nextGames);
                     scheduleKeyRef.current = scheduleKey;
                     setScheduleData(nextGames);
@@ -264,10 +332,24 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             if (chartMode === 'B2B') return b2bKeys.has(getGameKey(game));
             return true;
         };
+        const teammateGameIds = new Set(
+            activeTeammateFilter?.activeGameIds ?? [],
+        );
+        const matchesTeammateMode = (game: any) => {
+            if (!activeTeammateFilter || activeTeammateFilter.isImpactLoading) return true;
+            const gameId = String(game?.GAME_ID ?? '').trim();
+            const teammateWasActive = gameId ? teammateGameIds.has(gameId) : false;
+            return activeTeammateFilter.mode === 'with'
+                ? teammateWasActive
+                : !teammateWasActive;
+        };
+        const teammateFilteredGames = activeTeammateFilter && !activeTeammateFilter.isImpactLoading
+            ? chartPlayer.game_log.filter((game: any) => matchesTeammateMode(game))
+            : chartPlayer.game_log;
 
         const selectedGames = chartMode
-            ? chartPlayer.game_log.filter((game: any) => matchesChartMode(game)).slice(0, numGames)
-            : chartPlayer.game_log.slice(0, numGames);
+            ? teammateFilteredGames.filter((game: any) => matchesChartMode(game)).slice(0, numGames)
+            : teammateFilteredGames.slice(0, numGames);
 
         const log = [...selectedGames].reverse();
 
@@ -369,9 +451,18 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             }
 
             data.push({
+                GAME_DATE: upcomingGame?.game_date ?? dashboardDate,
+                GAME_ID: upcomingGame?.game_id ?? `upcoming-${dashboardDate}-${chartPlayer.team}-${upcomingOpponent}`,
+                MATCHUP: upcomingGame?.matchup
+                    ?? `${chartPlayer.team} vs. ${upcomingOpponent}`,
+                away_team_tricode: upcomingGame?.away_team_tricode ?? null,
+                game_time_et: upcomingGame?.game_time_et ?? null,
+                has_action_network_markets: upcomingGame?.has_action_network_markets ?? false,
+                home_team_tricode: upcomingGame?.home_team_tricode ?? null,
+                markets: upcomingGame?.markets ?? {},
                 score: null,
                 secondaryValue: upcomingSecondaryValue,
-                opponent: upcomingOpponent === 'TBD' ? 'HOU' : upcomingOpponent,
+                opponent: upcomingOpponent,
                 logoUrl: upcomingLogoUrl,
                 dateMonth: upcomingMonth,
                 dateDay: upcomingDay,
@@ -388,7 +479,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             isBinaryOverlay: overlayDefinition?.kind === 'binary',
             historicalSampleCount: log.length,
         };
-    }, [chartPlayer, statKey, activeSportsbook, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
+    }, [chartPlayer, statKey, activeSportsbook, activeTeammateFilter, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
 
     if (!player) return null;
 

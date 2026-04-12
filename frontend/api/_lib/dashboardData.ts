@@ -27,6 +27,8 @@ const HISTORICAL_PLAYER_PROP_SELECT = 'game_date, stat_type, sportsbook, line, o
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
 const LINE_META_SELECT = 'game_date, updated_at';
 const SLATE_SELECT = 'game_id, game_date, home_team_tricode, away_team_tricode, is_live, is_final';
+const GAME_MARKETS_SELECT = 'game_id, has_action_network_markets, markets, source, source_query_date, source_generated_at, updated_at';
+const NBA_INJURY_REPORT_SELECT = 'game_id, game_date, has_injury_report, teams, source, source_query_date, report_timestamp_et, source_generated_at, updated_at';
 const PAGE_SIZE = 1000;
 const MAX_UPCOMING_PROP_DAYS = 2;
 const DEFAULT_BOOTSTRAP_PROP_DAYS = MAX_UPCOMING_PROP_DAYS;
@@ -55,6 +57,8 @@ const LEGACY_HISTORICAL_BOOK_MAP: Record<string, string> = {
   fanduel: 'fanduel',
   prizepicks: 'pp',
 };
+const SUPPORTED_SPORTSBOOK_IDS: SportsbookId[] = ['dk', 'fd', 'mgm', 'cz', 'pp'];
+const FALLBACK_SPORTSBOOK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
 
 declare global {
   // eslint-disable-next-line no-var
@@ -72,6 +76,7 @@ const dashboardInflight = globalThis.__propsmadnessDashboardInflight ??= new Map
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFilePath);
 const LOCAL_EDGE_SCORE_PATH = path.resolve(currentDir, '..', '..', '..', 'backend', 'data', 'current', 'edge_scores_top15.json');
+const LOCAL_NBA_INJURY_REPORT_PATH = path.resolve(currentDir, '..', '..', '..', 'backend', 'data', 'current', 'nba_injury_report.json');
 
 function parsePositiveInteger(rawValue: string, fallbackValue: number) {
   const parsed = Number(rawValue);
@@ -94,6 +99,10 @@ function getServerBooleanEnv(name: string, fallbackValue: boolean) {
     return false;
   }
   return fallbackValue;
+}
+
+function isSportsbookId(value: unknown): value is SportsbookId {
+  return typeof value === 'string' && SUPPORTED_SPORTSBOOK_IDS.includes(value as SportsbookId);
 }
 
 function clampPropDayWindow(days: number) {
@@ -197,6 +206,42 @@ function readLocalEdgePayloadFallback(): EdgeScorePayload | null {
   } catch (error) {
     console.error('[edge fallback] Could not read local edge score artifact.', error);
     return null;
+  }
+}
+
+function readLocalNbaInjuryReportRowsFallback(dates: string[]) {
+  if (!fs.existsSync(LOCAL_NBA_INJURY_REPORT_PATH)) {
+    return [];
+  }
+
+  const requestedDates = new Set((dates ?? []).map((value) => String(value ?? '').trim()).filter(Boolean));
+
+  try {
+    const rawPayload = JSON.parse(fs.readFileSync(LOCAL_NBA_INJURY_REPORT_PATH, 'utf8')) as {
+      games?: any[];
+      query_date?: string | null;
+      source?: string | null;
+      generated_at?: string | null;
+      report_timestamp_et?: string | null;
+    } | null;
+    const rows = Array.isArray(rawPayload?.games) ? rawPayload.games : [];
+
+    return rows
+      .filter((row: any) => row?.game_id && requestedDates.has(String(row?.game_date ?? '').trim()))
+      .map((row: any) => ({
+        game_id: row.game_id,
+        game_date: row.game_date ?? rawPayload?.query_date ?? null,
+        has_injury_report: Boolean(row?.teams),
+        teams: row?.teams && typeof row.teams === 'object' ? row.teams : {},
+        source: rawPayload?.source ?? 'nba_official_injury_report',
+        source_query_date: rawPayload?.query_date ?? row.game_date ?? null,
+        report_timestamp_et: rawPayload?.report_timestamp_et ?? null,
+        source_generated_at: rawPayload?.generated_at ?? null,
+        updated_at: rawPayload?.generated_at ?? null,
+      }));
+  } catch (error) {
+    console.error('[injury fallback] Could not read local NBA injury report artifact.', error);
+    return [];
   }
 }
 
@@ -452,6 +497,75 @@ async function fetchAllPlayerPropsForDates(
   );
 }
 
+function chooseFallbackSportsbook(
+  availabilityRows: any[] = [],
+  requestedSportsbook?: SportsbookId | null,
+): SportsbookId | null {
+  const rowCounts = new Map<SportsbookId, number>();
+
+  for (const row of availabilityRows ?? []) {
+    const sportsbook = row?.sportsbook;
+    if (!isSportsbookId(sportsbook)) {
+      continue;
+    }
+    rowCounts.set(sportsbook, (rowCounts.get(sportsbook) ?? 0) + 1);
+  }
+
+  if (!rowCounts.size) {
+    return requestedSportsbook ?? null;
+  }
+
+  if (requestedSportsbook && (rowCounts.get(requestedSportsbook) ?? 0) > 0) {
+    return requestedSportsbook;
+  }
+
+  const priorityIndex = (sportsbook: SportsbookId) => {
+    const index = FALLBACK_SPORTSBOOK_PRIORITY.indexOf(sportsbook);
+    return index >= 0 ? index : FALLBACK_SPORTSBOOK_PRIORITY.length;
+  };
+
+  return Array.from(rowCounts.entries())
+    .sort(([leftBook, leftCount], [rightBook, rightCount]) => {
+      if (rightCount !== leftCount) {
+        return rightCount - leftCount;
+      }
+      return priorityIndex(leftBook) - priorityIndex(rightBook);
+    })[0]?.[0] ?? requestedSportsbook ?? null;
+}
+
+async function resolvePropsRowsForSportsbook(
+  gameDates: string[],
+  requestedSportsbook: SportsbookId,
+  availabilityRows: any[] = [],
+  prefetchedRequestedRows?: any[] | null,
+) {
+  const requestedRows = prefetchedRequestedRows
+    ?? await fetchAllPlayerPropsForDates(gameDates, PLAYER_PROP_SELECT, requestedSportsbook);
+  if (requestedRows.length > 0) {
+    return {
+      effectiveSportsbook: requestedSportsbook,
+      propsRows: requestedRows,
+      requestedSportsbook,
+    };
+  }
+
+  const fallbackSportsbook = chooseFallbackSportsbook(availabilityRows, requestedSportsbook);
+  if (!fallbackSportsbook || fallbackSportsbook === requestedSportsbook) {
+    return {
+      effectiveSportsbook: requestedSportsbook,
+      propsRows: requestedRows,
+      requestedSportsbook,
+    };
+  }
+
+  const fallbackRows = await fetchAllPlayerPropsForDates(gameDates, PLAYER_PROP_SELECT, fallbackSportsbook);
+  return {
+    effectiveSportsbook: fallbackRows.length > 0 ? fallbackSportsbook : requestedSportsbook,
+    propsRows: fallbackRows.length > 0 ? fallbackRows : requestedRows,
+    requestedSportsbook,
+  };
+}
+
 async function fetchPlayers(selectClause: string) {
   return readCached(
     buildCacheKey(['players', selectClause]),
@@ -485,6 +599,131 @@ async function fetchGamesForDates(dates: string[], selectClause = '*') {
       return data ?? [];
     },
   );
+}
+
+async function fetchGameMarketsForDates(dates: string[]) {
+  const normalizedDates = Array.from(new Set((dates ?? []).filter(Boolean))).sort();
+  if (!normalizedDates.length) {
+    return [];
+  }
+
+  return readCached(
+    buildCacheKey(['game_markets_current', GAME_MARKETS_SELECT, normalizedDates.join(',')]),
+    GAMES_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase
+        .from('game_markets_current')
+        .select(GAME_MARKETS_SELECT)
+        .in('game_date', normalizedDates);
+
+      if (error && isMissingRelationError(error, 'game_markets_current')) {
+        return [];
+      }
+
+      assertNoError(error, 'game_markets_current');
+      return data ?? [];
+    },
+  );
+}
+
+async function fetchGameInjuryReportsForDates(dates: string[]) {
+  const normalizedDates = Array.from(new Set((dates ?? []).filter(Boolean))).sort();
+  if (!normalizedDates.length) {
+    return [];
+  }
+
+  return readCached(
+    buildCacheKey(['nba_injury_reports_current', NBA_INJURY_REPORT_SELECT, normalizedDates.join(',')]),
+    GAMES_CACHE_MS,
+    async () => {
+      const localFallbackRows = readLocalNbaInjuryReportRowsFallback(normalizedDates);
+
+      try {
+        const supabase = getSupabaseAdmin();
+        const { data, error } = await supabase
+          .from('nba_injury_reports_current')
+          .select(NBA_INJURY_REPORT_SELECT)
+          .in('game_date', normalizedDates);
+
+        if (error && isMissingRelationError(error, 'nba_injury_reports_current')) {
+          return localFallbackRows;
+        }
+
+        assertNoError(error, 'nba_injury_reports_current');
+
+        if (data?.length) {
+          return data;
+        }
+
+        return localFallbackRows;
+      } catch (error) {
+        if (localFallbackRows.length) {
+          return localFallbackRows;
+        }
+        throw error;
+      }
+    },
+  );
+}
+
+function mergeGamesWithMarkets(gamesRows: any[], marketRows: any[]) {
+  if (!Array.isArray(gamesRows) || !gamesRows.length) {
+    return gamesRows ?? [];
+  }
+
+  const marketsByGameId = new Map(
+    (marketRows ?? [])
+      .filter((row: any) => row?.game_id)
+      .map((row: any) => [String(row.game_id), row]),
+  );
+
+  return gamesRows.map((game: any) => {
+    const marketRow = marketsByGameId.get(String(game?.game_id ?? ''));
+    if (!marketRow) {
+      return game;
+    }
+
+    return {
+      ...game,
+      has_action_network_markets: marketRow.has_action_network_markets ?? Boolean(marketRow.markets),
+      markets: marketRow.markets ?? {},
+      market_source: marketRow.source ?? null,
+      market_source_generated_at: marketRow.source_generated_at ?? null,
+      market_source_query_date: marketRow.source_query_date ?? null,
+      market_updated_at: marketRow.updated_at ?? null,
+    };
+  });
+}
+
+function mergeGamesWithInjuries(gamesRows: any[], injuryRows: any[]) {
+  if (!Array.isArray(gamesRows) || !gamesRows.length) {
+    return gamesRows ?? [];
+  }
+
+  const injuriesByGameId = new Map(
+    (injuryRows ?? [])
+      .filter((row: any) => row?.game_id)
+      .map((row: any) => [String(row.game_id), row]),
+  );
+
+  return gamesRows.map((game: any) => {
+    const injuryRow = injuriesByGameId.get(String(game?.game_id ?? ''));
+    if (!injuryRow) {
+      return game;
+    }
+
+    return {
+      ...game,
+      has_injury_report: injuryRow.has_injury_report ?? Boolean(injuryRow.teams),
+      injury_teams: injuryRow.teams ?? {},
+      injury_source: injuryRow.source ?? null,
+      injury_source_query_date: injuryRow.source_query_date ?? null,
+      injury_report_timestamp_et: injuryRow.report_timestamp_et ?? null,
+      injury_source_generated_at: injuryRow.source_generated_at ?? null,
+      injury_updated_at: injuryRow.updated_at ?? null,
+    };
+  });
 }
 
 async function fetchAllHistoricalPlayerPropsForPlayer(playerId: number) {
@@ -554,7 +793,7 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
   const fastRefreshDates = getFastRefreshDates(null);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [playersRows, propsRows, availabilityRows, lineRows, gamesRows] = await Promise.all([
+  const [playersRows, requestedPropsRows, availabilityRows, lineRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
     fetchPlayers(PLAYER_BASE_SELECT),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT, activeSportsbook),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_AVAIL_SELECT),
@@ -562,16 +801,29 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
       ? fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements')
       : Promise.resolve([]),
     fetchGamesForDates([today], SLATE_SELECT),
+    fetchGameMarketsForDates([today]),
+    fetchGameInjuryReportsForDates([today]),
   ]);
+  const resolvedProps = await resolvePropsRowsForSportsbook(
+    futureDates,
+    activeSportsbook,
+    availabilityRows,
+    requestedPropsRows,
+  );
 
   return {
+    requestedSportsbook: activeSportsbook,
+    effectiveSportsbook: resolvedProps.effectiveSportsbook,
     playersRows: (playersRows ?? []).map((row: any) => ({
       ...row,
       play_type_analysis: undefined,
     })),
-    propsRows,
+    propsRows: resolvedProps.propsRows,
     availabilityRows,
-    gamesRows: gamesRows ?? [],
+    gamesRows: mergeGamesWithInjuries(
+      mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),
+      gameInjuryRows ?? [],
+    ),
     lineRows: lineRows ?? [],
     lineVersion: serializeLineMovementVersion(lineRows ?? []),
   };
@@ -585,7 +837,7 @@ export async function fetchHotPayload(
   const activeDates = getFastRefreshDates(selectedDate);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [propsRows, availabilityRows, lineMetaRows, gamesRows] = await Promise.all([
+  const [propsRows, availabilityRows, lineMetaRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
     fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_SELECT, activeSportsbook),
     fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_AVAIL_SELECT),
     includeLineMovements
@@ -597,24 +849,41 @@ export async function fetchHotPayload(
       )
       : Promise.resolve([]),
     fetchGamesForDates(activeDates, SLATE_SELECT),
+    fetchGameMarketsForDates(activeDates),
+    fetchGameInjuryReportsForDates(activeDates),
   ]);
+  const resolvedProps = await resolvePropsRowsForSportsbook(
+    activeDates,
+    activeSportsbook,
+    availabilityRows,
+    propsRows,
+  );
+
+  const mergedGamesRows = mergeGamesWithInjuries(
+    mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),
+    gameInjuryRows ?? [],
+  );
 
   const nextVersion = serializeLineMovementVersion(lineMetaRows ?? []);
 
   if (!includeLineMovements) {
     return {
-      propsRows,
+      requestedSportsbook: activeSportsbook,
+      effectiveSportsbook: resolvedProps.effectiveSportsbook,
+      propsRows: resolvedProps.propsRows,
       availabilityRows,
-      gamesRows,
+      gamesRows: mergedGamesRows,
       lineVersion: currentLineVersion,
     };
   }
 
   if (nextVersion === currentLineVersion) {
     return {
-      propsRows,
+      requestedSportsbook: activeSportsbook,
+      effectiveSportsbook: resolvedProps.effectiveSportsbook,
+      propsRows: resolvedProps.propsRows,
       availabilityRows,
-      gamesRows,
+      gamesRows: mergedGamesRows,
       lineVersion: nextVersion,
     };
   }
@@ -627,17 +896,28 @@ export async function fetchHotPayload(
   );
 
   return {
-    propsRows,
+    requestedSportsbook: activeSportsbook,
+    effectiveSportsbook: resolvedProps.effectiveSportsbook,
+    propsRows: resolvedProps.propsRows,
     availabilityRows,
-    gamesRows,
+    gamesRows: mergedGamesRows,
     lineVersion: nextVersion,
     lineRows: lineRows ?? [],
   };
 }
 
 export async function fetchGamesPayload(dates: string[]) {
+  const [gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
+    fetchGamesForDates(dates),
+    fetchGameMarketsForDates(dates),
+    fetchGameInjuryReportsForDates(dates),
+  ]);
+
   return {
-    games: await fetchGamesForDates(dates),
+    games: mergeGamesWithInjuries(
+      mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),
+      gameInjuryRows ?? [],
+    ),
   };
 }
 

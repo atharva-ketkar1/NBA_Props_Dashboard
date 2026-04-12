@@ -58,7 +58,7 @@ const TAB_ORDER = [
   'Steals', 'Blocks', 'Stl+Blk', 'Turnovers', 'Fouls', 'FT Attempted'
 ];
 
-const ENABLE_PRIZEPICKS = import.meta.env.VITE_ENABLE_PRIZEPICKS === 'true';
+const ENABLE_PRIZEPICKS = import.meta.env.VITE_ENABLE_PRIZEPICKS !== 'false';
 
 const SPORTSBOOKS: Array<{ id: SportsbookId; label: string; logo: string }> = [
   { id: 'dk', label: 'DraftKings', logo: `${ASSETS_BASE}/assets/sportsbook_logos/draftkings.webp` },

@@ -7,6 +7,7 @@ import argparse
 import atexit
 import signal
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -28,6 +29,8 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 LOCK_FILE = os.path.join(LOGS_DIR, "master_cron.lock")
 STATE_FILE = os.path.join(LOGS_DIR, "master_cron_state.json")
 SCHEDULE_PATH = os.path.join(DATA_DIR, "today_schedule.json")
+NBA_INJURY_REPORT_PATH = os.path.join(DATA_DIR, "nba_injury_report.json")
+ACTION_NETWORK_PATH = os.path.join(DATA_DIR, "action_network_odds.json")
 LOCK_STALE_SECONDS = 2700
 _LOCK_REGISTERED = False
 
@@ -46,6 +49,24 @@ def get_game_status_refresh_interval_seconds():
     except ValueError:
         parsed = 300
     return max(60, parsed)
+
+
+def get_action_network_refresh_interval_seconds():
+    raw_value = os.getenv("ACTION_NETWORK_REFRESH_INTERVAL_SECONDS", "3600")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 3600
+    return max(300, parsed)
+
+
+def get_nba_injury_report_refresh_interval_seconds():
+    raw_value = os.getenv("NBA_INJURY_REPORT_REFRESH_INTERVAL_SECONDS", "3600")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 3600
+    return max(300, parsed)
 
 
 def get_pipeline_retry_cooldown_seconds():
@@ -90,6 +111,8 @@ def load_state():
         "scraped_closing_games": [],
         "last_intraday_time": 0,
         "last_game_status_refresh_time": 0,
+        "last_nba_injury_report_refresh_time": 0,
+        "last_action_network_refresh_time": 0,
         "pipeline_failure_date": "",
         "pipeline_failures_today": 0,
         "last_pipeline_attempt_ts": 0,
@@ -369,6 +392,117 @@ def run_intraday_if_needed(now, state, dry_run=False):
     return False
 
 
+def run_nba_injury_report_if_needed(now, state, dry_run=False):
+    """Priority 4: Hourly official injury report refresh."""
+    last_run = state.get("last_nba_injury_report_refresh_time", 0)
+    current_timestamp = now.timestamp()
+    interval_seconds = get_nba_injury_report_refresh_interval_seconds()
+
+    if current_timestamp - last_run < interval_seconds:
+        return False
+
+    log_section(
+        logger,
+        "Priority 4 - NBA injury report refresh",
+        every_s=interval_seconds,
+        dry_run=dry_run,
+    )
+
+    injury_ok = True
+    if not dry_run:
+        try:
+            from scrapers import fetch_nba_injury_report
+
+            result = fetch_nba_injury_report.refresh_nba_injury_report_if_needed(
+                output_path=Path(NBA_INJURY_REPORT_PATH),
+                schedule_path=Path(SCHEDULE_PATH),
+                min_refresh_interval_seconds=interval_seconds,
+            )
+            payload = result.get("payload") if isinstance(result, dict) else {}
+            log_status(
+                logger,
+                "OK",
+                "NBA injury report ready",
+                refreshed=bool(result.get("refreshed")) if isinstance(result, dict) else False,
+                games=(payload or {}).get("game_count", 0),
+                player_rows=(payload or {}).get("player_row_count", 0),
+                not_submitted_teams=(payload or {}).get("not_submitted_team_count", 0),
+            )
+
+            try:
+                from utils.upsert_nba_injury_report import upsert_nba_injury_report_from_file
+
+                upsert_nba_injury_report_from_file(NBA_INJURY_REPORT_PATH)
+            except Exception as e:
+                log_status(logger, "WARN", "nba_injury_reports_current sync failed", error=e)
+        except Exception as e:
+            log_status(logger, "FAIL", "NBA injury report refresh failed", error=e)
+            injury_ok = False
+
+    if not injury_ok:
+        return False
+
+    state["last_nba_injury_report_refresh_time"] = time.time()
+    if not dry_run:
+        save_state(state)
+    return True
+
+
+def run_action_network_if_needed(now, state, dry_run=False):
+    """Priority 5: Hourly spreads/totals refresh from Action Network."""
+    last_run = state.get("last_action_network_refresh_time", 0)
+    current_timestamp = now.timestamp()
+    interval_seconds = get_action_network_refresh_interval_seconds()
+
+    if current_timestamp - last_run < interval_seconds:
+        return False
+
+    log_section(
+        logger,
+        "Priority 5 - Action Network markets refresh",
+        every_s=interval_seconds,
+        dry_run=dry_run,
+    )
+
+    action_ok = True
+    if not dry_run:
+        try:
+            from scrapers import fetch_action_network_odds as action_network_odds
+
+            result = action_network_odds.refresh_action_network_odds_if_needed(
+                output_path=Path(ACTION_NETWORK_PATH),
+                schedule_path=Path(SCHEDULE_PATH),
+                min_refresh_interval_seconds=interval_seconds,
+            )
+            payload = result.get("payload") if isinstance(result, dict) else {}
+            log_status(
+                logger,
+                "OK",
+                "Action Network markets ready",
+                refreshed=bool(result.get("refreshed")) if isinstance(result, dict) else False,
+                games=(payload or {}).get("matched_game_count", 0),
+                schedule_games=(payload or {}).get("schedule_game_count", 0),
+            )
+
+            try:
+                from utils.upsert_game_markets import upsert_game_markets_from_file
+
+                upsert_game_markets_from_file(ACTION_NETWORK_PATH)
+            except Exception as e:
+                log_status(logger, "WARN", "game_markets_current sync failed", error=e)
+        except Exception as e:
+            log_status(logger, "FAIL", "Action Network markets refresh failed", error=e)
+            action_ok = False
+
+    if not action_ok:
+        return False
+
+    state["last_action_network_refresh_time"] = time.time()
+    if not dry_run:
+        save_state(state)
+    return True
+
+
 def refresh_game_status_if_needed(now, state, dry_run=False):
     """Lightweight games table refresh for LIVE/FINAL status."""
     last_run = state.get("last_game_status_refresh_time", 0)
@@ -424,7 +558,12 @@ def check_mutual_exclusion():
             lock_pid = lock_info.get("pid")
 
             if lock_pid and _is_pid_running(lock_pid):
-                log_status(logger, "WARN", "Another master cron instance is active", pid=lock_pid)
+                log_status(
+                    logger,
+                    "SKIP",
+                    "Master cron run skipped; active instance holds lock",
+                    pid=lock_pid,
+                )
                 return False
 
             if lock_pid and not _is_pid_running(lock_pid):
@@ -436,7 +575,7 @@ def check_mutual_exclusion():
                     log_status(logger, "WARN", "Removing stale cron lock")
                     os.remove(LOCK_FILE)
                 else:
-                    log_status(logger, "WARN", "Another master cron instance is active")
+                    log_status(logger, "SKIP", "Master cron run skipped; active lock file present")
                     return False
         except Exception:
             return False
@@ -476,7 +615,12 @@ def main(dry_run=False, mock_time=None):
             return
 
         refresh_game_status_if_needed(now, state, dry_run=dry_run)
-            
+
+        # Check Priority 4
+        ran_injury_report = run_nba_injury_report_if_needed(now, state, dry_run=dry_run)
+        if ran_injury_report:
+            return
+
         # Check Priority 2
         ran_closing = check_closing_lines(now, state, dry_run=dry_run)
         if ran_closing:
@@ -485,6 +629,11 @@ def main(dry_run=False, mock_time=None):
         # Check Priority 3
         ran_intraday = run_intraday_if_needed(now, state, dry_run=dry_run)
         if ran_intraday:
+            return
+
+        # Check Priority 5
+        ran_action_network = run_action_network_if_needed(now, state, dry_run=dry_run)
+        if ran_action_network:
             return
 
         logger.debug("No priority matched at this time.")

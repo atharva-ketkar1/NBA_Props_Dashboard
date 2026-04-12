@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import os
 
-DASHBOARD_LOOKAHEAD_DAYS = 14
+DASHBOARD_LOOKAHEAD_DAYS = 7
 
 
 def upsert_games_to_db(raw_data: list) -> None:

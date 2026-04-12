@@ -11,6 +11,7 @@ LOGGER_ALIASES = {
     "PipelineStdout": "pipe-out",
     "CronSimulator": "simulator",
     "ClosingLineSkips": "skip-log",
+    "EdgeScore": "edge-score",
     "scrapers.fetch_odds_draftkings": "draftkings",
     "scrapers.fetch_odds_fanduel": "fanduel",
     "utils.upsert_props": "props-sync",
@@ -121,3 +122,7 @@ def configure_logging(level=logging.INFO):
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+    logging.getLogger("requests.packages.urllib3").setLevel(logging.ERROR)
+    logging.getLogger("requests.packages.urllib3.connectionpool").setLevel(logging.ERROR)
