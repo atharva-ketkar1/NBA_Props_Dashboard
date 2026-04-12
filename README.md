@@ -2,7 +2,30 @@
 
 An end-to-end basketball analytics product that turns fragmented sportsbook and league data into a fast, research-friendly decision surface.
 
+**Live app:** https://propx-dashboard.vercel.app/
+
+**Discord alerts:** https://discord.gg/HV3aG7qw
+
+<!-- ![Dashboard preview](docs/assets/dashboard-preview.gif) -->
+
 This project combines scheduled data collection, entity resolution, feature engineering, historical market capture, and a React dashboard tuned for high-density exploration. It is built like a small analytics platform rather than a one-off frontend: the same pipeline can publish a static JSON feed for local/offline use or upsert structured records into Supabase for hosted delivery.
+
+## Current App Status
+
+### What Works
+
+- Live dashboard browsing for the current NBA slate.
+- Player prop exploration across supported sportsbooks.
+- Signal Score ranking, matchup context, recent-game history, and player detail views.
+- Filtering by team, game, stat type, sportsbook, line value, and teammate availability context.
+- Supabase-backed hosted reads plus static JSON mode for local development.
+
+### What Does Not Work Yet
+
+- **Check My Prop** is visible in the navigation, but the full user-facing workflow is not wired up yet.
+- **User profiles/accounts** are not implemented yet.
+- Saved picks, personalized dashboards, and account-specific history are not available yet.
+- Some advanced analysis panels depend on available upstream data and may show empty or partial states when a feed is missing.
 
 ## Why This Project Stands Out
 
