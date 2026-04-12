@@ -200,6 +200,14 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const [scheduleData, setScheduleData] = useState<Game[]>([]);
     const scheduleCacheRef = useRef(new Map<string, Game[]>());
     const scheduleKeyRef = useRef('');
+    const scheduleMountedRef = useRef(true);
+
+    useEffect(() => {
+        scheduleMountedRef.current = true;
+        return () => {
+            scheduleMountedRef.current = false;
+        };
+    }, []);
 
     useEffect(() => {
         const propDates = Array.from(new Set(
@@ -223,18 +231,22 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             return;
         }
 
-        let cancelled = false;
+        // Mark the key before the async request resolves. Otherwise every
+        // player-object refresh can launch the same /api/games request again.
+        scheduleKeyRef.current = scheduleKey;
 
         if (USE_DB) {
             fetchDashboardGames(relevantDates)
                 .then(({ games }) => {
-                    if (cancelled) return;
+                    if (!scheduleMountedRef.current || scheduleKeyRef.current !== scheduleKey) return;
                     const nextGames = games ?? [];
                     scheduleCacheRef.current.set(scheduleKey, nextGames);
-                    scheduleKeyRef.current = scheduleKey;
                     setScheduleData(nextGames);
                 })
                 .catch((error) => {
+                    if (scheduleKeyRef.current === scheduleKey) {
+                        scheduleKeyRef.current = '';
+                    }
                     console.error('[api] games error:', error);
                 });
         } else {
@@ -246,19 +258,21 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 actionOddsPromise,
             ])
                 .then(([data, actionOdds]) => {
-                    if (cancelled) return;
+                    if (!scheduleMountedRef.current || scheduleKeyRef.current !== scheduleKey) return;
                     const filteredGames = (data as Game[]).filter(g => relevantDates.includes(g.game_date));
                     const nextGames = mergeActionNetworkMarkets(filteredGames, actionOdds?.games ?? []);
                     scheduleCacheRef.current.set(scheduleKey, nextGames);
-                    scheduleKeyRef.current = scheduleKey;
                     setScheduleData(nextGames);
                 })
-                .catch(err => console.error("Error loading schedule:", err));
+                .catch(err => {
+                    if (scheduleKeyRef.current === scheduleKey) {
+                        scheduleKeyRef.current = '';
+                    }
+                    console.error("Error loading schedule:", err);
+                });
         }
 
-        return () => {
-            cancelled = true;
-        };
+        return undefined;
     }, [chartPlayer]);
 
     const { chartData, lineValue, graphAvgSecondary, comparisonAvgSecondary, isRankOverlay, isBinaryOverlay, historicalSampleCount } = useMemo(() => {
