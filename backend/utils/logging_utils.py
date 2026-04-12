@@ -1,4 +1,5 @@
 import logging
+import os
 
 
 LOGGER_ALIASES = {
@@ -27,6 +28,11 @@ LEVEL_ALIASES = {
     "INFO": "INFO",
     "DEBUG": "DEBUG",
 }
+
+NOISY_MODEL_LOG_PREFIXES = (
+    "Lineup adjustment applied",
+    "Feature drift aggregate",
+)
 
 
 def _short_logger_name(name: str) -> str:
@@ -104,8 +110,27 @@ class DashboardLogFormatter(logging.Formatter):
         return output
 
 
+class DashboardNoiseFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        verbose_model_logs = os.getenv("NBA_VERBOSE_MODEL_LOGS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if verbose_model_logs:
+            return True
+
+        if record.name in {"EdgeScore", "MLInference"} and record.levelno <= logging.INFO:
+            message = record.getMessage()
+            if message.startswith(NOISY_MODEL_LOG_PREFIXES):
+                return False
+
+        return True
+
+
 def configure_logging(level=logging.INFO):
     formatter = DashboardLogFormatter()
+    noise_filter = DashboardNoiseFilter()
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
@@ -113,10 +138,13 @@ def configure_logging(level=logging.INFO):
         handler = logging.StreamHandler()
         handler.setFormatter(formatter)
         handler.setLevel(level)
+        handler.addFilter(noise_filter)
         root_logger.addHandler(handler)
     else:
         for handler in root_logger.handlers:
             handler.setFormatter(formatter)
+            if not any(isinstance(existing_filter, DashboardNoiseFilter) for existing_filter in handler.filters):
+                handler.addFilter(noise_filter)
             if handler.level == logging.NOTSET:
                 handler.setLevel(level)
 

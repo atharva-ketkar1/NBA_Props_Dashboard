@@ -32,6 +32,57 @@ function playerHasAvailableSportsbookPropForDate(
     return Boolean(availabilityBucket[dateKey] || availabilityBucket.__undated__);
 }
 
+function playerHasAnyAvailablePropForDate(
+    availabilityByPlayer: PlayerAvailabilityByDate,
+    playerId: number,
+    gameDate?: string | null,
+) {
+    const statMap = availabilityByPlayer?.[playerId] ?? {};
+    const dateKey = gameDate || '__undated__';
+    return Object.values(statMap).some((sportsbookMap) => (
+        Object.values(sportsbookMap ?? {}).some((dateMap) => Boolean(dateMap?.[dateKey] || dateMap?.__undated__))
+    ));
+}
+
+function playerHasAnyPropForDate(player: Player, gameDate?: string | null) {
+    const dateKey = gameDate || '__undated__';
+    const propsByDate = player.props_by_date ?? {};
+    const hasDatedProp = Object.values(propsByDate).some((sportsbookMap) => (
+        Object.values(sportsbookMap ?? {}).some((dateMap) => Boolean(dateMap?.[dateKey] || dateMap?.__undated__))
+    ));
+
+    if (hasDatedProp) {
+        return true;
+    }
+
+    return Object.values(player.props ?? {}).some((sportsbookMap) => (
+        Object.values(sportsbookMap ?? {}).some((prop) => {
+            if (!prop) return false;
+            const propDate = prop.game_date || '__undated__';
+            return propDate === dateKey || propDate === '__undated__';
+        })
+    ));
+}
+
+function playerHasAnyKnownLineForDate(
+    player: Player,
+    availabilityByPlayer: PlayerAvailabilityByDate,
+    gameDate?: string | null,
+) {
+    return (
+        playerHasAnyPropForDate(player, gameDate)
+        || playerHasAnyAvailablePropForDate(availabilityByPlayer, player.id, gameDate)
+    );
+}
+
+function sortGamesByTime(games: Game[] = []) {
+    return [...games].sort((left, right) => {
+        const leftTime = new Date(left.game_time_utc || `${left.game_date}T23:59:59Z`).getTime();
+        const rightTime = new Date(right.game_time_utc || `${right.game_date}T23:59:59Z`).getTime();
+        return (Number.isNaN(leftTime) ? 0 : leftTime) - (Number.isNaN(rightTime) ? 0 : rightTime);
+    });
+}
+
 const CustomDropdown = ({ value, options, onChange, placeholder }: { value: string, options: { label: string, value: string, disabled?: boolean }[], onChange: (val: string) => void, placeholder?: string }) => {
     const [isOpen, setIsOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
@@ -85,6 +136,7 @@ interface SidebarProps {
     isOpen?: boolean;
     onClose?: () => void;
     players: Player[];
+    games?: Game[];
     activePlayerId?: number;
     activeGameDate?: string | null;
     pendingPlayerId?: number;
@@ -282,8 +334,8 @@ interface ProcessedGame extends Game {
     players: Player[];
 }
 
-const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: SportsbookId, propsAvailabilityByDate?: PlayerAvailabilityByDate, onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string }> = ({
-    game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, propsAvailabilityByDate = {}, onSelectPlayer, onPrefetchPlayer, statFilter
+const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: SportsbookId, propsAvailabilityByDate?: PlayerAvailabilityByDate, onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string, emptyPlayersLabel?: string }> = ({
+    game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, propsAvailabilityByDate = {}, onSelectPlayer, onPrefetchPlayer, statFilter, emptyPlayersLabel = 'No props posted for this game yet.'
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
@@ -370,7 +422,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                         ))
                     ) : (
                         <div className="p-4 text-center text-xs text-gray-500">
-                            No players found matching filter.
+                            {emptyPlayersLabel}
                         </div>
                     )}
                 </div>
@@ -380,7 +432,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 };
 
 export const Sidebar: React.FC<SidebarProps> = ({
-    isOpen = false, onClose, players, activePlayerId, onSelectPlayer,
+    isOpen = false, onClose, players, games = [], activePlayerId, onSelectPlayer,
     activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook = 'dk', propsAvailabilityByDate = {}, activeTab = 'Points', onTabChange = () => { }, onPrefetchPlayer
 }) => {
     const statFilter = STAT_MAP[activeTab] || 'PTS';
@@ -391,7 +443,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
     // Fetch live game data
     useEffect(() => {
-        if (!players.length) return;
+        if (games.length > 0) {
+            setScheduleData(sortGamesByTime(games));
+            return;
+        }
+
+        if (!players.length) {
+            setScheduleData([]);
+            return;
+        }
 
         const propDates = Array.from(new Set(
             players.flatMap(p =>
@@ -408,10 +468,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         if (USE_DB) {
             fetchDashboardGames(propDates)
                 .then(({ games }) => {
-                    const sorted = (games ?? []).sort((a: Game, b: Game) =>
-                        new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
-                    );
-                    setScheduleData(sorted);
+                    setScheduleData(sortGamesByTime(games ?? []));
                 })
                 .catch((error) => {
                     console.error('[api] games error:', error);
@@ -419,16 +476,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
         } else {
             fetchApiJson<Game[]>('/data/current/nba_dashboard_games.json')
                 .then(data => {
-                    const sortedGames = (data as Game[])
+                    const sortedGames = sortGamesByTime((data as Game[])
                         .filter(g => propDates.includes(g.game_date))
-                        .sort((a, b) =>
-                            new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
-                        );
+                    );
                     setScheduleData(sortedGames);
                 })
                 .catch(err => console.error("Error loading schedule:", err));
         }
-    }, [players]);
+    }, [games, players]);
 
     // Dynamically generate prop options and game options
     const propOptions = useMemo(() => {
@@ -436,6 +491,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
         players.forEach(p => {
             Object.keys(p.props ?? {}).forEach(key => propSet.add(key));
             Object.keys(p.props_by_date ?? {}).forEach(key => propSet.add(key));
+        });
+        Object.values(propsAvailabilityByDate ?? {}).forEach(statMap => {
+            Object.keys(statMap ?? {}).forEach(key => propSet.add(key));
         });
 
         // Exact tabs from Header
@@ -453,7 +511,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 disabled: !propSet.has(key) // Greyed out if no players have the line
             };
         });
-    }, [players]);
+    }, [players, propsAvailabilityByDate]);
 
     const gameOptions = useMemo(() => {
         const options = [{ label: 'All Games', value: 'All Games' }];
@@ -468,7 +526,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
     // Group active players into the schedule with Filters
     const processedGames = useMemo(() => {
-        if (!scheduleData.length || !players.length) return [];
+        if (!scheduleData.length) return [];
 
         // 1. Game Filter
         let filteredSchedule = scheduleData;
@@ -487,11 +545,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 game.home_team_tricode.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 game.away_team_tricode.toLowerCase().includes(searchTerm.toLowerCase());
 
-            // Keep the slate explorable even before every book posts lines.
             const gamePlayers = players.filter(p => {
                 // Team Match
                 const isInGame = p.team === game.home_team_tricode || p.team === game.away_team_tricode;
                 if (!isInGame) return false;
+
+                if (!playerHasAnyKnownLineForDate(p, propsAvailabilityByDate, game.game_date)) {
+                    return false;
+                }
 
                 // Search Match (Player Name)
                 if (searchTerm && !gameMatchesSearch) {
@@ -502,10 +563,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 return true;
             });
 
-            if (gamePlayers.length > 0) {
+            if (gamePlayers.length > 0 || gameMatchesSearch) {
                 result.push({ ...game, players: gamePlayers });
-            } else if (gameMatchesSearch && searchTerm) {
-                // Show game if it matches search even if no players (optional UX choice)
             }
         });
 
@@ -602,6 +661,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 onSelectPlayer={onSelectPlayer}
                                 onPrefetchPlayer={onPrefetchPlayer}
                                 statFilter={statFilter}
+                                emptyPlayersLabel={searchTerm ? 'No players found matching filter.' : 'No props posted for this game yet.'}
                             />
                         );
                     })}

@@ -184,6 +184,11 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     const [isSuggestedExpanded, setIsSuggestedExpanded] = React.useState(false);
     const [isTeammateModalOpen, setIsTeammateModalOpen] = React.useState(false);
     const [teammateModalViewport, setTeammateModalViewport] = React.useState(getTeammateModalViewportSize);
+    const teammateScrollRef = React.useRef<HTMLDivElement>(null);
+    const [teammateScrollState, setTeammateScrollState] = React.useState({
+        canScrollLeft: false,
+        canScrollRight: false,
+    });
     const teammatePreviewCards = React.useMemo(() => {
         const prominentCards = teammateInjuryCards.slice(0, TEAMMATE_PREVIEW_LIMIT);
         return [...prominentCards].sort((left, right) => {
@@ -213,6 +218,42 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
 
         return `${ASSETS_BASE}/assets/team_logos/${teamTricode}.svg`;
     }, [player?.team, teamInjuryReport?.team_tricode]);
+
+    const updateTeammateScrollState = React.useCallback(() => {
+        const element = teammateScrollRef.current;
+        if (!element) {
+            setTeammateScrollState({ canScrollLeft: false, canScrollRight: false });
+            return;
+        }
+
+        const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+        const nextState = {
+            canScrollLeft: element.scrollLeft > 1,
+            canScrollRight: element.scrollLeft < maxScrollLeft - 1,
+        };
+
+        setTeammateScrollState((current) => (
+            current.canScrollLeft === nextState.canScrollLeft
+            && current.canScrollRight === nextState.canScrollRight
+                ? current
+                : nextState
+        ));
+    }, []);
+
+    const scrollTeammates = React.useCallback((direction: 'left' | 'right') => {
+        const element = teammateScrollRef.current;
+        if (!element) {
+            return;
+        }
+
+        const amount = Math.max(96, element.clientWidth * 0.82);
+        element.scrollBy({
+            left: direction === 'left' ? -amount : amount,
+            behavior: 'smooth',
+        });
+
+        window.setTimeout(updateTeammateScrollState, 220);
+    }, [updateTeammateScrollState]);
 
     React.useEffect(() => {
         if (!isOpen) {
@@ -244,6 +285,32 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
             window.removeEventListener('resize', handleResize);
         };
     }, [isTeammateModalOpen]);
+
+    React.useEffect(() => {
+        if (!isOpen) {
+            setTeammateScrollState({ canScrollLeft: false, canScrollRight: false });
+            return undefined;
+        }
+
+        let frameId: number | null = null;
+        if (typeof window !== 'undefined') {
+            frameId = window.requestAnimationFrame(updateTeammateScrollState);
+            window.addEventListener('resize', updateTeammateScrollState);
+        }
+
+        const element = teammateScrollRef.current;
+        element?.addEventListener('scroll', updateTeammateScrollState, { passive: true });
+
+        return () => {
+            if (frameId !== null && typeof window !== 'undefined') {
+                window.cancelAnimationFrame(frameId);
+            }
+            if (typeof window !== 'undefined') {
+                window.removeEventListener('resize', updateTeammateScrollState);
+            }
+            element?.removeEventListener('scroll', updateTeammateScrollState);
+        };
+    }, [isOpen, teammatePreviewCards.length, updateTeammateScrollState]);
 
     // Must be above the early return to comply with React rules of hooks
     const teammateModalStyle = React.useMemo<React.CSSProperties>(() => {
@@ -741,14 +808,36 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                 </button>
                             </div>
 
-                            <div className="flex items-center gap-2.5 relative overflow-x-auto no-scrollbar pb-3">
-                                {teammatePreviewCards.length > 0 ? teammatePreviewCards.map((teammate) => (
-                                    renderPreviewTeammateCard(teammate)
-                                )) : (
-                                    <div className="text-fgSubtle text-xs py-4">
-                                        No teammates available.
-                                    </div>
-                                )}
+                            <div className="relative">
+                                <div ref={teammateScrollRef} className="flex items-center gap-2.5 overflow-x-auto no-scrollbar pb-3 scroll-smooth">
+                                    {teammatePreviewCards.length > 0 ? teammatePreviewCards.map((teammate) => (
+                                        renderPreviewTeammateCard(teammate)
+                                    )) : (
+                                        <div className="text-fgSubtle text-xs py-4">
+                                            No teammates available.
+                                        </div>
+                                    )}
+                                </div>
+                                {teammateScrollState.canScrollLeft ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => scrollTeammates('left')}
+                                        aria-label="Scroll teammates left"
+                                        className="absolute left-0 top-1/2 z-20 flex h-8 w-6 -translate-y-1/2 items-center justify-center rounded-md border border-borderMedium/60 bg-bgElevation2/95 text-sm font-bold text-white shadow-lg hover:bg-bgElevation3"
+                                    >
+                                        {'<'}
+                                    </button>
+                                ) : null}
+                                {teammateScrollState.canScrollRight ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => scrollTeammates('right')}
+                                        aria-label="Scroll teammates right"
+                                        className="absolute right-0 top-1/2 z-20 flex h-8 w-6 -translate-y-1/2 items-center justify-center rounded-md border border-borderMedium/60 bg-bgElevation2/95 text-sm font-bold text-white shadow-lg hover:bg-bgElevation3"
+                                    >
+                                        {'>'}
+                                    </button>
+                                ) : null}
                             </div>
                         </div>
                     </>
