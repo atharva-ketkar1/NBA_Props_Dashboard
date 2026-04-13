@@ -307,6 +307,9 @@ SUPABASE_URL=...
 SUPABASE_SECRET_KEY=...
 # or
 SUPABASE_SERVICE_ROLE_KEY=...
+
+# Optional: cap upcoming prop/schedule reads. Defaults to 7 and is capped at 7.
+DASHBOARD_MAX_UPCOMING_PROP_DAYS=7
 ```
 
 ## Repository Guide

@@ -9,7 +9,7 @@ DASHBOARD_LOOKAHEAD_DAYS = 7
 
 
 def upsert_games_to_db(raw_data: list) -> None:
-    """Upsert today's/tomorrow's game schedule into Supabase games table.
+    """Upsert the dashboard lookahead schedule into Supabase games table.
     Non-fatal: logs errors and continues if Supabase is unavailable.
     """
     try:

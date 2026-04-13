@@ -30,9 +30,14 @@ const SLATE_SELECT = 'game_id, game_date, home_team_tricode, away_team_tricode, 
 const GAME_MARKETS_SELECT = 'game_id, has_action_network_markets, markets, source, source_query_date, source_generated_at, updated_at';
 const NBA_INJURY_REPORT_SELECT = 'game_id, game_date, has_injury_report, teams, source, source_query_date, report_timestamp_et, source_generated_at, updated_at';
 const PAGE_SIZE = 1000;
-const MAX_UPCOMING_PROP_DAYS = 2;
+const MAX_CONFIGURABLE_UPCOMING_PROP_DAYS = 7;
+const DEFAULT_MAX_UPCOMING_PROP_DAYS = 7;
+const MAX_UPCOMING_PROP_DAYS = Math.min(
+  MAX_CONFIGURABLE_UPCOMING_PROP_DAYS,
+  Math.max(1, getServerNumberEnv('DASHBOARD_MAX_UPCOMING_PROP_DAYS', DEFAULT_MAX_UPCOMING_PROP_DAYS)),
+);
 const DEFAULT_BOOTSTRAP_PROP_DAYS = MAX_UPCOMING_PROP_DAYS;
-const DEFAULT_SIMILAR_PROP_DAYS = MAX_UPCOMING_PROP_DAYS;
+const DEFAULT_SIMILAR_PROP_DAYS = Math.min(2, MAX_UPCOMING_PROP_DAYS);
 const DEFAULT_PLAYERS_CACHE_MS = 60_000;
 const DEFAULT_PROPS_CACHE_MS = 30_000;
 const DEFAULT_GAMES_CACHE_MS = 60_000;
@@ -800,9 +805,9 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
     includeLineMovements
       ? fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements')
       : Promise.resolve([]),
-    fetchGamesForDates([today], SLATE_SELECT),
-    fetchGameMarketsForDates([today]),
-    fetchGameInjuryReportsForDates([today]),
+    fetchGamesForDates(futureDates, SLATE_SELECT),
+    fetchGameMarketsForDates(futureDates),
+    fetchGameInjuryReportsForDates(futureDates),
   ]);
   const resolvedProps = await resolvePropsRowsForSportsbook(
     futureDates,
