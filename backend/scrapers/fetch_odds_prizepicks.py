@@ -22,6 +22,10 @@ DEFAULT_DK_REFERENCE_PATH = Path(__file__).resolve().parents[1] / "data" / "curr
 DEFAULT_FD_REFERENCE_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "fanduel.csv"
 DEFAULT_COOLDOWN_STATE_PATH = Path(__file__).resolve().parents[1] / "logs" / "prizepicks_fetch_state.json"
 
+# Temporary scheduler kill switch. Flip this to True to let ENABLE_PRIZEPICKS control fetches again.
+PRIZEPICKS_SCHEDULED_FETCHES_ENABLED = False
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
 DEFAULT_PARAMS = {
     "league_id": 7,
     "per_page": 250,
@@ -286,7 +290,9 @@ def build_headers() -> Dict[str, str]:
 
 
 def prizepicks_enabled() -> bool:
-    return str(os.getenv("ENABLE_PRIZEPICKS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if not PRIZEPICKS_SCHEDULED_FETCHES_ENABLED:
+        return False
+    return str(os.getenv("ENABLE_PRIZEPICKS", "false")).strip().lower() in TRUE_ENV_VALUES
 
 
 def get_fetch_mode() -> str:
