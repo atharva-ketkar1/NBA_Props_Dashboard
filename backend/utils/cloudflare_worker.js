@@ -72,7 +72,7 @@ function applyResponseHeaders(baseHeaders, request, env) {
     if (corsOrigin) {
         headers.set("Access-Control-Allow-Origin", corsOrigin);
         headers.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
-        headers.set("Access-Control-Allow-Headers", "Content-Type, X-Proxy-Token");
+        headers.set("Access-Control-Allow-Headers", "Content-Type, X-Proxy-Token, X-Device-Id, X-Device-Info, X-CSRF-Token");
     }
 
     return headers;
@@ -135,7 +135,31 @@ function copyHeaderIfPresent(sourceHeaders, targetHeaders, name) {
     }
 }
 
-function buildUpstreamHeaders(request, targetObj, userAgent) {
+function setHeaderFromEnvIfMissing(targetHeaders, name, value) {
+    const normalizedValue = String(value || "").trim();
+    if (normalizedValue && !targetHeaders.has(name)) {
+        targetHeaders.set(name, normalizedValue);
+    }
+}
+
+function getCookieValue(cookieHeader, name) {
+    const cookiePairs = String(cookieHeader || "").split(";");
+    for (const pair of cookiePairs) {
+        const separatorIndex = pair.indexOf("=");
+        if (separatorIndex === -1) {
+            continue;
+        }
+
+        const cookieName = pair.slice(0, separatorIndex).trim();
+        if (cookieName === name) {
+            return pair.slice(separatorIndex + 1).trim();
+        }
+    }
+
+    return "";
+}
+
+function buildUpstreamHeaders(request, env, targetObj, userAgent) {
     const headers = new Headers();
     const hostname = targetObj.hostname.toLowerCase();
     const acceptLanguage = request.headers.get("Accept-Language") || "en-US,en;q=0.9";
@@ -164,9 +188,19 @@ function buildUpstreamHeaders(request, targetObj, userAgent) {
         copyHeaderIfPresent(request.headers, headers, "content-type");
         copyHeaderIfPresent(request.headers, headers, "x-device-id");
         copyHeaderIfPresent(request.headers, headers, "x-device-info");
+        copyHeaderIfPresent(request.headers, headers, "x-csrf-token");
         copyHeaderIfPresent(request.headers, headers, "sec-ch-ua");
         copyHeaderIfPresent(request.headers, headers, "sec-ch-ua-mobile");
         copyHeaderIfPresent(request.headers, headers, "sec-ch-ua-platform");
+
+        setHeaderFromEnvIfMissing(headers, "Cookie", env.PRIZEPICKS_COOKIE);
+        setHeaderFromEnvIfMissing(headers, "x-device-id", env.PRIZEPICKS_DEVICE_ID);
+        setHeaderFromEnvIfMissing(headers, "x-device-info", env.PRIZEPICKS_DEVICE_INFO);
+        setHeaderFromEnvIfMissing(headers, "x-csrf-token", env.PRIZEPICKS_CSRF_TOKEN);
+
+        if (!headers.has("x-csrf-token")) {
+            setHeaderFromEnvIfMissing(headers, "x-csrf-token", getCookieValue(headers.get("Cookie"), "CSRF-TOKEN"));
+        }
     } else if (effectiveUserAgent.includes("Chrome") || effectiveUserAgent.includes("Edge")) {
         headers.set("sec-ch-ua", '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"');
         headers.set("sec-ch-ua-mobile", "?0");
@@ -253,7 +287,7 @@ function hasValidSharedSecret(request, env) {
     return request.headers.get("X-Proxy-Token") === expectedSecret;
 }
 
-async function fetchWithRetry(request, targetUrl, targetObj) {
+async function fetchWithRetry(request, env, targetUrl, targetObj) {
     let lastResponse = null;
     let lastError = null;
 
@@ -261,7 +295,7 @@ async function fetchWithRetry(request, targetUrl, targetObj) {
         try {
             const response = await fetch(targetUrl, {
                 method: "GET",
-                headers: buildUpstreamHeaders(request, targetObj, randomUserAgent()),
+                headers: buildUpstreamHeaders(request, env, targetObj, randomUserAgent()),
                 redirect: "manual",
                 signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
                 cf: {
@@ -340,7 +374,7 @@ export default {
         }
 
         try {
-            const response = await fetchWithRetry(request, targetUrl, targetObj);
+            const response = await fetchWithRetry(request, env, targetUrl, targetObj);
             const headers = applyResponseHeaders({}, request, env);
             const contentType = response.headers.get("Content-Type");
 
