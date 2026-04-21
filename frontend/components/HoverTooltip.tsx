@@ -221,7 +221,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                         O_ODDS = formatOdds(fallbackProp.over);
                         U_ODDS = formatOdds(fallbackProp.under);
                         hasHistoricalData = true;
-                        isFallback = playerRecord.source === 'last_snapshot_fallback';
+                        isFallback = String(playerRecord.source ?? '').includes('fallback');
                     }
                 }
             }

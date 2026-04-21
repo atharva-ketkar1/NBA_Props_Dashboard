@@ -174,6 +174,36 @@ def persist_raw_odds_csvs(dk_data, fd_data):
 def is_live_or_final_game(game):
     return bool((game or {}).get("is_live")) or bool((game or {}).get("is_final"))
 
+
+def supplement_missing_players_from_snapshots(players_data, snapshot_manager, games_to_scrape, schedule):
+    """Fill whole-game sportsbook pull-down gaps from the latest intraday snapshots."""
+    snapshot_summary = snapshot_manager.get_latest_snapshot_players_for_games(
+        [game.get("game_id") for game in games_to_scrape],
+        schedule=schedule,
+    )
+    snapshot_players = snapshot_summary.get("players", {})
+    if not snapshot_players:
+        return 0
+
+    added = 0
+    for player_id, pdata in snapshot_players.items():
+        player_key = str(player_id)
+        if player_key in players_data:
+            continue
+        players_data[player_key] = pdata
+        added += 1
+
+    if added:
+        log_status(
+            logger,
+            "OK",
+            "Supplemented pre-tip archive from latest snapshots",
+            players=added,
+            games=len(snapshot_summary.get("games_seen", [])),
+        )
+
+    return added
+
 def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
     log_status(logger, "RUN", "Odds scrapers")
@@ -516,10 +546,16 @@ def main(dry_run=False, preselected_games=None):
             is_closing=True,
             allowed_game_ids=[g["game_id"] for g in games_to_scrape],
         )
+        sm = SnapshotManager()
+        supplement_missing_players_from_snapshots(
+            players_data,
+            sm,
+            games_to_scrape,
+            sched,
+        )
         if not players_data:
             log_status(logger, "WARN", "Pre-tip props refresh produced no mapped players")
             return False
-        sm = SnapshotManager()
                 
         # Send to SnapshotManager
         closing_summary = sm.process_closing_lines(players_data)

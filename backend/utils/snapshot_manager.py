@@ -223,6 +223,119 @@ class SnapshotManager:
                 return candidate
         return None
 
+    def _props_tree_has_lines(self, props):
+        if not isinstance(props, dict):
+            return False
+
+        for sportsbook_map in props.values():
+            if not isinstance(sportsbook_map, dict):
+                continue
+            for line_payload in sportsbook_map.values():
+                if not isinstance(line_payload, dict):
+                    continue
+                if line_payload.get("line") not in (None, ""):
+                    return True
+        return False
+
+    def _target_game_maps(self, game_ids, schedule=None):
+        target_game_ids = {str(game_id) for game_id in (game_ids or []) if game_id}
+        schedule = schedule if isinstance(schedule, dict) else self._load_schedule()
+        games = schedule.get("games", []) if isinstance(schedule.get("games", []), list) else []
+        games_by_id = {
+            str(game.get("game_id")): game
+            for game in games
+            if isinstance(game, dict) and game.get("game_id") and str(game.get("game_id")) in target_game_ids
+        }
+        team_date_to_game = {}
+
+        for game in games_by_id.values():
+            game_date = game.get("game_date")
+            if not game_date:
+                continue
+            for team in (game.get("home_team_tricode"), game.get("away_team_tricode")):
+                if team:
+                    team_date_to_game[(team, game_date)] = game
+
+        return target_game_ids, games_by_id, team_date_to_game
+
+    def _snapshot_player_target_game(self, pdata, target_game_ids, games_by_id, team_date_to_game):
+        if not isinstance(pdata, dict):
+            return None
+
+        game_id = str(pdata.get("game_id") or "")
+        if game_id and game_id in target_game_ids:
+            return games_by_id.get(game_id, {"game_id": game_id, "game_date": pdata.get("game_date")})
+
+        team = pdata.get("team")
+        game_date = pdata.get("game_date")
+        if team and game_date:
+            return team_date_to_game.get((team, game_date))
+
+        return None
+
+    def get_latest_snapshot_players_for_games(self, game_ids, schedule=None):
+        """Return the most recent snapshot player rows for target games.
+
+        Closing-line scrapes can happen after a sportsbook has already pulled
+        an entire game's props. This recovers those missing players from the
+        intraday snapshots captured before the pull-down.
+        """
+        target_game_ids, games_by_id, team_date_to_game = self._target_game_maps(game_ids, schedule=schedule)
+        if not target_game_ids:
+            return {"players": {}, "games_seen": []}
+
+        now = get_et_now()
+        today_date = now.strftime("%Y-%m-%d")
+        data = self._read_json(self.line_movements_path, default={"date": today_date, "snapshots": []})
+        snapshots = data.get("snapshots", []) if isinstance(data.get("snapshots", []), list) else []
+        players_by_id = {}
+        games_seen = set()
+
+        for snapshot in reversed(snapshots):
+            players = snapshot.get("players", {}) if isinstance(snapshot, dict) else {}
+            if not isinstance(players, dict):
+                continue
+
+            for player_id, pdata in players.items():
+                player_key = str(player_id)
+                if player_key in players_by_id:
+                    continue
+
+                target_game = self._snapshot_player_target_game(
+                    pdata,
+                    target_game_ids,
+                    games_by_id,
+                    team_date_to_game,
+                )
+                if not target_game or not self._props_tree_has_lines(pdata.get("props")):
+                    continue
+
+                candidate = dict(pdata)
+                candidate["props"] = pdata.get("props", {})
+                candidate.setdefault("source", "pre_game_snapshot_fallback")
+                candidate.setdefault("captured_at", snapshot.get("timestamp"))
+                if not candidate.get("game_id"):
+                    candidate["game_id"] = target_game.get("game_id")
+                if not candidate.get("game_date"):
+                    candidate["game_date"] = target_game.get("game_date")
+                candidate.setdefault("draftkings_available", any(
+                    isinstance(book_map, dict) and "draftkings" in book_map
+                    for book_map in candidate.get("props", {}).values()
+                ))
+                candidate.setdefault("fanduel_available", any(
+                    isinstance(book_map, dict) and "fanduel" in book_map
+                    for book_map in candidate.get("props", {}).values()
+                ))
+
+                players_by_id[player_key] = candidate
+                if candidate.get("game_id"):
+                    games_seen.add(str(candidate.get("game_id")))
+
+        return {
+            "players": players_by_id,
+            "games_seen": sorted(games_seen),
+        }
+
     def _merge_props_tree(self, primary_props, fallback_props):
         primary = primary_props if isinstance(primary_props, dict) else {}
         fallback = fallback_props if isinstance(fallback_props, dict) else {}
@@ -364,13 +477,21 @@ class SnapshotManager:
                     pdata.get("props", {}),
                     (fallback_snapshot or {}).get("props", {}),
                 )
+                incoming_source = pdata.get("source")
+                if incoming_source not in {
+                    "closing_line",
+                    "pre_game_snapshot_fallback",
+                    "last_snapshot_fallback",
+                    "line_movements_fallback",
+                }:
+                    incoming_source = "closing_line"
 
                 incoming_record = {
                     "name": pdata.get("name"),
                     "team": pdata.get("team"),
                     "props": merged_props,
-                    "source": "closing_line",
-                    "captured_at": now.isoformat()
+                    "source": incoming_source,
+                    "captured_at": pdata.get("captured_at") or now.isoformat()
                 }
                 existing_record = historical_odds[archive_date].get(player_id)
                 next_record = self._merge_historical_record(existing_record, incoming_record)
