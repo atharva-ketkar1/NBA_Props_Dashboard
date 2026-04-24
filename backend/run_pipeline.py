@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from utils.logging_utils import configure_logging, log_section, log_status
+from scrapers.season_type import resolve_season
 
 # Add path to scrapers
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
@@ -78,7 +79,8 @@ STATS_PATH = os.path.join(DATA_DIR, "season_stats.csv")
 DK_PATH = os.path.join(DATA_DIR, "draftkings.csv")
 FD_PATH = os.path.join(DATA_DIR, "fanduel.csv")
 PP_PATH = os.path.join(DATA_DIR, "prizepicks.csv")
-LOGS_PATH = os.path.join(DATA_DIR, "gamelogs_2025-26.csv")
+CURRENT_SEASON = resolve_season()
+LOGS_PATH = os.path.join(DATA_DIR, f"gamelogs_{CURRENT_SEASON}.csv")
 MASTER_PATH = os.path.join(DATA_DIR, "master_feed.json")
 GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json")
 SCHEDULE_PATH = os.path.join(DATA_DIR, "today_schedule.json")

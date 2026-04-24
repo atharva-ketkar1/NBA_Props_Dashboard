@@ -751,12 +751,15 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
 if __name__ == "__main__":
     # Test Run
+    from scrapers.season_type import resolve_season
+
     base = "backend/data/current"
+    season = resolve_season()
     run_aggregation(
         f"{base}/season_stats.csv",
         f"{base}/draftkings.csv",
         f"{base}/fanduel.csv",
-        f"{base}/gamelogs_2025-26.csv",
+        f"{base}/gamelogs_{season}.csv",
         f"{base}/shooting_zones.json",
         f"{base}/assist_zones.json",
         f"{base}/opp_assist_zones.json",

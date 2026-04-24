@@ -4,6 +4,11 @@ import json
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 # ---------------- HEADERS ---------------- #
 HEADERS = {
     "accept": "application/json, text/plain, */*",
@@ -45,6 +50,7 @@ def fetch_dataframe(url, params):
 # =========================================================
 def fetch_pt_shot_stats(measure_type):
     url = "https://stats.nba.com/stats/leaguedashplayerptshot"
+    season = resolve_season()
 
     params = {
         "CloseDefDistRange": "",
@@ -71,9 +77,9 @@ def fetch_pt_shot_stats(measure_type):
         "Period": "0",
         "PlayerExperience": "",
         "PlayerPosition": "",
-        "Season": "2025-26",           # Safely reverted to the 2025-26 season
+        "Season": season,
         "SeasonSegment": "",
-        "SeasonType": "Regular Season",
+        "SeasonType": resolve_season_type(),
         "ShotClockRange": "",
         "StarterBench": "",
         "TeamID": "0",

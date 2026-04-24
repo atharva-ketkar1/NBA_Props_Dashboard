@@ -4,6 +4,11 @@ import json
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 # ---------------- HEADERS & SESSION ---------------- #
 HEADERS = {
     "accept": "application/json, text/plain, */*",
@@ -50,13 +55,14 @@ PLAY_TYPES = {
 # ==========================================
 def fetch_synergy_data(play_type, grouping="offensive", is_team="P"):
     url = "https://stats.nba.com/stats/synergyplaytypes"
+    season = resolve_season()
     params = {
         "LeagueID": "00",
         "PerMode": "PerGame",       
         "PlayType": play_type,
         "PlayerOrTeam": is_team,    
-        "SeasonType": "Regular Season",
-        "SeasonYear": "2025-26",    
+        "SeasonType": resolve_season_type(),
+        "SeasonYear": season,
         "TypeGrouping": grouping    
     }
     r = SESSION.get(url, headers=HEADERS, params=params, timeout=20)
@@ -67,6 +73,7 @@ def fetch_synergy_data(play_type, grouping="offensive", is_team="P"):
 def fetch_traditional_player_stats():
     # Needed specifically to get Player Offensive Free Throws (FTM)
     url = "https://stats.nba.com/stats/leaguedashplayerstats"
+    season = resolve_season()
     params = {
         "College": "", "Conference": "", "Country": "", "DateFrom": "", "DateTo": "",
         "Division": "", "DraftPick": "", "DraftYear": "", "GameScope": "", "GameSegment": "",
@@ -75,7 +82,7 @@ def fetch_traditional_player_stats():
         "Month": "0", "OpponentTeamID": "0", "Outcome": "", "PORound": "0", "PaceAdjust": "N",
         "PerMode": "PerGame", "Period": "0", "PlayerExperience": "", "PlayerPosition": "",
         "PlusMinus": "N", "Rank": "N",
-        "Season": "2025-26", "SeasonSegment": "", "SeasonType": "Regular Season", 
+        "Season": season, "SeasonSegment": "", "SeasonType": resolve_season_type(), 
         "ShotClockRange": "", "StarterBench": "", "TeamID": "0", "TwoWay": "0", 
         "VsConference": "", "VsDivision": "", "Weight": ""
     }
@@ -86,6 +93,7 @@ def fetch_traditional_player_stats():
 def fetch_traditional_team_stats():
     # Needed specifically to get Defensive Free Throw rankings (OPP_FTM)
     url = "https://stats.nba.com/stats/leaguedashteamstats"
+    season = resolve_season()
     params = {
         "Conference": "", "DateFrom": "", "DateTo": "", "Division": "", "GameScope": "",
         "GameSegment": "", "LastNGames": "0", "LeagueID": "00", "Location": "",
@@ -93,7 +101,7 @@ def fetch_traditional_team_stats():
         "Month": "0", "OpponentTeamID": "0", "Outcome": "",
         "PORound": "0", "PaceAdjust": "N", "PerMode": "PerGame", "Period": "0",
         "PlayerExperience": "", "PlayerPosition": "", "PlusMinus": "N", "Rank": "N",
-        "Season": "2025-26", "SeasonSegment": "", "SeasonType": "Regular Season",
+        "Season": season, "SeasonSegment": "", "SeasonType": resolve_season_type(),
         "ShotClockRange": "", "StarterBench": "", "TeamID": "0", "TwoWay": "0",
         "VsConference": "", "VsDivision": ""
     }
@@ -104,6 +112,7 @@ def fetch_traditional_team_stats():
 def fetch_misc_team_stats():
     # Needed to get Opponent 2nd Chance Points (Proxy for Defensive Putbacks)
     url = "https://stats.nba.com/stats/leaguedashteamstats"
+    season = resolve_season()
     params = {
         "Conference": "", "DateFrom": "", "DateTo": "", "Division": "", "GameScope": "",
         "GameSegment": "", "LastNGames": "0", "LeagueID": "00", "Location": "",
@@ -111,7 +120,7 @@ def fetch_misc_team_stats():
         "Month": "0", "OpponentTeamID": "0", "Outcome": "",
         "PORound": "0", "PaceAdjust": "N", "PerMode": "PerGame", "Period": "0",
         "PlayerExperience": "", "PlayerPosition": "", "PlusMinus": "N", "Rank": "N",
-        "Season": "2025-26", "SeasonSegment": "", "SeasonType": "Regular Season",
+        "Season": season, "SeasonSegment": "", "SeasonType": resolve_season_type(),
         "ShotClockRange": "", "StarterBench": "", "TeamID": "0", "TwoWay": "0",
         "VsConference": "", "VsDivision": ""
     }

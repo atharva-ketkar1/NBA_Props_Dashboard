@@ -9,6 +9,11 @@ import time
 import random
 from pathlib import Path
 
+try:
+    from .season_type import encoded_season_type, resolve_season, resolve_season_type
+except ImportError:
+    from season_type import encoded_season_type, resolve_season, resolve_season_type
+
 
 def _atomic_write_csv(df: pd.DataFrame, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,22 +92,26 @@ class NBAStatsEngine:
     def get_player_data(self):
         """Fetches all necessary endpoints in parallel."""
         start_time = time.time()
+        season = resolve_season()
+        season_type = resolve_season_type()
+        season_type_encoded = encoded_season_type()
         
         # 1. Define Endpoints
-        base_url = "https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
+        base_url = f"https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season={season}&SeasonSegment=&SeasonType={season_type_encoded}&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
-        adv_base_url = "https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
+        adv_base_url = f"https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season={season}&SeasonSegment=&SeasonType={season_type_encoded}&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
-        adv_url_template = "https://stats.nba.com/stats/leaguedashptstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PerMode=PerGame&PlayerExperience=&PlayerOrTeam=Player&PlayerPosition=&PtMeasureType={}&SeasonSegment=&SeasonType=Regular%20Season&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
+        adv_url_template = f"https://stats.nba.com/stats/leaguedashptstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PerMode=PerGame&PlayerExperience=&PlayerOrTeam=Player&PlayerPosition=&PtMeasureType={{}}&SeasonSegment=&SeasonType={season_type_encoded}&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
         urls_map = {
             "Base": base_url,
             "Advanced": adv_base_url,
-            "Passing": adv_url_template.format("Passing&Season=2025-26"),
-            "Drives": adv_url_template.format("Drives&Season=2025-26"),
-            "Rebounding": adv_url_template.format("Rebounding&Season=2025-26"),
-            "Index": "https://stats.nba.com/stats/playerindex?Historical=0&LeagueID=00&Season=2025-26&SeasonType=Regular%20Season"
+            "Passing": adv_url_template.format(f"Passing&Season={season}"),
+            "Drives": adv_url_template.format(f"Drives&Season={season}"),
+            "Rebounding": adv_url_template.format(f"Rebounding&Season={season}"),
+            "Index": f"https://stats.nba.com/stats/playerindex?Historical=0&LeagueID=00&Season={season}&SeasonType={season_type_encoded}"
         }
+        print(f"Season Stats Season: {season} | SeasonType: {season_type}")
 
         # 2. Sequential Execution (Memory Safe)
         dfs = {}

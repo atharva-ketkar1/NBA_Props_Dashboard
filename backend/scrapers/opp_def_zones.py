@@ -5,6 +5,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 URL = "https://stats.nba.com/stats/leaguedashteamshotlocations"
 
 HEADERS = {
@@ -33,7 +38,9 @@ def create_session():
     session.mount("https://", HTTPAdapter(max_retries=retries))
     return session
 
-def fetch_positional_defense(position, season="2025-26"):
+def fetch_positional_defense(position, season=None):
+    if season is None:
+        season = resolve_season()
     session = create_session()
     
     params = dict(
@@ -54,7 +61,7 @@ def fetch_positional_defense(position, season="2025-26"):
         Rank='N',
         Season=season,
         SeasonSegment='',
-        SeasonType='Regular Season',
+        SeasonType=resolve_season_type(),
         ShotClockRange='',
         TeamID=0,
         VsConference='',

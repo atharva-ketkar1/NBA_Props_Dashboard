@@ -8,14 +8,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def fetch_opponent_assists_allowed(season="2025-26"):
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
+def fetch_opponent_assists_allowed(season=None):
     """Fetches Opponent Assists Allowed by Zone for all 30 teams in a single request via Proxy."""
     import urllib.parse
+    if season is None:
+        season = resolve_season()
     
     target_url = "https://api.pbpstats.com/get-totals/nba"
     target_params = {
         "Season": season,
-        "SeasonType": "Regular Season",
+        "SeasonType": resolve_season_type(),
         "Type": "Opponent"
     }
     

@@ -9,6 +9,11 @@ import urllib.parse
 
 load_dotenv()
 
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 # --- CONFIGURATION ---
 STATS_FILE = os.path.join(os.path.dirname(__file__), '../data/current/season_stats.csv')
 
@@ -22,12 +27,14 @@ def get_all_team_ids():
         print(f"Error reading stats file: {e}")
         return []
 
-def fetch_team_assists(team_id, season="2025-26"):    
+def fetch_team_assists(team_id, season=None):
+    if season is None:
+        season = resolve_season()
     
     target_url = "https://api.pbpstats.com/get-assist-networks/nba"
     target_params = {
         "Season": season,
-        "SeasonType": "Regular Season",
+        "SeasonType": resolve_season_type(),
         "EntityId": int(team_id),
         "EntityType": "Team"
     }

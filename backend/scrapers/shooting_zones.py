@@ -3,6 +3,11 @@ import pandas as pd
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 URL = "https://stats.nba.com/stats/leaguedashplayershotlocations"
 
 # ---- PROTECTION LAYER: HEADERS ----
@@ -37,8 +42,8 @@ PARAMS = {
     "Period": "0",
     "PlusMinus": "N",
     "Rank": "N",
-    "Season": "2025-26",
-    "SeasonType": "Regular Season",
+    "Season": resolve_season(),
+    "SeasonType": resolve_season_type(),
     "TeamID": "0",
 }
 

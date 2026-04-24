@@ -4,9 +4,15 @@ import time
 import random
 import urllib.parse
 import os
+import platform
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
+
+try:
+    from .season_type import is_completed_season, resolve_season, resolve_season_type
+except ImportError:
+    from season_type import is_completed_season, resolve_season, resolve_season_type
 
 load_dotenv()
 
@@ -19,16 +25,13 @@ MAX_WORKERS = 1
 REQUEST_TIMEOUT = 60
 BASE_LOG_MAX_RETRIES = 5
 ENDPOINT_MAX_RETRIES = 3
+REQUEST_MODE_ENV = "GAMELOGS_REQUEST_MODE"
 RETRYABLE_STATUS_CODES = {
     408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524, 525, 526, 530
 }
 
 # Default season to scrape. The output CSV will be named gamelogs_{SEASON}.csv automatically.
-SEASON = "2025-26"
-
-# Seasons that are fully complete. When explicitly requested, the script will
-# do a one-time full fetch if the CSV doesn't exist yet, then never update again.
-COMPLETED_SEASONS = {"2024-25"}
+SEASON = resolve_season()
 
 HEADERS = {
     "accept": "*/*",
@@ -86,12 +89,43 @@ def _split_proxy_urls(raw_value):
     return urls
 
 
+def _normalize_request_mode(raw_value):
+    clean = (raw_value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "direct": "direct_only",
+        "direct_only": "direct_only",
+        "proxy": "proxy_only",
+        "proxy_only": "proxy_only",
+        "proxy_first": "proxy_first",
+        "auto": "auto",
+        "": "auto",
+    }
+    return aliases.get(clean, "auto")
+
+
+def _default_request_mode(proxy_urls):
+    if platform.system() == "Darwin":
+        return "direct_only"
+    if proxy_urls:
+        return "proxy_only"
+    return "direct_only"
+
+
 def _build_request_targets():
     targets = []
     seen = set()
+    proxy_urls = (
+        _split_proxy_urls(os.environ.get("PBPSTATS_PROXY_URL"))
+        + _split_proxy_urls(os.environ.get("PBPSTATS_PROXY_URLS"))
+    )
+    mode = _normalize_request_mode(os.environ.get(REQUEST_MODE_ENV))
+    if mode == "auto":
+        mode = _default_request_mode(proxy_urls)
 
-    for proxy_url in _split_proxy_urls(os.environ.get("PBPSTATS_PROXY_URL")) + _split_proxy_urls(os.environ.get("PBPSTATS_PROXY_URLS")):
-        if proxy_url not in seen:
+    if mode in {"proxy_only", "proxy_first"}:
+        for proxy_url in proxy_urls:
+            if proxy_url in seen:
+                continue
             seen.add(proxy_url)
             targets.append({
                 "url": proxy_url,
@@ -99,7 +133,7 @@ def _build_request_targets():
             })
 
     allow_direct_fallback = os.environ.get("GAMELOGS_ALLOW_DIRECT_FALLBACK", "").strip().lower() in {"1", "true", "yes"}
-    if not targets or allow_direct_fallback:
+    if mode == "direct_only" or mode == "proxy_first" or allow_direct_fallback:
         targets.append({"url": None, "label": "direct"})
 
     return targets
@@ -210,6 +244,8 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     max_retries = ENDPOINT_MAX_RETRIES
     if season is None:
         season = SEASON
+    season_type = resolve_season_type(env_names=("GAMELOGS_SEASON_TYPE", "NBA_SEASON_TYPE", "NBA_STATS_SEASON_TYPE"))
+    season_type_encoded = urllib.parse.quote(season_type, safe="")
 
     if is_full_refresh:
         elapsed = time.time() - _last_500_time
@@ -236,7 +272,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                     f"?DateFrom={encoded_date}&DateTo={encoded_date}"
                     f"&LastNGames=0&LeagueID=00&Month=0&OpponentTeamID=0&PORound=0"
                     f"&PerMode=PerGame&PlayerOrTeam=Player&PtMeasureType={PT}"
-                    f"&Season={season}&SeasonType=Regular%20Season&TeamID=0"
+                    f"&Season={season}&SeasonType={season_type_encoded}&TeamID=0"
                 )
                 r, route_label = fetch_nba_json(
                     url,
@@ -292,7 +328,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base"
                 f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
                 f"&PerMode=Totals&Period=1&PlusMinus=N&Rank=N"
-                f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&Season={season}&SeasonSegment=&SeasonType={season_type_encoded}"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
             r, route_label = fetch_nba_json(
@@ -345,7 +381,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&GameSegment=First%20Half&LastNGames=0&LeagueID=00&Location=&MeasureType=Base"
                 f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
                 f"&PerMode=Totals&Period=0&PlusMinus=N&Rank=N"
-                f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&Season={season}&SeasonSegment=&SeasonType={season_type_encoded}"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
             r, route_label = fetch_nba_json(
@@ -398,7 +434,7 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 f"&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced"
                 f"&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N"
                 f"&PerMode=Totals&Period=0&PlusMinus=N&Rank=N"
-                f"&Season={season}&SeasonSegment=&SeasonType=Regular%20Season"
+                f"&Season={season}&SeasonSegment=&SeasonType={season_type_encoded}"
                 f"&ShotClockRange=&VsConference=&VsDivision="
             )
             r, route_label = fetch_nba_json(
@@ -458,7 +494,9 @@ def run_scrape(output_path=None, season=None):
         output_path = os.path.join(backend_dir, "data", "current", f"gamelogs_{season}.csv")
         print(f"      Warning: output_path not specified. Defaulting to {output_path}")
 
-    print(f"   Managing Game Logs at {output_path}")
+    season_type = resolve_season_type(env_names=("GAMELOGS_SEASON_TYPE", "NBA_SEASON_TYPE", "NBA_STATS_SEASON_TYPE"))
+    season_type_encoded = urllib.parse.quote(season_type, safe="")
+    print(f"   Managing Game Logs at {output_path} ({season_type})")
 
     # ------------------------------------------------------------------
     # Completed season guard: never incrementally update a finished season.
@@ -466,7 +504,8 @@ def run_scrape(output_path=None, season=None):
     # If a failed manifest exists, allow a recovery run.
     # If no CSV at all, do a one-time full fetch.
     # ------------------------------------------------------------------
-    if season in COMPLETED_SEASONS:
+    completed_season = is_completed_season(season)
+    if completed_season:
         failed_manifest = output_path.replace(".csv", "_failed_dates.csv")
         if os.path.exists(output_path) and not os.path.exists(failed_manifest):
             print(f"   Season {season} is complete and data already exists. Nothing to do.")
@@ -481,7 +520,7 @@ def run_scrape(output_path=None, season=None):
     full_refresh = True
     completed_season_recovery_dates = None  # Only set for completed season manifest recovery
 
-    if season not in COMPLETED_SEASONS and os.path.exists(output_path):
+    if not completed_season and os.path.exists(output_path):
         try:
             print("      Found existing logs. Running INCREMENTAL update.")
             existing_df = pd.read_csv(output_path)
@@ -492,7 +531,7 @@ def run_scrape(output_path=None, season=None):
         except Exception as e:
             print(f"      Corrupt CSV ({e}). Forcing full refresh.")
             full_refresh = True
-    elif season in COMPLETED_SEASONS and os.path.exists(output_path):
+    elif completed_season and os.path.exists(output_path):
         # Load existing data to merge recovered dates into
         try:
             existing_df = pd.read_csv(output_path)
@@ -519,7 +558,7 @@ def run_scrape(output_path=None, season=None):
             log_url = (
                 f"https://stats.nba.com/stats/leaguegamelog"
                 f"?Counter=0&DateFrom=&DateTo=&Direction=DESC&LeagueID=00"
-                f"&PlayerOrTeam=P&Season={season}&SeasonType=Regular%20Season&Sorter=DATE"
+                f"&PlayerOrTeam=P&Season={season}&SeasonType={season_type_encoded}&Sorter=DATE"
             )
 
             r, route_label = fetch_nba_json(
@@ -743,14 +782,14 @@ def run_scrape(output_path=None, season=None):
 if __name__ == "__main__":
     import sys
     # Usage:
-    #   python gamelogs.py              -> runs 2025-26 (current season) as normal
+    #   python gamelogs.py              -> runs the current season as normal
     #   python gamelogs.py 2024-25      -> explicitly requests a completed season;
     #                                      fetches once if CSV missing, skips if already present
     cli_season = sys.argv[1] if len(sys.argv) > 1 else None
 
     # Safety: don't accidentally run a completed season without explicitly asking for it
     effective_season = cli_season or os.environ.get("GAMELOGS_SEASON", SEASON)
-    if effective_season in COMPLETED_SEASONS and cli_season is None:
+    if is_completed_season(effective_season) and cli_season is None:
         print(f"   Season {effective_season} is in COMPLETED_SEASONS. "
               f"Pass it explicitly as an argument to fetch it: python gamelogs.py {effective_season}")
     else:
