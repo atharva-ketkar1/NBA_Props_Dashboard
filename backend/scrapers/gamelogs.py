@@ -759,6 +759,11 @@ def run_scrape(output_path=None, season=None):
         final_df.to_csv(output_path, index=False)
         print(f"   Updated logs saved! (Rows: {len(final_df)})")
 
+    failed_manifest_path = output_path.replace(".csv", "_failed_dates.csv")
+    if not permanently_failed and os.path.exists(failed_manifest_path):
+        os.remove(failed_manifest_path)
+        print("   Cleared stale failed manifest.")
+
     if permanently_failed:
         if not dates_with_any_data:
             return _result(
