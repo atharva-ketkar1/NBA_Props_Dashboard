@@ -3,7 +3,7 @@ import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-reac
 import { Player, Game, SportsbookId } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
-import { getSportsbookProp } from '../utils/propResolution';
+import { getSportsbookProp, playerHasSportsbookPropForDate } from '../utils/propResolution';
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
 
@@ -32,46 +32,16 @@ function playerHasAvailableSportsbookPropForDate(
     return Boolean(availabilityBucket[dateKey] || availabilityBucket.__undated__);
 }
 
-function playerHasAnyAvailablePropForDate(
-    availabilityByPlayer: PlayerAvailabilityByDate,
-    playerId: number,
-    gameDate?: string | null,
-) {
-    const statMap = availabilityByPlayer?.[playerId] ?? {};
-    const dateKey = gameDate || '__undated__';
-    return Object.values(statMap).some((sportsbookMap) => (
-        Object.values(sportsbookMap ?? {}).some((dateMap) => Boolean(dateMap?.[dateKey] || dateMap?.__undated__))
-    ));
-}
-
-function playerHasAnyPropForDate(player: Player, gameDate?: string | null) {
-    const dateKey = gameDate || '__undated__';
-    const propsByDate = player.props_by_date ?? {};
-    const hasDatedProp = Object.values(propsByDate).some((sportsbookMap) => (
-        Object.values(sportsbookMap ?? {}).some((dateMap) => Boolean(dateMap?.[dateKey] || dateMap?.__undated__))
-    ));
-
-    if (hasDatedProp) {
-        return true;
-    }
-
-    return Object.values(player.props ?? {}).some((sportsbookMap) => (
-        Object.values(sportsbookMap ?? {}).some((prop) => {
-            if (!prop) return false;
-            const propDate = prop.game_date || '__undated__';
-            return propDate === dateKey || propDate === '__undated__';
-        })
-    ));
-}
-
-function playerHasAnyKnownLineForDate(
+function playerHasKnownSportsbookLineForDate(
     player: Player,
     availabilityByPlayer: PlayerAvailabilityByDate,
+    statType: string,
+    sportsbook: SportsbookId | string,
     gameDate?: string | null,
 ) {
     return (
-        playerHasAnyPropForDate(player, gameDate)
-        || playerHasAnyAvailablePropForDate(availabilityByPlayer, player.id, gameDate)
+        playerHasSportsbookPropForDate(player, statType, sportsbook, gameDate)
+        || playerHasAvailableSportsbookPropForDate(availabilityByPlayer, player.id, statType, sportsbook, gameDate)
     );
 }
 
@@ -590,7 +560,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 const isInGame = p.team === game.home_team_tricode || p.team === game.away_team_tricode;
                 if (!isInGame) return false;
 
-                if (!playerHasAnyKnownLineForDate(p, propsAvailabilityByDate, game.game_date)) {
+                if (!playerHasKnownSportsbookLineForDate(p, propsAvailabilityByDate, statFilter, activeSportsbook, game.game_date)) {
                     return false;
                 }
 
