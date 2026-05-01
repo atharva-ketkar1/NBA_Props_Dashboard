@@ -96,11 +96,16 @@ EDGE_SCORE_DISCORD_ASSETS_BASE_URL = (
 EDGE_DISCORD_MIN_SIGNAL_SCORE = max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCORD_MIN_SIGNAL_SCORE", 72.5)))
 EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
 EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
+EDGE_DISCORD_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_PLAYER_LIMIT", 1))
 EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = max(
     1.0,
     min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 72.5)),
 )
 EDGE_SPORTSBOOK_BOARD_LIMIT = max(1, _env_int("EDGE_SPORTSBOOK_BOARD_LIMIT", 10))
+EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD = max(
+    0.0,
+    min(1.0, _env_float("EDGE_SCORE_DISCORD_COMPONENT_OVERLAP_THRESHOLD", 0.45)),
+)
 EDGE_DISCORD_LINE_MOVE_POINTS = max(0.25, _env_float("EDGE_SCORE_DISCORD_LINE_MOVE_POINTS", 1.0))
 EDGE_DISCORD_ODDS_MOVE_AMERICAN = max(5, _env_int("EDGE_SCORE_DISCORD_ODDS_MOVE_AMERICAN", 25))
 EDGE_DISCORD_SCORE_DELTA = max(1.0, _env_float("EDGE_SCORE_DISCORD_SCORE_DELTA", 6.0))
@@ -742,6 +747,116 @@ def _ranking_confidence(candidate: Dict[str, Any]) -> float:
         candidate.get("display_confidence"),
         _safe_float(candidate.get("confidence"), 0.0),
     ) or 0.0
+
+
+def _stat_component_weights(stat_type: Any) -> Dict[str, float]:
+    profile = STAT_PROFILES.get(str(stat_type or "").strip().upper(), {})
+    if not isinstance(profile, dict):
+        return {}
+    components = profile.get("components", {})
+    if not isinstance(components, dict):
+        return {}
+
+    normalized: Dict[str, float] = {}
+    total_weight = 0.0
+    for raw_component, raw_weight in components.items():
+        weight = _safe_float(raw_weight)
+        if weight is None or weight <= 0:
+            continue
+        component = str(raw_component or "").strip().upper()
+        if not component:
+            continue
+        normalized[component] = float(weight)
+        total_weight += float(weight)
+
+    if total_weight <= 0:
+        return {}
+    if abs(total_weight - 1.0) < 1e-9:
+        return normalized
+    return {
+        component: weight / total_weight
+        for component, weight in normalized.items()
+    }
+
+
+def _stat_component_overlap(left_stat_type: Any, right_stat_type: Any) -> float:
+    left = _stat_component_weights(left_stat_type)
+    right = _stat_component_weights(right_stat_type)
+    if not left or not right:
+        return 0.0
+    components = set(left.keys()) | set(right.keys())
+    return sum(min(left.get(component, 0.0), right.get(component, 0.0)) for component in components)
+
+
+def _discord_recommendations_conflict(
+    candidate: Dict[str, Any],
+    existing: Dict[str, Any],
+) -> bool:
+    candidate_player = str(candidate.get("player_id") or "").strip()
+    existing_player = str(existing.get("player_id") or "").strip()
+    if not candidate_player or candidate_player != existing_player:
+        return False
+
+    candidate_pick = str(candidate.get("pick") or "").strip().lower()
+    existing_pick = str(existing.get("pick") or "").strip().lower()
+    if candidate_pick != existing_pick:
+        return False
+
+    candidate_stat = str(candidate.get("stat_type") or "").strip().upper()
+    existing_stat = str(existing.get("stat_type") or "").strip().upper()
+    if candidate_stat == existing_stat:
+        return True
+
+    return _stat_component_overlap(candidate_stat, existing_stat) >= EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD
+
+
+def _filter_discord_recommendations(
+    recommendations: List[Dict[str, Any]],
+    *,
+    min_signal_score: float,
+    per_book_limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    per_book_counts: Dict[str, int] = {}
+    per_player_counts: Dict[str, int] = {}
+    selected_by_player: Dict[str, List[Dict[str, Any]]] = {}
+    filtered = []
+
+    for recommendation in recommendations:
+        if recommendation.get("eligibility_blocked"):
+            continue
+        signal_score = _ranking_edge_score(recommendation)
+        if signal_score < min_signal_score:
+            continue
+
+        book = str(recommendation.get("sportsbook") or "").strip().lower()
+        if book not in SUPPORTED_BOOKS:
+            continue
+
+        rank = _safe_int(recommendation.get("rank"))
+        if rank is not None and rank > EDGE_DISCORD_MAX_RANK:
+            continue
+
+        if per_book_limit is not None and per_book_counts.get(book, 0) >= per_book_limit:
+            continue
+
+        player_key = str(recommendation.get("player_id") or "").strip()
+        selected_for_player = selected_by_player.get(player_key, [])
+        if player_key and per_player_counts.get(player_key, 0) >= EDGE_DISCORD_PER_PLAYER_LIMIT:
+            continue
+        if player_key and any(
+            _discord_recommendations_conflict(recommendation, existing)
+            for existing in selected_for_player
+        ):
+            continue
+
+        filtered.append(recommendation)
+        if per_book_limit is not None:
+            per_book_counts[book] = per_book_counts.get(book, 0) + 1
+        if player_key:
+            per_player_counts[player_key] = per_player_counts.get(player_key, 0) + 1
+            selected_by_player.setdefault(player_key, []).append(recommendation)
+
+    return filtered
 
 
 def _format_signal_score_threshold(value: float) -> str:
@@ -3889,34 +4004,19 @@ def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, 
 
 
 def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    per_book_counts: Dict[str, int] = {}
-    filtered = []
-    for recommendation in recommendations:
-        if recommendation.get("eligibility_blocked"):
-            continue
-        signal_score = _ranking_edge_score(recommendation)
-        book = str(recommendation.get("sportsbook") or "").strip().lower()
-        if book not in SUPPORTED_BOOKS:
-            continue
-        if signal_score < EDGE_DISCORD_MIN_SIGNAL_SCORE:
-            continue
-        if per_book_counts.get(book, 0) >= EDGE_DISCORD_PER_BOOK_LIMIT:
-            continue
-        filtered.append(recommendation)
-        per_book_counts[book] = per_book_counts.get(book, 0) + 1
-    return filtered
+    return _filter_discord_recommendations(
+        recommendations,
+        min_signal_score=EDGE_DISCORD_MIN_SIGNAL_SCORE,
+        per_book_limit=EDGE_DISCORD_PER_BOOK_LIMIT,
+    )
 
 
 def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    filtered = []
-    for recommendation in recommendations:
-        if recommendation.get("eligibility_blocked"):
-            continue
-        signal_score = _ranking_edge_score(recommendation)
-        if signal_score < EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE:
-            continue
-        filtered.append(recommendation)
-    return filtered
+    return _filter_discord_recommendations(
+        recommendations,
+        min_signal_score=EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE,
+        per_book_limit=None,
+    )
 
 
 def _compute_notification_delta(
@@ -3952,8 +4052,6 @@ def _compute_notification_delta(
         if previous is None:
             reason_flags.append("new entrant")
         else:
-            if recommendation.get("sportsbook") != previous.get("sportsbook"):
-                reason_flags.append("best book changed")
             if abs((_safe_float(recommendation.get("line"), 0.0) or 0.0) - (_safe_float(previous.get("line"), 0.0) or 0.0)) >= EDGE_DISCORD_LINE_MOVE_POINTS:
                 reason_flags.append("line moved")
             if abs((_safe_float(recommendation.get("odds"), 0.0) or 0.0) - (_safe_float(previous.get("odds"), 0.0) or 0.0)) >= EDGE_DISCORD_ODDS_MOVE_AMERICAN:
@@ -4072,7 +4170,6 @@ LONG_STAT_LABELS = {
 
 NOTIFICATION_REASON_LABELS = {
     "new entrant": "new to the board",
-    "best book changed": "best book changed",
     "line moved": "line moved",
     "odds moved": "price moved",
     "score moved": "Signal Score moved",
@@ -5130,7 +5227,8 @@ def _build_discord_alert_payload(
     )
     threshold_text = _format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)
     rules_text = (
-        f"Up to {EDGE_DISCORD_PER_BOOK_LIMIT} props per sportsbook at Signal Score {threshold_text}+."
+        f"Top {EDGE_DISCORD_MAX_RANK} props only, max {EDGE_DISCORD_PER_BOOK_LIMIT} per sportsbook, "
+        f"and max {EDGE_DISCORD_PER_PLAYER_LIMIT} per player at Signal Score {threshold_text}+."
     )
     books_summary = _changed_books_summary(grouped_books)
     visible_books = {
@@ -5189,7 +5287,7 @@ def _build_discord_alert_payload(
         summary_fields.extend([
             {
                 "name": "Why this updated",
-                "value": "Only props with a new entrant, better book, line move, price move, or meaningful score/rank change are shown."[:1024],
+                "value": "Only props with a new entrant, line move, price move, or meaningful score/rank change are shown."[:1024],
                 "inline": False,
             },
             {
@@ -5970,9 +6068,11 @@ def run_edge_score_refresh(
             "removed": notification_delta.get("removed", []),
             "dedupe_rules": {
                 "per_book_limit": EDGE_DISCORD_PER_BOOK_LIMIT,
+                "per_player_limit": EDGE_DISCORD_PER_PLAYER_LIMIT,
+                "max_rank": EDGE_DISCORD_MAX_RANK,
+                "component_overlap_threshold": EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD,
                 "min_signal_score": EDGE_DISCORD_MIN_SIGNAL_SCORE,
                 "new_entrant": True,
-                "best_book_changed": True,
                 "line_move_points": EDGE_DISCORD_LINE_MOVE_POINTS,
                 "odds_move_american": EDGE_DISCORD_ODDS_MOVE_AMERICAN,
                 "signal_score_delta": EDGE_DISCORD_SCORE_DELTA,
@@ -6000,13 +6100,13 @@ def run_edge_score_refresh(
     main_message_response: Optional[Dict[str, Any]] = None
     tracker_message_response: Optional[Dict[str, Any]] = None
     state_changed = bool(recap_result.get("state_changed"))
-    tracker_delta_sent_snapshot = {}
     slate_date = notification_delta.get("slate_date") or ""
     tracker_running_recommendations = _tracker_running_recommendations(
         state,
         slate_date=slate_date,
         tracker_delta=tracker_delta,
     )
+    tracker_running_recommendations = _filter_tracker_recommendations(tracker_running_recommendations)
     tracker_message_ref = _latest_discord_message_ref(
         state,
         slate_date=slate_date,
@@ -6048,8 +6148,6 @@ def run_edge_score_refresh(
                 discord_tracker_sent = bool(tracker_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score tracker webhook failed: %s", exc)
-        if discord_tracker_sent:
-            tracker_delta_sent_snapshot = tracker_delta.get("current_snapshot", {})
         discord_sent = bool(discord_main_sent or discord_tracker_sent)
 
     if discord_main_sent:
@@ -6093,10 +6191,7 @@ def run_edge_score_refresh(
         tracker_date_state = tracker_state_by_date.get(slate_date, {})
         if not isinstance(tracker_date_state, dict):
             tracker_date_state = {}
-        sent_snapshot = tracker_date_state.get("sent_snapshot", {})
-        if not isinstance(sent_snapshot, dict):
-            sent_snapshot = {}
-        sent_snapshot.update(tracker_delta_sent_snapshot)
+        sent_snapshot = _tracker_state_snapshot_for_recommendations(tracker_running_recommendations)
         tracker_date_state["sent_snapshot"] = sent_snapshot
         tracker_date_state.setdefault("first_sent_at", payload["generated_at"])
         tracker_date_state["last_sent_at"] = payload["generated_at"]
