@@ -1,11 +1,44 @@
 import requests
 import pandas as pd
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import os
 
 DASHBOARD_LOOKAHEAD_DAYS = 7
+ET_ZONE = ZoneInfo("America/New_York")
+
+
+def _normalize_status_text(value):
+    return str(value or "").strip()
+
+
+def _is_tbd_tipoff(game):
+    return _normalize_status_text(game.get('gameStatusText')).upper() == "TBD"
+
+
+def _has_unknown_teams(game):
+    home_team = game.get('homeTeam', {}) or {}
+    away_team = game.get('awayTeam', {}) or {}
+    return (
+        not home_team.get('teamId')
+        or not away_team.get('teamId')
+        or not home_team.get('teamTricode')
+        or not away_team.get('teamTricode')
+    )
+
+
+def _should_skip_dashboard_game(game):
+    # Skip blank bracket placeholders and speculative playoff rows with no real tip.
+    return _has_unknown_teams(game) or (bool(game.get('ifNecessary')) and _is_tbd_tipoff(game))
+
+
+def _get_dashboard_window_dates(days_ahead: int = DASHBOARD_LOOKAHEAD_DAYS):
+    today_et = datetime.now(ET_ZONE)
+    return [
+        (today_et + timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(days_ahead)
+    ]
 
 
 def upsert_games_to_db(raw_data: list) -> None:
@@ -50,12 +83,33 @@ def upsert_games_to_db(raw_data: list) -> None:
                 "closing_scrape_deadline": g.get("closing_scrape_deadline"),
             })
 
+        window_dates = _get_dashboard_window_dates()
+        stale_row_count = 0
+        if window_dates:
+            existing_rows = (
+                supabase
+                .table("games")
+                .select("game_id, game_date")
+                .gte("game_date", window_dates[0])
+                .lte("game_date", window_dates[-1])
+                .execute()
+            ).data or []
+            incoming_ids = {str(row["game_id"]) for row in rows if row.get("game_id")}
+
+            for existing_row in existing_rows:
+                game_id = str(existing_row.get("game_id") or "").strip()
+                if not game_id or game_id in incoming_ids:
+                    continue
+                supabase.table("games").delete().eq("game_id", game_id).execute()
+                stale_row_count += 1
+
         if not rows:
+            print(f"   games upsert: 0 games written to Supabase ({stale_row_count} stale rows removed)")
             return
 
         # Batch upsert (all games fit in one batch — max ~30 rows per day)
-        result = supabase.table("games").upsert(rows, on_conflict="game_id").execute()
-        print(f"   games upsert: {len(rows)} games written to Supabase")
+        supabase.table("games").upsert(rows, on_conflict="game_id").execute()
+        print(f"   games upsert: {len(rows)} games written to Supabase ({stale_row_count} stale rows removed)")
     except Exception as e:
         print(f"   Warning: games upsert failed (non-fatal): {e}")
 
@@ -87,6 +141,8 @@ def parse_game_data(game):
     # Parse game time (schedule uses gameDateTimeEst and gameDateTimeUTC)
     game_time_utc = game.get('gameDateTimeUTC')
     game_time_et_raw = game.get('gameDateTimeEst')
+    status_text = _normalize_status_text(game.get('gameStatusText'))
+    is_tbd_tipoff = _is_tbd_tipoff(game)
     
     game_time_et_display = None
     game_date = None
@@ -97,17 +153,30 @@ def parse_game_data(game):
         try:
             # Parse the EST time string from the API
             dt = datetime.strptime(game_time_et_raw, "%Y-%m-%dT%H:%M:%SZ")
-            dt_et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
-            closing_scrape_deadline = dt_et.isoformat()
-            game_time_et_display = dt.strftime("%I:%M %p ET")
+            dt_et = dt.replace(tzinfo=ET_ZONE)
             game_date = dt.strftime("%Y-%m-%d")
             game_weekday = dt.strftime("%A")
+            if is_tbd_tipoff:
+                game_time_utc = None
+                game_time_et_display = "TBD"
+            else:
+                closing_scrape_deadline = dt_et.isoformat()
+                game_time_et_display = dt.strftime("%I:%M %p ET")
         except:
-            game_time_et_display = game_time_et_raw
+            game_time_et_display = "TBD" if is_tbd_tipoff else game_time_et_raw
+
+    if not game_date:
+        game_date_raw = game.get('gameDateEst')
+        if game_date_raw:
+            try:
+                date_dt = datetime.strptime(game_date_raw, "%Y-%m-%dT%H:%M:%SZ")
+                game_date = date_dt.strftime("%Y-%m-%d")
+                game_weekday = date_dt.strftime("%A")
+            except:
+                pass
     
     # Determine game status from gameStatus (1: Scheduled, 2: Live, 3: Final)
     game_status_num = game.get('gameStatus', 1)
-    status_text = game.get('gameStatusText', '')
     
     is_live = game_status_num == 2
     is_final = game_status_num == 3
@@ -216,8 +285,12 @@ def get_dashboard_data(days_ahead: int = DASHBOARD_LOOKAHEAD_DAYS):
     all_games_data = []
     
     for game in todays_games_list:
+        if _should_skip_dashboard_game(game):
+            continue
         game_data = parse_game_data(game)
         all_games_data.append(game_data)
+
+    print(f"Prepared {len(all_games_data)} dashboard games after filtering placeholders")
     
     # Convert to DataFrame
     df = pd.DataFrame(all_games_data) if all_games_data else pd.DataFrame()

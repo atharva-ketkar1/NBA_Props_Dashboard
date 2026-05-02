@@ -149,8 +149,8 @@ export interface Game {
   arena_city: string;
   arena_state: string;
   arena_full: string;
-  game_time_utc: string;
-  game_time_et: string;
+  game_time_utc: string | null;
+  game_time_et: string | null;
   game_date: string;
   game_weekday: string;
   game_et: string;

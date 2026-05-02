@@ -53,6 +53,30 @@ function sortGamesByTime(games: Game[] = []) {
     });
 }
 
+function hasTbdTipoff(game: Game) {
+    const statusText = String(game?.game_status_text ?? '').trim().toUpperCase();
+    const tipoffText = String(game?.game_time_et ?? '').trim().toUpperCase();
+    return statusText === 'TBD' || tipoffText === 'TBD';
+}
+
+function formatScheduledTipoff(game: Game) {
+    if (hasTbdTipoff(game)) {
+        return 'TBD';
+    }
+
+    if (game.game_time_utc) {
+        const parsedTime = new Date(game.game_time_utc);
+        if (!Number.isNaN(parsedTime.getTime())) {
+            return parsedTime.toLocaleTimeString(undefined, {
+                hour: 'numeric',
+                minute: '2-digit',
+            });
+        }
+    }
+
+    return game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '';
+}
+
 const CustomDropdown = ({ value, options, onChange, placeholder }: { value: string, options: { label: string, value: string, disabled?: boolean }[], onChange: (val: string) => void, placeholder?: string }) => {
     const [isOpen, setIsOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
@@ -309,14 +333,13 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
+    const isTipoffTbd = hasTbdTipoff(game);
     const gameTimeObj = game.game_time_utc ? new Date(game.game_time_utc) : new Date(game.game_date + 'T23:59:59Z');
     const hasValidGameTime = !Number.isNaN(gameTimeObj.getTime());
     const gameDay = hasValidGameTime
         ? gameTimeObj.toLocaleDateString(undefined, { weekday: 'short' })
         : '';
-    const formattedTime = hasValidGameTime
-        ? gameTimeObj.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-        : (game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '');
+    const formattedTime = formatScheduledTipoff(game);
 
     return (
         <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-2 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
@@ -344,7 +367,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                         ) : game.is_final ? (
                             <span className="text-xs text-gray-500 font-medium">FINAL</span>
                         ) : (
-                            <span className="text-xs text-gray-400 font-medium">{gameDay}</span>
+                            <span className="text-xs text-gray-400 font-medium">{isTipoffTbd ? game.game_weekday?.slice(0, 3) : gameDay}</span>
                         )}
 
                         <span className={`${isExpanded ? 'text-[13px] text-white' : 'text-[13px] text-gray-300'} font-medium whitespace-nowrap`}>
