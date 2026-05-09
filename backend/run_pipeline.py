@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import sys
 import gc
+import tempfile
 import psutil
 import logging
 from contextlib import redirect_stdout
@@ -93,6 +94,33 @@ OPP_SHOT_TYPE_PATH = os.path.join(DATA_DIR, "opponent_defensive_ranks.json")
 PLAY_TYPE_PATH = os.path.join(DATA_DIR, "play_type_analysis.json")
 BOXSCORES_PATH = os.path.join(DATA_DIR, "boxscores.json")
 ET_ZONE = ZoneInfo("America/New_York")
+STATS_REQUIRED_COLUMNS = {"PLAYER_ID", "PLAYER_NAME", "TEAM_ABBREVIATION"}
+
+
+def _atomic_write_dataframe_csv(df: pd.DataFrame, output_path: str) -> None:
+    target_path = Path(output_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".tmp",
+        prefix=f".{target_path.name}.",
+        dir=str(target_path.parent),
+        delete=False,
+        newline="",
+        encoding="utf-8",
+    )
+    temp_path = Path(temp_handle.name)
+    temp_handle.close()
+
+    try:
+        df.to_csv(temp_path, index=False)
+        os.replace(temp_path, target_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 def run_dk():
     logger.info("Starting DraftKings...")
@@ -132,7 +160,29 @@ def run_stats():
     logger.info("Starting Season Stats...")
     engine = nba_stats.NBAStatsEngine()
     df = engine.get_player_data()
-    df.to_csv(STATS_PATH, index=False)
+    has_rows = isinstance(df, pd.DataFrame) and not df.empty
+    has_required_columns = has_rows and STATS_REQUIRED_COLUMNS.issubset(set(df.columns))
+
+    if not has_required_columns:
+        existing_stats_usable = os.path.exists(STATS_PATH) and os.path.getsize(STATS_PATH) > 0
+        if existing_stats_usable:
+            logger.warning(
+                "Season stats scrape returned unusable data; preserving existing season_stats.csv | rows=%s cols=%s",
+                len(df) if isinstance(df, pd.DataFrame) else 0,
+                list(df.columns) if isinstance(df, pd.DataFrame) else [],
+            )
+            return "Season Stats: 0 players (preserved previous file)"
+
+        missing_cols = (
+            sorted(STATS_REQUIRED_COLUMNS - set(df.columns))
+            if isinstance(df, pd.DataFrame)
+            else sorted(STATS_REQUIRED_COLUMNS)
+        )
+        raise RuntimeError(
+            f"Season stats scrape returned unusable data and no fallback file exists (missing_cols={missing_cols})"
+        )
+
+    _atomic_write_dataframe_csv(df, STATS_PATH)
     return f"Season Stats: {len(df)} players"
 
 def run_logs():

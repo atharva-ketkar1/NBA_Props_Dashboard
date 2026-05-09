@@ -1,12 +1,17 @@
 import requests
 import pandas as pd
 import json
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import os
 
 DASHBOARD_LOOKAHEAD_DAYS = 7
 ET_ZONE = ZoneInfo("America/New_York")
+SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+SCHEDULE_REQUEST_TIMEOUT_SECONDS = 20
+SCHEDULE_REQUEST_ATTEMPTS = 3
+SCHEDULE_RETRY_BACKOFF_SECONDS = 1.5
 
 
 def _normalize_status_text(value):
@@ -116,8 +121,6 @@ def upsert_games_to_db(raw_data: list) -> None:
 
 def get_nba_schedule():
     """Get NBA schedule data"""
-    url = 'https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json'
-    
     HEADERS = {
         "accept": "*/*",
         "accept-encoding": "gzip, deflate, br, zstd",
@@ -126,9 +129,39 @@ def get_nba_schedule():
         "dnt": "1",
         "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
     }
-    
-    response = requests.get(url=url, headers=HEADERS)
-    return response.json()
+
+    last_error = None
+    for attempt in range(1, SCHEDULE_REQUEST_ATTEMPTS + 1):
+        try:
+            response = requests.get(
+                url=SCHEDULE_URL,
+                headers=HEADERS,
+                timeout=SCHEDULE_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                excerpt = (response.text or "").strip()
+                excerpt = " ".join(excerpt.split())
+                if len(excerpt) > 180:
+                    excerpt = f"{excerpt[:180]}..."
+                raise RuntimeError(
+                    f"NBA schedule endpoint returned non-JSON payload (status={response.status_code}, excerpt={excerpt!r})"
+                ) from exc
+
+            if not isinstance(payload, dict) or "leagueSchedule" not in payload:
+                raise RuntimeError("NBA schedule endpoint returned an unexpected payload shape.")
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if attempt < SCHEDULE_REQUEST_ATTEMPTS:
+                time.sleep(SCHEDULE_RETRY_BACKOFF_SECONDS * attempt)
+
+    raise RuntimeError(
+        f"Unable to fetch NBA schedule after {SCHEDULE_REQUEST_ATTEMPTS} attempts: {last_error}"
+    )
 
 def parse_game_data(game):
     """Parse game data from the schedule endpoint"""

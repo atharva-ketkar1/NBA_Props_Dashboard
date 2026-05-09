@@ -540,8 +540,25 @@ def refresh_game_status_if_needed(now, state, dry_run=False):
                 games=len(df),
             )
         except Exception as e:
-            log_status(logger, "FAIL", "Game status refresh failed", error=e)
-            refresh_ok = False
+            cached_schedule_exists = False
+            try:
+                with open(SCHEDULE_PATH, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                    cached_schedule_exists = isinstance(payload, dict) and isinstance(payload.get("games"), list)
+            except Exception:
+                cached_schedule_exists = False
+
+            if cached_schedule_exists:
+                log_status(
+                    logger,
+                    "WARN",
+                    "Game status refresh failed; using cached schedule snapshot",
+                    error=e,
+                    cached_schedule_path=SCHEDULE_PATH,
+                )
+            else:
+                log_status(logger, "FAIL", "Game status refresh failed", error=e)
+                refresh_ok = False
 
     if refresh_ok:
         state["last_game_status_refresh_time"] = time.time()
