@@ -1,8 +1,10 @@
 import json
 import math
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
+
+from utils.pregame_props import is_pregame_schedule_game
 
 ET_ZONE = ZoneInfo("America/New_York")
 
@@ -156,11 +158,17 @@ def _pick_best_game(games, now_et=None):
 
     if now_et is None:
         now_et = datetime.now(ET_ZONE)
+    else:
+        now_et = now_et.astimezone(ET_ZONE)
+
+    games = [game for game in games if is_pregame_schedule_game(game, now_et=now_et)]
+    if not games:
+        return None
 
     def game_sort_key(game):
         deadline_dt = _parse_deadline(game)
         game_date = normalize_game_date(game.get("game_date"))
-        is_relevant = deadline_dt is not None and deadline_dt >= (now_et - timedelta(minutes=15))
+        is_relevant = deadline_dt is not None and deadline_dt > now_et
         is_future = deadline_dt is not None and deadline_dt >= now_et
         return (
             0 if is_relevant else 1,

@@ -1,4 +1,3 @@
-import csv
 import copy
 import json
 import logging
@@ -30,6 +29,7 @@ from prop_modeling.injury_feature_config import (
 )
 from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
+from utils.pregame_props import has_game_started, is_pregame_schedule_game
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
@@ -58,7 +58,6 @@ MASTER_FEED_PATH = os.path.join(CURRENT_DIR, "master_feed.json")
 SCHEDULE_PATH = os.path.join(CURRENT_DIR, "today_schedule.json")
 ACTION_NETWORK_PATH = os.path.join(CURRENT_DIR, "action_network_odds.json")
 LINE_MOVEMENTS_PATH = os.path.join(CURRENT_DIR, "line_movements_today.json")
-PRIZEPICKS_PATH = os.path.join(CURRENT_DIR, "prizepicks.csv")
 EDGE_SCORE_PATH = os.path.join(CURRENT_DIR, "edge_scores_top15.json")
 EDGE_SCORE_STATE_PATH = os.path.join(CURRENT_DIR, "edge_score_notification_state.json")
 EDGE_SCORE_HISTORY_PATH = os.path.join(ARCHIVE_DIR, "edge_scores_history.json")
@@ -124,24 +123,17 @@ EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = max(
 )
 _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL: Dict[str, float] = {}
 UNDATED_PROP_KEY = "__undated__"
-TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-EDGE_SCORE_ENABLE_PRIZEPICKS = (
-    str(os.getenv("EDGE_SCORE_ENABLE_PRIZEPICKS", "false")).strip().lower() in TRUE_ENV_VALUES
-)
 
-SUPPORTED_BOOKS = {"dk", "fd"} | ({"pp"} if EDGE_SCORE_ENABLE_PRIZEPICKS else set())
+SUPPORTED_BOOKS = {"dk", "fd"}
 BOOK_ALIASES = {
     "dk": "dk",
     "draftkings": "dk",
     "fd": "fd",
     "fanduel": "fd",
-    "pp": "pp",
-    "prizepicks": "pp",
 }
 BOOK_LABELS = {
     "dk": "DraftKings",
     "fd": "FanDuel",
-    "pp": "PrizePicks",
 }
 ACTION_NETWORK_CONTEXT_BOOK_IDS = (
     "15",    # DraftKings
@@ -269,47 +261,14 @@ PLAY_TYPE_LABELS = [
     "Misc",
 ]
 
-BOOK_DISPLAY_ORDER = [book for book in ("dk", "fd", "pp") if book in SUPPORTED_BOOKS]
+BOOK_DISPLAY_ORDER = [book for book in ("dk", "fd") if book in SUPPORTED_BOOKS]
 BOOK_EMBED_COLORS = {
     "dk": 0xF97316,
     "fd": 0x2563EB,
-    "pp": 0xDC2626,
 }
 SPORTSBOOK_LOGO_FILES = {
     "dk": "draftkings.webp",
     "fd": "fanduel.webp",
-    "pp": "prizepicks.webp",
-}
-PP_PROP_MAP = {
-    "points": "PTS",
-    "rebounds": "REB",
-    "assists": "AST",
-    "threes": "FG3M",
-    "blocks": "BLK",
-    "steals": "STL",
-    "pra": "PTS+REB+AST",
-    "pr": "PTS+REB",
-    "pa": "PTS+AST",
-    "ra": "REB+AST",
-    "stocks": "STL+BLK",
-}
-PP_LABEL_PROP_MAP = {
-    "3PTM": "FG3M",
-    "3-PT MADE": "FG3M",
-    "ASSISTS": "AST",
-    "BLKS+STLS": "STL+BLK",
-    "BLOCKED SHOTS": "BLK",
-    "BLOCKS": "BLK",
-    "POINTS": "PTS",
-    "PRA": "PTS+REB+AST",
-    "PTS+ASTS": "PTS+AST",
-    "PTS+REBS": "PTS+REB",
-    "PTS+REBS+ASTS": "PTS+REB+AST",
-    "RA": "REB+AST",
-    "REBOUNDS": "REB",
-    "REBS+ASTS": "REB+AST",
-    "STEALS": "STL",
-    "STEALS+BLOCKS": "STL+BLK",
 }
 
 
@@ -378,17 +337,29 @@ def _normalize_book_key(raw_book: Any) -> str:
     return BOOK_ALIASES.get(str(raw_book or "").strip().lower(), "")
 
 
-def _normalize_pp_stat_type(raw_prop_type: Any, raw_prop_label: Any) -> str:
-    raw_key = str(raw_prop_type or "").strip().lower()
-    mapped = PP_PROP_MAP.get(raw_key)
-    if mapped:
-        return mapped
+def _recommendation_uses_supported_book(recommendation: Any) -> bool:
+    if not isinstance(recommendation, dict):
+        return False
+    return _normalize_book_key(recommendation.get("sportsbook")) in SUPPORTED_BOOKS
 
-    if isinstance(raw_prop_label, str):
-        cleaned = re.sub(r"\s+", " ", raw_prop_label).upper().strip()
-        return PP_LABEL_PROP_MAP.get(cleaned, "")
 
-    return ""
+def _recommendation_is_still_pregame(recommendation: Any, now_et: Optional[datetime] = None) -> bool:
+    if not isinstance(recommendation, dict):
+        return False
+    if bool(recommendation.get("game_started")):
+        return False
+
+    game_date = _normalize_game_date(recommendation.get("game_date"))
+    if not game_date:
+        return False
+
+    now = now_et or get_et_now()
+    today = now.strftime("%Y-%m-%d")
+    if game_date < today:
+        return False
+    if game_date == today and "game_started" not in recommendation:
+        return False
+    return True
 
 
 def _normalize_game_date(raw_value: Any) -> str:
@@ -827,9 +798,12 @@ def _filter_discord_recommendations(
     per_player_counts: Dict[str, int] = {}
     selected_by_player: Dict[str, List[Dict[str, Any]]] = {}
     filtered = []
+    now = get_et_now()
 
     for recommendation in recommendations:
         if recommendation.get("eligibility_blocked"):
+            continue
+        if not _recommendation_is_still_pregame(recommendation, now_et=now):
             continue
         signal_score = _ranking_edge_score(recommendation)
         if signal_score < min_signal_score:
@@ -1497,10 +1471,7 @@ def _estimate_stat_rate_context(player: Dict[str, Any], logs: List[Dict[str, Any
 
 
 def _is_live_or_final_schedule_game(game: Dict[str, Any]) -> bool:
-    if bool(game.get("is_live")) or bool(game.get("is_final")):
-        return True
-    game_status = int(_safe_float(game.get("game_status"), 0.0) or 0.0)
-    return game_status >= 2
+    return has_game_started(game, now_et=get_et_now())
 
 
 def _build_schedule_context(schedule_payload: Any, action_network_payload: Any = None) -> Dict[str, Any]:
@@ -1514,12 +1485,16 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
     games = [game for game in games if isinstance(game, dict)]
     now = get_et_now()
     today_str = now.strftime("%Y-%m-%d")
-    pregame_games = [game for game in games if not _is_live_or_final_schedule_game(game)]
+    pregame_games = [
+        game
+        for game in games
+        if is_pregame_schedule_game(game, now_et=now)
+    ]
 
     active_candidates = []
     for game in pregame_games:
         deadline_dt = _parse_dt(game.get("closing_scrape_deadline"))
-        if deadline_dt is not None and deadline_dt >= (now - timedelta(minutes=15)):
+        if deadline_dt is not None and deadline_dt > now:
             active_candidates.append(game)
 
     active_games = []
@@ -1539,7 +1514,7 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
         for game in pregame_games:
             game_date = _normalize_game_date(game.get("game_date"))
             deadline_dt = _parse_dt(game.get("closing_scrape_deadline"))
-            if deadline_dt and deadline_dt >= (now - timedelta(hours=2)):
+            if deadline_dt and deadline_dt > now:
                 future_games.append((deadline_dt, game))
             elif game_date >= today_str:
                 future_games.append((datetime.max.replace(tzinfo=ET_ZONE), game))
@@ -1569,7 +1544,11 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
     active_dates = set()
     opponent_by_team = {}
     game_by_team = {}
+    game_by_id = {}
     for game in active_games:
+        game_id = str(game.get("game_id") or "").strip()
+        if game_id:
+            game_by_id[game_id] = game
         home_team = game.get("home_team_tricode")
         away_team = game.get("away_team_tricode")
         game_date = _normalize_game_date(game.get("game_date"))
@@ -1591,6 +1570,7 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
         "active_teams": active_teams,
         "active_dates": active_dates,
         "game_by_team": game_by_team,
+        "game_by_id": game_by_id,
         "opponent_by_team": opponent_by_team,
     }
 
@@ -1770,92 +1750,6 @@ def _merge_overlay_indexes(
                 merged[player_id][stat_type][book] = dict(prop)
 
     return merged
-
-
-def _load_prizepicks_overlay(
-    master_feed: Any,
-    schedule_context: Dict[str, Any],
-    prizepicks_path: str,
-) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    if not prizepicks_path or not os.path.exists(prizepicks_path):
-        return {}
-
-    matcher, id_to_team = _build_master_feed_matcher(master_feed)
-    if matcher is None:
-        return {}
-
-    active_teams = set(schedule_context.get("active_teams") or [])
-    game_by_team = schedule_context.get("game_by_team") or {}
-    active_dates = set(schedule_context.get("active_dates") or [])
-
-    candidates: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
-    try:
-        with open(prizepicks_path, "r", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                if not isinstance(row, dict):
-                    continue
-
-                raw_team = str(row.get("team") or "").strip()
-                if active_teams and raw_team not in active_teams:
-                    continue
-
-                raw_name = row.get("raw_player_name") or row.get("player") or ""
-                player_id = matcher.match_player(raw_name, raw_team or "UNK")
-                if not player_id:
-                    continue
-
-                canonical_team = id_to_team.get(str(player_id), raw_team)
-                schedule_game = game_by_team.get(canonical_team, {}) if canonical_team else {}
-                schedule_game_date = _normalize_game_date(schedule_game.get("game_date"))
-                row_game_date = _normalize_game_date(row.get("game_date"))
-                if schedule_game_date:
-                    if row_game_date and row_game_date != schedule_game_date:
-                        continue
-                    game_date = schedule_game_date
-                else:
-                    game_date = row_game_date
-
-                if active_dates and game_date and game_date not in active_dates:
-                    continue
-
-                stat_type = _normalize_pp_stat_type(row.get("prop_type"), row.get("prop_label"))
-                if not stat_type or stat_type not in STAT_PROFILES:
-                    continue
-
-                line = _safe_float(row.get("line"))
-                if line is None:
-                    continue
-
-                game_id = row.get("game_id") or schedule_game.get("game_id")
-                candidate_key = (str(player_id), stat_type, game_date or "")
-                candidates.setdefault(candidate_key, []).append({
-                    "line": line,
-                    "over": _safe_float(row.get("over_odds")),
-                    "under": _safe_float(row.get("under_odds")),
-                    "game_date": game_date,
-                    "game_id": game_id,
-                })
-    except Exception as exc:
-        logger.warning("Could not load PrizePicks overlay from %s: %s", prizepicks_path, exc)
-        return {}
-
-    overlay_index: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for (player_id, stat_type, _game_date), prop_candidates in candidates.items():
-        unique_lines = {candidate["line"] for candidate in prop_candidates}
-        if len(unique_lines) != 1:
-            continue
-
-        chosen = prop_candidates[-1]
-        overlay_index.setdefault(player_id, {}).setdefault(stat_type, {})["pp"] = {
-            "line": chosen["line"],
-            "over": chosen.get("over"),
-            "under": chosen.get("under"),
-            "game_date": chosen.get("game_date"),
-            "game_id": chosen.get("game_id"),
-        }
-
-    return overlay_index
 
 
 def _build_overlay_props_index(players_data: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
@@ -3698,6 +3592,7 @@ def _build_candidate(
 
     book = chosen.get("book")
     game_date = entry["game_date"] or chosen.get("game_date") or ""
+    game_started = has_game_started(entry.get("game_context") or {}, now_et=get_et_now())
     player_id = str(player.get("id"))
     opponent = entry.get("opponent")
 
@@ -3800,6 +3695,7 @@ def _build_candidate(
         "game_id": entry.get("game_id") or chosen.get("game_id"),
         "game_date": game_date,
         "game_time_et": entry.get("game_time_et"),
+        "game_started": game_started,
         "sportsbook": book,
         "sportsbook_label": BOOK_LABELS.get(book, str(book).title()),
         "stat_type": stat_type,
@@ -3962,6 +3858,8 @@ def _state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -
             "odds": recommendation.get("odds"),
             "display_edge_score": recommendation.get("display_edge_score"),
             "rank": recommendation.get("rank"),
+            "game_date": _normalize_game_date(recommendation.get("game_date")),
+            "game_started": bool(recommendation.get("game_started")),
         }
     return snapshot
 
@@ -3975,6 +3873,13 @@ def _load_preservable_previous_board(
         return None
     previous_recommendations = previous_payload.get("recommendations", [])
     if not isinstance(previous_recommendations, list) or not previous_recommendations:
+        return None
+    previous_recommendations = [
+        recommendation
+        for recommendation in previous_recommendations
+        if _recommendation_uses_supported_book(recommendation)
+    ]
+    if not previous_recommendations:
         return None
 
     normalized_current_dates = sorted({
@@ -4004,6 +3909,11 @@ def _load_preservable_previous_board(
     preserved_boards = previous_summary.get("sportsbook_boards", {})
     if not isinstance(preserved_boards, dict):
         preserved_boards = {}
+    preserved_boards = {
+        book: board
+        for book, board in preserved_boards.items()
+        if _normalize_book_key(book) in SUPPORTED_BOOKS
+    }
 
     return {
         "generated_at": previous_payload.get("generated_at"),
@@ -4032,6 +3942,7 @@ def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, 
             "display_edge_score": recommendation.get("display_edge_score"),
             "guardrail_active": recommendation.get("guardrail_active"),
             "game_date": _normalize_game_date(recommendation.get("game_date")),
+            "game_started": bool(recommendation.get("game_started")),
             "first_logged_at": recommendation.get("first_logged_at"),
             "why_summary": recommendation.get("why_summary") or _discord_signal_summary(recommendation),
         }
@@ -4078,6 +3989,11 @@ def _compute_notification_delta(
     previous_snapshot = date_state.get("last_sent_snapshot", {})
     if not isinstance(previous_snapshot, dict):
         previous_snapshot = {}
+    previous_snapshot = {
+        key: payload
+        for key, payload in previous_snapshot.items()
+        if _recommendation_uses_supported_book(payload)
+    }
 
     changes = []
     for recommendation in official_recommendations:
@@ -4253,7 +4169,7 @@ def _discord_book_label(recommendation: Dict[str, Any]) -> str:
         str(recommendation.get("sportsbook") or "").title(),
     )
     odds_display = recommendation.get("odds_display") or _format_odds(recommendation.get("odds"))
-    if recommendation.get("sportsbook") == "pp" or odds_display == "-":
+    if odds_display == "-":
         return f"{sportsbook_label} line"
     if str(odds_display).strip().lower().startswith(str(sportsbook_label).strip().lower()):
         return str(odds_display)
@@ -4266,7 +4182,7 @@ def _discord_tracker_odds_label(recommendation: Dict[str, Any]) -> str:
         recommendation.get("sportsbook"),
         "",
     )).strip()
-    if recommendation.get("sportsbook") == "pp" or odds_display in {"", "-"}:
+    if odds_display in {"", "-"}:
         return "line"
     if sportsbook_label and odds_display.lower().startswith(sportsbook_label.lower()):
         odds_display = odds_display[len(sportsbook_label):].strip()
@@ -4576,6 +4492,7 @@ def _serialize_recommendation_for_results(recommendation: Dict[str, Any]) -> Dic
         "game_id": recommendation.get("game_id"),
         "game_date": _normalize_game_date(recommendation.get("game_date")),
         "game_time_et": recommendation.get("game_time_et"),
+        "game_started": bool(recommendation.get("game_started")),
         "sportsbook": recommendation.get("sportsbook"),
         "sportsbook_label": recommendation.get("sportsbook_label"),
         "stat_type": recommendation.get("stat_type"),
@@ -4605,6 +4522,8 @@ def _queue_results_recap_payload(
     recommendations_by_date: Dict[str, List[Dict[str, Any]]] = {}
     for recommendation in recommendations:
         if not isinstance(recommendation, dict):
+            continue
+        if not _recommendation_uses_supported_book(recommendation):
             continue
         game_date = _normalize_game_date(recommendation.get("game_date"))
         if not game_date:
@@ -4678,6 +4597,11 @@ def _compute_tracker_delta(
     sent_snapshot = existing_entry.get("sent_snapshot", {})
     if not isinstance(sent_snapshot, dict):
         sent_snapshot = {}
+    sent_snapshot = {
+        key: recommendation
+        for key, recommendation in sent_snapshot.items()
+        if _recommendation_uses_supported_book(recommendation)
+    }
     existing_by_player: Dict[str, List[Dict[str, Any]]] = {}
     for tracked in sent_snapshot.values():
         if not isinstance(tracked, dict):
@@ -4740,6 +4664,11 @@ def _tracker_running_recommendations(
     pending_tracked = pending_entry.get("tracked_recommendations", {})
     if not isinstance(pending_tracked, dict):
         pending_tracked = {}
+    pending_tracked = {
+        key: recommendation
+        for key, recommendation in pending_tracked.items()
+        if _recommendation_uses_supported_book(recommendation)
+    }
     pending_snapshot = _tracker_state_snapshot_for_recommendations([
         recommendation
         for recommendation in pending_tracked.values()
@@ -4753,6 +4682,8 @@ def _tracker_running_recommendations(
     for recommendation_key, existing_recommendation in sent_snapshot.items():
         key = str(recommendation_key or "").strip()
         if not key or not isinstance(existing_recommendation, dict):
+            continue
+        if not _recommendation_uses_supported_book(existing_recommendation):
             continue
         merged_snapshot[key] = {
             **pending_snapshot.get(key, {}),
@@ -5003,6 +4934,8 @@ def _grade_results_recap(
     for recommendation in recap_payload.get("recommendations", []):
         if not isinstance(recommendation, dict):
             continue
+        if not _recommendation_uses_supported_book(recommendation):
+            continue
         player_id = str(recommendation.get("player_id") or "").strip()
         player_name = recommendation.get("player_name")
         team = str(recommendation.get("team") or "").strip()
@@ -5065,6 +4998,38 @@ def _grade_results_recap(
         "summary": summary,
         "recommendations": graded_recommendations,
     }
+
+
+def _filter_recap_payload_to_supported_books(
+    recap_payload: Dict[str, Any],
+) -> Tuple[Dict[str, Any], bool]:
+    tracked = recap_payload.get("tracked_recommendations", {})
+    if not isinstance(tracked, dict):
+        tracked = {}
+    filtered_tracked = {
+        key: recommendation
+        for key, recommendation in tracked.items()
+        if _recommendation_uses_supported_book(recommendation)
+    }
+
+    recommendations = recap_payload.get("recommendations", [])
+    if not isinstance(recommendations, list):
+        recommendations = []
+    filtered_recommendations = [
+        recommendation
+        for recommendation in recommendations
+        if _recommendation_uses_supported_book(recommendation)
+    ]
+
+    changed = (
+        len(filtered_tracked) != len(tracked)
+        or len(filtered_recommendations) != len(recommendations)
+    )
+    return {
+        **recap_payload,
+        "tracked_recommendations": filtered_tracked,
+        "recommendations": filtered_recommendations,
+    }, changed
 
 
 def _results_record_text(summary: Dict[str, Any]) -> str:
@@ -5734,9 +5699,17 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
         if not normalized_date:
             continue
         if normalized_date >= today_str:
-            remaining_pending[normalized_date] = recap_payload
+            filtered_recap_payload, pruned = _filter_recap_payload_to_supported_books(recap_payload)
+            state_changed = bool(state_changed or pruned)
+            if filtered_recap_payload.get("tracked_recommendations"):
+                remaining_pending[normalized_date] = filtered_recap_payload
             continue
         if normalized_date in sent_history:
+            continue
+
+        recap_payload, pruned = _filter_recap_payload_to_supported_books(recap_payload)
+        state_changed = bool(state_changed or pruned)
+        if not recap_payload.get("tracked_recommendations"):
             continue
 
         graded_results = _grade_results_recap(recap_payload, master_feed)
@@ -5862,7 +5835,6 @@ def run_edge_score_refresh(
     master_feed_path: str = MASTER_FEED_PATH,
     schedule_path: str = SCHEDULE_PATH,
     line_movements_path: str = LINE_MOVEMENTS_PATH,
-    prizepicks_path: str = PRIZEPICKS_PATH,
     action_network_path: str = ACTION_NETWORK_PATH,
 ) -> Dict[str, Any]:
     start_time = time.time()
@@ -5927,19 +5899,15 @@ def run_edge_score_refresh(
 
     schedule_context = _build_schedule_context(schedule_payload, action_network_payload)
     overlay_props_index = _build_overlay_props_index(current_players_data)
-    if EDGE_SCORE_ENABLE_PRIZEPICKS:
-        overlay_props_index = _merge_overlay_indexes(
-            overlay_props_index,
-            _load_prizepicks_overlay(master_feed, schedule_context, prizepicks_path),
-        )
     line_lookup = _build_line_movement_lookup(line_movements_payload)
 
     active_entries = []
+    active_teams = set(schedule_context.get("active_teams") or [])
     for player in master_feed:
         if not isinstance(player, dict):
             continue
         team = player.get("team")
-        if schedule_context["active_teams"] and team not in schedule_context["active_teams"]:
+        if team not in active_teams:
             continue
 
         player_id = str(player.get("id"))

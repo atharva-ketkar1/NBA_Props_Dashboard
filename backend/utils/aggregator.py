@@ -5,10 +5,11 @@ import numpy as np
 import gc
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import resolve_prop_game_date
+from utils.pregame_props import is_pregame_schedule_game, is_prop_pregame_by_time
 
 logger = logging.getLogger(__name__)
 UNDATED_PROP_KEY = '__undated__'
@@ -366,10 +367,17 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         games_data,
         key=lambda g: (normalize_game_date(g.get('game_date')), g.get('game_time_utc') or ''),
     )
+    schedule_game_by_team_date = {}
     for g in sorted_games:
         game_date = normalize_game_date(g.get('game_date'))
         if not game_date:
             continue
+        for team in filter(None, [g.get('home_team_tricode', ''), g.get('away_team_tricode', '')]):
+            schedule_game_by_team_date[(team, game_date)] = g
+
+        if not is_pregame_schedule_game(g, now_et=now_et):
+            continue
+
         deadline_dt = None
         deadline_str = g.get('closing_scrape_deadline')
         if deadline_str:
@@ -382,14 +390,16 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             if (
                 team not in active_game_date_by_team
                 and deadline_dt is not None
-                and deadline_dt >= (now_et - timedelta(minutes=15))
+                and deadline_dt > now_et
             ):
                 active_game_date_by_team[team] = game_date
 
     for team, game_date in fallback_game_date_by_team.items():
         active_game_date_by_team.setdefault(team, game_date)
 
-    for g in games_data:
+    for g in sorted_games:
+        if not is_pregame_schedule_game(g, now_et=now_et):
+            continue
         home_team = g.get('home_team_tricode', '')
         away_team = g.get('away_team_tricode', '')
         
@@ -683,6 +693,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                 schedule_rows=sorted_games,
                 now_et=now_et,
             )
+            schedule_game = schedule_game_by_team_date.get((canonical_team, row_game_date))
+            if schedule_game and not is_pregame_schedule_game(schedule_game, now_et=now_et):
+                continue
+            if not schedule_game and not is_prop_pregame_by_time(row.get('start_time'), row_game_date, now_et=now_et):
+                continue
             active_game_date = active_game_date_by_team.get(canonical_team)
 
             # Map prop type (e.g. 'points' -> 'PTS')
