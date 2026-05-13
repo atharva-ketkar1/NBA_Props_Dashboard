@@ -124,8 +124,12 @@ EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = max(
 )
 _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL: Dict[str, float] = {}
 UNDATED_PROP_KEY = "__undated__"
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+EDGE_SCORE_ENABLE_PRIZEPICKS = (
+    str(os.getenv("EDGE_SCORE_ENABLE_PRIZEPICKS", "false")).strip().lower() in TRUE_ENV_VALUES
+)
 
-SUPPORTED_BOOKS = {"dk", "fd", "pp"}
+SUPPORTED_BOOKS = {"dk", "fd"} | ({"pp"} if EDGE_SCORE_ENABLE_PRIZEPICKS else set())
 BOOK_ALIASES = {
     "dk": "dk",
     "draftkings": "dk",
@@ -265,7 +269,7 @@ PLAY_TYPE_LABELS = [
     "Misc",
 ]
 
-BOOK_DISPLAY_ORDER = ["dk", "fd", "pp"]
+BOOK_DISPLAY_ORDER = [book for book in ("dk", "fd", "pp") if book in SUPPORTED_BOOKS]
 BOOK_EMBED_COLORS = {
     "dk": 0xF97316,
     "fd": 0x2563EB,
@@ -1492,6 +1496,13 @@ def _estimate_stat_rate_context(player: Dict[str, Any], logs: List[Dict[str, Any
     }
 
 
+def _is_live_or_final_schedule_game(game: Dict[str, Any]) -> bool:
+    if bool(game.get("is_live")) or bool(game.get("is_final")):
+        return True
+    game_status = int(_safe_float(game.get("game_status"), 0.0) or 0.0)
+    return game_status >= 2
+
+
 def _build_schedule_context(schedule_payload: Any, action_network_payload: Any = None) -> Dict[str, Any]:
     if isinstance(schedule_payload, dict):
         games = schedule_payload.get("games", [])
@@ -1503,10 +1514,10 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
     games = [game for game in games if isinstance(game, dict)]
     now = get_et_now()
     today_str = now.strftime("%Y-%m-%d")
-    non_final_games = [game for game in games if not game.get("is_final")]
+    pregame_games = [game for game in games if not _is_live_or_final_schedule_game(game)]
 
     active_candidates = []
-    for game in non_final_games:
+    for game in pregame_games:
         deadline_dt = _parse_dt(game.get("closing_scrape_deadline"))
         if deadline_dt is not None and deadline_dt >= (now - timedelta(minutes=15)):
             active_candidates.append(game)
@@ -1525,7 +1536,7 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
 
     if not active_games:
         future_games = []
-        for game in non_final_games:
+        for game in pregame_games:
             game_date = _normalize_game_date(game.get("game_date"))
             deadline_dt = _parse_dt(game.get("closing_scrape_deadline"))
             if deadline_dt and deadline_dt >= (now - timedelta(hours=2)):
@@ -5916,10 +5927,11 @@ def run_edge_score_refresh(
 
     schedule_context = _build_schedule_context(schedule_payload, action_network_payload)
     overlay_props_index = _build_overlay_props_index(current_players_data)
-    overlay_props_index = _merge_overlay_indexes(
-        overlay_props_index,
-        _load_prizepicks_overlay(master_feed, schedule_context, prizepicks_path),
-    )
+    if EDGE_SCORE_ENABLE_PRIZEPICKS:
+        overlay_props_index = _merge_overlay_indexes(
+            overlay_props_index,
+            _load_prizepicks_overlay(master_feed, schedule_context, prizepicks_path),
+        )
     line_lookup = _build_line_movement_lookup(line_movements_payload)
 
     active_entries = []
