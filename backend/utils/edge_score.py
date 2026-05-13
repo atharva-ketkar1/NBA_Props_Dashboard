@@ -97,6 +97,9 @@ EDGE_DISCORD_MIN_SIGNAL_SCORE = max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCOR
 EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
 EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
 EDGE_DISCORD_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_PLAYER_LIMIT", 1))
+EDGE_TOP_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_TOP_PER_PLAYER_LIMIT", 1))
+EDGE_TOP_PER_GAME_LIMIT = max(1, _env_int("EDGE_SCORE_TOP_PER_GAME_LIMIT", 5))
+EDGE_TRACKER_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_TRACKER_PER_PLAYER_LIMIT", 1))
 EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = max(
     1.0,
     min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 72.5)),
@@ -3832,9 +3835,17 @@ def _build_candidate(
     }
 
 
-def _diversify_candidates(candidates: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+def _diversify_candidates(
+    candidates: List[Dict[str, Any]],
+    limit: int,
+    *,
+    per_player_limit: int = EDGE_TOP_PER_PLAYER_LIMIT,
+    per_game_limit: int = EDGE_TOP_PER_GAME_LIMIT,
+    prevent_component_overlap: bool = True,
+) -> List[Dict[str, Any]]:
     output = []
     per_player_counts: Dict[int, int] = {}
+    selected_by_player: Dict[int, List[Dict[str, Any]]] = {}
     per_game_counts: Dict[str, int] = {}
     seen_keys = set()
 
@@ -3843,14 +3854,21 @@ def _diversify_candidates(candidates: List[Dict[str, Any]], limit: int) -> List[
         if recommendation_key in seen_keys:
             continue
         player_id = int(candidate.get("player_id"))
+        selected_for_player = selected_by_player.get(player_id, [])
         game_id = str(candidate.get("game_id") or "")
-        if per_player_counts.get(player_id, 0) >= 2:
+        if per_player_counts.get(player_id, 0) >= per_player_limit:
             continue
-        if game_id and per_game_counts.get(game_id, 0) >= 5:
+        if prevent_component_overlap and any(
+            _discord_recommendations_conflict(candidate, existing)
+            for existing in selected_for_player
+        ):
+            continue
+        if game_id and per_game_counts.get(game_id, 0) >= per_game_limit:
             continue
 
         seen_keys.add(recommendation_key)
         per_player_counts[player_id] = per_player_counts.get(player_id, 0) + 1
+        selected_by_player.setdefault(player_id, []).append(candidate)
         if game_id:
             per_game_counts[game_id] = per_game_counts.get(game_id, 0) + 1
         output.append(candidate)
@@ -3868,7 +3886,13 @@ def _build_sportsbook_boards(candidates: List[Dict[str, Any]], limit_per_book: i
     for book in ordered_books:
         book_candidates = [dict(candidate) for candidate in candidates if candidate.get("sportsbook") == book]
         book_candidates.sort(key=_candidate_sort_key, reverse=True)
-        book_recommendations = _diversify_candidates(book_candidates, limit_per_book)
+        book_recommendations = _diversify_candidates(
+            book_candidates,
+            limit_per_book,
+            per_player_limit=EDGE_TOP_PER_PLAYER_LIMIT,
+            per_game_limit=EDGE_TOP_PER_GAME_LIMIT,
+            prevent_component_overlap=True,
+        )
         for sportsbook_rank, recommendation in enumerate(book_recommendations, start=1):
             recommendation["sportsbook_rank"] = sportsbook_rank
 
@@ -4643,15 +4667,33 @@ def _compute_tracker_delta(
     sent_snapshot = existing_entry.get("sent_snapshot", {})
     if not isinstance(sent_snapshot, dict):
         sent_snapshot = {}
+    existing_by_player: Dict[str, List[Dict[str, Any]]] = {}
+    for tracked in sent_snapshot.values():
+        if not isinstance(tracked, dict):
+            continue
+        tracked_player_key = str(tracked.get("player_id") or "").strip()
+        if tracked_player_key:
+            existing_by_player.setdefault(tracked_player_key, []).append(tracked)
 
     new_recommendations = []
     for recommendation in tracker_candidates:
         recommendation_key = str(recommendation.get("recommendation_key") or "").strip()
         if not recommendation_key or recommendation_key in sent_snapshot:
             continue
+        player_key = str(recommendation.get("player_id") or "").strip()
+        existing_for_player = existing_by_player.get(player_key, [])
+        if player_key and len(existing_for_player) >= EDGE_TRACKER_PER_PLAYER_LIMIT:
+            continue
+        if player_key and any(
+            _discord_recommendations_conflict(recommendation, existing)
+            for existing in existing_for_player
+        ):
+            continue
         tracker_recommendation = dict(recommendation)
         tracker_recommendation["first_logged_at"] = generated_at
         new_recommendations.append(tracker_recommendation)
+        if player_key:
+            existing_by_player.setdefault(player_key, []).append(tracker_recommendation)
 
     return {
         "tracker_candidates": tracker_candidates,
@@ -5987,8 +6029,20 @@ def run_edge_score_refresh(
         candidate for candidate in candidates
         if candidate.get("eligibility_blocked")
     ]
-    top_recommendations = _diversify_candidates(eligible_candidates, EDGE_LIMIT)
-    blocked_recommendations = _diversify_candidates(blocked_candidates, EDGE_LIMIT)
+    top_recommendations = _diversify_candidates(
+        eligible_candidates,
+        EDGE_LIMIT,
+        per_player_limit=EDGE_TOP_PER_PLAYER_LIMIT,
+        per_game_limit=EDGE_TOP_PER_GAME_LIMIT,
+        prevent_component_overlap=True,
+    )
+    blocked_recommendations = _diversify_candidates(
+        blocked_candidates,
+        EDGE_LIMIT,
+        per_player_limit=EDGE_TOP_PER_PLAYER_LIMIT,
+        per_game_limit=EDGE_TOP_PER_GAME_LIMIT,
+        prevent_component_overlap=True,
+    )
     for rank, recommendation in enumerate(top_recommendations, start=1):
         recommendation["rank"] = rank
     for blocked_rank, recommendation in enumerate(blocked_recommendations, start=1):
@@ -6069,6 +6123,9 @@ def run_edge_score_refresh(
             "dedupe_rules": {
                 "per_book_limit": EDGE_DISCORD_PER_BOOK_LIMIT,
                 "per_player_limit": EDGE_DISCORD_PER_PLAYER_LIMIT,
+                "top_per_player_limit": EDGE_TOP_PER_PLAYER_LIMIT,
+                "top_per_game_limit": EDGE_TOP_PER_GAME_LIMIT,
+                "tracker_per_player_limit": EDGE_TRACKER_PER_PLAYER_LIMIT,
                 "max_rank": EDGE_DISCORD_MAX_RANK,
                 "component_overlap_threshold": EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD,
                 "min_signal_score": EDGE_DISCORD_MIN_SIGNAL_SCORE,
