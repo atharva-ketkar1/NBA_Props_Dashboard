@@ -119,7 +119,7 @@ The ML model predicts how a player historically performs, but the pipeline makes
 
 If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, the system acts as a highly curated prop alert stream. When the modified ML Edge Score crosses a high-conviction threshold (72.5+), it fires a visual Discord snippet explaining exactly *why* the mathematical edge triggered (e.g., *"The regression model projects 16.5 (lineup-adjusted +20%: Cade Cunningham out)..."*). 
 
-The Discord integration includes full intraday deduplication (it only alerts you when lines or odds officially shift), automated game-finalization cleanup, 429 webhook retry safety, and tracker grading recaps that retry dynamically once prior-day box scores are available.
+The Discord integration includes full intraday deduplication: it only alerts when lines, odds, scores, or ranks move meaningfully, and it suppresses same-slate repeats of overlapping player/side concepts unless the later move is materially larger. It also handles automated game-finalization cleanup, 429 webhook retry safety, and tracker grading recaps that retry dynamically once prior-day box scores are available.
 
 To manually verify the tracker webhook target, run `python3 test_tracker_discord.py --message "manual tracker test"` from [backend/](/Users/atharvaketkar/Desktop/NBA_Dashboard/backend). The script posts a one-off test message to the tracker webhook and prints the returned Discord `channel_id`/`message_id`.
 

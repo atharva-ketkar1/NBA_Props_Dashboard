@@ -112,6 +112,22 @@ EDGE_DISCORD_LINE_MOVE_POINTS = max(0.25, _env_float("EDGE_SCORE_DISCORD_LINE_MO
 EDGE_DISCORD_ODDS_MOVE_AMERICAN = max(5, _env_int("EDGE_SCORE_DISCORD_ODDS_MOVE_AMERICAN", 25))
 EDGE_DISCORD_SCORE_DELTA = max(1.0, _env_float("EDGE_SCORE_DISCORD_SCORE_DELTA", 6.0))
 EDGE_DISCORD_RANK_DELTA = max(1, _env_int("EDGE_SCORE_DISCORD_RANK_DELTA", 4))
+EDGE_DISCORD_REPEAT_SUPPRESSION_HOURS = max(
+    0.0,
+    _env_float("EDGE_SCORE_DISCORD_REPEAT_SUPPRESSION_HOURS", 18.0),
+)
+EDGE_DISCORD_REPEAT_LINE_MOVE_POINTS = max(
+    EDGE_DISCORD_LINE_MOVE_POINTS,
+    _env_float("EDGE_SCORE_DISCORD_REPEAT_LINE_MOVE_POINTS", 2.0),
+)
+EDGE_DISCORD_REPEAT_ODDS_MOVE_AMERICAN = max(
+    EDGE_DISCORD_ODDS_MOVE_AMERICAN,
+    _env_int("EDGE_SCORE_DISCORD_REPEAT_ODDS_MOVE_AMERICAN", 40),
+)
+EDGE_DISCORD_REPEAT_SCORE_DELTA = max(
+    EDGE_DISCORD_SCORE_DELTA,
+    _env_float("EDGE_SCORE_DISCORD_REPEAT_SCORE_DELTA", 8.0),
+)
 EDGE_DISCORD_HTTP_MAX_ATTEMPTS = max(1, _env_int("EDGE_SCORE_DISCORD_HTTP_MAX_ATTEMPTS", 5))
 EDGE_DISCORD_RATE_LIMIT_FALLBACK_SECONDS = max(
     0.25,
@@ -766,13 +782,37 @@ def _stat_component_overlap(left_stat_type: Any, right_stat_type: Any) -> float:
     return sum(min(left.get(component, 0.0), right.get(component, 0.0)) for component in components)
 
 
+def _recommendation_player_name_key(recommendation: Dict[str, Any]) -> str:
+    return re.sub(r"\s+", " ", str(recommendation.get("player_name") or "").strip().lower())
+
+
+def _recommendation_player_identity(recommendation: Dict[str, Any]) -> str:
+    player_id = str(recommendation.get("player_id") or "").strip()
+    if player_id:
+        return f"id:{player_id}"
+
+    player_name = _recommendation_player_name_key(recommendation)
+    if player_name:
+        return f"name:{player_name}"
+    return ""
+
+
+def _recommendations_same_player(candidate: Dict[str, Any], existing: Dict[str, Any]) -> bool:
+    candidate_player_id = str(candidate.get("player_id") or "").strip()
+    existing_player_id = str(existing.get("player_id") or "").strip()
+    if candidate_player_id and existing_player_id:
+        return candidate_player_id == existing_player_id
+
+    candidate_player_name = _recommendation_player_name_key(candidate)
+    existing_player_name = _recommendation_player_name_key(existing)
+    return bool(candidate_player_name and candidate_player_name == existing_player_name)
+
+
 def _discord_recommendations_conflict(
     candidate: Dict[str, Any],
     existing: Dict[str, Any],
 ) -> bool:
-    candidate_player = str(candidate.get("player_id") or "").strip()
-    existing_player = str(existing.get("player_id") or "").strip()
-    if not candidate_player or candidate_player != existing_player:
+    if not _recommendations_same_player(candidate, existing):
         return False
 
     candidate_pick = str(candidate.get("pick") or "").strip().lower()
@@ -786,6 +826,155 @@ def _discord_recommendations_conflict(
         return True
 
     return _stat_component_overlap(candidate_stat, existing_stat) >= EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD
+
+
+def _discord_concept_storage_key(recommendation: Dict[str, Any]) -> str:
+    recommendation_key = str(recommendation.get("recommendation_key") or "").strip()
+    book = (
+        _normalize_book_key(recommendation.get("sportsbook"))
+        or str(recommendation.get("sportsbook") or "").strip().lower()
+    )
+    if recommendation_key:
+        return f"{recommendation_key}|{book}" if book else recommendation_key
+
+    player = _recommendation_player_identity(recommendation)
+    game_date = _normalize_game_date(recommendation.get("game_date"))
+    stat_type = str(recommendation.get("stat_type") or "").strip().upper()
+    pick = str(recommendation.get("pick") or "").strip().lower()
+    return "|".join(part for part in (player, game_date, stat_type, pick, book) if part)
+
+
+def _discord_concept_snapshot_for_recommendations(
+    recommendations: List[Dict[str, Any]],
+    *,
+    sent_at: Any,
+) -> Dict[str, Dict[str, Any]]:
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    for recommendation in recommendations:
+        key = _discord_concept_storage_key(recommendation)
+        if not key:
+            continue
+        snapshot[key] = {
+            "recommendation_key": recommendation.get("recommendation_key"),
+            "player_name": recommendation.get("player_name"),
+            "player_id": recommendation.get("player_id"),
+            "stat_type": recommendation.get("stat_type"),
+            "pick": recommendation.get("pick"),
+            "sportsbook": recommendation.get("sportsbook"),
+            "line": recommendation.get("line"),
+            "odds": recommendation.get("odds"),
+            "display_edge_score": recommendation.get("display_edge_score"),
+            "rank": recommendation.get("rank"),
+            "game_date": _normalize_game_date(recommendation.get("game_date")),
+            "last_sent_at": sent_at,
+        }
+    return snapshot
+
+
+def _discord_sent_concept_history(
+    date_state: Dict[str, Any],
+    previous_snapshot: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    sent_concepts = date_state.get("sent_concept_snapshot", {})
+    if isinstance(sent_concepts, dict) and sent_concepts:
+        return {
+            str(key): value
+            for key, value in sent_concepts.items()
+            if isinstance(value, dict) and _recommendation_uses_supported_book(value)
+        }
+
+    last_sent_at = date_state.get("last_sent_at")
+    legacy_history: Dict[str, Dict[str, Any]] = {}
+    for key, payload in previous_snapshot.items():
+        if not isinstance(payload, dict) or not _recommendation_uses_supported_book(payload):
+            continue
+        legacy_payload = dict(payload)
+        legacy_payload.setdefault("recommendation_key", key)
+        legacy_payload.setdefault("last_sent_at", last_sent_at)
+        storage_key = _discord_concept_storage_key(legacy_payload)
+        if storage_key:
+            legacy_history[storage_key] = legacy_payload
+    return legacy_history
+
+
+def _discord_repeat_is_active(sent_payload: Dict[str, Any], *, now_et: datetime) -> bool:
+    if EDGE_DISCORD_REPEAT_SUPPRESSION_HOURS <= 0:
+        return False
+
+    sent_at = _parse_dt(sent_payload.get("last_sent_at") or sent_payload.get("sent_at"))
+    if sent_at is None:
+        return True
+    return (now_et - sent_at).total_seconds() < EDGE_DISCORD_REPEAT_SUPPRESSION_HOURS * 3600
+
+
+def _discord_repeat_change_is_major(
+    recommendation: Dict[str, Any],
+    sent_payload: Dict[str, Any],
+) -> bool:
+    current_stat = str(recommendation.get("stat_type") or "").strip().upper()
+    sent_stat = str(sent_payload.get("stat_type") or "").strip().upper()
+    if current_stat == sent_stat:
+        line_delta = abs(
+            (_safe_float(recommendation.get("line"), 0.0) or 0.0)
+            - (_safe_float(sent_payload.get("line"), 0.0) or 0.0)
+        )
+        if line_delta >= EDGE_DISCORD_REPEAT_LINE_MOVE_POINTS:
+            return True
+
+    odds_delta = abs(
+        (_safe_float(recommendation.get("odds"), 0.0) or 0.0)
+        - (_safe_float(sent_payload.get("odds"), 0.0) or 0.0)
+    )
+    if odds_delta >= EDGE_DISCORD_REPEAT_ODDS_MOVE_AMERICAN:
+        return True
+
+    current_display_edge_score = _safe_float(recommendation.get("display_edge_score"))
+    sent_display_edge_score = _safe_float(sent_payload.get("display_edge_score"))
+    if (
+        current_display_edge_score is not None
+        and sent_display_edge_score is not None
+        and current_display_edge_score - sent_display_edge_score >= EDGE_DISCORD_REPEAT_SCORE_DELTA
+    ):
+        return True
+
+    return False
+
+
+def _discord_recent_repeat_concept(
+    recommendation: Dict[str, Any],
+    sent_concepts: Dict[str, Dict[str, Any]],
+    *,
+    now_et: datetime,
+) -> Optional[Dict[str, Any]]:
+    recommendation_date = _normalize_game_date(recommendation.get("game_date"))
+    for sent_payload in sent_concepts.values():
+        if not isinstance(sent_payload, dict):
+            continue
+        sent_date = _normalize_game_date(sent_payload.get("game_date"))
+        if recommendation_date and sent_date and sent_date != recommendation_date:
+            continue
+        if not _discord_repeat_is_active(sent_payload, now_et=now_et):
+            continue
+        if _discord_recommendations_conflict(recommendation, sent_payload):
+            return sent_payload
+    return None
+
+
+def _merge_discord_sent_concepts(
+    existing: Dict[str, Any],
+    recommendations: List[Dict[str, Any]],
+    *,
+    sent_at: Any,
+) -> Dict[str, Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    if isinstance(existing, dict):
+        merged = {
+            str(key): value
+            for key, value in existing.items()
+            if isinstance(value, dict) and _recommendation_uses_supported_book(value)
+        }
+    merged.update(_discord_concept_snapshot_for_recommendations(recommendations, sent_at=sent_at))
+    return merged
 
 
 def _filter_discord_recommendations(
@@ -3850,7 +4039,9 @@ def _state_snapshot_for_recommendations(recommendations: List[Dict[str, Any]]) -
     snapshot = {}
     for recommendation in recommendations:
         snapshot[recommendation["recommendation_key"]] = {
+            "recommendation_key": recommendation.get("recommendation_key"),
             "player_name": recommendation.get("player_name"),
+            "player_id": recommendation.get("player_id"),
             "stat_type": recommendation.get("stat_type"),
             "pick": recommendation.get("pick"),
             "sportsbook": recommendation.get("sportsbook"),
@@ -3995,7 +4186,15 @@ def _compute_notification_delta(
         if _recommendation_uses_supported_book(payload)
     }
 
+    opening_sent = bool(date_state.get("opening_sent_at"))
+    pre_tip_sent = bool(date_state.get("pre_tip_sent_at"))
+    last_sent_at_raw = date_state.get("last_sent_at")
+    last_sent_at = _parse_dt(last_sent_at_raw)
+    now = get_et_now()
+    sent_concepts = _discord_sent_concept_history(date_state, previous_snapshot)
+
     changes = []
+    suppressed_repeats = []
     for recommendation in official_recommendations:
         key = recommendation["recommendation_key"]
         previous = previous_snapshot.get(key)
@@ -4025,6 +4224,28 @@ def _compute_notification_delta(
                 reason_flags.append("rank changed")
 
         if reason_flags:
+            repeat_match = None
+            if opening_sent and refresh_label in DISCORD_ALERT_REFRESH_LABELS:
+                repeat_match = _discord_recent_repeat_concept(
+                    recommendation,
+                    sent_concepts,
+                    now_et=now,
+                )
+            if repeat_match and not _discord_repeat_change_is_major(recommendation, repeat_match):
+                suppressed_repeats.append({
+                    "recommendation_key": key,
+                    "player_name": recommendation.get("player_name"),
+                    "stat_type": recommendation.get("stat_type"),
+                    "pick": recommendation.get("pick"),
+                    "sportsbook": recommendation.get("sportsbook"),
+                    "line": recommendation.get("line"),
+                    "reasons": reason_flags,
+                    "matched_recommendation_key": repeat_match.get("recommendation_key"),
+                    "matched_stat_type": repeat_match.get("stat_type"),
+                    "matched_line": repeat_match.get("line"),
+                    "matched_last_sent_at": repeat_match.get("last_sent_at"),
+                })
+                continue
             changes.append({
                 "recommendation_key": key,
                 "rank": recommendation.get("rank"),
@@ -4052,11 +4273,6 @@ def _compute_notification_delta(
         if key not in current_snapshot
     ]
 
-    opening_sent = bool(date_state.get("opening_sent_at"))
-    pre_tip_sent = bool(date_state.get("pre_tip_sent_at"))
-    last_sent_at_raw = date_state.get("last_sent_at")
-    last_sent_at = _parse_dt(last_sent_at_raw)
-    now = get_et_now()
     cooldown_active = False
     if last_sent_at is not None and EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS > 0:
         cooldown_active = (now - last_sent_at).total_seconds() < EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS
@@ -4093,9 +4309,11 @@ def _compute_notification_delta(
     return {
         "changes": changes,
         "removed": removed,
+        "suppressed_repeats": suppressed_repeats,
         "cooldown_active": cooldown_active,
         "should_send": should_send,
         "current_snapshot": current_snapshot,
+        "sent_concept_snapshot": sent_concepts,
         "official_recommendations": official_recommendations,
         "send_recommendations": send_recommendations,
         "alert_kind": alert_kind,
@@ -6098,8 +6316,10 @@ def run_edge_score_refresh(
             "tracker_min_signal_score": EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE,
             "change_count": len(notification_delta.get("changes", [])),
             "removed_count": len(notification_delta.get("removed", [])),
+            "suppressed_repeat_count": len(notification_delta.get("suppressed_repeats", [])),
             "changes": notification_delta.get("changes", []),
             "removed": notification_delta.get("removed", []),
+            "suppressed_repeats": notification_delta.get("suppressed_repeats", []),
             "dedupe_rules": {
                 "per_book_limit": EDGE_DISCORD_PER_BOOK_LIMIT,
                 "per_player_limit": EDGE_DISCORD_PER_PLAYER_LIMIT,
@@ -6115,6 +6335,10 @@ def run_edge_score_refresh(
                 "signal_score_delta": EDGE_DISCORD_SCORE_DELTA,
                 "rank_delta": EDGE_DISCORD_RANK_DELTA,
                 "min_interval_seconds": EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS,
+                "repeat_suppression_hours": EDGE_DISCORD_REPEAT_SUPPRESSION_HOURS,
+                "repeat_line_move_points": EDGE_DISCORD_REPEAT_LINE_MOVE_POINTS,
+                "repeat_odds_move_american": EDGE_DISCORD_REPEAT_ODDS_MOVE_AMERICAN,
+                "repeat_signal_score_delta": EDGE_DISCORD_REPEAT_SCORE_DELTA,
             },
         },
     }
@@ -6197,6 +6421,15 @@ def run_edge_score_refresh(
 
         date_state["last_sent_at"] = payload["generated_at"]
         date_state["last_sent_snapshot"] = notification_delta.get("current_snapshot", {})
+        existing_sent_concepts = notification_delta.get(
+            "sent_concept_snapshot",
+            date_state.get("sent_concept_snapshot", {}),
+        )
+        date_state["sent_concept_snapshot"] = _merge_discord_sent_concepts(
+            existing_sent_concepts,
+            notification_delta.get("send_recommendations", []),
+            sent_at=payload["generated_at"],
+        )
         if notification_delta.get("alert_kind") == "opening":
             date_state["opening_sent_at"] = payload["generated_at"]
         if notification_delta.get("alert_kind") == "pre_tip":
