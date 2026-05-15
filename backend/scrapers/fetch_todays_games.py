@@ -12,6 +12,40 @@ SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.js
 SCHEDULE_REQUEST_TIMEOUT_SECONDS = 20
 SCHEDULE_REQUEST_ATTEMPTS = 3
 SCHEDULE_RETRY_BACKOFF_SECONDS = 1.5
+ACTION_NETWORK_SCHEDULE_FALLBACK_DAYS = 2
+
+TEAM_INFO_BY_TRICODE = {
+    "ATL": ("Atlanta", "Hawks"),
+    "BOS": ("Boston", "Celtics"),
+    "BKN": ("Brooklyn", "Nets"),
+    "CHA": ("Charlotte", "Hornets"),
+    "CHI": ("Chicago", "Bulls"),
+    "CLE": ("Cleveland", "Cavaliers"),
+    "DAL": ("Dallas", "Mavericks"),
+    "DEN": ("Denver", "Nuggets"),
+    "DET": ("Detroit", "Pistons"),
+    "GSW": ("Golden State", "Warriors"),
+    "HOU": ("Houston", "Rockets"),
+    "IND": ("Indiana", "Pacers"),
+    "LAC": ("LA", "Clippers"),
+    "LAL": ("Los Angeles", "Lakers"),
+    "MEM": ("Memphis", "Grizzlies"),
+    "MIA": ("Miami", "Heat"),
+    "MIL": ("Milwaukee", "Bucks"),
+    "MIN": ("Minnesota", "Timberwolves"),
+    "NOP": ("New Orleans", "Pelicans"),
+    "NYK": ("New York", "Knicks"),
+    "OKC": ("Oklahoma City", "Thunder"),
+    "ORL": ("Orlando", "Magic"),
+    "PHI": ("Philadelphia", "76ers"),
+    "PHX": ("Phoenix", "Suns"),
+    "POR": ("Portland", "Trail Blazers"),
+    "SAC": ("Sacramento", "Kings"),
+    "SAS": ("San Antonio", "Spurs"),
+    "TOR": ("Toronto", "Raptors"),
+    "UTA": ("Utah", "Jazz"),
+    "WAS": ("Washington", "Wizards"),
+}
 
 
 def _normalize_status_text(value):
@@ -44,6 +78,158 @@ def _get_dashboard_window_dates(days_ahead: int = DASHBOARD_LOOKAHEAD_DAYS):
         (today_et + timedelta(days=offset)).strftime("%Y-%m-%d")
         for offset in range(days_ahead)
     ]
+
+
+def _parse_action_fallback_time(game):
+    raw_utc = str(game.get("game_time_utc") or "").strip()
+    if not raw_utc:
+        return None, None, None
+
+    try:
+        dt_utc = datetime.fromisoformat(raw_utc.replace("Z", "+00:00"))
+    except ValueError:
+        return raw_utc, game.get("game_time_et"), None
+
+    dt_et = dt_utc.astimezone(ET_ZONE)
+    return raw_utc, dt_et.strftime("%I:%M %p ET"), dt_et.isoformat()
+
+
+def _split_team_name(tricode, fallback_name):
+    team_info = TEAM_INFO_BY_TRICODE.get(str(tricode or "").strip().upper())
+    if team_info:
+        return team_info
+
+    fallback_text = " ".join(str(fallback_name or "").split()).strip()
+    if not fallback_text:
+        return None, None
+
+    parts = fallback_text.split(" ", 1)
+    if len(parts) == 1:
+        return None, parts[0]
+    return parts[0], parts[1]
+
+
+def _fallback_game_id(game_date, away_tricode, home_tricode, action_network_game_id):
+    action_id = str(action_network_game_id or "").strip()
+    if action_id:
+        return f"AN{action_id}"
+
+    game_date_key = str(game_date or "").replace("-", "")
+    matchup_key = f"{away_tricode or 'AWY'}{home_tricode or 'HME'}"
+    return f"{game_date_key}/{matchup_key}"
+
+
+def _action_network_game_to_schedule_game(game):
+    game_date = str(game.get("game_date") or "").strip()
+    away_tricode = str(game.get("away_team_tricode") or "").strip().upper()
+    home_tricode = str(game.get("home_team_tricode") or "").strip().upper()
+    if not game_date or not away_tricode or not home_tricode:
+        return None
+
+    game_time_utc, game_time_et, closing_scrape_deadline = _parse_action_fallback_time(game)
+    away_city, away_name = _split_team_name(away_tricode, game.get("away_team_name"))
+    home_city, home_name = _split_team_name(home_tricode, game.get("home_team_name"))
+    game_id = _fallback_game_id(
+        game_date,
+        away_tricode,
+        home_tricode,
+        game.get("action_network_game_id"),
+    )
+
+    try:
+        weekday = datetime.strptime(game_date, "%Y-%m-%d").strftime("%A")
+    except ValueError:
+        weekday = None
+
+    return {
+        "game_id": game_id,
+        "game_code": f"{game_date.replace('-', '')}/{away_tricode}{home_tricode}",
+        "schedule_source": "action_network_fallback",
+        "home_team_id": game.get("home_team_id"),
+        "home_team_name": home_name,
+        "home_team_city": home_city,
+        "home_team_tricode": home_tricode,
+        "home_team_wins": None,
+        "home_team_losses": None,
+        "home_score": 0,
+        "away_team_id": game.get("away_team_id"),
+        "away_team_name": away_name,
+        "away_team_city": away_city,
+        "away_team_tricode": away_tricode,
+        "away_team_wins": None,
+        "away_team_losses": None,
+        "away_score": 0,
+        "arena_name": "Unknown Arena",
+        "arena_city": "Unknown City",
+        "arena_state": "Unknown State",
+        "arena_full": "Unknown Arena, Unknown City, Unknown State",
+        "game_time_utc": game_time_utc,
+        "game_time_et": game_time_et or "TBD",
+        "game_date": game_date,
+        "game_weekday": weekday,
+        "closing_scrape_deadline": closing_scrape_deadline,
+        "game_status": 1,
+        "game_status_text": game_time_et or "TBD",
+        "is_live": False,
+        "is_final": False,
+        "is_scheduled": True,
+        "home_leader_name": None,
+        "home_leader_points": None,
+        "away_leader_name": None,
+        "away_leader_points": None,
+        "score_differential": 0,
+        "total_points": 0,
+        "winning_team": "tie",
+        "matchup": f"{away_tricode} @ {home_tricode}",
+        "display_score": f"{away_tricode} 0 - {home_tricode} 0",
+    }
+
+
+def _get_action_network_schedule_fallback(days_ahead: int):
+    try:
+        from scrapers import fetch_action_network_odds as action_network_odds
+    except ImportError:
+        import fetch_action_network_odds as action_network_odds
+
+    fallback_days = max(1, min(days_ahead, ACTION_NETWORK_SCHEDULE_FALLBACK_DAYS))
+    games_by_key = {}
+
+    for offset in range(fallback_days):
+        query_date = action_network_odds.resolve_query_date(None, days_ahead=offset)
+        try:
+            raw_payload = action_network_odds.fetch_raw_action_network_payload(
+                query_date=query_date,
+                book_ids=action_network_odds.DEFAULT_BOOK_IDS,
+            )
+            parsed_payload = action_network_odds.parse_action_network_payload(
+                raw_payload,
+                query_date=query_date,
+                book_ids=action_network_odds.DEFAULT_BOOK_IDS,
+                schedule_rows=[],
+            )
+        except Exception as exc:
+            print(f"Action Network schedule fallback failed for {query_date}: {exc}")
+            continue
+
+        for action_game in parsed_payload.get("games", []):
+            schedule_game = _action_network_game_to_schedule_game(action_game)
+            if not schedule_game:
+                continue
+            key = (
+                schedule_game.get("game_date"),
+                schedule_game.get("away_team_tricode"),
+                schedule_game.get("home_team_tricode"),
+            )
+            games_by_key[key] = schedule_game
+
+    return sorted(
+        games_by_key.values(),
+        key=lambda game: (
+            str(game.get("game_date") or ""),
+            str(game.get("game_time_utc") or ""),
+            str(game.get("matchup") or ""),
+        ),
+    )
 
 
 def upsert_games_to_db(raw_data: list) -> None:
@@ -88,7 +274,22 @@ def upsert_games_to_db(raw_data: list) -> None:
                 "closing_scrape_deadline": g.get("closing_scrape_deadline"),
             })
 
-        window_dates = _get_dashboard_window_dates()
+        is_partial_fallback = bool(raw_data) and all(
+            game.get("schedule_source") == "action_network_fallback"
+            for game in raw_data
+            if isinstance(game, dict)
+        )
+        window_dates = (
+            sorted(
+                {
+                    str(game.get("game_date") or "").strip()
+                    for game in raw_data
+                    if isinstance(game, dict) and str(game.get("game_date") or "").strip()
+                }
+            )
+            if is_partial_fallback
+            else _get_dashboard_window_dates()
+        )
         stale_row_count = 0
         if window_dates:
             existing_rows = (
@@ -294,7 +495,16 @@ def parse_game_data(game):
 def get_dashboard_data(days_ahead: int = DASHBOARD_LOOKAHEAD_DAYS):
     """Get upcoming games from the schedule for the dashboard window."""
     print("Fetching NBA schedule data...")
-    data = get_nba_schedule()
+    try:
+        data = get_nba_schedule()
+    except Exception as exc:
+        print(f"NBA schedule fetch failed: {exc}")
+        print("Falling back to Action Network scoreboard schedule...")
+        fallback_games = _get_action_network_schedule_fallback(days_ahead)
+        if not fallback_games:
+            raise
+        print(f"Prepared {len(fallback_games)} dashboard games from Action Network fallback")
+        return pd.DataFrame(fallback_games), fallback_games
     
     # 1. Determine the dashboard schedule window in US Eastern Time (ET)
     et_tz = ZoneInfo("America/New_York")
