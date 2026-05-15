@@ -12,18 +12,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BACKEND_DIR / ".env")
 
 PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
-DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "prizepicks.csv"
-DEFAULT_STATS_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "season_stats.csv"
-DEFAULT_SCHEDULE_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "today_schedule.json"
-DEFAULT_DK_REFERENCE_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "draftkings.csv"
-DEFAULT_FD_REFERENCE_PATH = Path(__file__).resolve().parents[1] / "data" / "current" / "fanduel.csv"
-DEFAULT_COOLDOWN_STATE_PATH = Path(__file__).resolve().parents[1] / "logs" / "prizepicks_fetch_state.json"
+DEFAULT_OUTPUT_PATH = BACKEND_DIR / "data" / "current" / "prizepicks.csv"
+DEFAULT_STATS_PATH = BACKEND_DIR / "data" / "current" / "season_stats.csv"
+DEFAULT_SCHEDULE_PATH = BACKEND_DIR / "data" / "current" / "today_schedule.json"
+DEFAULT_DK_REFERENCE_PATH = BACKEND_DIR / "data" / "current" / "draftkings.csv"
+DEFAULT_FD_REFERENCE_PATH = BACKEND_DIR / "data" / "current" / "fanduel.csv"
+DEFAULT_COOLDOWN_STATE_PATH = BACKEND_DIR / "logs" / "prizepicks_fetch_state.json"
 
-# Temporary scheduler kill switch. Flip this to True to let ENABLE_PRIZEPICKS control fetches again.
-PRIZEPICKS_SCHEDULED_FETCHES_ENABLED = False
+# Hard scheduler kill switch. Keep True so ENABLE_PRIZEPICKS and auto-disable state control fetches.
+PRIZEPICKS_SCHEDULED_FETCHES_ENABLED = True
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 DEFAULT_PARAMS = {
@@ -134,6 +135,7 @@ ERROR_BODY_MAX_CHARS = 300
 DEFAULT_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
 DEFAULT_PX_BLOCK_COOLDOWN_SECONDS = 6 * 60 * 60
 PX_BLOCK_REASON = "PrizePicks PX anti-bot block on upstream request"
+PRIZEPICKS_403_AUTO_DISABLE_REASON = "PrizePicks upstream returned HTTP 403; scheduled fetches auto-disabled"
 
 TEAM_NAME_TO_ABBREV = {
     "ATL": "ATL",
@@ -290,9 +292,21 @@ def build_headers() -> Dict[str, str]:
 
 
 def prizepicks_enabled() -> bool:
+    return not prizepicks_disabled_reason()
+
+
+def prizepicks_disabled_reason() -> str:
     if not PRIZEPICKS_SCHEDULED_FETCHES_ENABLED:
-        return False
-    return str(os.getenv("ENABLE_PRIZEPICKS", "false")).strip().lower() in TRUE_ENV_VALUES
+        return "code kill switch is off"
+    if str(os.getenv("ENABLE_PRIZEPICKS", "false")).strip().lower() not in TRUE_ENV_VALUES:
+        return "ENABLE_PRIZEPICKS is not true"
+
+    state = get_auto_disabled_state()
+    if state:
+        disabled_at = state.get("disabled_at_utc") or state.get("last_blocked_at_utc") or "unknown time"
+        return f"auto-disabled after HTTP 403 at {disabled_at}"
+
+    return ""
 
 
 def get_fetch_mode() -> str:
@@ -367,6 +381,14 @@ def is_px_antibot_response(response: requests.Response, body_excerpt: Optional[s
     return "pxzneitfzp" in normalized_body or "blockscript" in normalized_body or "/captcha/" in normalized_body
 
 
+def is_prizepicks_403_response(response: requests.Response, via_proxy: bool = False) -> bool:
+    if response.status_code != 403:
+        return False
+    if not via_proxy:
+        return True
+    return response.headers.get("x-proxy-target", "").lower() == "api.prizepicks.com"
+
+
 def describe_bad_response(response: requests.Response) -> str:
     message = f"HTTP {response.status_code} {response.reason}".strip()
     proxy_target = response.headers.get("x-proxy-target")
@@ -399,6 +421,11 @@ def write_cooldown_state(state: Dict[str, Any], state_path: Optional[Path] = Non
         json.dump(state, handle, indent=2, sort_keys=True)
 
 
+def get_auto_disabled_state(state_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    state = read_cooldown_state(state_path)
+    return state if state.get("auto_disabled") else None
+
+
 def get_active_cooldown(now: Optional[float] = None, state_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     state = read_cooldown_state(state_path)
     until = safe_float(state.get("cooldown_until"))
@@ -413,6 +440,15 @@ def get_active_cooldown(now: Optional[float] = None, state_path: Optional[Path] 
 
 
 def raise_if_cooldown_active(now: Optional[float] = None) -> None:
+    disabled_state = get_auto_disabled_state()
+    if disabled_state:
+        disabled_at = disabled_state.get("disabled_at_utc") or disabled_state.get("last_blocked_at_utc") or "unknown time"
+        reason = disabled_state.get("disabled_reason") or PRIZEPICKS_403_AUTO_DISABLE_REASON
+        raise PrizePicksFetchCooldown(
+            f"PrizePicks fetch skipped because scheduled fetches are auto-disabled after HTTP 403 "
+            f"at {disabled_at} UTC | reason={reason}"
+        )
+
     state = get_active_cooldown(now=now)
     if not state:
         return
@@ -425,24 +461,35 @@ def raise_if_cooldown_active(now: Optional[float] = None) -> None:
     )
 
 
-def record_px_block_cooldown(error_message: str, now: Optional[float] = None) -> None:
-    cooldown_seconds = get_px_block_cooldown_seconds()
-    if cooldown_seconds <= 0:
-        return
-
+def record_prizepicks_403_auto_disable(error_message: str, now: Optional[float] = None) -> None:
     current_time = time.time() if now is None else now
-    cooldown_until = current_time + cooldown_seconds
-    write_cooldown_state(
-        {
-            "cooldown_until": cooldown_until,
-            "cooldown_until_utc": format_utc_timestamp(cooldown_until),
-            "cooldown_seconds": cooldown_seconds,
-            "last_blocked_at": current_time,
-            "last_blocked_at_utc": format_utc_timestamp(current_time),
-            "last_error": error_message,
-            "reason": PX_BLOCK_REASON,
-        }
-    )
+    cooldown_seconds = get_px_block_cooldown_seconds()
+    disabled_state = {
+        "auto_disabled": True,
+        "disabled_at": current_time,
+        "disabled_at_utc": format_utc_timestamp(current_time),
+        "disabled_reason": PRIZEPICKS_403_AUTO_DISABLE_REASON,
+        "last_blocked_at": current_time,
+        "last_blocked_at_utc": format_utc_timestamp(current_time),
+        "last_error": error_message,
+        "reason": PRIZEPICKS_403_AUTO_DISABLE_REASON,
+    }
+
+    if cooldown_seconds > 0:
+        cooldown_until = current_time + cooldown_seconds
+        disabled_state.update(
+            {
+                "cooldown_until": cooldown_until,
+                "cooldown_until_utc": format_utc_timestamp(cooldown_until),
+                "cooldown_seconds": cooldown_seconds,
+            }
+        )
+
+    write_cooldown_state(disabled_state)
+
+
+def record_px_block_cooldown(error_message: str, now: Optional[float] = None) -> None:
+    record_prizepicks_403_auto_disable(error_message, now=now)
 
 
 def clear_cooldown_state() -> None:
@@ -477,7 +524,7 @@ def fetch_payload(mode: str = "proxy_first", timeout: int = 20, ignore_cooldown:
 
     last_error = None
     route_errors: List[str] = []
-    px_block_error: Optional[RuntimeError] = None
+    prizepicks_403_error: Optional[RuntimeError] = None
     for label, via_proxy in build_fetch_routes(mode):
         for attempt in range(1, FETCH_RETRY_ATTEMPTS_PER_ROUTE + 1):
             attempt_suffix = f" (attempt {attempt}/{FETCH_RETRY_ATTEMPTS_PER_ROUTE})"
@@ -488,9 +535,9 @@ def fetch_payload(mode: str = "proxy_first", timeout: int = 20, ignore_cooldown:
                         f"{label} request failed{attempt_suffix}: {describe_bad_response(response)}"
                     )
                     route_errors.append(str(last_error))
-                    if is_px_antibot_response(response):
-                        record_px_block_cooldown(str(last_error))
-                        px_block_error = last_error
+                    if is_prizepicks_403_response(response, via_proxy=via_proxy):
+                        record_prizepicks_403_auto_disable(str(last_error))
+                        prizepicks_403_error = last_error
                         break
                     if should_retry_status(response.status_code) and attempt < FETCH_RETRY_ATTEMPTS_PER_ROUTE:
                         time.sleep(FETCH_RETRY_DELAY_SECONDS * attempt)
@@ -504,8 +551,8 @@ def fetch_payload(mode: str = "proxy_first", timeout: int = 20, ignore_cooldown:
                 route_errors.append(str(last_error))
                 if attempt < FETCH_RETRY_ATTEMPTS_PER_ROUTE:
                     time.sleep(FETCH_RETRY_DELAY_SECONDS * attempt)
-        if px_block_error:
-            raise px_block_error
+        if prizepicks_403_error:
+            raise prizepicks_403_error
 
     if route_errors:
         raise RuntimeError(f"All PrizePicks request routes failed: {' | '.join(route_errors)}")

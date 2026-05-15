@@ -149,8 +149,9 @@ def run_fd():
     return f"FanDuel: {len(df)} rows"
 
 def run_pp():
-    if not prizepicks.prizepicks_enabled():
-        return "PrizePicks: disabled"
+    disabled_reason = prizepicks.prizepicks_disabled_reason()
+    if disabled_reason:
+        return f"PrizePicks: disabled ({disabled_reason})"
 
     logger.info("Starting PrizePicks...")
     rows, _diagnostics = prizepicks.fetch_and_write_rows(output_path=Path(PP_PATH))

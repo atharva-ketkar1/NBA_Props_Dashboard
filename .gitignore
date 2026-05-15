@@ -5,6 +5,7 @@ backend/data
 backend/exploration
 backend/.env
 backend/maintainence
+backend/scrapers/check_prizepicks_*.py
 utils/player_matcher.py
 utils/test_matcher.py
 backend/logs
