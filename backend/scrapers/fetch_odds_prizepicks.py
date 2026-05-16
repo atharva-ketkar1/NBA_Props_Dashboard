@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -350,6 +351,13 @@ def get_cookie_value(cookie_header: str, name: str) -> str:
     return ""
 
 
+def get_cookie_fingerprint() -> str:
+    cookie = os.getenv("PRIZEPICKS_COOKIE", "").strip()
+    if not cookie:
+        return ""
+    return hashlib.sha256(cookie.encode("utf-8")).hexdigest()
+
+
 def build_fetch_routes(mode: str) -> List[Tuple[str, bool]]:
     if mode == "proxy_only":
         return [("proxy", True)]
@@ -423,7 +431,15 @@ def write_cooldown_state(state: Dict[str, Any], state_path: Optional[Path] = Non
 
 def get_auto_disabled_state(state_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     state = read_cooldown_state(state_path)
-    return state if state.get("auto_disabled") else None
+    if not state.get("auto_disabled"):
+        return None
+
+    current_cookie_fingerprint = get_cookie_fingerprint()
+    blocked_cookie_fingerprint = state.get("cookie_fingerprint")
+    if current_cookie_fingerprint and blocked_cookie_fingerprint != current_cookie_fingerprint:
+        return None
+
+    return state
 
 
 def get_active_cooldown(now: Optional[float] = None, state_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
@@ -466,6 +482,7 @@ def record_prizepicks_403_auto_disable(error_message: str, now: Optional[float] 
     cooldown_seconds = get_px_block_cooldown_seconds()
     disabled_state = {
         "auto_disabled": True,
+        "cookie_fingerprint": get_cookie_fingerprint(),
         "disabled_at": current_time,
         "disabled_at_utc": format_utc_timestamp(current_time),
         "disabled_reason": PRIZEPICKS_403_AUTO_DISABLE_REASON,
