@@ -3,7 +3,7 @@ import requests
 import json
 import time
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from dateutil import tz
 from dotenv import load_dotenv
 import os
@@ -143,17 +143,56 @@ def extract_team_name(logo_url):
         return "UNK"
 
 
-def extract_event_game_date(event):
+def extract_event_start_time(event):
     for field in ('startDate', 'openDate', 'eventDate', 'startTime'):
         raw = event.get(field, '')
         if not raw:
             continue
         try:
             dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
-            return dt.astimezone(tz.gettz('America/New_York')).strftime('%Y-%m-%d')
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=tz.gettz('America/New_York'))
+            return dt.astimezone(timezone.utc)
         except Exception as e:
             logger.warning("Could not parse %s '%s': %s", field, raw, e)
-    return ''
+    return None
+
+
+def extract_event_game_date(event):
+    start_dt = extract_event_start_time(event)
+    if start_dt is None:
+        return ''
+    return start_dt.astimezone(tz.gettz('America/New_York')).strftime('%Y-%m-%d')
+
+
+def is_event_pregame(event, now=None):
+    if bool((event or {}).get("inPlay", False)):
+        return False
+
+    start_dt = extract_event_start_time(event or {})
+    if start_dt is None:
+        return True
+
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    return current_time.astimezone(timezone.utc) < start_dt
+
+
+def payload_marks_event_in_play(payload, event_id):
+    events = (payload or {}).get('attachments', {}).get('events', {})
+    if isinstance(events, dict):
+        event_items = events.items()
+    elif isinstance(events, list):
+        event_items = enumerate(events)
+    else:
+        event_items = []
+
+    for key, event in event_items:
+        if str(key) != str(event_id) and str((event or {}).get('eventId', '')) != str(event_id):
+            continue
+        return bool((event or {}).get('inPlay', False))
+    return False
 
 def fetch_odds():
     logger.info("[RUN] FanDuel odds fetch")
@@ -166,7 +205,7 @@ def fetch_odds():
     
     upcoming_events = [
         event for event in events_data.values()
-        if not event.get("inPlay", False)
+        if is_event_pregame(event)
         and ' @ ' in event.get('name', '')  # only real matchup games
     ]
 
@@ -176,13 +215,27 @@ def fetch_odds():
         event_id = event['eventId']
         game_name = event['name']
         logger.debug("Processing Game: %s", game_name)
-        
+
+        event_props = []
+        discard_event = False
         tabs = get_all_available_tabs(event_id)
         for tab in tabs:
+            if not is_event_pregame(event):
+                discard_event = True
+                break
+
             prop_data = get_player_props(event_id, tab['name'])
             if not prop_data: continue
-            
+
+            if payload_marks_event_in_play(prop_data, event_id) or not is_event_pregame(event):
+                discard_event = True
+                break
+
             markets = prop_data.get('attachments', {}).get('markets', {})
+            if any(market.get('inPlay', False) for market in markets.values()):
+                discard_event = True
+                break
+
             for market in markets.values():
                 market_name = market.get('marketName', '')
                 if " - " not in market_name: continue
@@ -220,9 +273,16 @@ def fetch_odds():
                     "under_odds": int(under_odds),
                     "game": game_name,
                     "game_date": extract_event_game_date(event),
-                    "sportsbook": "fanduel"
+                    "sportsbook": "fanduel",
+                    "inPlay": False,
                 }
-                all_props.append(prop_entry)
+                event_props.append(prop_entry)
+
+        if discard_event or not is_event_pregame(event):
+            logger.info("Discarded FanDuel event after tip/live detection | event=%s game=%s", event_id, game_name)
+            continue
+
+        all_props.extend(event_props)
     
     logger.info("[OK] FanDuel odds fetch complete | props=%d", len(all_props))
     return all_props

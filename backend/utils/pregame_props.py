@@ -123,6 +123,23 @@ def is_pregame_schedule_game(game: Optional[Mapping[str, Any]], now_et: Optional
     return isinstance(game, Mapping) and not has_game_started(game, now_et=now_et)
 
 
+def is_within_pregame_window(
+    game: Optional[Mapping[str, Any]],
+    max_minutes_before_start: float,
+    now_et: Optional[datetime] = None,
+) -> bool:
+    if not is_pregame_schedule_game(game, now_et=now_et):
+        return False
+
+    start_dt = get_schedule_start_time(game or {})
+    if start_dt is None:
+        return False
+
+    now = (now_et or get_et_now()).astimezone(ET_ZONE)
+    minutes_until_start = (start_dt - now).total_seconds() / 60.0
+    return 0 < minutes_until_start <= max_minutes_before_start
+
+
 def is_prop_pregame_by_time(
     start_time: Any,
     game_date: Any = None,

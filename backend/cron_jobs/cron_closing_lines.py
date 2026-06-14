@@ -17,6 +17,7 @@ from utils.logging_utils import configure_logging, log_section, log_status
 from scrapers import fetch_odds_draftkings as draftkings
 from scrapers import fetch_odds_fanduel as fanduel
 from utils.player_matcher import PlayerMatcher
+from utils.pregame_props import has_game_started, is_within_pregame_window
 from utils.prop_date_resolver import resolve_prop_game_date
 from utils.snapshot_manager import SnapshotManager
 from utils.odds_csv import write_odds_csv
@@ -172,7 +173,7 @@ def persist_raw_odds_csvs(dk_data, fd_data):
 
 
 def is_live_or_final_game(game):
-    return bool((game or {}).get("is_live")) or bool((game or {}).get("is_final"))
+    return has_game_started(game, now_et=get_et_now())
 
 
 def supplement_missing_players_from_snapshots(players_data, snapshot_manager, games_to_scrape, schedule):
@@ -486,6 +487,9 @@ def main(dry_run=False, preselected_games=None):
                     selected_deadline = datetime.fromisoformat(selected_deadline)
                 except ValueError:
                     selected_deadline = None
+            schedule_game = schedule_by_id.get(game_id, {})
+            if not is_within_pregame_window(schedule_game, 12, now_et=now):
+                continue
             games_to_scrape.append({
                 "game_id": game_id,
                 "deadline": selected_deadline,
@@ -510,12 +514,7 @@ def main(dry_run=False, preselected_games=None):
                 # At XX:15: deadline is 15 mins away (delta=15)
                 # At XX:20: deadline is 10 mins away (delta=10) -> TRIGGER!
                 
-                delta = deadline_dt - now
-                delta_minutes = delta.total_seconds() / 60.0
-                
-                # If the game is starting in <= 12 minutes, and it hasn't started yet
-                # (or it started max 5 mins ago and we missed it)
-                if -5 <= delta_minutes <= 12:
+                if is_within_pregame_window(game, 12, now_et=now):
                     games_to_scrape.append({
                         "game_id": game_id,
                         "deadline": deadline_dt,

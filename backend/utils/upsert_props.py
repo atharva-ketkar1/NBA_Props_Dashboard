@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
+from utils.pregame_props import has_game_started
 from utils.prop_date_resolver import load_schedule_rows, resolve_prop_game_date
 from utils.supabase_client import get_supabase_client
 
@@ -187,7 +188,7 @@ def _build_schedule_lookup(schedule_rows):
 
 
 def _is_live_or_final_schedule_game(game):
-    return bool((game or {}).get("is_live")) or bool((game or {}).get("is_final"))
+    return has_game_started(game)
 
 
 def _normalize_pp_prop_type_from_label(prop_label):

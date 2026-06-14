@@ -17,6 +17,7 @@ if BASE_DIR not in sys.path:
 
 from utils.intraday_schedule import get_schedule_aware_intraday_interval_seconds
 from utils.logging_utils import configure_logging, log_section, log_status
+from utils.pregame_props import is_within_pregame_window
 
 configure_logging()
 logger = logging.getLogger("MasterCron")
@@ -307,12 +308,7 @@ def check_closing_lines(now, state, dry_run=False):
             
         try:
             deadline_dt = datetime.fromisoformat(deadline_str)
-            delta = deadline_dt - now
-            delta_minutes = delta.total_seconds() / 60.0
-            
-            # If the game is starting in <= 12 minutes, and it hasn't started yet
-            # (or it started max 5 mins ago and we missed it)
-            if -5 <= delta_minutes <= 12:
+            if is_within_pregame_window(game, 12, now_et=now):
                 games_to_scrape.append({
                     "game_id": game_id,
                     "deadline": deadline_dt,
