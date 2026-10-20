@@ -24,6 +24,13 @@ import {
 } from './types';
 import { MobileViewSwitcher, MobileView } from './components/MobileViewSwitcher';
 import { EdgeBoardPanel } from './components/EdgeBoardPanel';
+import {
+  LIVE_SEASON,
+  SeasonLabel,
+  archiveSeasonKey,
+  isArchiveSeason,
+  isSelectableSeason,
+} from './constants';
 import { getDashboardDate } from './utils/dashboardDate';
 import {
   getResolvedPlayerGameDate,
@@ -544,7 +551,7 @@ function buildTeammateInjuryCards(
       const safeMinutesPerGame = Number.isFinite(minutesPerGame) ? minutesPerGame : null;
       const safeStatPerGame = statPerGame !== null && Number.isFinite(statPerGame) ? statPerGame : null;
       const currentStatus = reportPlayer?.current_status ?? (submittedReport ? 'Available' : null);
-      const isImpactLoading = activeSeason === '25/26' && teamPlayer.detail_loaded === false;
+      const isImpactLoading = activeSeason === LIVE_SEASON && teamPlayer.detail_loaded === false;
 
       seenNameKeys.add(nameKey);
       cards.push({
@@ -682,7 +689,7 @@ function App() {
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [filterGameCount, setFilterGameCount] = useState<number>(19);
-  const [activeSeason, setActiveSeason] = useState<'25/26' | '24/25'>('25/26');
+  const [activeSeason, setActiveSeason] = useState<SeasonLabel>(LIVE_SEASON);
   const [archiveGameLogs, setArchiveGameLogs] = useState<Record<string, any[]>>({});
   const [propsAvailabilityByDate, setPropsAvailabilityByDate] = useState<PlayerPropAvailabilityByDate>({});
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
@@ -1262,11 +1269,13 @@ function App() {
   };
 
   const ensureArchiveLoaded = async (playerId: number, season: string) => {
-    if (archiveGameLogs[String(playerId)]) {
+    // Keyed by player AND season: with more than one archive season available,
+    // caching on player alone would serve 24/25 logs after switching to 25/26.
+    const cacheKey = `${playerId}:${season}`;
+    if (archiveGameLogs[cacheKey]) {
       return;
     }
 
-    const cacheKey = `${playerId}:${season}`;
     const existingRequest = archiveRequestsRef.current.get(cacheKey);
     if (existingRequest) {
       return existingRequest;
@@ -1283,7 +1292,7 @@ function App() {
       .then(({ gameLog }) => {
         setArchiveGameLogs(prev => ({
           ...prev,
-          [playerId]: gameLog || []
+          [cacheKey]: gameLog || []
         }));
       })
       .finally(() => {
@@ -1316,9 +1325,10 @@ function App() {
     }
 
     const nextPlayer = playersWithProps[index];
-    const shouldPreloadArchive = USE_DB && activeSeason === '24/25';
+    const shouldPreloadArchive = USE_DB && isArchiveSeason(activeSeason);
     const needsDetailLoad = USE_DB && !hasLoadedPlayerDetail(nextPlayer);
-    const needsArchiveLoad = shouldPreloadArchive && !archiveGameLogs[String(id)];
+    const needsArchiveLoad = shouldPreloadArchive
+      && !archiveGameLogs[`${id}:${archiveSeasonKey(activeSeason)}`];
     const requestId = selectionRequestRef.current + 1;
     selectionRequestRef.current = requestId;
 
@@ -1340,7 +1350,7 @@ function App() {
       requestId,
     });
 
-    void preparePlayerForSelection(id, shouldPreloadArchive ? '2024-25' : null)
+    void preparePlayerForSelection(id, shouldPreloadArchive ? archiveSeasonKey(activeSeason) : null)
       .then(() => {
         if (selectionRequestRef.current === requestId) {
           setPendingSelection((current) => (
@@ -1380,14 +1390,15 @@ function App() {
 
   // 2. Archive fetching when season filter changes
   useEffect(() => {
-    // Only fetch if 24/25 is active, and the current player exists, and we haven't fetched their logs yet
-    if (activeSeason === '24/25' && currentPlayer && !archiveGameLogs[currentPlayer.id]) {
+    // Any archive season (not just 24/25) whose logs we have not fetched yet.
+    const seasonKey = archiveSeasonKey(activeSeason);
+    if (seasonKey && currentPlayer && !archiveGameLogs[`${currentPlayer.id}:${seasonKey}`]) {
       setIsLoadingArchive(true);
 
       const playerId = currentPlayer.id;
 
       if (USE_DB) {
-        ensureArchiveLoaded(playerId, '2024-25')
+        ensureArchiveLoaded(playerId, seasonKey)
           .catch((error) => {
             console.error('[api] archive error:', error);
           })
@@ -1405,10 +1416,11 @@ function App() {
   const displayPlayer = useMemo(() => {
     if (!currentPlayer) return null;
     const materializedPlayer = materializePlayerForGameDate(currentPlayer, resolvedSelectedGameDate);
-    if (activeSeason === '24/25') {
+    const seasonKey = archiveSeasonKey(activeSeason);
+    if (seasonKey) {
       return {
         ...materializedPlayer,
-        game_log: archiveGameLogs[String(currentPlayer.id)] || []
+        game_log: archiveGameLogs[`${currentPlayer.id}:${seasonKey}`] || []
       } as Player;
     }
     return materializedPlayer;
@@ -1600,7 +1612,7 @@ function App() {
   const areSimilarCandidatesCurrent = similarCandidatesKey === similarRankingKey;
   const readySimilarCandidatesByProp = areSimilarCandidatesCurrent ? similarCandidatesByProp : [];
   const readySimilarCandidatesByPosition = areSimilarCandidatesCurrent ? similarCandidatesByPosition : [];
-  const shouldShowSimilarLoading = activeSeason === '25/26'
+  const shouldShowSimilarLoading = activeSeason === LIVE_SEASON
     && Boolean(displayPlayer)
     && (!areSimilarCandidatesCurrent || isSimilarCandidatesLoading);
 
@@ -1658,7 +1670,7 @@ function App() {
     if (
       !USE_DB
       || !isFiltersOpen
-      || activeSeason !== '25/26'
+      || activeSeason !== LIVE_SEASON
       || !displayPlayer?.team
       || !rawDataRef.current.length
     ) {
@@ -1708,7 +1720,7 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
-    if (activeSeason !== '25/26' || !displayPlayer) {
+    if (activeSeason !== LIVE_SEASON || !displayPlayer) {
       setSimilarCandidatesByProp([]);
       setSimilarCandidatesByPosition([]);
       setSimilarCandidatesKey('');
@@ -1799,7 +1811,7 @@ function App() {
     if (
       !USE_DB
       || !isPageVisible
-      || activeSeason !== '25/26'
+      || activeSeason !== LIVE_SEASON
       || !displayPlayer
       || similarPrefetchIds.length === 0
     ) {
@@ -1995,8 +2007,8 @@ function App() {
                 }}
                 activeSeason={activeSeason}
                 onSeasonChange={(s) => {
-                  if (s === '25/26' || s === '24/25') {
-                    setActiveSeason(s as any);
+                  if (isSelectableSeason(s)) {
+                    setActiveSeason(s);
                   }
                 }}
               />

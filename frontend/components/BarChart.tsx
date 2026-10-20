@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { ActiveTeammateFilter, Player, Game, SportsbookId } from '../types';
-import { TEAM_IDS } from '../constants';
+import { LIVE_SEASON, TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
 import { motion } from 'framer-motion';
@@ -110,7 +110,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     );
     const shouldHoldPreviousChart = Boolean(
         USE_DB
-        && activeSeason === '25/26'
+        && activeSeason === LIVE_SEASON
         && player
         && !player.detail_loaded
         && (player.game_log?.length ?? 0) === 0
@@ -434,7 +434,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             && Math.round((upcomingGameDate.getTime() - latestSeasonGameDate.getTime()) / 86400000) === 1,
         );
 
-        const includeUpcomingGame = activeSeason !== '24/25' && (
+        const includeUpcomingGame = activeSeason === LIVE_SEASON && (
             !chartMode
             || (chartMode === 'H2H' && upcomingOpponent !== 'TBD')
             || (chartMode === 'Home' && Boolean(upcomingGame && upcomingGame.home_team_tricode === chartPlayer.team))
