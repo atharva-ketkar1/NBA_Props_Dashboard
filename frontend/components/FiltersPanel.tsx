@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronUp, HelpCircle, LoaderCircle, Lock, Minus, Plus, X } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
-import { LIVE_SEASON, SEASON_FILTER_OPTIONS, TEAM_IDS, isSelectableSeason } from '../constants';
+import { LIVE_SEASON, SEASON_FILTER_OPTIONS, TEAM_IDS, isArchiveSeason, isSelectableSeason } from '../constants';
 import { isOverlayFilterSupported } from '../utils/filterOverlays';
 import {
     ActiveTeammateFilter,
@@ -792,7 +792,14 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                         {/* Teammates Section */}
                         <div className="flex flex-col gap-3 mt-2 border-t border-borderMedium/40 pt-4">
                             <div className="flex items-center justify-between">
-                                <span className="text-white text-[14px] font-semibold tracking-[-0.01em]">Teammates</span>
+                                <div className="flex flex-col">
+                                    <span className="text-white text-[14px] font-semibold tracking-[-0.01em]">Teammates</span>
+                                    {isArchiveSeason(activeSeason) ? (
+                                        <span className="text-[10px] leading-tight text-fgSubtle/70">
+                                            Current roster &middot; no injury report for {activeSeason}
+                                        </span>
+                                    ) : null}
+                                </div>
                                 <button
                                     type="button"
                                     onClick={() => teammateInjuryCards.length > 0 && setIsTeammateModalOpen(true)}

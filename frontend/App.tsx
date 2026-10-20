@@ -1453,9 +1453,24 @@ function App() {
       return null;
     }
 
+    // Archive seasons get no injury report at all, deliberately.
+    //
+    // Two things conspire here. resolvedSelectedGameDate is derived from the
+    // player's LIVE props dates, so for a past-season game it never matches the
+    // game actually on screen -- which dropped us into the getDashboardDate()
+    // fallback below and served TONIGHT's report for a game played last season,
+    // complete with players who were not on the team yet. And there is nothing
+    // right to fall back to: nba_injury_reports_current is pruned (as the name
+    // says), so no archive date can be looked up.
+    //
+    // Showing nothing is correct; showing the live slate's report is not.
+    if (isArchiveSeason(activeSeason)) {
+      return null;
+    }
+
     const gameDate = resolvedSelectedGameDate ?? displayPlayer.active_game_date ?? getDashboardDate();
     return teamInjuryByTeamDate[`${gameDate}:${displayPlayer.team}`] ?? null;
-  }, [displayPlayer, resolvedSelectedGameDate, teamInjuryByTeamDate]);
+  }, [displayPlayer, resolvedSelectedGameDate, teamInjuryByTeamDate, activeSeason]);
   const displayTeammateInjuryCards = useMemo(() => (
     buildTeammateInjuryCards(
       displayPlayer,
