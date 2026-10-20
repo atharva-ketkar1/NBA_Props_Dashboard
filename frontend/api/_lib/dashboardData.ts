@@ -1072,6 +1072,127 @@ export async function fetchPlayerSportsbookPreviewPayload({
   );
 }
 
+/**
+ * Calendar window for an NBA season label like '2025-26'.
+ *
+ * Injury rows are keyed by game_date, not by season, so an archive season has to
+ * be expressed as a date range. September-to-August is deliberately wide: it
+ * covers preseason through the Finals without ever overlapping the next season.
+ */
+function seasonDateWindow(season: string): { start: string; end: string } | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(season ?? '').trim());
+  if (!match) {
+    return null;
+  }
+  const startYear = Number(match[1]);
+  if (!Number.isFinite(startYear)) {
+    return null;
+  }
+  return { start: `${startYear}-09-01`, end: `${startYear + 1}-08-31` };
+}
+
+/**
+ * The player's official injury reports for one archive season, keyed by game date.
+ *
+ * Keyed off TEAM_ABBREVIATION in the archive game log rather than players.team,
+ * because players.team is the CURRENT roster: using it would pull the wrong
+ * franchise's report for anyone who has since been traded, and silently so.
+ * Reading the team per game date also keeps a mid-season trade correct on both
+ * sides of the move.
+ *
+ * Capture only began 2026-04-03, so most of 2025-26 has no report at all. The
+ * caller has to tell "no report for this game" apart from "we were not recording
+ * yet", so coverage bounds come back alongside the reports and the UI can say
+ * which case it is instead of rendering a bare empty panel.
+ */
+async function fetchArchiveInjuryReports(gameLog: any[], season: string) {
+  const empty = { reportsByDate: {} as Record<string, any>, coverage: null };
+  const window = seasonDateWindow(season);
+  if (!window || !Array.isArray(gameLog) || !gameLog.length) {
+    return empty;
+  }
+
+  const teamByDate = new Map<string, string>();
+  for (const game of gameLog) {
+    const gameDate = String(game?.GAME_DATE ?? '').slice(0, 10);
+    const team = String(game?.TEAM_ABBREVIATION ?? '').trim().toUpperCase();
+    if (gameDate && team) {
+      teamByDate.set(gameDate, team);
+    }
+  }
+
+  const teams = Array.from(new Set(teamByDate.values()));
+  if (!teams.length) {
+    return empty;
+  }
+
+  const teamList = teams.join(',');
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from('nba_injury_reports_current')
+    .select(NBA_INJURY_REPORT_SELECT)
+    .gte('game_date', window.start)
+    .lte('game_date', window.end)
+    .or(`home_team_tricode.in.(${teamList}),away_team_tricode.in.(${teamList})`)
+    .order('game_date', { ascending: true });
+
+  // A missing table is not an error here -- it just means no archive injuries.
+  if (error && isMissingRelationError(error, 'nba_injury_reports_current')) {
+    return empty;
+  }
+  assertNoError(error, 'nba_injury_reports_current (archive)');
+
+  const reportsByDate: Record<string, any> = {};
+  const dates: string[] = [];
+
+  for (const row of data ?? []) {
+    const gameDate = String((row as any)?.game_date ?? '').slice(0, 10);
+    if (!gameDate) {
+      continue;
+    }
+
+    // The team the player was actually on that night.
+    const teamTricode = teamByDate.get(gameDate);
+    if (!teamTricode) {
+      continue;
+    }
+
+    dates.push(gameDate);
+
+    const rawTeams = (row as any)?.teams;
+    const teamPayload = rawTeams && typeof rawTeams === 'object'
+      ? Object.values(rawTeams as Record<string, any>).find((entry: any) => (
+        String(entry?.team_tricode ?? '').trim().toUpperCase() === teamTricode
+      ))
+      : null;
+
+    if (!teamPayload) {
+      continue;
+    }
+
+    reportsByDate[gameDate] = {
+      team_tricode: teamTricode,
+      team_name: (teamPayload as any)?.team_name ?? null,
+      report_status: (teamPayload as any)?.report_status ?? null,
+      report_timestamp_et: (row as any)?.report_timestamp_et ?? null,
+      source_generated_at: (row as any)?.source_generated_at ?? null,
+      updated_at: (row as any)?.updated_at ?? null,
+      players: Array.isArray((teamPayload as any)?.players) ? (teamPayload as any).players : [],
+    };
+  }
+
+  const sortedDates = dates.sort();
+  const coverage = sortedDates.length
+    ? {
+      earliest: sortedDates[0],
+      latest: sortedDates[sortedDates.length - 1],
+      dates: sortedDates,
+    }
+    : null;
+
+  return { reportsByDate, coverage };
+}
+
 export async function fetchArchivePayload(playerId: number, season: string) {
   return readCached(
     buildCacheKey(['archive', playerId, season]),
@@ -1087,10 +1208,14 @@ export async function fetchArchivePayload(playerId: number, season: string) {
 
       assertNoError(error, 'archive_gamelogs');
       const archiveRow = (data ?? null) as { game_log?: unknown } | null;
-      const gameLog = archiveRow?.game_log;
+      const gameLog = Array.isArray(archiveRow?.game_log) ? archiveRow!.game_log as any[] : [];
+
+      const { reportsByDate, coverage } = await fetchArchiveInjuryReports(gameLog, season);
 
       return {
-        gameLog: Array.isArray(gameLog) ? gameLog : [],
+        gameLog,
+        injuryReportsByDate: reportsByDate,
+        injuryCoverage: coverage,
       };
     },
   );
