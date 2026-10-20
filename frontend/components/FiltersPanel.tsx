@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronUp, HelpCircle, LoaderCircle, Lock, Minus, Plus, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, ClipboardX, HelpCircle, LoaderCircle, Lock, Minus, Plus, X } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
 import { LIVE_SEASON, SEASON_FILTER_OPTIONS, TEAM_IDS, isArchiveSeason, isSelectableSeason } from '../constants';
@@ -21,6 +21,11 @@ interface FiltersPanelProps {
     player?: Player | null;
     teammateInjuryCards?: TeammateInjuryCard[];
     teamInjuryReport?: TeamInjuryReport | null;
+    archiveInjuryContext?: {
+        gameDate: string | null;
+        coverage: { earliest: string; latest: string; dates: string[] } | null;
+        loaded: boolean;
+    } | null;
     selectedTeammateFilter?: ActiveTeammateFilter | null;
     teammateStatLabel?: string;
     onPreviewTeammateToggle?: (teammate: TeammateInjuryCard) => void;
@@ -32,6 +37,17 @@ interface FiltersPanelProps {
 }
 
 const TEAMMATE_PREVIEW_LIMIT = 10;
+
+/** '2026-04-12' -> 'Apr 12, 2026'. Parsed as parts, not Date, to dodge UTC shifts. */
+const formatReportDate = (isoDate: string | null | undefined) => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate ?? ''));
+    if (!match) {
+        return null;
+    }
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const month = months[Number(match[2]) - 1] ?? '';
+    return `${month} ${Number(match[3])}, ${match[1]}`;
+};
 
 const TEAMMATE_STATUS_META: Record<string, { badge: string; badgeClass: string; textClass: string; label: string }> = {
     Out: {
@@ -171,6 +187,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     player,
     teammateInjuryCards = [],
     teamInjuryReport = null,
+    archiveInjuryContext = null,
     selectedTeammateFilter = null,
     teammateStatLabel = 'PTS',
     onPreviewTeammateToggle,
@@ -218,6 +235,58 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
 
         return `${ASSETS_BASE}/assets/team_logos/${teamTricode}.svg`;
     }, [player?.team, teamInjuryReport?.team_tricode]);
+
+    /**
+     * What the Teammates section says about a past season.
+     *
+     * Three distinct states, because "empty" has three different meanings and
+     * collapsing them is how this panel used to mislead: a real captured report,
+     * a game that predates capture (which began 2026-04-03), and a tracked date
+     * with nothing filed.
+     */
+    const archiveInjuryNote = React.useMemo(() => {
+        if (!isArchiveSeason(activeSeason)) {
+            return null;
+        }
+
+        const gameDate = archiveInjuryContext?.gameDate ?? null;
+        const prettyGameDate = formatReportDate(gameDate);
+
+        // Until the archive payload lands, coverage is null -- which must not be
+        // read as "nothing was ever recorded".
+        if (!teamInjuryReport && !archiveInjuryContext?.loaded) {
+            return { tone: 'loading' as const, label: 'Loading injury report\u2026' };
+        }
+
+        if (teamInjuryReport) {
+            return {
+                tone: 'data' as const,
+                label: prettyGameDate
+                    ? `Official report \u00b7 ${prettyGameDate}`
+                    : `Official report \u00b7 ${activeSeason}`,
+            };
+        }
+
+        const coverage = archiveInjuryContext?.coverage ?? null;
+        if (!coverage) {
+            return { tone: 'empty' as const, label: `No reports recorded in ${activeSeason}` };
+        }
+
+        if (gameDate && gameDate < coverage.earliest) {
+            const prettyEarliest = formatReportDate(coverage.earliest);
+            return {
+                tone: 'empty' as const,
+                label: prettyEarliest
+                    ? `Not tracked until ${prettyEarliest}`
+                    : `Not tracked in ${activeSeason}`,
+            };
+        }
+
+        return {
+            tone: 'empty' as const,
+            label: prettyGameDate ? `No report filed \u00b7 ${prettyGameDate}` : 'No report filed',
+        };
+    }, [activeSeason, archiveInjuryContext, teamInjuryReport]);
 
     const updateTeammateScrollState = React.useCallback(() => {
         const element = teammateScrollRef.current;
@@ -792,11 +861,18 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                         {/* Teammates Section */}
                         <div className="flex flex-col gap-3 mt-2 border-t border-borderMedium/40 pt-4">
                             <div className="flex items-center justify-between">
-                                <div className="flex flex-col">
+                                <div className="flex min-w-0 flex-col">
                                     <span className="text-white text-[14px] font-semibold tracking-[-0.01em]">Teammates</span>
-                                    {isArchiveSeason(activeSeason) ? (
-                                        <span className="text-[10px] leading-tight text-fgSubtle/70">
-                                            Current roster &middot; no injury report for {activeSeason}
+                                    {archiveInjuryNote ? (
+                                        <span className="flex items-center gap-1.5 text-[10px] leading-tight text-fgSubtle/70">
+                                            {archiveInjuryNote.tone === 'data' ? (
+                                                <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-blue500" />
+                                            ) : archiveInjuryNote.tone === 'loading' ? (
+                                                <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-borderMedium" />
+                                            ) : (
+                                                <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full border border-borderMedium/80" />
+                                            )}
+                                            <span className="truncate">{archiveInjuryNote.label}</span>
                                         </span>
                                     ) : null}
                                 </div>
@@ -819,7 +895,21 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                 <div ref={teammateScrollRef} className="flex items-center gap-2.5 overflow-x-auto no-scrollbar pb-3 scroll-smooth">
                                     {teammatePreviewCards.length > 0 ? teammatePreviewCards.map((teammate) => (
                                         renderPreviewTeammateCard(teammate)
-                                    )) : (
+                                    )) : archiveInjuryNote ? (
+                                        <div className="flex w-full items-center gap-3 rounded-[12px] border border-dashed border-borderMedium/50 bg-bgElevation1/40 px-3.5 py-3.5">
+                                            <ClipboardX className="h-4 w-4 shrink-0 text-fgSubtle/50" strokeWidth={1.8} />
+                                            <div className="flex min-w-0 flex-col gap-0.5">
+                                                <span className="text-[12px] font-medium leading-tight text-fgSubtle">
+                                                    {archiveInjuryNote.label}
+                                                </span>
+                                                {archiveInjuryNote.tone === 'empty' ? (
+                                                    <span className="text-[10px] leading-tight text-fgSubtle/60">
+                                                        Injury reports were first captured in April 2026.
+                                                    </span>
+                                                ) : null}
+                                            </div>
+                                        </div>
+                                    ) : (
                                         <div className="text-fgSubtle text-xs py-4">
                                             No teammates available.
                                         </div>

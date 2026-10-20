@@ -31,8 +31,18 @@ type PlayerResponse = {
   historicalOddsRows: any[];
 };
 
+export type ArchiveInjuryCoverage = {
+  earliest: string;
+  latest: string;
+  dates: string[];
+};
+
 type ArchiveResponse = {
   gameLog: any[];
+  /** That team's official injury report for the season, keyed by game date. */
+  injuryReportsByDate?: Record<string, any>;
+  /** Bounds of what was actually captured, so absence can be explained. */
+  injuryCoverage?: ArchiveInjuryCoverage | null;
 };
 
 type AccessResponse = {

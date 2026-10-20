@@ -41,6 +41,7 @@ import {
 import { fetchApiJson } from './utils/network';
 import { rankSimilarPlayers } from './utils/similarPlayers';
 import {
+  ArchiveInjuryCoverage,
   fetchDashboardAccess,
   fetchDashboardArchive,
   fetchDashboardBootstrap,
@@ -691,6 +692,11 @@ function App() {
   const [filterGameCount, setFilterGameCount] = useState<number>(19);
   const [activeSeason, setActiveSeason] = useState<SeasonLabel>(LIVE_SEASON);
   const [archiveGameLogs, setArchiveGameLogs] = useState<Record<string, any[]>>({});
+  // Archive injury reports arrive with the archive game log, keyed the same
+  // `playerId:season` way. Coverage is kept separately so the panel can say
+  // "not tracked yet" rather than just showing an empty list.
+  const [archiveInjuryReports, setArchiveInjuryReports] = useState<Record<string, Record<string, any>>>({});
+  const [archiveInjuryCoverage, setArchiveInjuryCoverage] = useState<Record<string, ArchiveInjuryCoverage | null>>({});
   const [propsAvailabilityByDate, setPropsAvailabilityByDate] = useState<PlayerPropAvailabilityByDate>({});
   const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>('graph');
@@ -1289,10 +1295,18 @@ function App() {
 
         return fetchDashboardArchive(access.archiveToken);
       })
-      .then(({ gameLog }) => {
+      .then(({ gameLog, injuryReportsByDate, injuryCoverage }) => {
         setArchiveGameLogs(prev => ({
           ...prev,
           [cacheKey]: gameLog || []
+        }));
+        setArchiveInjuryReports(prev => ({
+          ...prev,
+          [cacheKey]: injuryReportsByDate || {}
+        }));
+        setArchiveInjuryCoverage(prev => ({
+          ...prev,
+          [cacheKey]: injuryCoverage ?? null
         }));
       })
       .finally(() => {
@@ -1448,33 +1462,87 @@ function App() {
   const appliedHistoricalGameCount = isFiltersOpen
     ? effectiveFilterGameCount
     : defaultHistoricalGameCount;
+  // The game an archive season's injury panel is "about": the player's most
+  // recent appearance that season. The archive log is stored newest-first, so
+  // that is simply the head. It is surfaced in the UI rather than used silently,
+  // because resolvedSelectedGameDate cannot serve this role -- it is derived
+  // from LIVE props dates, so for a past season it pointed at today, which is
+  // how this panel used to show tonight's report next to last season's games.
+  const archiveContextGameDate = useMemo(() => {
+    const seasonKey = archiveSeasonKey(activeSeason);
+    if (!seasonKey || !displayPlayer?.id) {
+      return null;
+    }
+
+    const log = archiveGameLogs[`${displayPlayer.id}:${seasonKey}`];
+    if (!Array.isArray(log) || !log.length) {
+      return null;
+    }
+
+    const dates = log
+      .map((game: any) => String(game?.GAME_DATE ?? '').slice(0, 10))
+      .filter(Boolean)
+      .sort();
+
+    return dates.length ? dates[dates.length - 1] : null;
+  }, [activeSeason, displayPlayer?.id, archiveGameLogs]);
+
+  const archiveInjuryContext = useMemo(() => {
+    const seasonKey = archiveSeasonKey(activeSeason);
+    if (!seasonKey || !displayPlayer?.id) {
+      return null;
+    }
+
+    const cacheKey = `${displayPlayer.id}:${seasonKey}`;
+    return {
+      gameDate: archiveContextGameDate,
+      coverage: archiveInjuryCoverage[cacheKey] ?? null,
+      loaded: Object.prototype.hasOwnProperty.call(archiveInjuryReports, cacheKey),
+    };
+  }, [
+    activeSeason,
+    displayPlayer?.id,
+    archiveContextGameDate,
+    archiveInjuryCoverage,
+    archiveInjuryReports,
+  ]);
+
   const displayTeamInjuryReport = useMemo(() => {
     if (!displayPlayer?.team) {
       return null;
     }
 
-    // Archive seasons get no injury report at all, deliberately.
-    //
-    // Two things conspire here. resolvedSelectedGameDate is derived from the
-    // player's LIVE props dates, so for a past-season game it never matches the
-    // game actually on screen -- which dropped us into the getDashboardDate()
-    // fallback below and served TONIGHT's report for a game played last season,
-    // complete with players who were not on the team yet. And there is nothing
-    // right to fall back to: nba_injury_reports_current is pruned (as the name
-    // says), so no archive date can be looked up.
-    //
-    // Showing nothing is correct; showing the live slate's report is not.
-    if (isArchiveSeason(activeSeason)) {
-      return null;
+    // Archive seasons read the real report that was captured for that game date.
+    // Never fall through to the live-slate lookup below: that is what used to
+    // serve tonight's injuries for a game played last season.
+    const seasonKey = archiveSeasonKey(activeSeason);
+    if (seasonKey) {
+      if (!archiveContextGameDate) {
+        return null;
+      }
+      const reports = archiveInjuryReports[`${displayPlayer.id}:${seasonKey}`] ?? {};
+      return reports[archiveContextGameDate] ?? null;
     }
 
     const gameDate = resolvedSelectedGameDate ?? displayPlayer.active_game_date ?? getDashboardDate();
     return teamInjuryByTeamDate[`${gameDate}:${displayPlayer.team}`] ?? null;
-  }, [displayPlayer, resolvedSelectedGameDate, teamInjuryByTeamDate, activeSeason]);
+  }, [
+    displayPlayer,
+    resolvedSelectedGameDate,
+    teamInjuryByTeamDate,
+    activeSeason,
+    archiveContextGameDate,
+    archiveInjuryReports,
+  ]);
   const displayTeammateInjuryCards = useMemo(() => (
     buildTeammateInjuryCards(
       displayPlayer,
-      rawData,
+      // For an archive season the live roster is the wrong set of names -- those
+      // are this season's teammates. Passing none leaves only the players the
+      // official report actually listed that night, which is the real roster
+      // context for that game. Deriving full historical rosters would need the
+      // batch archive fetch path that SimilarPlayers is also waiting on.
+      isArchiveSeason(activeSeason) ? [] : rawData,
       displayTeamInjuryReport,
       activeStatKey,
       effectiveFilterGameCount,
@@ -2011,6 +2079,7 @@ function App() {
                 player={displayPlayer}
                 teammateInjuryCards={displayTeammateInjuryCards}
                 teamInjuryReport={displayTeamInjuryReport}
+                archiveInjuryContext={archiveInjuryContext}
                 selectedTeammateFilter={displayActiveTeammateFilter}
                 teammateStatLabel={activeStatKey}
                 onPreviewTeammateToggle={handlePreviewTeammateToggle}
