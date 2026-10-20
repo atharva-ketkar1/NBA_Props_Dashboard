@@ -172,3 +172,35 @@ export function archiveSeasonKey(season: string | null | undefined): string | nu
 export function isSelectableSeason(season: string | null | undefined): boolean {
   return season === LIVE_SEASON || isArchiveSeason(season);
 }
+
+/** '26/27' -> 2026. Returns null for anything that is not a season label. */
+export function seasonLabelStartYear(season: string | null | undefined): number | null {
+  const match = /^(\d{2})\/(\d{2})$/.exec(String(season ?? '').trim());
+  return match ? 2000 + Number(match[1]) : null;
+}
+
+/**
+ * Calendar window for a season label.
+ *
+ * The September boundary matches the backend's resolve_season(), which rolls over
+ * in September so preseason automation targets the upcoming season. Any game in a
+ * live row dated before that boundary is therefore last season's residue: the
+ * scrapers only ever fetch the resolved season.
+ */
+export function seasonDateWindow(season: string | null | undefined): { start: string; end: string } | null {
+  const startYear = seasonLabelStartYear(season);
+  if (startYear === null) {
+    return null;
+  }
+  return { start: `${startYear}-09-01`, end: `${startYear + 1}-08-31` };
+}
+
+/** Unknown labels return true, so an unparsed season never silently drops games. */
+export function isGameDateInSeason(gameDate: unknown, season: string | null | undefined): boolean {
+  const window = seasonDateWindow(season);
+  if (!window) {
+    return true;
+  }
+  const date = String(gameDate ?? '').slice(0, 10);
+  return Boolean(date) && date >= window.start && date <= window.end;
+}

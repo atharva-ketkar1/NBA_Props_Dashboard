@@ -29,6 +29,7 @@ import {
   SeasonLabel,
   archiveSeasonKey,
   isArchiveSeason,
+  isGameDateInSeason,
   isSelectableSeason,
 } from './constants';
 import { getDashboardDate } from './utils/dashboardDate';
@@ -1511,7 +1512,33 @@ function App() {
         stats: buildArchiveSeasonStats(materializedPlayer.stats, archiveLog),
       } as Player;
     }
-    return materializedPlayer;
+
+    // Live season: drop last season's residue.
+    //
+    // players.stats and players.game_log are upserted from the current season's
+    // stats CSV and never deleted, so a player who has not appeared in a scrape
+    // for the new season keeps last season's row verbatim. That is how a 26/27
+    // view came to show games played in April and a season average with no games
+    // behind it. Games outside the live season are filtered out, and once nothing
+    // is left the averages go with them -- an empty stats object makes the header
+    // render a dash instead of a number that has nothing supporting it.
+    const liveLog = (materializedPlayer.game_log ?? []).filter((game: any) => (
+      isGameDateInSeason(game?.GAME_DATE, LIVE_SEASON)
+    ));
+
+    // Only short-circuit when there is genuinely nothing to change. An already
+    // empty game_log must still fall through, because that is the common case:
+    // the row was never rewritten for the new season but kept last season's
+    // stats, so the averages still need blanking.
+    if (liveLog.length && liveLog.length === (materializedPlayer.game_log?.length ?? 0)) {
+      return materializedPlayer;
+    }
+
+    return {
+      ...materializedPlayer,
+      game_log: liveLog,
+      stats: liveLog.length ? materializedPlayer.stats : {},
+    } as Player;
   }, [currentPlayer, resolvedSelectedGameDate, activeSeason, archiveGameLogs]);
   const displayPlayerOpponent = useMemo(() => (
     resolveSlateOpponent(displayPlayer, resolvedSelectedGameDate, slateOpponentByTeamDate)
