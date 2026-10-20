@@ -195,9 +195,13 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
     const graphAvg = validGamesCount > 0 ? (sum / validGamesCount) : 0;
 
     const seasonStats: Record<string, any> = player.stats || {};
-    let seasonAvg = seasonStats[statKey];
+    // An empty stats object means no games this season back these averages (App
+    // blanks it for rows that are last season's leftovers). Render a dash for
+    // that, never 0.0 -- a zero reads as a real measurement of zero.
+    const hasSeasonStats = Object.keys(seasonStats).length > 0;
+    let seasonAvg: number | null = hasSeasonStats ? seasonStats[statKey] : null;
 
-    if (seasonAvg === undefined) {
+    if (hasSeasonStats && seasonAvg === undefined) {
       if (statKey === 'PTS+REB+AST') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.REB || 0) + (seasonStats.AST || 0);
       else if (statKey === 'PTS+REB') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.REB || 0);
       else if (statKey === 'PTS+AST') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.AST || 0);
@@ -205,7 +209,9 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       else seasonAvg = 0;
     }
 
-    const diff = (historicalGameCount === 82 || historicalGameCount === totalGames) ? 0 : (graphAvg - seasonAvg);
+    const diff = (seasonAvg === null || historicalGameCount === 82 || historicalGameCount === totalGames)
+      ? 0
+      : (graphAvg - seasonAvg);
 
     // Desktop Stats Array Calculation
     const tickerItems = [
@@ -217,6 +223,10 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       { label: 'USAGE', key: 'USG_PCT', fallback: '0.0%' },
       { label: 'FGA', key: 'FGA' },
     ].map(item => {
+      // Nothing measured and nothing scraped -> a dash, not a computed zero.
+      if (!visibleLogs.length && !hasSeasonStats) {
+        return { label: item.label, value: '\u2014', diff: undefined };
+      }
       const seasonVal = seasonStats[item.key] || 0;
       let avg = 0;
       if (visibleLogs.length > 0) {
@@ -257,7 +267,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
     });
 
     const mobileRate = hasLine ? ((mobileHits / mobileGameCount) * 100).toFixed(1) : '0.0';
-    const mobileGraphAvg = mobileValidCount > 0 ? mobileSum / mobileValidCount : 0;
+    const mobileGraphAvg: number | null = mobileValidCount > 0 ? mobileSum / mobileValidCount : null;
 
     return {
       line: lineVal,
@@ -571,16 +581,18 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
               {/* Season Avg */}
               <div className="flex flex-col items-center flex-1">
                 <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">SEASON AVG</span>
-                <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (activeStatAverages.seasonAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
-                  {typeof activeStatAverages.seasonAvg === 'number' ? activeStatAverages.seasonAvg.toFixed(1) : activeStatAverages.seasonAvg}
+                <span className={`font-bold text-[16px] leading-none ${(!hasLine || activeStatAverages.seasonAvg === null) ? 'text-white' : (activeStatAverages.seasonAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
+                  {typeof activeStatAverages.seasonAvg === 'number'
+                    ? activeStatAverages.seasonAvg.toFixed(1)
+                    : '\u2014'}
                 </span>
               </div>
 
               {/* Graph Avg */}
               <div className="flex flex-col items-center flex-1 border-l border-r border-white/5">
                 <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">GRAPH AVG</span>
-                <span className={`font-bold text-[16px] leading-none ${!hasLine ? 'text-white' : (mobileGraphAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
-                  {mobileGraphAvg.toFixed(1)}
+                <span className={`font-bold text-[16px] leading-none ${(!hasLine || mobileGraphAvg == null) ? 'text-white' : (mobileGraphAvg >= (customLine ?? line) ? 'text-green500' : 'text-red500')}`}>
+                  {mobileGraphAvg == null ? '\u2014' : mobileGraphAvg.toFixed(1)}
                 </span>
               </div>
 
