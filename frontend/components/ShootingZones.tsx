@@ -3,7 +3,7 @@ import { Info } from 'lucide-react';
 import { Player } from '../types';
 
 import { colors } from '../utils/propsmadness_colors';
-import { LIVE_SEASON } from '../constants';
+import { SeasonScopeNote } from './SeasonScopeNote';
 
 function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
@@ -163,7 +163,7 @@ const CourtView = ({ pView, oView, vsView, activeTab }: { pView: any, oView: any
   </div>
 );
 
-export const ShootingZones = ({ player }: { player: Player | any }) => {
+export const ShootingZones = ({ player, activeSeason }: { player: Player | any; activeSeason?: string }) => {
   const [activeTab, setActiveTab] = useState<'player' | 'vs' | 'opp'>('vs');
 
   const playerView = processZoneData((player as any)?.shooting_zones);
@@ -185,7 +185,7 @@ export const ShootingZones = ({ player }: { player: Player | any }) => {
               </div>
             </div>
           </div>
-          <div className="text-[12px] text-gray-400 font-medium">{LIVE_SEASON} Season</div>
+          <SeasonScopeNote activeSeason={activeSeason} className="text-[12px] text-gray-400 font-medium" />
         </div>
 
         <div className="flex bg-bgElevation1 rounded-[10px] p-1 border-transparent items-center">

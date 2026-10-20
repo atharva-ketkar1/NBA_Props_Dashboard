@@ -1,10 +1,11 @@
 import React from 'react';
 import { Info } from 'lucide-react';
-import { LIVE_SEASON, PLAY_TYPES } from '../constants';
+import { SeasonScopeNote } from './SeasonScopeNote';
 import { PlayTypeData } from '../types';
 
 interface PlayTypeAnalysisProps {
   playTypes?: PlayTypeData[];
+  activeSeason?: string;
 }
 
 function getPlayTypeRankColor(rank?: number | string, points?: number) {
@@ -53,8 +54,9 @@ const RankBadge = ({ rank, points }: { rank: number | string; points?: string | 
   );
 };
 
-export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes }) => {
-  const data = playTypes ?? PLAY_TYPES;
+export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes, activeSeason }) => {
+  // Not PLAY_TYPES: that is placeholder data and would read as this player's own.
+  const data = playTypes ?? [];
   const hasData = data.length > 0;
 
   return (
@@ -68,7 +70,7 @@ export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes })
           </div>
         </div>
       </div>
-      <p className="text-xs text-gray-500 mb-4">{LIVE_SEASON} Season</p>
+      <SeasonScopeNote activeSeason={activeSeason} className="text-xs text-gray-500 mb-4" />
 
       {hasData ? (
         <div className="w-full">

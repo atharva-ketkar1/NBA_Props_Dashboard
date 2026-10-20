@@ -662,6 +662,77 @@ function mergePropsIntoPlayers(players: Player[], propsRows: any[]) {
   });
 }
 
+/**
+ * Rate stats cannot be averaged per game -- they are totals-over-totals. Averaging
+ * 0/1 and 5/10 as percentages gives 25%, not the real 45%.
+ */
+const RATE_STAT_COMPONENTS: Record<string, [string, string]> = {
+  FG_PCT: ['FGM', 'FGA'],
+  FG3_PCT: ['FG3M', 'FG3A'],
+  FT_PCT: ['FTM', 'FTA'],
+};
+
+const NON_AVERAGED_STAT_KEYS = new Set(['GP', 'PLAYER_ID', 'TEAM_ABBREVIATION']);
+
+/**
+ * Season averages for an archive season, derived from that season's game log.
+ *
+ * Without this, selecting a past season swapped the game log but left `stats`
+ * pointing at the LIVE row -- so "SEASON AVG" in the header, the chart's
+ * comparison line and every numeric overlay compared last season's games against
+ * this season's averages. It reads as plausible, which is what makes it bad.
+ *
+ * Only keys already on the live stats object are overwritten, so the shape is
+ * unchanged and filter availability (which tests for key presence) still behaves.
+ */
+function buildArchiveSeasonStats(liveStats: Record<string, any> | undefined, gameLog: any[]) {
+  if (!Array.isArray(gameLog) || !gameLog.length) {
+    return liveStats ?? {};
+  }
+
+  const sums: Record<string, number> = {};
+  const counts: Record<string, number> = {};
+
+  for (const game of gameLog) {
+    for (const [key, raw] of Object.entries(game ?? {})) {
+      if (raw === null || raw === undefined || raw === '') {
+        continue;
+      }
+      const value = Number(raw);
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+      sums[key] = (sums[key] ?? 0) + value;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+  }
+
+  const next: Record<string, any> = { ...(liveStats ?? {}) };
+
+  for (const key of Object.keys(next)) {
+    if (NON_AVERAGED_STAT_KEYS.has(key)) {
+      continue;
+    }
+
+    const rateComponents = RATE_STAT_COMPONENTS[key];
+    if (rateComponents) {
+      const [madeKey, attemptKey] = rateComponents;
+      const attempts = sums[attemptKey];
+      if (attempts) {
+        next[key] = sums[madeKey] / attempts;
+        continue;
+      }
+    }
+
+    if (counts[key]) {
+      next[key] = sums[key] / counts[key];
+    }
+  }
+
+  next.GP = gameLog.length;
+  return next;
+}
+
 function buildHistoricalOddsMap(playerId: number, historicalOddsRows: any[]) {
   return Object.fromEntries((historicalOddsRows ?? []).map((row: any) => [
     row.game_date,
@@ -1432,9 +1503,12 @@ function App() {
     const materializedPlayer = materializePlayerForGameDate(currentPlayer, resolvedSelectedGameDate);
     const seasonKey = archiveSeasonKey(activeSeason);
     if (seasonKey) {
+      const archiveLog = archiveGameLogs[`${currentPlayer.id}:${seasonKey}`] || [];
       return {
         ...materializedPlayer,
-        game_log: archiveGameLogs[`${currentPlayer.id}:${seasonKey}`] || []
+        game_log: archiveLog,
+        // Averages must come from the season on screen, not the live row.
+        stats: buildArchiveSeasonStats(materializedPlayer.stats, archiveLog),
       } as Player;
     }
     return materializedPlayer;
@@ -2133,13 +2207,13 @@ function App() {
                   : mobileView !== 'shooting' ? 'hidden md:flex' : ''
                 }`}>
                 {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
-                  <AssistZones player={displayPlayer} />
+                  <AssistZones player={displayPlayer} activeSeason={activeSeason} />
                 ) : (
-                  <ShootingZones player={displayPlayer} />
+                  <ShootingZones player={displayPlayer} activeSeason={activeSeason} />
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className="flex-1 min-h-0 hidden md:block">
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} />
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} activeSeason={activeSeason} />
                   </div>
                 )}
               </div>
@@ -2148,7 +2222,7 @@ function App() {
               <div className="xl:col-span-6 flex flex-col gap-4 h-full">
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`${mobileView !== 'shooting' ? 'hidden md:block' : ''}`}>
-                    <ShotTypeAnalysis shotTypes={(() => {
+                    <ShotTypeAnalysis activeSeason={activeSeason} shotTypes={(() => {
                       if (!displayPlayer?.shot_type_analysis) return [];
                       const sta = displayPlayer.shot_type_analysis;
                       const p = sta.player || {};
@@ -2188,7 +2262,7 @@ function App() {
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`md:hidden ${mobileView !== 'types' ? 'hidden' : ''}`}>
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} />
+                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} activeSeason={activeSeason} />
                   </div>
                 )}
                 <div className={`flex-1 min-h-0 xl:col-span-12 w-full h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>

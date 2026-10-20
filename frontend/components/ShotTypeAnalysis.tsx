@@ -2,7 +2,7 @@ import React from 'react';
 import { Info } from 'lucide-react';
 import { ShotTypeData } from '../types';
 import { colors } from '../utils/propsmadness_colors';
-import { LIVE_SEASON } from '../constants';
+import { SeasonScopeNote } from './SeasonScopeNote';
 
 function getOppRankColor(rank?: number, percentage?: number) {
    if (rank === undefined) return colors.bgElevation2; // default neutral
@@ -36,16 +36,15 @@ function getOppRankColor(rank?: number, percentage?: number) {
 
 interface ShotTypeAnalysisProps {
    shotTypes?: ShotTypeData[];
+   activeSeason?: string;
 }
 
-const DEFAULT_SHOT_TYPES: ShotTypeData[] = [
-   { type: 'C&S', percentage: 14, attempts: 13, width: 16 },
-   { type: '< 10 ft', percentage: 52, attempts: 19, width: 50 },
-   { type: 'Pull Up', percentage: 34, attempts: 13, width: 34 },
-];
-
-export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes }) => {
-   const data = shotTypes ?? DEFAULT_SHOT_TYPES;
+export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes, activeSeason }) => {
+   // Never fall back to placeholder shot splits: a caller that passes undefined (the
+   // App does, when a player has a shot_type_analysis object with no actual shot
+   // splits) would render those placeholder percentages as the player's real
+   // profile. An empty panel is the honest result.
+   const data = shotTypes ?? [];
    const hasData = data.length > 0;
 
    return (
@@ -59,7 +58,7 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes })
                </div>
             </div>
          </div>
-         <p className="text-xs text-gray-500 mb-6">{LIVE_SEASON} Season</p>
+         <SeasonScopeNote activeSeason={activeSeason} className="text-xs text-gray-500 mb-6" />
 
          {hasData ? (
             <>

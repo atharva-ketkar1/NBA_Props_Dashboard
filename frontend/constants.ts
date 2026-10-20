@@ -44,15 +44,6 @@ export const RECENT_GAMES: GameLog[] = [
 // I'll comment it out.
 
 
-export const PLAY_TYPES: PlayTypeData[] = [
-  { type: 'Transition', points: '7 (27%)', percent: '27%', rank: 12 },
-  { type: 'Free Throws', points: '4.1 (16%)', percent: '16%', rank: 16 },
-  { type: 'PNR Ball Handler', points: '2.6 (10%)', percent: '10%', rank: 28 },
-  { type: 'Spot Up', points: '2.6 (10%)', percent: '10%', rank: 14 },
-  { type: 'Isolation', points: '2.4 (9%)', percent: '9%', rank: 2 },
-  { type: 'Post Up', points: '2.3 (9%)', percent: '9%', rank: 2 },
-];
-
 export const SIMILAR_GAMES: SimilarPlayerGame[] = [
   { date: 'Jan 19', team: 'Pacers', player: 'P. Siakam', line: 23.5, result: 24, diffPercent: 2 },
   { date: 'Jan 12', team: 'Raptors', player: 'S. Barnes', line: 18.5, result: 15, diffPercent: -19 },
