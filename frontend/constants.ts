@@ -141,3 +141,43 @@ export const TEAM_COLORS: Record<string, [string, string]> = {
   "UTA": ["#002B5C", "#00471B"],
   "WAS": ["#002B5C", "#E31837"]
 };
+
+// ---------------------------------------------------------------------------
+// Seasons
+//
+// Single source of truth for the season filter. Previously the live season was
+// the bare string '25/26' compared inline in ~12 places across App.tsx,
+// SimilarPlayers, BarChart and FiltersPanel, so a rollover meant finding every
+// literal -- and any one that was missed would silently keep treating last
+// season as live.
+//
+// LIVE_SEASON is served from the live feed (Supabase `players`). Archive seasons
+// are served by swapping only the player's game_log, read from `archive_gamelogs`
+// keyed by the NBA-format season string below.
+// ---------------------------------------------------------------------------
+
+export const LIVE_SEASON = '26/27';
+
+/** Filter label -> the `season` value stored in archive_gamelogs. */
+export const ARCHIVE_SEASONS: Record<string, string> = {
+  '25/26': '2025-26',
+  '24/25': '2024-25',
+};
+
+/** Left-to-right order in the filter. 'All' is rendered but not selectable. */
+export const SEASON_FILTER_OPTIONS = ['24/25', '25/26', LIVE_SEASON, 'All'];
+
+export type SeasonLabel = string;
+
+export function isArchiveSeason(season: string | null | undefined): boolean {
+  return !!season && season in ARCHIVE_SEASONS;
+}
+
+/** The archive_gamelogs key for a label, or null if the label is not an archive. */
+export function archiveSeasonKey(season: string | null | undefined): string | null {
+  return season && season in ARCHIVE_SEASONS ? ARCHIVE_SEASONS[season] : null;
+}
+
+export function isSelectableSeason(season: string | null | undefined): boolean {
+  return season === LIVE_SEASON || isArchiveSeason(season);
+}

@@ -2,6 +2,7 @@ import React from 'react';
 import { Info } from 'lucide-react';
 import { ShotTypeData } from '../types';
 import { colors } from '../utils/propsmadness_colors';
+import { LIVE_SEASON } from '../constants';
 
 function getOppRankColor(rank?: number, percentage?: number) {
    if (rank === undefined) return colors.bgElevation2; // default neutral
@@ -58,7 +59,7 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes })
                </div>
             </div>
          </div>
-         <p className="text-xs text-gray-500 mb-6">25/26 Season</p>
+         <p className="text-xs text-gray-500 mb-6">{LIVE_SEASON} Season</p>
 
          {hasData ? (
             <>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Info } from 'lucide-react';
-import { PLAY_TYPES } from '../constants';
+import { LIVE_SEASON, PLAY_TYPES } from '../constants';
 import { PlayTypeData } from '../types';
 
 interface PlayTypeAnalysisProps {
@@ -68,7 +68,7 @@ export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes })
           </div>
         </div>
       </div>
-      <p className="text-xs text-gray-500 mb-4">25/26 Season</p>
+      <p className="text-xs text-gray-500 mb-4">{LIVE_SEASON} Season</p>
 
       {hasData ? (
         <div className="w-full">

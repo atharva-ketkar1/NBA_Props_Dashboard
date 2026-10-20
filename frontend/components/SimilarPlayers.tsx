@@ -2,13 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Player, SimilarPlayerCandidate, SimilarPlayersMode, SportsbookId } from '../types';
 import { buildSimilarPlayersDataset } from '../utils/similarPlayers';
+import { LIVE_SEASON } from '../constants';
 
 interface SimilarPlayersProps {
    player?: Player | null;
    players: Player[];
    activeTab: string;
    activeSportsbook: SportsbookId;
-   activeSeason: '25/26' | '24/25';
+   activeSeason: string;
    targetOpponent?: string | null;
    isLoadingCandidates?: boolean;
    similarCandidatesByProp: SimilarPlayerCandidate[];
@@ -79,7 +80,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    const avgDiffPercentColor = summary.total === 0 ? 'text-white' : summary.avgDiffPercent >= 0 ? 'text-green500' : 'text-red500';
    const hitRateColor = summary.total === 0 ? 'text-white' : summary.hitRate >= 50 ? 'text-green500' : 'text-red500';
    const rowsMissingHistoricalLine = dataset.rows.filter((row) => !row.hasHistoricalLine).length;
-   const showLoadingState = activeSeason === '25/26'
+   const showLoadingState = activeSeason === LIVE_SEASON
       && Boolean(player)
       && (
          isLoadingCandidates
@@ -92,10 +93,10 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       );
 
    const renderEmptyState = () => {
-      if (activeSeason !== '25/26') {
+      if (activeSeason !== LIVE_SEASON) {
          return (
             <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
-               Similar-player comps currently use the live `25/26` season profile plus archived line history. Archive-season comps need a batch archive fetch path before they can be accurate.
+               Similar-player comps currently use the live {LIVE_SEASON} season profile plus archived line history. Archive-season comps need a batch archive fetch path before they can be accurate.
             </div>
          );
       }
@@ -165,7 +166,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                   </span>
                </div>
                <p className="text-xs text-gray-500">
-                  {activeSeason === '25/26' ? '25/26 live-slate comps' : 'Current-season comps only'}
+                  {activeSeason === LIVE_SEASON ? `${LIVE_SEASON} live-slate comps` : 'Current-season comps only'}
                   {targetOpponent ? ` • vs ${targetOpponent}` : ''}
                   {dataset.currentLine !== null ? ` • Current line ${formatValue(dataset.currentLine)}` : ''}
                </p>

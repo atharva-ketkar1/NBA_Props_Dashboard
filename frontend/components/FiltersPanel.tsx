@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronUp, HelpCircle, LoaderCircle, Lock, Minus, Plus, X } from 'lucide-react';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
-import { TEAM_IDS } from '../constants';
+import { LIVE_SEASON, SEASON_FILTER_OPTIONS, TEAM_IDS, isSelectableSeason } from '../constants';
 import { isOverlayFilterSupported } from '../utils/filterOverlays';
 import {
     ActiveTeammateFilter,
@@ -551,7 +551,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                         <div className="flex items-center justify-between rounded-[16px] border border-[#37586A] bg-[#0E1113] px-4 py-3">
                             <div className="flex min-w-0 items-center gap-3">
                                 <span className="shrink-0 text-[14px] font-medium tracking-[-0.04em] text-[#8D8D8D] sm:text-[18px]">
-                                    {activeSeason ?? '25/26'}
+                                    {activeSeason ?? LIVE_SEASON}
                                 </span>
                                 <span className="truncate text-[14px] font-semibold tracking-[-0.04em] text-white sm:text-[18px]">
                                     {teamInjuryReport?.team_name ?? player?.team ?? 'Team'}
@@ -675,9 +675,9 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     <div className="flex items-center justify-between">
                         <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[56px]">Season</span>
                         <div className="flex bg-bgElevation1 rounded-md border border-borderMedium/40 p-0.5 flex-1 ml-2">
-                            {['23/24', '24/25', '25/26', 'All'].map(s => {
-                                const isActive = s === (activeSeason || '25/26');
-                                const isClickable = s === '24/25' || s === '25/26';
+                            {SEASON_FILTER_OPTIONS.map(s => {
+                                const isActive = s === (activeSeason || LIVE_SEASON);
+                                const isClickable = isSelectableSeason(s);
                                 return (
                                     <button
                                         key={s}

@@ -3,6 +3,7 @@ import { Info } from 'lucide-react';
 import { Player } from '../types';
 
 import { colors } from '../utils/propsmadness_colors';
+import { LIVE_SEASON } from '../constants';
 
 function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
@@ -187,7 +188,7 @@ export const AssistZones = ({ player }: { player: Player }) => {
               </div>
             </div>
           </div>
-          <div className="text-[12px] text-gray-400 font-medium">25/26 Season</div>
+          <div className="text-[12px] text-gray-400 font-medium">{LIVE_SEASON} Season</div>
         </div>
 
         <div className="flex bg-bgElevation1 rounded-[10px] p-1 border-transparent items-center">
