@@ -320,6 +320,11 @@ def check_closing_lines(now, state, dry_run=False):
         closing_ok = True
         if not dry_run:
             try:
+                from utils.game_markets_closing import capture_closing_game_markets
+                capture_closing_game_markets([g["game_id"] for g in games_to_scrape])
+            except Exception as e:
+                log_status(logger, "WARN", "Closing game markets capture failed", error=e)
+            try:
                 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
                 import cron_closing_lines
                 # Modify the state of the cron_closing_lines strictly locally if needed,

@@ -257,6 +257,26 @@ function sortGamesByTime(games: Game[] = []) {
   });
 }
 
+// Picks the teams for "today's slate", falling back to the nearest upcoming
+// date that has games when nothing is scheduled today (e.g. an all-star break).
+function computeFeaturedSlateTeams(games: any[] = [], today: string): string[] {
+  const datesWithGames = Array.from(new Set(
+    games
+      .map((g: any) => g?.game_date)
+      .filter((d: any): d is string => typeof d === 'string' && d >= today),
+  )).sort();
+
+  const targetDate = datesWithGames.length > 0 ? datesWithGames[0] : null;
+  if (!targetDate) return [];
+
+  return Array.from(new Set(
+    games
+      .filter((g: any) => g?.game_date === targetDate)
+      .flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode])
+      .filter(Boolean),
+  ));
+}
+
 function mergeGamesById(existingGames: Game[] = [], incomingGames: Game[] = []) {
   const byGameId = new Map<string, Game>();
 
@@ -1057,7 +1077,7 @@ function App() {
           );
           const availabilityMap = buildAvailabilityByDateMap(snapshot.availabilityRows ?? []);
           const nextSlateGames = sortGamesByTime(snapshot.gamesRows ?? []);
-          const slateTeams = Array.from(new Set(nextSlateGames.flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode]).filter(Boolean)));
+          const slateTeams = computeFeaturedSlateTeams(nextSlateGames, getDashboardDate());
           setCurrentSlateGames(nextSlateGames);
           setCurrentSlateTeams(slateTeams);
           setSlateOpponentByTeamDate((prev) => ({ ...prev, ...nextOpponentByTeamDate }));
@@ -1173,10 +1193,7 @@ function App() {
           const today = getDashboardDate();
           const nextGames = Array.isArray(games) ? games : [];
           const nextGameStatusById = buildGameStatusById(Array.isArray(games) ? games : []);
-          const slateTeams = Array.from(new Set(nextGames
-            .filter((g: any) => g?.game_date === today)
-            .flatMap((g: any) => [g.home_team_tricode, g.away_team_tricode])
-            .filter(Boolean)));
+          const slateTeams = computeFeaturedSlateTeams(nextGames, today);
           setCurrentSlateGames(sortGamesByTime(nextGames));
           setCurrentSlateTeams(slateTeams);
           setSlateOpponentByTeamDate(buildSlateOpponentByTeamDate(nextGames));

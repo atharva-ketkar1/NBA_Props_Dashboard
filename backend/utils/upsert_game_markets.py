@@ -29,7 +29,55 @@ def _is_missing_relation_error(error: Exception, table_name: str) -> bool:
     )
 
 
-def build_game_market_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _schedule_lookup_key(game_date: Any, home_tricode: Any, away_tricode: Any) -> Optional[tuple]:
+    game_date = str(game_date or "").strip()
+    home_tricode = str(home_tricode or "").strip().upper()
+    away_tricode = str(away_tricode or "").strip().upper()
+    if not game_date or not home_tricode or not away_tricode:
+        return None
+    return (game_date, home_tricode, away_tricode)
+
+
+def build_game_id_resolver(dates: List[str]):
+    """Fall back to the Supabase `games` table (date + matchup) to recover a
+    real NBA game_id when the odds artifact doesn't have one -- e.g. because
+    the scraper's local schedule snapshot was stale when it ran. Without
+    this, rows with no game_id get silently dropped and that day's odds
+    never make it into game_markets_current."""
+    normalized_dates = sorted({str(d).strip() for d in dates if str(d or "").strip()})
+    if not normalized_dates:
+        return lambda *_args: None
+
+    try:
+        sb = get_supabase_client()
+        resp = (
+            sb.table("games")
+            .select("game_id,game_date,home_team_tricode,away_team_tricode")
+            .in_("game_date", normalized_dates)
+            .execute()
+        )
+        schedule_rows = resp.data or []
+    except Exception as exc:
+        logger.warning("Could not load games table for game_id resolution: %s", exc)
+        return lambda *_args: None
+
+    index: Dict[tuple, str] = {}
+    for row in schedule_rows:
+        key = _schedule_lookup_key(row.get("game_date"), row.get("home_team_tricode"), row.get("away_team_tricode"))
+        if key:
+            index[key] = row.get("game_id")
+
+    def resolver(game_date: Any, home_tricode: Any, away_tricode: Any) -> Optional[str]:
+        key = _schedule_lookup_key(game_date, home_tricode, away_tricode)
+        return index.get(key) if key else None
+
+    return resolver
+
+
+def build_game_market_rows(
+    payload: Dict[str, Any],
+    game_id_resolver: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
 
@@ -43,6 +91,13 @@ def build_game_market_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(game, dict):
             continue
         game_id = str(game.get("game_id") or "").strip()
+        if not game_id and game_id_resolver is not None:
+            resolved = game_id_resolver(
+                game.get("game_date") or query_date,
+                game.get("home_team_tricode"),
+                game.get("away_team_tricode"),
+            )
+            game_id = str(resolved or "").strip()
         if not game_id:
             continue
 
@@ -84,7 +139,12 @@ def upsert_game_markets_from_file(action_network_path: str) -> bool:
         logger.warning("Could not read Action Network artifact %s: %s", action_network_path, exc)
         return False
 
-    rows = build_game_market_rows(payload)
+    games = payload.get("games") if isinstance(payload.get("games"), list) else []
+    fallback_dates = [str(payload.get("query_date") or "").strip()] + [
+        str(game.get("game_date") or "").strip() for game in games if isinstance(game, dict)
+    ]
+    resolver = build_game_id_resolver(fallback_dates)
+    rows = build_game_market_rows(payload, game_id_resolver=resolver)
     if not rows:
         log_status(logger, "SKIP", "No Action Network game markets rows prepared")
         return True

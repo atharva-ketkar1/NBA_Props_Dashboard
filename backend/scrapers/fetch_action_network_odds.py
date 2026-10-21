@@ -732,6 +732,17 @@ def _is_existing_payload_fresh(
     if str(payload.get("query_date") or "").strip() != expected_query_date:
         return False
 
+    # A payload built while today_schedule.json was still stale (e.g. before
+    # the ~6am ET daily pipeline run) has no real NBA game_id for any game,
+    # which makes every row silently un-upsertable downstream. Don't treat
+    # that as "fresh" -- retry sooner instead of waiting out the full
+    # interval with no odds for the day.
+    payload_games = payload.get("games") if isinstance(payload.get("games"), list) else []
+    if not payload_games:
+        return False
+    if not any(str(game.get("game_id") or "").strip() for game in payload_games if isinstance(game, dict)):
+        return False
+
     generated_at = str(payload.get("generated_at") or "").strip()
     if not generated_at:
         return False
