@@ -602,21 +602,30 @@ def run_odds_update(
             logger.error("Upsert failed for chunk %d-%d: %s", i, i + len(chunk), e)
             all_chunks_ok = False
 
+    # --- Batch stale-row deletes by (stat_type, sportsbook, game_date) so each
+    # distinct group is a single `IN (...)` request instead of one request per row ---
+    stale_groups = {}
     for stale_row in stale_pp_rows:
-        try:
-            sb.table('player_props').delete().eq('player_id', stale_row['player_id']).eq(
-                'stat_type', stale_row['stat_type']
-            ).eq('sportsbook', stale_row['sportsbook']).eq('game_date', stale_row['game_date']).execute()
-        except Exception as e:
-            logger.error(
-                "Delete failed for stale PrizePicks row %s/%s/%s/%s: %s",
-                stale_row['player_id'],
-                stale_row['stat_type'],
-                stale_row['sportsbook'],
-                stale_row['game_date'],
-                e,
-            )
-            all_chunks_ok = False
+        group_key = (stale_row['stat_type'], stale_row['sportsbook'], stale_row['game_date'])
+        stale_groups.setdefault(group_key, []).append(stale_row['player_id'])
+
+    for (stat_type, sportsbook, game_date), player_ids in stale_groups.items():
+        for i in range(0, len(player_ids), 100):
+            id_chunk = player_ids[i:i + 100]
+            try:
+                sb.table('player_props').delete().in_('player_id', id_chunk).eq(
+                    'stat_type', stat_type
+                ).eq('sportsbook', sportsbook).eq('game_date', game_date).execute()
+            except Exception as e:
+                logger.error(
+                    "Delete failed for stale PrizePicks rows %s/%s/%s (%d ids): %s",
+                    stat_type,
+                    sportsbook,
+                    game_date,
+                    len(id_chunk),
+                    e,
+                )
+                all_chunks_ok = False
 
     if all_chunks_ok:
         try:
