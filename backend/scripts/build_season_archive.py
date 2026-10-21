@@ -23,6 +23,7 @@ import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -36,7 +37,12 @@ load_dotenv(BACKEND / ".env")
 import pandas as pd  # noqa: E402
 import requests  # noqa: E402
 
+from utils.aggregator import DNP_STAT_KEYS, safe_float  # noqa: E402
+from utils.player_index import get_full_player_history  # noqa: E402
+from utils.player_matcher import PlayerMatcher  # noqa: E402
+
 TABLE = "archive_gamelogs"
+ARCHIVE = BACKEND / "data" / "archive"
 # Players per request. The payload is large (~100KB of JSON per player), so this is
 # deliberately small to stay inside PostgREST's request size and timeout limits.
 CHUNK = 15
@@ -68,7 +74,72 @@ def clean(value):
     return value
 
 
-def build_rows(season, csv_path):
+def build_dnp_stats_map(df):
+    """Per-player averages for THIS season, straight from its own gamelogs CSV.
+
+    There is no season_stats.csv for a past season (only the live one gets
+    rewritten each season), but the gamelogs CSV already carries every raw
+    per-game column DNP_STAT_KEYS needs, so grouping/averaging it directly is
+    both sufficient and more accurate than reaching for a current-season file.
+    """
+    present = [k for k in DNP_STAT_KEYS if k in df.columns]
+    means = df.groupby("PLAYER_ID")[present].mean() if present else pd.DataFrame()
+    stats_map = {}
+    for player_id, row in means.iterrows():
+        stats_map[int(player_id)] = {
+            k: (safe_float(row[k]) if k in present else 0.0) for k in DNP_STAT_KEYS
+        }
+    return stats_map
+
+
+def load_boxscores(path):
+    if not path or not Path(path).exists():
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def attach_dnps(games, boxscores_data, stats_map, matcher):
+    """Mutates each game dict in place, mirroring aggregator.py's live-season
+    logic exactly: a DNP'd teammate's `stats` is their season average for
+    the stat the hover tooltip is currently showing, resolved by name via the
+    same PlayerMatcher the live pipeline uses."""
+    if not boxscores_data:
+        return
+    for game in games:
+        game_id = str(game.get("GAME_ID", "")).zfill(10)
+        b_data = boxscores_data.get(game_id)
+        if not b_data:
+            continue
+
+        team = str(game.get("TEAM_ABBREVIATION", ""))
+        if not team or team == "0" or team == "0.0":
+            matchup = str(game.get("MATCHUP", ""))
+            if " @ " in matchup:
+                team = matchup.split(" @ ")[0]
+            elif " vs. " in matchup:
+                team = matchup.split(" vs. ")[0]
+
+        game["margin"] = b_data.get("margins", {}).get(team, 0)
+
+        team_dnps = []
+        for dnp in b_data.get("dnps", []):
+            if dnp.get("team") != team:
+                continue
+            dnp_pid = matcher.match_player(dnp["name"], team, [])
+            d_stats = stats_map.get(dnp_pid) if dnp_pid else None
+            if not d_stats:
+                d_stats = {k: 0.0 for k in DNP_STAT_KEYS}
+            team_dnps.append({
+                "name": dnp["name"],
+                "reason": dnp.get("reason"),
+                "stats": d_stats,
+                "id": dnp_pid,
+            })
+        game["dnps"] = team_dnps
+
+
+def build_rows(season, csv_path, boxscores_path=None):
     df = pd.read_csv(csv_path)
     if "PLAYER_ID" not in df.columns:
         raise SystemExit(f"{csv_path} has no PLAYER_ID column")
@@ -81,6 +152,21 @@ def build_rows(season, csv_path):
         # games of the season instead of their most recent.
         df = df.sort_values(SORT_KEY, ascending=False)
 
+    boxscores_data = load_boxscores(boxscores_path)
+    stats_map = build_dnp_stats_map(df) if boxscores_data else {}
+    matcher = None
+    if boxscores_data:
+        # gamelogs_<season>.csv has no player-name column (PLAYER_ID only), so
+        # the DNP name->id matcher needs a name->id lookup covering everyone
+        # who played in this (possibly long-past) season -- including anyone
+        # since retired or out of the league, whom a "current roster" source
+        # would drop. get_full_player_history is exactly that: the league's
+        # full all-time player list, not filtered by current activity.
+        roster = get_full_player_history()
+        if not roster:
+            print(f"  WARNING: no player history available; DNP names will not resolve to IDs.")
+        matcher = PlayerMatcher(roster)
+
     rows = []
     total_games = 0
     for player_id, group in df.groupby("PLAYER_ID", sort=True):
@@ -88,6 +174,8 @@ def build_rows(season, csv_path):
             {col: clean(val) for col, val in record.items()}
             for record in group.to_dict(orient="records")
         ]
+        if boxscores_data:
+            attach_dnps(games, boxscores_data, stats_map, matcher)
         total_games += len(games)
         rows.append({
             "player_id": int(player_id),
@@ -95,6 +183,11 @@ def build_rows(season, csv_path):
             "game_log": games,
         })
     return rows, total_games, list(df.columns)
+
+
+RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504,
+                             520, 521, 522, 523, 524, 525, 526, 530})
+MAX_CHUNK_ATTEMPTS = 8
 
 
 def upsert(rows, url, key):
@@ -109,12 +202,39 @@ def upsert(rows, url, key):
     for i in range(0, len(rows), CHUNK):
         chunk = rows[i:i + CHUNK]
         body = json.dumps(chunk, allow_nan=False)
-        resp = requests.post(endpoint, headers=headers, data=body, timeout=180)
-        if resp.status_code not in (200, 201, 204):
-            raise SystemExit(
-                f"upsert failed at rows {i}-{i + len(chunk)}: "
-                f"HTTP {resp.status_code} {resp.text[:400]}"
-            )
+
+        # Transient 5xx/520s and raw connection timeouts happen right after a
+        # project restart or under pool pressure -- not a sign the data
+        # itself is bad -- so retry a few times with backoff before giving
+        # up on this chunk. A timeout raises before any response/status code
+        # exists, so it needs its own except clause, not just a status check.
+        for attempt in range(1, MAX_CHUNK_ATTEMPTS + 1):
+            try:
+                resp = requests.post(endpoint, headers=headers, data=body, timeout=180)
+            except requests.exceptions.RequestException as exc:
+                if attempt == MAX_CHUNK_ATTEMPTS:
+                    raise SystemExit(
+                        f"upsert failed at rows {i}-{i + len(chunk)}: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                delay = min(2 ** attempt, 30)
+                print(f"\n  chunk {i}-{i + len(chunk)}: {type(exc).__name__}, "
+                      f"retrying in {delay}s (attempt {attempt}/{MAX_CHUNK_ATTEMPTS})")
+                time.sleep(delay)
+                continue
+
+            if resp.status_code in (200, 201, 204):
+                break
+            if resp.status_code not in RETRY_STATUSES or attempt == MAX_CHUNK_ATTEMPTS:
+                raise SystemExit(
+                    f"upsert failed at rows {i}-{i + len(chunk)}: "
+                    f"HTTP {resp.status_code} {resp.text[:400]}"
+                )
+            delay = min(2 ** attempt, 30)
+            print(f"\n  chunk {i}-{i + len(chunk)}: HTTP {resp.status_code}, "
+                  f"retrying in {delay}s (attempt {attempt}/{MAX_CHUNK_ATTEMPTS})")
+            time.sleep(delay)
+
         written += len(chunk)
         print(f"  upserted {written}/{len(rows)} players", end="\r", flush=True)
     print(f"  upserted {written}/{len(rows)} players    ")
@@ -143,15 +263,27 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--season", required=True, help="e.g. 2025-26")
     ap.add_argument("--csv", help="defaults to backend/data/current/gamelogs_<season>.csv")
+    ap.add_argument(
+        "--boxscores",
+        help=(
+            "Path to that season's boxscores.json (margins + DNPs), used to attach "
+            "a `dnps` list to each game row like the live aggregator does. Defaults "
+            "to backend/data/archive/season_<season>/boxscores.json if present; "
+            "omit/missing means archived rows get no `dnps` field, same as today."
+        ),
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--verify", action="store_true", help="only re-check what is stored")
     args = ap.parse_args()
 
     url, key = env("SUPABASE_URL"), env("SUPABASE_SERVICE_KEY")
     csv_path = Path(args.csv) if args.csv else BACKEND / "data" / "current" / f"gamelogs_{args.season}.csv"
+    boxscores_path = Path(args.boxscores) if args.boxscores else ARCHIVE / f"season_{args.season}" / "boxscores.json"
+    if not boxscores_path.exists():
+        boxscores_path = None
 
     if args.verify:
-        rows, total_games, _ = build_rows(args.season, csv_path)
+        rows, total_games, _ = build_rows(args.season, csv_path, boxscores_path)
         return 0 if verify(args.season, len(rows), total_games, url, key) else 1
 
     if not csv_path.exists():
@@ -159,7 +291,8 @@ def main():
 
     print(f"season : {args.season}")
     print(f"source : {csv_path}")
-    rows, total_games, columns = build_rows(args.season, csv_path)
+    print(f"boxscores: {boxscores_path or '(none found -- dnps will be omitted)'}")
+    rows, total_games, columns = build_rows(args.season, csv_path, boxscores_path)
     payload_mb = len(json.dumps(rows, allow_nan=False)) / 1048576
     print(f"  players     : {len(rows)}")
     print(f"  games       : {total_games}")

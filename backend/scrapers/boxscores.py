@@ -120,62 +120,79 @@ def fetch_and_parse_boxscore(game_id):
             print(f"      Failed to parse Boxscore {game_id}: {e}")
         return game_id, None
 
-def run_scrape(output_path):
-    print(f"   Managing Boxscores at {output_path}")
+def _load_existing(output_path):
+    if not os.path.exists(output_path):
+        return {}
+    try:
+        with open(output_path, 'r') as f:
+            return json.load(f)
+    except Exception:
+        print("      Corrupt JSON. Forcing full refresh.")
+        return {}
 
-    existing_data = {}
 
-    if os.path.exists(output_path):
-        try:
-            with open(output_path, 'r') as f:
-                existing_data = json.load(f)
-            if existing_data:
-                print(f"      Found {len(existing_data)} existing logs. Identifying missing games for SMART INCREMENTAL update.")
-        except Exception:
-            print("      Corrupt JSON. Forcing full refresh.")
-            existing_data = {}
+def _save(existing_data, output_path):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    tmp_path = output_path + ".tmp"
+    with open(tmp_path, 'w') as f:
+        json.dump(existing_data, f, indent=4)
+    os.replace(tmp_path, output_path)
 
-    days_to_check = MAX_HISTORY_DAYS
-    
-    # Step 1: Get all Game IDs instantly from the Master Schedule
-    all_game_ids = get_all_recent_game_ids(days_to_check)
-    
-    # Step 2: Filter out games we already have
-    game_ids_to_process = [gid for gid in all_game_ids if gid not in existing_data]
-    
+
+def run_scrape_for_ids(game_ids, output_path, checkpoint_every=50):
+    """Fetch boxscores for exactly `game_ids`, skipping any already present at
+    `output_path`. Safe to re-run: only ever fetches what's missing, and never
+    re-requests or rewrites a game that's already saved.
+
+    Checkpoints to disk every `checkpoint_every` new games so a long run (e.g.
+    backfilling a full past season, ~1230 games) doesn't lose progress to a
+    crash or an interrupted connection partway through.
+    """
+    existing_data = _load_existing(output_path)
+    if existing_data:
+        print(f"      Found {len(existing_data)} existing logs. Identifying missing games for SMART INCREMENTAL update.")
+
+    game_ids_to_process = [gid for gid in game_ids if gid not in existing_data]
     print(f"      Found {len(game_ids_to_process)} NEW completed games missing from boxscores.")
 
     if not game_ids_to_process:
         print("      No new games to process. Exiting.")
-        return
+        return existing_data
 
-    # Step 3: Fetch the actual boxscores concurrently from the CDN
     print(f"      Fetching Boxscore data with {MAX_WORKERS} workers...")
     valid_updates = 0
-    
+    since_checkpoint = 0
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_game = {executor.submit(fetch_and_parse_boxscore, gid): gid for gid in game_ids_to_process}
-        
+
         for i, future in enumerate(as_completed(future_to_game)):
             game_id, parsed_data = future.result()
-            
-            # If valid data came back, save it to our dictionary
+
             if parsed_data:
                 existing_data[game_id] = parsed_data
                 valid_updates += 1
-            
+                since_checkpoint += 1
+
             if (i + 1) % 25 == 0 or (i + 1) == len(game_ids_to_process):
                 print(f"      [{i+1}/{len(game_ids_to_process)}] Processed new boxscores...")
+
+            if since_checkpoint >= checkpoint_every:
+                _save(existing_data, output_path)
+                since_checkpoint = 0
 
     import gc
     gc.collect()
 
-    # Step 4: Save to data sink
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w') as f:
-        json.dump(existing_data, f, indent=4)
-        
+    _save(existing_data, output_path)
     print(f"   Updated boxscores saved! (Total tracked: {len(existing_data)}, Updated just now: {valid_updates})")
+    return existing_data
+
+
+def run_scrape(output_path):
+    print(f"   Managing Boxscores at {output_path}")
+    all_game_ids = get_all_recent_game_ids(MAX_HISTORY_DAYS)
+    run_scrape_for_ids(all_game_ids, output_path)
 
 if __name__ == "__main__":
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
