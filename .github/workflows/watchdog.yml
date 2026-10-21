@@ -1,0 +1,81 @@
+name: Pipeline watchdog
+
+# Watches the dashboard from outside the VM, so that a dead or deleted host
+# cannot also silence its own alarm. See backend/scripts/watchdog_check.py for
+# what is checked and why.
+#
+# Runs on GitHub's schedule, which is best-effort: ticks can be delayed by
+# several minutes under load, and are skipped entirely if the queue is busy.
+# That is fine here -- the staleness threshold (90m) is far wider than the
+# jitter, so a late run does not produce a false alarm.
+#
+# NOTE: GitHub disables scheduled workflows in repositories with no activity
+# for 60 days. During the offseason, either push something occasionally or
+# re-enable this from the Actions tab before the season starts.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      stale_minutes:
+        description: 'Override the staleness threshold, in minutes'
+        required: false
+        default: '90'
+
+# Never let a slow run collide with the next tick.
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Deliberately no pip install: the check uses only the standard library,
+      # so there is no dependency that can break the watchdog itself.
+      - name: Run health check
+        id: check
+        env:
+          WATCHDOG_STALE_MINUTES: ${{ github.event.inputs.stale_minutes || '90' }}
+        run: python backend/scripts/watchdog_check.py | tee "$RUNNER_TEMP/report.txt"
+
+      - name: Write run summary
+        if: always()
+        run: |
+          {
+            echo '### Pipeline watchdog'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/report.txt" 2>/dev/null || echo 'check produced no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Alert Discord
+        if: failure() && env.WEBHOOK != ''
+        env:
+          WEBHOOK: ${{ secrets.WATCHDOG_DISCORD_WEBHOOK_URL }}
+          SUMMARY: ${{ steps.check.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # jq ships on ubuntu-latest and is used here so the message is always
+          # valid JSON no matter what characters the summary contains.
+          jq -n \
+            --arg summary "${SUMMARY:-the health check failed; see the run log}" \
+            --arg url "$RUN_URL" \
+            '{content: ("**NBA pipeline watchdog**\n" + $summary + "\n" + $url)}' \
+            > payload.json
+          curl -sS -X POST -H 'content-type: application/json' \
+            --data @payload.json "$WEBHOOK" \
+            --retry 3 --retry-delay 5 --max-time 30
