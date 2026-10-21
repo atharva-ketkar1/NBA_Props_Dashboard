@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import sys
 import gc
+import tempfile
 import psutil
 import logging
 from contextlib import redirect_stdout
@@ -11,6 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from utils.logging_utils import configure_logging, log_section, log_status
+from scrapers.season_type import resolve_season
 
 # Add path to scrapers
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scrapers'))
@@ -78,7 +80,8 @@ STATS_PATH = os.path.join(DATA_DIR, "season_stats.csv")
 DK_PATH = os.path.join(DATA_DIR, "draftkings.csv")
 FD_PATH = os.path.join(DATA_DIR, "fanduel.csv")
 PP_PATH = os.path.join(DATA_DIR, "prizepicks.csv")
-LOGS_PATH = os.path.join(DATA_DIR, "gamelogs_2025-26.csv")
+CURRENT_SEASON = resolve_season()
+LOGS_PATH = os.path.join(DATA_DIR, f"gamelogs_{CURRENT_SEASON}.csv")
 MASTER_PATH = os.path.join(DATA_DIR, "master_feed.json")
 GAMES_PATH = os.path.join(DATA_DIR, "nba_dashboard_games.json")
 SCHEDULE_PATH = os.path.join(DATA_DIR, "today_schedule.json")
@@ -91,6 +94,33 @@ OPP_SHOT_TYPE_PATH = os.path.join(DATA_DIR, "opponent_defensive_ranks.json")
 PLAY_TYPE_PATH = os.path.join(DATA_DIR, "play_type_analysis.json")
 BOXSCORES_PATH = os.path.join(DATA_DIR, "boxscores.json")
 ET_ZONE = ZoneInfo("America/New_York")
+STATS_REQUIRED_COLUMNS = {"PLAYER_ID", "PLAYER_NAME", "TEAM_ABBREVIATION"}
+
+
+def _atomic_write_dataframe_csv(df: pd.DataFrame, output_path: str) -> None:
+    target_path = Path(output_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".tmp",
+        prefix=f".{target_path.name}.",
+        dir=str(target_path.parent),
+        delete=False,
+        newline="",
+        encoding="utf-8",
+    )
+    temp_path = Path(temp_handle.name)
+    temp_handle.close()
+
+    try:
+        df.to_csv(temp_path, index=False)
+        os.replace(temp_path, target_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 def run_dk():
     logger.info("Starting DraftKings...")
@@ -119,8 +149,9 @@ def run_fd():
     return f"FanDuel: {len(df)} rows"
 
 def run_pp():
-    if not prizepicks.prizepicks_enabled():
-        return "PrizePicks: disabled"
+    disabled_reason = prizepicks.prizepicks_disabled_reason()
+    if disabled_reason:
+        return f"PrizePicks: disabled ({disabled_reason})"
 
     logger.info("Starting PrizePicks...")
     rows, _diagnostics = prizepicks.fetch_and_write_rows(output_path=Path(PP_PATH))
@@ -130,7 +161,29 @@ def run_stats():
     logger.info("Starting Season Stats...")
     engine = nba_stats.NBAStatsEngine()
     df = engine.get_player_data()
-    df.to_csv(STATS_PATH, index=False)
+    has_rows = isinstance(df, pd.DataFrame) and not df.empty
+    has_required_columns = has_rows and STATS_REQUIRED_COLUMNS.issubset(set(df.columns))
+
+    if not has_required_columns:
+        existing_stats_usable = os.path.exists(STATS_PATH) and os.path.getsize(STATS_PATH) > 0
+        if existing_stats_usable:
+            logger.warning(
+                "Season stats scrape returned unusable data; preserving existing season_stats.csv | rows=%s cols=%s",
+                len(df) if isinstance(df, pd.DataFrame) else 0,
+                list(df.columns) if isinstance(df, pd.DataFrame) else [],
+            )
+            return "Season Stats: 0 players (preserved previous file)"
+
+        missing_cols = (
+            sorted(STATS_REQUIRED_COLUMNS - set(df.columns))
+            if isinstance(df, pd.DataFrame)
+            else sorted(STATS_REQUIRED_COLUMNS)
+        )
+        raise RuntimeError(
+            f"Season stats scrape returned unusable data and no fallback file exists (missing_cols={missing_cols})"
+        )
+
+    _atomic_write_dataframe_csv(df, STATS_PATH)
     return f"Season Stats: {len(df)} players"
 
 def run_logs():
@@ -352,13 +405,18 @@ def main():
                 normalized_historical_ok = False
                 legacy_historical_ok = False
 
-            if props_ok and historical_sync_ok:
+            db_sync_ok = props_ok and historical_sync_ok
+            if db_sync_ok:
                 log_status(logger, "OK", "Supabase sync complete")
             else:
+                # Supabase is the only durable copy: local data/current/ is scratch that the
+                # next run overwrites, and the VM itself is disposable. A failed sync therefore
+                # loses the day permanently unless we report failure and let master_cron retry
+                # (bounded by MAX_PIPELINE_FAILURES_PER_DAY), so this is ERROR, not WARN.
                 log_status(
                     logger,
-                    "WARN",
-                    "Supabase sync incomplete",
+                    "ERROR",
+                    "Supabase sync incomplete - day not durably stored",
                     props_ok=props_ok,
                     normalized_historical_ok=normalized_historical_ok,
                     legacy_historical_ok=legacy_historical_ok,
@@ -375,6 +433,13 @@ def main():
                 log_status(logger, "WARN", "Critical scraper failures detected", count=len(critical_failures))
                 for failure in critical_failures:
                     logger.warning("  %s", failure)
+
+            # A pipeline run only "succeeded" if the data actually reached Supabase.
+            # Set REQUIRE_DB_SYNC=false to fall back to the old scraper-only definition
+            # (e.g. to work offline, or to stop retries while Supabase is down).
+            require_db_sync = os.environ.get("REQUIRE_DB_SYNC", "true").strip().lower() not in {"0", "false", "no"}
+            if require_db_sync and not db_sync_ok:
+                return False
 
             return not critical_failures
     finally:

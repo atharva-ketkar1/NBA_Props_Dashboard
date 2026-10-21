@@ -798,10 +798,44 @@ class MLPredictor:
         )
         self._drift_last_summary_at = now
 
+    @staticmethod
+    def _game_context_is_home(
+        team_abbr: str,
+        game_context: Optional[Dict[str, Any]],
+    ) -> Optional[int]:
+        if not isinstance(game_context, dict):
+            return None
+
+        raw_is_home = game_context.get("is_home")
+        if isinstance(raw_is_home, bool):
+            return 1 if raw_is_home else 0
+        raw_is_home_num = _safe_float(raw_is_home)
+        if raw_is_home_num in {0.0, 1.0}:
+            return int(raw_is_home_num)
+
+        team_key = str(team_abbr or "").strip().upper()
+        home_team = str(
+            game_context.get("home_team_tricode")
+            or game_context.get("home_team")
+            or ""
+        ).strip().upper()
+        away_team = str(
+            game_context.get("away_team_tricode")
+            or game_context.get("away_team")
+            or ""
+        ).strip().upper()
+        if team_key and team_key == home_team:
+            return 1
+        if team_key and team_key == away_team:
+            return 0
+        return None
+
     def _build_live_player_history_context(
         self,
         player_info: Dict[str, Any],
         logs: List[Dict[str, Any]],
+        *,
+        game_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not logs:
             return None
@@ -827,8 +861,10 @@ class MLPredictor:
             if self.enrichment
             else str(player_info.get("position") or "G")
         )
+        is_home_flag = self._game_context_is_home(team_abbr, game_context)
+        matchup_separator = " @ " if is_home_flag == 0 else " vs. "
         dummy_matchup = (
-            f"{team_abbr} vs. {opponent_abbr}"
+            f"{team_abbr}{matchup_separator}{opponent_abbr}"
             if team_abbr and opponent_abbr and opponent_abbr != "UNK"
             else f"vs. {opponent_abbr or 'UNK'}"
         )
@@ -936,6 +972,11 @@ class MLPredictor:
         if not isinstance(game_context, dict):
             return
 
+        team_key = str(row_obj.get("team") or "").strip().upper()
+        is_home_flag = MLPredictor._game_context_is_home(team_key, game_context)
+        if is_home_flag is not None:
+            row_obj["is_home"] = is_home_flag
+
         vegas_total = _safe_float(game_context.get("vegas_total"))
         team_spread_line = _safe_float(game_context.get("team_spread_line"))
         team_implied_total = _safe_float(game_context.get("team_implied_total"))
@@ -966,7 +1007,11 @@ class MLPredictor:
         game_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         self._ensure_runtime_artifacts_fresh()
-        history_context = self._build_live_player_history_context(player_info, logs)
+        history_context = self._build_live_player_history_context(
+            player_info,
+            logs,
+            game_context=game_context,
+        )
         if not history_context:
             return None
 

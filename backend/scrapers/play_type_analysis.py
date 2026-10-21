@@ -4,6 +4,15 @@ import json
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
+
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 # ---------------- HEADERS & SESSION ---------------- #
 HEADERS = {
     "accept": "application/json, text/plain, */*",
@@ -19,7 +28,7 @@ HEADERS = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-site",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 }
 
 def create_session():
@@ -50,23 +59,24 @@ PLAY_TYPES = {
 # ==========================================
 def fetch_synergy_data(play_type, grouping="offensive", is_team="P"):
     url = "https://stats.nba.com/stats/synergyplaytypes"
+    season = resolve_season()
     params = {
         "LeagueID": "00",
         "PerMode": "PerGame",       
         "PlayType": play_type,
         "PlayerOrTeam": is_team,    
-        "SeasonType": "Regular Season",
-        "SeasonYear": "2025-26",    
+        "SeasonType": resolve_season_type(),
+        "SeasonYear": season,
         "TypeGrouping": grouping    
     }
-    r = SESSION.get(url, headers=HEADERS, params=params, timeout=20)
-    r.raise_for_status()
+    r = proxied_get(url, headers=HEADERS, params=params, label="synergy-" + play_type)
     data = r.json()["resultSets"][0]
     return pd.DataFrame(data["rowSet"], columns=data["headers"])
 
 def fetch_traditional_player_stats():
     # Needed specifically to get Player Offensive Free Throws (FTM)
     url = "https://stats.nba.com/stats/leaguedashplayerstats"
+    season = resolve_season()
     params = {
         "College": "", "Conference": "", "Country": "", "DateFrom": "", "DateTo": "",
         "Division": "", "DraftPick": "", "DraftYear": "", "GameScope": "", "GameSegment": "",
@@ -75,17 +85,18 @@ def fetch_traditional_player_stats():
         "Month": "0", "OpponentTeamID": "0", "Outcome": "", "PORound": "0", "PaceAdjust": "N",
         "PerMode": "PerGame", "Period": "0", "PlayerExperience": "", "PlayerPosition": "",
         "PlusMinus": "N", "Rank": "N",
-        "Season": "2025-26", "SeasonSegment": "", "SeasonType": "Regular Season", 
+        "Season": season, "SeasonSegment": "", "SeasonType": resolve_season_type(), 
         "ShotClockRange": "", "StarterBench": "", "TeamID": "0", "TwoWay": "0", 
         "VsConference": "", "VsDivision": "", "Weight": ""
     }
-    r = SESSION.get(url, headers=HEADERS, params=params, timeout=20)
+    r = proxied_get(url, headers=HEADERS, params=params, label="play-type")
     data = r.json()["resultSets"][0]
     return pd.DataFrame(data["rowSet"], columns=data["headers"])
 
 def fetch_traditional_team_stats():
     # Needed specifically to get Defensive Free Throw rankings (OPP_FTM)
     url = "https://stats.nba.com/stats/leaguedashteamstats"
+    season = resolve_season()
     params = {
         "Conference": "", "DateFrom": "", "DateTo": "", "Division": "", "GameScope": "",
         "GameSegment": "", "LastNGames": "0", "LeagueID": "00", "Location": "",
@@ -93,17 +104,18 @@ def fetch_traditional_team_stats():
         "Month": "0", "OpponentTeamID": "0", "Outcome": "",
         "PORound": "0", "PaceAdjust": "N", "PerMode": "PerGame", "Period": "0",
         "PlayerExperience": "", "PlayerPosition": "", "PlusMinus": "N", "Rank": "N",
-        "Season": "2025-26", "SeasonSegment": "", "SeasonType": "Regular Season",
+        "Season": season, "SeasonSegment": "", "SeasonType": resolve_season_type(),
         "ShotClockRange": "", "StarterBench": "", "TeamID": "0", "TwoWay": "0",
         "VsConference": "", "VsDivision": ""
     }
-    r = SESSION.get(url, headers=HEADERS, params=params, timeout=20)
+    r = proxied_get(url, headers=HEADERS, params=params, label="play-type")
     data = r.json()["resultSets"][0]
     return pd.DataFrame(data["rowSet"], columns=data["headers"])
 
 def fetch_misc_team_stats():
     # Needed to get Opponent 2nd Chance Points (Proxy for Defensive Putbacks)
     url = "https://stats.nba.com/stats/leaguedashteamstats"
+    season = resolve_season()
     params = {
         "Conference": "", "DateFrom": "", "DateTo": "", "Division": "", "GameScope": "",
         "GameSegment": "", "LastNGames": "0", "LeagueID": "00", "Location": "",
@@ -111,11 +123,11 @@ def fetch_misc_team_stats():
         "Month": "0", "OpponentTeamID": "0", "Outcome": "",
         "PORound": "0", "PaceAdjust": "N", "PerMode": "PerGame", "Period": "0",
         "PlayerExperience": "", "PlayerPosition": "", "PlusMinus": "N", "Rank": "N",
-        "Season": "2025-26", "SeasonSegment": "", "SeasonType": "Regular Season",
+        "Season": season, "SeasonSegment": "", "SeasonType": resolve_season_type(),
         "ShotClockRange": "", "StarterBench": "", "TeamID": "0", "TwoWay": "0",
         "VsConference": "", "VsDivision": ""
     }
-    r = SESSION.get(url, headers=HEADERS, params=params, timeout=20)
+    r = proxied_get(url, headers=HEADERS, params=params, label="play-type")
     data = r.json()["resultSets"][0]
     return pd.DataFrame(data["rowSet"], columns=data["headers"])
 

@@ -1,4 +1,4 @@
-# PropX NBA Dashboard
+# NBA Props Intelligence Dashboard
 
 An end-to-end basketball analytics product that turns fragmented sportsbook and league data into a fast, research-friendly decision surface.
 
@@ -119,7 +119,7 @@ The ML model predicts how a player historically performs, but the pipeline makes
 
 If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, the system acts as a highly curated prop alert stream. When the modified ML Edge Score crosses a high-conviction threshold (72.5+), it fires a visual Discord snippet explaining exactly *why* the mathematical edge triggered (e.g., *"The regression model projects 16.5 (lineup-adjusted +20%: Cade Cunningham out)..."*). 
 
-The Discord integration includes full intraday deduplication (it only alerts you when lines or odds officially shift), automated game-finalization cleanup, 429 webhook retry safety, and tracker grading recaps that retry dynamically once prior-day box scores are available.
+The Discord integration includes full intraday deduplication: it only alerts when lines, odds, scores, or ranks move meaningfully, and it suppresses same-slate repeats of overlapping player/side concepts unless the later move is materially larger. It also handles automated game-finalization cleanup, 429 webhook retry safety, and tracker grading recaps that retry dynamically once prior-day box scores are available.
 
 To manually verify the tracker webhook target, run `python3 test_tracker_discord.py --message "manual tracker test"` from [backend/](/Users/atharvaketkar/Desktop/NBA_Dashboard/backend). The script posts a one-off test message to the tracker webhook and prints the returned Discord `channel_id`/`message_id`.
 
@@ -134,94 +134,129 @@ The React frontend (`frontend/`) is intentionally thin at runtime:
 
 That split keeps the interface responsive while still allowing a hosted deployment path.
 
-## How The System Works
+## Architecture Snapshot
 
 ```text
-NBA + sportsbook sources
-        |
-Python scrapers
-        |
-Clean CSV / JSON artifacts
-        |
-Aggregator + feature engineering
-        |
-CatBoost scoring + Edge Score
-        |
-Supabase and/or static JSON
-        |
-React + TypeScript dashboard
+Sportsbooks + NBA data sources
+           ↓
+   Python scrapers
+           ↓
+  current CSV/JSON artifacts
+           ↓
+   aggregator.py canonicalizes
+           ↓
+ master_feed.json + Supabase upserts
+           ↓
+ React dashboard (JSON mode or DB mode)
 ```
 
-## Core Features
+## Notable Engineering Decisions
 
-- Multi-source data pipeline: pulls schedule, sportsbook odds, player stats, game logs, box scores, injury context, and advanced style data.
-- Player identity matching: handles messy sportsbook names with fuzzy matching and team-aware cleanup.
-- ML-assisted scoring: uses exported CatBoost models and feature engineering to support prop ranking.
-- Market tracking: captures intraday line movement and closing-line snapshots.
-- Responsive frontend: keeps the dashboard fast by doing heavy processing before data reaches the browser.
-- Flexible data delivery: supports local JSON mode for development and Supabase-backed mode for hosted usage.
-- Alerting support: can send curated Discord alerts when configured with a webhook.
+- Sequential scraper execution in `run_pipeline.py` reduces memory pressure on smaller VM instances.
+- `SnapshotManager` preserves closing-line immutability and falls back to the last valid intraday snapshot when books move in-play too quickly.
+- The frontend uses a static-first interaction model, which makes filtering and tab changes feel immediate even with dense player records.
+- Historical game logs are enriched with margin, DNP context, and opponent-rank overlays so the UI can compare performance against matchup texture rather than only raw box scores.
+- Supabase support is additive rather than replacing local artifacts, which keeps local development simple and the production path flexible.
+
+## Security Model
+
+This dashboard is a public, read-focused application. That means an important rule applies:
+
+- Any data required to render the anonymous browser experience should be treated as potentially scrapeable.
+
+The goal of the security model is therefore not "make all browser-visible stats secret." The goal is:
+
+- Keep privileged credentials off the client
+- Minimize bulk data exposure
+- Avoid turning the server into an unrestricted database proxy
+- Rate-limit and shape access patterns
+- Reserve stronger protection for truly proprietary or paid-only data
+
+### Current Security Boundaries
+
+- Supabase service-role credentials are server-side only and are never shipped to the browser.
+- The browser talks to app API routes under `frontend/api/` rather than directly querying privileged Supabase resources.
+- Player-detail and archive reads use short-lived, signed tokens tied to an HttpOnly session cookie.
+- API routes apply request-shaping checks such as custom app headers, browser request filtering, cache control, and per-route rate limits.
+- Security headers are configured in [`vercel.json`](/Users/atharvaketkar/Desktop/NBA_Dashboard/vercel.json).
+
+### Important Limitation
+
+This app is still anonymous/public. So while the database is not directly exposed, data returned by public endpoints can still be reverse engineered or scraped.
+
+Two practical implications:
+
+- Public bootstrap data should be kept as small as possible.
+- If a dataset is truly proprietary, it needs real authentication and entitlement checks, not just obscurity or header checks.
+
+## Hardening Work Completed
+
+Recent security-focused changes reduced unnecessary data exposure without changing the user-facing UI:
+
+- Moved similar-player ranking to a server-side endpoint so the browser no longer needs every player's play-style profile just to compute comps.
+- Added [`/api/similar`](/Users/atharvaketkar/Desktop/NBA_Dashboard/frontend/api/similar.ts) as a server-ranked similar-player route.
+- Reduced the public bootstrap payload by removing bulk `play_type_analysis` from the initial all-player response.
+- Moved `play_type_analysis` into the per-player detail fetch path so only the actively viewed player gets that heavier style data.
+- Updated the analysis cards to wait for real player detail instead of relying on public placeholder/demo data during DB-mode rendering.
+
+In practice, this means:
+
+- A scraper no longer gets every player's play-type profile from the first page load.
+- Similar-player logic can still work, but the underlying cross-player style input stays on the server.
+- The dashboard keeps the same UX while exposing less analytical structure up front.
+
+## Remaining Security Gaps
+
+The current hardening is a meaningful improvement, but it is not the same thing as private-data protection.
+
+Remaining gaps:
+
+- Public routes are still anonymous, so determined users can script against them.
+- Header checks such as `x-propx-client` are request-shaping measures, not real authentication.
+- Current rate limiting is in-memory and therefore weaker in a distributed/serverless environment than a shared Redis-backed limiter.
+- If all player detail/archive data should be private, the app will need authentication plus authorization rules.
+
+## Recommended Next Steps
+
+If the hosted version needs stronger protection, the next steps should be:
+
+1. Move public reads onto explicitly limited public views or RLS-safe tables instead of broad privileged reads.
+2. Replace in-memory per-instance rate limiting with a shared limiter such as Upstash Redis.
+3. Add real auth/entitlement checks for player detail, archives, or premium analytics if those should not be public.
+4. Log and monitor abusive request patterns so scraping behavior can be throttled or challenged.
+
+## Verification Before Deployment
+
+Before pushing the current frontend changes, the local verification run completed successfully with:
+
+- `npx tsc --noEmit`
+- `npm run build`
+
+Those checks confirm the frontend and API TypeScript compile cleanly and the Vite production bundle builds successfully. They do not replace a final runtime smoke test on the deployed VM with real environment variables.
 
 ## Tech Stack
 
-Frontend:
+### Frontend
 
 - React 19
 - TypeScript
 - Vite
 - Framer Motion
-- Supabase JS
-- Vercel
+- Supabase JS client
 
-Backend:
+### Backend
 
 - Python
-- pandas, NumPy, SciPy
-- CatBoost
-- nba_api, pbpstats, requests
-- RapidFuzz for player matching
+- pandas / numpy / scipy
+- catboost (ML Regression Inference)
+- requests / nba_api / pbpstats
+- RapidFuzz
+- APScheduler-compatible scheduling patterns plus cron orchestration
 - Supabase Python client
-- Cron-style orchestration for scheduled refreshes
 
-## Project Structure
+## Local Development
 
-```text
-backend/
-  run_pipeline.py              Main pipeline entrypoint
-  cron_jobs/                   Scheduled refresh and alert jobs
-  scrapers/                    NBA, sportsbook, and context data collectors
-  utils/                       Aggregation, scoring, matching, Supabase helpers
-  prop_modeling/               Training, feature engineering, and exported models
-
-frontend/
-  App.tsx                      Main dashboard shell
-  components/                  Dashboard panels, filters, charts, and detail views
-  api/                         Vercel API routes
-  utils/                       API, config, filtering, and display helpers
-  public/                      Static assets served by Vite/Vercel
-
-docs/
-  assets/                      Suggested place for screenshots or GIFs
-```
-
-## Running Locally
-
-Prerequisites:
-
-- Node.js
-- Python 3.11+
-- A Supabase project if you want to test database-backed mode
-- API access or network availability for the live scrapers
-
-Install and run the frontend:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Set up the backend:
+### Backend
 
 ```bash
 python3 -m venv .venv
@@ -232,39 +267,74 @@ cd backend
 python run_pipeline.py
 ```
 
-The backend writes generated files into `backend/data/current/`. The frontend can be configured to read static generated files for local development or use the Vercel API routes for production-style reads.
+To serve the generated files locally:
 
-## Environment Variables
-
-The exact values depend on how you run the app, but the project commonly uses:
-
-```text
-VITE_API_BASE_URL=
-VITE_USE_DB=
-SUPABASE_URL=
-SUPABASE_SECRET_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
-EDGE_SCORE_DISCORD_WEBHOOK_URL=
+```bash
+cd backend
+npx serve --cors -p 5000
 ```
 
-Keep service-role keys and webhooks server-side. Do not expose secrets in browser-facing `VITE_*` variables.
+### Frontend
 
-## Deployment
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-The public app is deployed here:
+### JSON Mode
 
-https://propx-dashboard.vercel.app/
+Use the locally served files:
 
-The frontend is built with Vite and deployed through Vercel. The backend pipeline is designed to run on a scheduled machine or VM that refreshes data artifacts and/or writes to Supabase.
+```bash
+VITE_USE_DB=false
+VITE_API_BASE_URL=http://localhost:5000
+```
 
-## What I Would Improve Next
+### Supabase Mode
 
-- Add a small public demo dataset so new contributors can run the app without live scraper access
-- Add CI checks for frontend build, TypeScript, and backend formatting
-- Add stronger shared rate limiting for public API routes
-- Expand model evaluation docs with backtest summaries and sample prediction reports
-- Add authentication if private or premium data ever needs to be protected
+Frontend:
 
-## Disclaimer
+```bash
+VITE_USE_DB=true
+VITE_ASSETS_URL=
+```
 
-This project is for analytics, research, and portfolio demonstration. It is not financial advice, betting advice, or a guarantee of outcomes.
+Server-side Vercel API routes:
+
+```bash
+SUPABASE_URL=...
+SUPABASE_SECRET_KEY=...
+# or
+SUPABASE_SERVICE_ROLE_KEY=...
+
+# Optional: cap upcoming prop/schedule reads. Defaults to 7 and is capped at 7.
+DASHBOARD_MAX_UPCOMING_PROP_DAYS=7
+```
+
+## Repository Guide
+
+```text
+backend/
+  cron_jobs/      Scheduling and intraday market capture
+  scrapers/       Source-specific extraction modules
+  utils/          Aggregation, matching, snapshots, Supabase helpers
+frontend/
+  components/     Dashboard UI and visual analysis surfaces
+  utils/          Environment and Supabase client helpers
+docs/
+  onboarding/     Fast orientation docs
+  audit/          Current implementation audit and roadmap
+  deployment/     Deployment and hosting notes
+```
+
+## Current Reality
+
+The core ETL and visualization pipeline is real and working. A few UI surfaces still have fallback-driven or coverage-limited states, especially the missing-data fallbacks in the analysis cards and the archive-season or missing-book constraints in Similar Players. Those gaps are documented in [`docs/audit/PROJECT_AUDIT_ROADMAP.md`](/Users/atharvaketkar/Desktop/NBA_Dashboard/docs/audit/PROJECT_AUDIT_ROADMAP.md).
+
+## Documentation
+
+- [`LLM_CONTEXT.md`](/Users/atharvaketkar/Desktop/NBA_Dashboard/LLM_CONTEXT.md)
+- [`docs/onboarding/catch_up_guide.md`](/Users/atharvaketkar/Desktop/NBA_Dashboard/docs/onboarding/catch_up_guide.md)
+- [`docs/audit/PROJECT_AUDIT_ROADMAP.md`](/Users/atharvaketkar/Desktop/NBA_Dashboard/docs/audit/PROJECT_AUDIT_ROADMAP.md)
+- [`docs/deployment/supabase_vercel_migration.md`](/Users/atharvaketkar/Desktop/NBA_Dashboard/docs/deployment/supabase_vercel_migration.md)

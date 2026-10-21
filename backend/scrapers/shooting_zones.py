@@ -3,6 +3,15 @@ import pandas as pd
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
+
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 URL = "https://stats.nba.com/stats/leaguedashplayershotlocations"
 
 # ---- PROTECTION LAYER: HEADERS ----
@@ -21,7 +30,7 @@ HEADERS = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-site",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 }
 
 # ---- REQUIRED PARAMETERS ----
@@ -37,8 +46,8 @@ PARAMS = {
     "Period": "0",
     "PlusMinus": "N",
     "Rank": "N",
-    "Season": "2025-26",
-    "SeasonType": "Regular Season",
+    "Season": resolve_season(),
+    "SeasonType": resolve_season_type(),
     "TeamID": "0",
 }
 
@@ -54,13 +63,10 @@ def create_session():
 def fetch_shot_locations():
     session = create_session()
 
-    response = session.get(
-        URL,
-        headers=HEADERS,
-        params=PARAMS,
-        timeout=15
-    )
-    response.raise_for_status()
+    # stats.nba.com does not respond at all from a datacenter IP (measured:
+    # connection hangs, 25s timeout). Must go through the worker.
+    response = proxied_get(URL, headers=HEADERS, params=PARAMS,
+                           label="shooting-zones")
 
     data = response.json()
     result_set = data["resultSets"]

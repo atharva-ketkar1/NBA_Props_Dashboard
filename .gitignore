@@ -3,8 +3,9 @@ backend/assets/player_headshots
 backend/assets/team_logos
 backend/data
 backend/exploration
-backend/.env*
+backend/.env
 backend/maintainence
+backend/scrapers/check_prizepicks_*.py
 utils/player_matcher.py
 utils/test_matcher.py
 backend/logs
@@ -16,11 +17,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 .env
-.env.*
+.env.local
 
 frontend/node_modules/
 frontend/dist/
-frontend/.env*
+frontend/.env
+frontend/.env.local
 frontend/frontend/
 frontend/npm-debug.log*
 frontend/yarn-debug.log*
@@ -31,10 +33,8 @@ frontend/utils/propsmadness_tokens.txt
 frontend/utils/convert_to_ts.cjs
 frontend/public/assets/player_headshots/
 
-backend_old/
 frontend_old/
 frontend.zip
-.main_local_backup/
 
 Propsmadness-Mock-UI/
 LLM_CONTEXT.md
@@ -46,6 +46,9 @@ docs/deployment/
 
 backend/scrapers/archive/
 /supabase/*
+# ...but migrations ARE schema source-of-truth and must be versioned. Without this
+# negation, new migrations are silently untracked and the DB becomes unrebuildable.
+!/supabase/migrations/
 /vercel.json
 sql/
 .vercel
@@ -54,8 +57,14 @@ Agents.md
 backend/Agents.md
 frontend/Agents.md
 
+backend_old/
+
 # ML Generated Files & Notebooks
 backend/prop_modeling/generated/
 catboost_info/
 backend/prop_modeling/*.ipynb
 backend/prop_modeling/*test*.py
+
+# data archives built by backend/scripts/snapshot.py (never commit: public repo)
+nba_dashboard_backup_*.zip
+*.zip

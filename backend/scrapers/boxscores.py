@@ -5,6 +5,10 @@ import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -12,7 +16,7 @@ MAX_HISTORY_DAYS = 300  # Check the whole season for missing games
 MAX_WORKERS = 1  # Reduced to 1 for memory safety
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Origin": "https://www.nba.com",
     "Referer": "https://www.nba.com/"
@@ -31,8 +35,7 @@ def get_all_recent_game_ids(days_back):
     cutoff_date = datetime.now() - timedelta(days=days_back)
     
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
+        resp = proxied_get(url, headers=HEADERS, label="boxscore-schedule")
         schedule_data = resp.json()
         
         # Navigate the JSON tree to find the dates array
@@ -67,10 +70,11 @@ def fetch_and_parse_boxscore(game_id):
     url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
     
     try:
-        # Fast timeout since CDN is incredibly responsive
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        
-        if resp.status_code != 200:
+        # cdn.nba.com 403s this host directly; the worker also re-rolls its UA
+        # pool, which clears the intermittent stale-UA 403s.
+        try:
+            resp = proxied_get(url, headers=HEADERS, label="boxscore-" + str(game_id))
+        except Exception:
             return game_id, None
 
         boxscore_json = resp.json()

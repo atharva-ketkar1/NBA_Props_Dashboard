@@ -16,6 +16,10 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from pypdf import PdfReader
 
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
+
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 logger = logging.getLogger(__name__)
@@ -98,7 +102,7 @@ HEADERS = {
     "user-agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
+        "Chrome/154.0.0.0 Safari/537.36"
     ),
 }
 
@@ -843,8 +847,12 @@ def fetch_latest_report_pdf_url(
     timeout_seconds: int = 20,
 ) -> Tuple[str, str, str]:
     report_page_url = _report_page_url_for_date(query_date)
-    response = requests.get(report_page_url, headers=HEADERS, timeout=timeout_seconds)
-    response.raise_for_status()
+    # official.nba.com 403s datacenter IPs (measured from the VM), so this has to
+    # go through the worker. proxied_get raises on failure instead of returning a
+    # non-2xx, so raise_for_status() is redundant.
+    response = proxied_get(report_page_url, headers=HEADERS,
+                           timeout=max(timeout_seconds, 60),
+                           label="injury-report-page")
 
     target_date = datetime.strptime(query_date, "%Y%m%d").date()
     soup = BeautifulSoup(response.text, "html.parser")
@@ -878,8 +886,10 @@ def fetch_official_injury_report_payload(
         datetime.strptime(resolved_query_date, "%Y%m%d").date().isoformat(),
         report_pdf_url,
     )
-    response = requests.get(report_pdf_url, headers=HEADERS, timeout=30)
-    response.raise_for_status()
+    # The PDF is served from ak-static.cms.nba.com, a different host that is also
+    # 403'd directly. The worker sends official.nba.com as the referer for it.
+    response = proxied_get(report_pdf_url, headers=HEADERS, timeout=60,
+                           label="injury-report-pdf")
 
     schedule_rows = load_schedule_rows(schedule_path)
     team_aliases = _build_team_aliases(schedule_rows)

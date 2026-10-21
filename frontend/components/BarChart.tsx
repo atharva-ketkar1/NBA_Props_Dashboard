@@ -52,6 +52,13 @@ const getGameKey = (game: any) => `${game?.GAME_ID ?? game?.GAME_DATE ?? ''}-${g
 const getIsHomeGame = (game: any) => String(game?.MATCHUP || '').includes('vs.');
 const getIsAwayGame = (game: any) => String(game?.MATCHUP || '').includes('@');
 
+const getScheduleSortTime = (game?: Game | null) => {
+    const fallbackTime = `${String(game?.game_date ?? '').trim()}T23:59:59Z`;
+    const rawTime = game?.game_time_utc || fallbackTime;
+    const parsedTime = new Date(rawTime).getTime();
+    return Number.isNaN(parsedTime) ? 0 : parsedTime;
+};
+
 const getScheduleMarketKey = (game: any) => {
     const gameDate = String(game?.game_date ?? '').trim();
     const awayTeam = String(game?.away_team_tricode ?? '').trim().toUpperCase();
@@ -314,7 +321,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
         if (chartPlayer.team && scheduleData.length > 0) {
             const sortedSchedule = [...scheduleData].sort((a, b) =>
-                new Date(a.game_time_utc).getTime() - new Date(b.game_time_utc).getTime()
+                getScheduleSortTime(a) - getScheduleSortTime(b)
             );
             upcomingGame = sortedSchedule.find(g =>
                 (g.home_team_tricode === chartPlayer.team || g.away_team_tricode === chartPlayer.team)

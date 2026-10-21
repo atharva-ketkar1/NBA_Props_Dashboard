@@ -5,10 +5,11 @@ import numpy as np
 import gc
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import resolve_prop_game_date
+from utils.pregame_props import is_pregame_schedule_game, is_prop_pregame_by_time
 
 logger = logging.getLogger(__name__)
 UNDATED_PROP_KEY = '__undated__'
@@ -255,7 +256,31 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
     # Create Matcher Instance (using PlayerMatcher)
     stats_records = df_stats[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].to_dict('records')
-    matcher = PlayerMatcher(stats_records)
+
+    # season_stats.csv only contains players with GP > 0, so at the start of a
+    # season the matcher cannot resolve any player whose team has not played
+    # yet -- which is most of the slate. Union in the league-wide roster so
+    # tonight's and tomorrow's players are matchable from day one. See
+    # utils/player_index.py for the measured numbers.
+    roster_records = []
+    try:
+        from utils.player_index import get_player_index
+        known_pids = {
+            int(r['PLAYER_ID']) for r in stats_records
+            if r.get('PLAYER_ID') is not None
+        }
+        roster_records = [
+            r for r in get_player_index()
+            if int(r['PLAYER_ID']) not in known_pids
+        ]
+        if roster_records:
+            print(f"   Extended matcher roster with league player index "
+                  f"(stats={len(stats_records)} index={len(roster_records)})")
+    except Exception as exc:
+        print(f"   Could not load league player index ({exc}); "
+              f"matcher limited to players with games played")
+
+    matcher = PlayerMatcher(stats_records + roster_records)
 
     # Build ID to Stats Map for DNP lookup
     id_to_stats_map = {}
@@ -366,10 +391,17 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         games_data,
         key=lambda g: (normalize_game_date(g.get('game_date')), g.get('game_time_utc') or ''),
     )
+    schedule_game_by_team_date = {}
     for g in sorted_games:
         game_date = normalize_game_date(g.get('game_date'))
         if not game_date:
             continue
+        for team in filter(None, [g.get('home_team_tricode', ''), g.get('away_team_tricode', '')]):
+            schedule_game_by_team_date[(team, game_date)] = g
+
+        if not is_pregame_schedule_game(g, now_et=now_et):
+            continue
+
         deadline_dt = None
         deadline_str = g.get('closing_scrape_deadline')
         if deadline_str:
@@ -382,14 +414,16 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             if (
                 team not in active_game_date_by_team
                 and deadline_dt is not None
-                and deadline_dt >= (now_et - timedelta(minutes=15))
+                and deadline_dt > now_et
             ):
                 active_game_date_by_team[team] = game_date
 
     for team, game_date in fallback_game_date_by_team.items():
         active_game_date_by_team.setdefault(team, game_date)
 
-    for g in games_data:
+    for g in sorted_games:
+        if not is_pregame_schedule_game(g, now_et=now_et):
+            continue
         home_team = g.get('home_team_tricode', '')
         away_team = g.get('away_team_tricode', '')
         
@@ -640,6 +674,39 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             "props_by_date": {}
         }
 
+    # Give roster-only players (GP == 0) a skeleton entry so that process_odds
+    # has somewhere to attach their props. Without this, matcher.match_player
+    # can resolve the name but `pid not in master_data` drops the prop, and the
+    # "props OR GP > 0" filter below can never admit a props-only player.
+    # Context fields are left as None, exactly as they would be for a player
+    # whose shooting/zone lookups miss.
+    _zero_stats_template = {k: 0 for k in DISPLAY_STATS}
+    for _rec in roster_records:
+        _pid = int(_rec['PLAYER_ID'])
+        if _pid in master_data:
+            continue
+        _stats = dict(_zero_stats_template)
+        _stats['PLAYER_ID'] = _pid
+        _stats['TEAM_ABBREVIATION'] = _rec.get('TEAM_ABBREVIATION') or 'UNK'
+        master_data[_pid] = {
+            "id": _pid,
+            "name": _rec['PLAYER_NAME'],
+            "team": _rec.get('TEAM_ABBREVIATION') or 'UNK',
+            "position": None,
+            "stats": _stats,
+            "game_log": [],
+            "shooting_zones": None,
+            "assist_zones": None,
+            "opp_assist_zones": None,
+            "opp_assist_zones_positional": None,
+            "opp_def_zones": None,
+            "opp_def_zones_positional": None,
+            "shot_type_analysis": {"player": None, "opp_def": None},
+            "play_type_analysis": [],
+            "props": {},
+            "props_by_date": {}
+        }
+
     # Free df_stats and spatial/JSON objects now that master_data is fully built
     # NOTE: del df_stats MUST be here, after the iterrows() loop above, not before it
     del df_stats
@@ -683,6 +750,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                 schedule_rows=sorted_games,
                 now_et=now_et,
             )
+            schedule_game = schedule_game_by_team_date.get((canonical_team, row_game_date))
+            if schedule_game and not is_pregame_schedule_game(schedule_game, now_et=now_et):
+                continue
+            if not schedule_game and not is_prop_pregame_by_time(row.get('start_time'), row_game_date, now_et=now_et):
+                continue
             active_game_date = active_game_date_by_team.get(canonical_team)
 
             # Map prop type (e.g. 'points' -> 'PTS')
@@ -751,12 +823,15 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
 if __name__ == "__main__":
     # Test Run
+    from scrapers.season_type import resolve_season
+
     base = "backend/data/current"
+    season = resolve_season()
     run_aggregation(
         f"{base}/season_stats.csv",
         f"{base}/draftkings.csv",
         f"{base}/fanduel.csv",
-        f"{base}/gamelogs_2025-26.csv",
+        f"{base}/gamelogs_{season}.csv",
         f"{base}/shooting_zones.json",
         f"{base}/assist_zones.json",
         f"{base}/opp_assist_zones.json",

@@ -17,6 +17,7 @@ if BASE_DIR not in sys.path:
 
 from utils.intraday_schedule import get_schedule_aware_intraday_interval_seconds
 from utils.logging_utils import configure_logging, log_section, log_status
+from utils.pregame_props import is_within_pregame_window
 
 configure_logging()
 logger = logging.getLogger("MasterCron")
@@ -117,22 +118,14 @@ def load_state():
         "pipeline_failures_today": 0,
         "last_pipeline_attempt_ts": 0,
     }
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, 'r') as f:
-                raw_state = json.load(f)
-                if isinstance(raw_state, dict):
-                    return {**default_state, **raw_state}
-        except Exception as e:
-            logger.error(f"Error loading state: {e}")
-    return default_state
+    # Scheduler state lives in Supabase so a rebuilt VM resumes mid-season; STATE_FILE
+    # is kept in sync as a local cache for when Supabase is unreachable.
+    from utils.cron_state_store import load_state as _load_durable_state
+    return _load_durable_state(STATE_FILE, default_state)
 
 def save_state(state):
-    try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving state: {e}")
+    from utils.cron_state_store import save_state as _save_durable_state
+    _save_durable_state(STATE_FILE, state)
 
 
 def _is_pid_running(pid):
@@ -307,12 +300,7 @@ def check_closing_lines(now, state, dry_run=False):
             
         try:
             deadline_dt = datetime.fromisoformat(deadline_str)
-            delta = deadline_dt - now
-            delta_minutes = delta.total_seconds() / 60.0
-            
-            # If the game is starting in <= 12 minutes, and it hasn't started yet
-            # (or it started max 5 mins ago and we missed it)
-            if -5 <= delta_minutes <= 12:
+            if is_within_pregame_window(game, 12, now_et=now):
                 games_to_scrape.append({
                     "game_id": game_id,
                     "deadline": deadline_dt,
@@ -540,8 +528,25 @@ def refresh_game_status_if_needed(now, state, dry_run=False):
                 games=len(df),
             )
         except Exception as e:
-            log_status(logger, "FAIL", "Game status refresh failed", error=e)
-            refresh_ok = False
+            cached_schedule_exists = False
+            try:
+                with open(SCHEDULE_PATH, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                    cached_schedule_exists = isinstance(payload, dict) and isinstance(payload.get("games"), list)
+            except Exception:
+                cached_schedule_exists = False
+
+            if cached_schedule_exists:
+                log_status(
+                    logger,
+                    "WARN",
+                    "Game status refresh failed; using cached schedule snapshot",
+                    error=e,
+                    cached_schedule_path=SCHEDULE_PATH,
+                )
+            else:
+                log_status(logger, "FAIL", "Game status refresh failed", error=e)
+                refresh_ok = False
 
     if refresh_ok:
         state["last_game_status_refresh_time"] = time.time()

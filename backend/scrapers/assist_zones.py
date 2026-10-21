@@ -9,6 +9,11 @@ import urllib.parse
 
 load_dotenv()
 
+try:
+    from .season_type import resolve_season, resolve_season_type
+except ImportError:
+    from season_type import resolve_season, resolve_season_type
+
 # --- CONFIGURATION ---
 STATS_FILE = os.path.join(os.path.dirname(__file__), '../data/current/season_stats.csv')
 
@@ -22,12 +27,14 @@ def get_all_team_ids():
         print(f"Error reading stats file: {e}")
         return []
 
-def fetch_team_assists(team_id, season="2025-26"):    
+def fetch_team_assists(team_id, season=None):
+    if season is None:
+        season = resolve_season()
     
     target_url = "https://api.pbpstats.com/get-assist-networks/nba"
     target_params = {
         "Season": season,
-        "SeasonType": "Regular Season",
+        "SeasonType": resolve_season_type(),
         "EntityId": int(team_id),
         "EntityType": "Team"
     }
@@ -46,8 +53,11 @@ def fetch_team_assists(team_id, season="2025-26"):
     }
 
     session = requests.Session()
-    retry = Retry(connect=3, read=3, redirect=3, backoff_factor=1,
-                  status_forcelist=[500, 502, 503, 504])
+    # 429 was missing here too, so rate limits were never backed off.
+    retry = Retry(total=5, connect=3, read=3, redirect=3, backoff_factor=1.5,
+                  status_forcelist=[408, 425, 429, 500, 502, 503, 504,
+                                    520, 521, 522, 524, 525, 526, 530],
+                  respect_retry_after_header=True)
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('https://', adapter)
 

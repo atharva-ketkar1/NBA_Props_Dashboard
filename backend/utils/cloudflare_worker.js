@@ -1,17 +1,25 @@
+// Akamai (cdn.nba.com, www.nba.com, DraftKings) rejects stale browser versions with a
+// 403 "Access Denied". Verified cutoff: Chrome <=145 is blocked, >=150 passes. Firefox is
+// refused at any version, so it is intentionally absent. Keep these current -- a UA that
+// ages out of support turns into intermittent 403s, because this pool is sampled at random.
 const USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/121.0.0.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
 ];
 
+// ak-static.cms.nba.com and official.nba.com serve the injury report: the HTML
+// index page lives on official.nba.com and the PDF it links to is on
+// ak-static.cms.nba.com. Both Akamai-front and both return 403 to datacenter
+// IPs (measured from the Oracle VM, 2026-10-20), so both must be proxied.
 const DEFAULT_ALLOWED_UPSTREAM_HOSTS = new Set([
+    "ak-static.cms.nba.com",
     "api.pbpstats.com",
     "api.prizepicks.com",
     "api.sportsbook.fanduel.com",
     "cdn.nba.com",
+    "official.nba.com",
     "sportsbook-nash.draftkings.com",
     "sportsbook.draftkings.com",
     "stats.nba.com",
@@ -72,7 +80,7 @@ function applyResponseHeaders(baseHeaders, request, env) {
     if (corsOrigin) {
         headers.set("Access-Control-Allow-Origin", corsOrigin);
         headers.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
-        headers.set("Access-Control-Allow-Headers", "Content-Type, X-Proxy-Token");
+        headers.set("Access-Control-Allow-Headers", "Content-Type, X-Proxy-Token, X-Device-Id, X-Device-Info, X-CSRF-Token");
     }
 
     return headers;
@@ -101,10 +109,24 @@ function getUpstreamOriginAndReferer(targetObj) {
         };
     }
 
-    if (hostname === "stats.nba.com" || hostname === "cdn.nba.com" || hostname === "www.nba.com") {
+    if (
+        hostname === "stats.nba.com" ||
+        hostname === "cdn.nba.com" ||
+        hostname === "www.nba.com" ||
+        hostname === "official.nba.com"
+    ) {
         return {
             origin: "https://www.nba.com",
             referer: "https://www.nba.com/",
+        };
+    }
+
+    // The injury report PDF is linked from the official.nba.com report page, so
+    // that is the referer a browser would actually send when fetching it.
+    if (hostname === "ak-static.cms.nba.com") {
+        return {
+            origin: "https://official.nba.com",
+            referer: "https://official.nba.com/",
         };
     }
 
@@ -135,7 +157,31 @@ function copyHeaderIfPresent(sourceHeaders, targetHeaders, name) {
     }
 }
 
-function buildUpstreamHeaders(request, targetObj, userAgent) {
+function setHeaderFromEnvIfMissing(targetHeaders, name, value) {
+    const normalizedValue = String(value || "").trim();
+    if (normalizedValue && !targetHeaders.has(name)) {
+        targetHeaders.set(name, normalizedValue);
+    }
+}
+
+function getCookieValue(cookieHeader, name) {
+    const cookiePairs = String(cookieHeader || "").split(";");
+    for (const pair of cookiePairs) {
+        const separatorIndex = pair.indexOf("=");
+        if (separatorIndex === -1) {
+            continue;
+        }
+
+        const cookieName = pair.slice(0, separatorIndex).trim();
+        if (cookieName === name) {
+            return pair.slice(separatorIndex + 1).trim();
+        }
+    }
+
+    return "";
+}
+
+function buildUpstreamHeaders(request, env, targetObj, userAgent) {
     const headers = new Headers();
     const hostname = targetObj.hostname.toLowerCase();
     const acceptLanguage = request.headers.get("Accept-Language") || "en-US,en;q=0.9";
@@ -164,9 +210,19 @@ function buildUpstreamHeaders(request, targetObj, userAgent) {
         copyHeaderIfPresent(request.headers, headers, "content-type");
         copyHeaderIfPresent(request.headers, headers, "x-device-id");
         copyHeaderIfPresent(request.headers, headers, "x-device-info");
+        copyHeaderIfPresent(request.headers, headers, "x-csrf-token");
         copyHeaderIfPresent(request.headers, headers, "sec-ch-ua");
         copyHeaderIfPresent(request.headers, headers, "sec-ch-ua-mobile");
         copyHeaderIfPresent(request.headers, headers, "sec-ch-ua-platform");
+
+        setHeaderFromEnvIfMissing(headers, "Cookie", env.PRIZEPICKS_COOKIE);
+        setHeaderFromEnvIfMissing(headers, "x-device-id", env.PRIZEPICKS_DEVICE_ID);
+        setHeaderFromEnvIfMissing(headers, "x-device-info", env.PRIZEPICKS_DEVICE_INFO);
+        setHeaderFromEnvIfMissing(headers, "x-csrf-token", env.PRIZEPICKS_CSRF_TOKEN);
+
+        if (!headers.has("x-csrf-token")) {
+            setHeaderFromEnvIfMissing(headers, "x-csrf-token", getCookieValue(headers.get("Cookie"), "CSRF-TOKEN"));
+        }
     } else if (effectiveUserAgent.includes("Chrome") || effectiveUserAgent.includes("Edge")) {
         headers.set("sec-ch-ua", '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"');
         headers.set("sec-ch-ua-mobile", "?0");
@@ -253,7 +309,7 @@ function hasValidSharedSecret(request, env) {
     return request.headers.get("X-Proxy-Token") === expectedSecret;
 }
 
-async function fetchWithRetry(request, targetUrl, targetObj) {
+async function fetchWithRetry(request, env, targetUrl, targetObj) {
     let lastResponse = null;
     let lastError = null;
 
@@ -261,7 +317,7 @@ async function fetchWithRetry(request, targetUrl, targetObj) {
         try {
             const response = await fetch(targetUrl, {
                 method: "GET",
-                headers: buildUpstreamHeaders(request, targetObj, randomUserAgent()),
+                headers: buildUpstreamHeaders(request, env, targetObj, randomUserAgent()),
                 redirect: "manual",
                 signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
                 cf: {
@@ -340,7 +396,7 @@ export default {
         }
 
         try {
-            const response = await fetchWithRetry(request, targetUrl, targetObj);
+            const response = await fetchWithRetry(request, env, targetUrl, targetObj);
             const headers = applyResponseHeaders({}, request, env);
             const contentType = response.headers.get("Content-Type");
 

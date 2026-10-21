@@ -9,6 +9,15 @@ import time
 import random
 from pathlib import Path
 
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
+
+try:
+    from .season_type import encoded_season_type, resolve_season, resolve_season_type
+except ImportError:
+    from season_type import encoded_season_type, resolve_season, resolve_season_type
+
 
 def _atomic_write_csv(df: pd.DataFrame, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,7 +47,7 @@ class NBAStatsEngine:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-site",
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
         }
         self.session.headers.update(self.headers)
 
@@ -64,8 +73,13 @@ class NBAStatsEngine:
             time.sleep(random.uniform(0.1, 0.5))
             
             # Timeout prevents the script from hanging forever if the server is slow
-            r = self.session.get(url, timeout=15)
-            r.raise_for_status() # Raises error for 4xx/5xx codes
+            # stats.nba.com is unreachable directly from a datacenter IP, so this
+            # must route through the worker. proxied_get raises on failure, so the
+            # explicit raise_for_status() is no longer needed.
+            # Pass self.headers explicitly: the original call relied on
+            # session-level headers (set at __init__), which do not survive
+            # the switch to proxied_get.
+            r = proxied_get(url, headers=self.headers, label=tag or "season-stats")
             
             data = r.json()
             headers = data['resultSets'][0]['headers']
@@ -87,22 +101,26 @@ class NBAStatsEngine:
     def get_player_data(self):
         """Fetches all necessary endpoints in parallel."""
         start_time = time.time()
+        season = resolve_season()
+        season_type = resolve_season_type()
+        season_type_encoded = encoded_season_type()
         
         # 1. Define Endpoints
-        base_url = "https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
+        base_url = f"https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season={season}&SeasonSegment=&SeasonType={season_type_encoded}&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
-        adv_base_url = "https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=2025-26&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
+        adv_base_url = f"https://stats.nba.com/stats/leaguedashplayerstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&GameSegment=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&MeasureType=Advanced&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season={season}&SeasonSegment=&SeasonType={season_type_encoded}&ShotClockRange=&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
-        adv_url_template = "https://stats.nba.com/stats/leaguedashptstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PerMode=PerGame&PlayerExperience=&PlayerOrTeam=Player&PlayerPosition=&PtMeasureType={}&SeasonSegment=&SeasonType=Regular%20Season&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
+        adv_url_template = f"https://stats.nba.com/stats/leaguedashptstats?College=&Conference=&Country=&DateFrom=&DateTo=&Division=&DraftPick=&DraftYear=&GameScope=&Height=&ISTRound=&LastNGames=0&LeagueID=00&Location=&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PerMode=PerGame&PlayerExperience=&PlayerOrTeam=Player&PlayerPosition=&PtMeasureType={{}}&SeasonSegment=&SeasonType={season_type_encoded}&StarterBench=&TeamID=0&VsConference=&VsDivision=&Weight="
         
         urls_map = {
             "Base": base_url,
             "Advanced": adv_base_url,
-            "Passing": adv_url_template.format("Passing&Season=2025-26"),
-            "Drives": adv_url_template.format("Drives&Season=2025-26"),
-            "Rebounding": adv_url_template.format("Rebounding&Season=2025-26"),
-            "Index": "https://stats.nba.com/stats/playerindex?Historical=0&LeagueID=00&Season=2025-26&SeasonType=Regular%20Season"
+            "Passing": adv_url_template.format(f"Passing&Season={season}"),
+            "Drives": adv_url_template.format(f"Drives&Season={season}"),
+            "Rebounding": adv_url_template.format(f"Rebounding&Season={season}"),
+            "Index": f"https://stats.nba.com/stats/playerindex?Historical=0&LeagueID=00&Season={season}&SeasonType={season_type_encoded}"
         }
+        print(f"Season Stats Season: {season} | SeasonType: {season_type}")
 
         # 2. Sequential Execution (Memory Safe)
         dfs = {}
@@ -241,13 +259,30 @@ class NBAStatsEngine:
                 .str.upper()
             )
 
-        main_df['AST_CONVERSION_PCT'] = main_df.apply(
-            lambda x: round(x['AST'] / x['POTENTIAL_AST'], 3) if x['POTENTIAL_AST'] > 0 else 0, axis=1
-        )
-        main_df['REB_HUSTLE_PCT'] = main_df.apply(
-            lambda x: round(x['REB'] / x['REB_CHANCES'], 3) if x['REB_CHANCES'] > 0 else 0, axis=1
-        )
-        main_df['AGGRESSION_SCORE'] = main_df['FGA'] + main_df['FTA'] + main_df['DRIVES']
+        # The Passing / Rebounding / Drives merges above are all conditional on
+        # those tracking endpoints returning rows. At the start of a season they
+        # return 0 rows (headers only), so the merges are skipped and these
+        # derived columns would raise KeyError -- which is exactly how the
+        # 2026-27 opening-night run failed with KeyError('POTENTIAL_AST').
+        # Derive each only when its source column actually arrived.
+        if 'POTENTIAL_AST' in main_df.columns:
+            main_df['AST_CONVERSION_PCT'] = main_df.apply(
+                lambda x: round(x['AST'] / x['POTENTIAL_AST'], 3) if x['POTENTIAL_AST'] > 0 else 0, axis=1
+            )
+        else:
+            main_df['AST_CONVERSION_PCT'] = 0
+
+        if 'REB_CHANCES' in main_df.columns:
+            main_df['REB_HUSTLE_PCT'] = main_df.apply(
+                lambda x: round(x['REB'] / x['REB_CHANCES'], 3) if x['REB_CHANCES'] > 0 else 0, axis=1
+            )
+        else:
+            main_df['REB_HUSTLE_PCT'] = 0
+
+        if 'DRIVES' in main_df.columns:
+            main_df['AGGRESSION_SCORE'] = main_df['FGA'] + main_df['FTA'] + main_df['DRIVES']
+        else:
+            main_df['AGGRESSION_SCORE'] = main_df['FGA'] + main_df['FTA']
 
         print(f"Data Fetch & Processing Complete: {time.time() - start_time:.2f} seconds")
         

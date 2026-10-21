@@ -3,7 +3,7 @@ import { ChevronDown, Search, Lock, Plus, LockOpen, X, Check } from 'lucide-reac
 import { Player, Game, SportsbookId } from '../types';
 import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
-import { getSportsbookProp } from '../utils/propResolution';
+import { getSportsbookProp, playerHasSportsbookPropForDate } from '../utils/propResolution';
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
 
@@ -32,46 +32,16 @@ function playerHasAvailableSportsbookPropForDate(
     return Boolean(availabilityBucket[dateKey] || availabilityBucket.__undated__);
 }
 
-function playerHasAnyAvailablePropForDate(
-    availabilityByPlayer: PlayerAvailabilityByDate,
-    playerId: number,
-    gameDate?: string | null,
-) {
-    const statMap = availabilityByPlayer?.[playerId] ?? {};
-    const dateKey = gameDate || '__undated__';
-    return Object.values(statMap).some((sportsbookMap) => (
-        Object.values(sportsbookMap ?? {}).some((dateMap) => Boolean(dateMap?.[dateKey] || dateMap?.__undated__))
-    ));
-}
-
-function playerHasAnyPropForDate(player: Player, gameDate?: string | null) {
-    const dateKey = gameDate || '__undated__';
-    const propsByDate = player.props_by_date ?? {};
-    const hasDatedProp = Object.values(propsByDate).some((sportsbookMap) => (
-        Object.values(sportsbookMap ?? {}).some((dateMap) => Boolean(dateMap?.[dateKey] || dateMap?.__undated__))
-    ));
-
-    if (hasDatedProp) {
-        return true;
-    }
-
-    return Object.values(player.props ?? {}).some((sportsbookMap) => (
-        Object.values(sportsbookMap ?? {}).some((prop) => {
-            if (!prop) return false;
-            const propDate = prop.game_date || '__undated__';
-            return propDate === dateKey || propDate === '__undated__';
-        })
-    ));
-}
-
-function playerHasAnyKnownLineForDate(
+function playerHasKnownSportsbookLineForDate(
     player: Player,
     availabilityByPlayer: PlayerAvailabilityByDate,
+    statType: string,
+    sportsbook: SportsbookId | string,
     gameDate?: string | null,
 ) {
     return (
-        playerHasAnyPropForDate(player, gameDate)
-        || playerHasAnyAvailablePropForDate(availabilityByPlayer, player.id, gameDate)
+        playerHasSportsbookPropForDate(player, statType, sportsbook, gameDate)
+        || playerHasAvailableSportsbookPropForDate(availabilityByPlayer, player.id, statType, sportsbook, gameDate)
     );
 }
 
@@ -81,6 +51,30 @@ function sortGamesByTime(games: Game[] = []) {
         const rightTime = new Date(right.game_time_utc || `${right.game_date}T23:59:59Z`).getTime();
         return (Number.isNaN(leftTime) ? 0 : leftTime) - (Number.isNaN(rightTime) ? 0 : rightTime);
     });
+}
+
+function hasTbdTipoff(game: Game) {
+    const statusText = String(game?.game_status_text ?? '').trim().toUpperCase();
+    const tipoffText = String(game?.game_time_et ?? '').trim().toUpperCase();
+    return statusText === 'TBD' || tipoffText === 'TBD';
+}
+
+function formatScheduledTipoff(game: Game) {
+    if (hasTbdTipoff(game)) {
+        return 'TBD';
+    }
+
+    if (game.game_time_utc) {
+        const parsedTime = new Date(game.game_time_utc);
+        if (!Number.isNaN(parsedTime.getTime())) {
+            return parsedTime.toLocaleTimeString(undefined, {
+                hour: 'numeric',
+                minute: '2-digit',
+            });
+        }
+    }
+
+    return game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '';
 }
 
 const CustomDropdown = ({ value, options, onChange, placeholder }: { value: string, options: { label: string, value: string, disabled?: boolean }[], onChange: (val: string) => void, placeholder?: string }) => {
@@ -339,14 +333,13 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
 
+    const isTipoffTbd = hasTbdTipoff(game);
     const gameTimeObj = game.game_time_utc ? new Date(game.game_time_utc) : new Date(game.game_date + 'T23:59:59Z');
     const hasValidGameTime = !Number.isNaN(gameTimeObj.getTime());
     const gameDay = hasValidGameTime
         ? gameTimeObj.toLocaleDateString(undefined, { weekday: 'short' })
         : '';
-    const formattedTime = hasValidGameTime
-        ? gameTimeObj.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-        : (game.game_time_et ? game.game_time_et.replace(' ET', '').replace(/^0/, '') : '');
+    const formattedTime = formatScheduledTipoff(game);
 
     return (
         <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-2 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
@@ -374,7 +367,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                         ) : game.is_final ? (
                             <span className="text-xs text-gray-500 font-medium">FINAL</span>
                         ) : (
-                            <span className="text-xs text-gray-400 font-medium">{gameDay}</span>
+                            <span className="text-xs text-gray-400 font-medium">{isTipoffTbd ? game.game_weekday?.slice(0, 3) : gameDay}</span>
                         )}
 
                         <span className={`${isExpanded ? 'text-[13px] text-white' : 'text-[13px] text-gray-300'} font-medium whitespace-nowrap`}>
@@ -590,7 +583,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 const isInGame = p.team === game.home_team_tricode || p.team === game.away_team_tricode;
                 if (!isInGame) return false;
 
-                if (!playerHasAnyKnownLineForDate(p, propsAvailabilityByDate, game.game_date)) {
+                if (!playerHasKnownSportsbookLineForDate(p, propsAvailabilityByDate, statFilter, activeSportsbook, game.game_date)) {
                     return false;
                 }
 
