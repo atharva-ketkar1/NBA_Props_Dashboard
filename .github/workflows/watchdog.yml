@@ -36,20 +36,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      # Deliberately no pip install: the check uses only the standard library,
-      # so there is no dependency that can break the watchdog itself.
+      # No setup-python and no pip install, on purpose. The check uses only the
+      # standard library and the runner already ships Python 3, so the watchdog
+      # has the fewest possible moving parts that could break it years from now.
       - name: Run health check
         id: check
         env:
           WATCHDOG_STALE_MINUTES: ${{ github.event.inputs.stale_minutes || '90' }}
-        run: python backend/scripts/watchdog_check.py | tee "$RUNNER_TEMP/report.txt"
+        run: python3 backend/scripts/watchdog_check.py | tee "$RUNNER_TEMP/report.txt"
 
       - name: Write run summary
         if: always()
