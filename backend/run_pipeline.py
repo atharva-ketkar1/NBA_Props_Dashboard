@@ -405,13 +405,18 @@ def main():
                 normalized_historical_ok = False
                 legacy_historical_ok = False
 
-            if props_ok and historical_sync_ok:
+            db_sync_ok = props_ok and historical_sync_ok
+            if db_sync_ok:
                 log_status(logger, "OK", "Supabase sync complete")
             else:
+                # Supabase is the only durable copy: local data/current/ is scratch that the
+                # next run overwrites, and the VM itself is disposable. A failed sync therefore
+                # loses the day permanently unless we report failure and let master_cron retry
+                # (bounded by MAX_PIPELINE_FAILURES_PER_DAY), so this is ERROR, not WARN.
                 log_status(
                     logger,
-                    "WARN",
-                    "Supabase sync incomplete",
+                    "ERROR",
+                    "Supabase sync incomplete - day not durably stored",
                     props_ok=props_ok,
                     normalized_historical_ok=normalized_historical_ok,
                     legacy_historical_ok=legacy_historical_ok,
@@ -428,6 +433,13 @@ def main():
                 log_status(logger, "WARN", "Critical scraper failures detected", count=len(critical_failures))
                 for failure in critical_failures:
                     logger.warning("  %s", failure)
+
+            # A pipeline run only "succeeded" if the data actually reached Supabase.
+            # Set REQUIRE_DB_SYNC=false to fall back to the old scraper-only definition
+            # (e.g. to work offline, or to stop retries while Supabase is down).
+            require_db_sync = os.environ.get("REQUIRE_DB_SYNC", "true").strip().lower() not in {"0", "false", "no"}
+            if require_db_sync and not db_sync_ok:
+                return False
 
             return not critical_failures
     finally:

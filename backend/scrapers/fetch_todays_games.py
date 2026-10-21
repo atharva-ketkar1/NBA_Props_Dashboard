@@ -5,11 +5,16 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
 
 DASHBOARD_LOOKAHEAD_DAYS = 7
 ET_ZONE = ZoneInfo("America/New_York")
 SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
-SCHEDULE_REQUEST_TIMEOUT_SECONDS = 20
+# Worker allows 2 upstream attempts x 15s, so it can legitimately take ~30s.
+SCHEDULE_REQUEST_TIMEOUT_SECONDS = 60
 SCHEDULE_REQUEST_ATTEMPTS = 3
 SCHEDULE_RETRY_BACKOFF_SECONDS = 1.5
 ACTION_NETWORK_SCHEDULE_FALLBACK_DAYS = 2
@@ -324,7 +329,27 @@ def upsert_games_to_db(raw_data: list) -> None:
             else _get_dashboard_window_dates()
         )
         stale_row_count = 0
-        if window_dates:
+        # DATA-SAFETY GUARD.
+        #
+        # This block deletes any existing game in the window that is absent from
+        # the incoming payload. That is correct only when the incoming payload is
+        # authoritative. It is NOT authoritative when cdn.nba.com refused us and we
+        # fell back to the Action Network scoreboard, which covers far fewer days:
+        # the 2026-10-20 opening-night run fetched 14 fallback games and deleted 14
+        # real ones. A transient 403 must never cost us rows.
+        #
+        # Rules:
+        #   1. Fallback data never deletes anything.
+        #   2. An empty payload never deletes anything.
+        #   3. Even on the authoritative path, refuse a deletion sweep that would
+        #      remove more than half the window -- that is a partial fetch, not a
+        #      genuinely shrunken schedule.
+        if is_partial_fallback:
+            print("   games upsert: skipping stale-row cleanup "
+                  "(payload is Action Network fallback, not authoritative)")
+        elif not rows:
+            print("   games upsert: skipping stale-row cleanup (empty payload)")
+        elif window_dates:
             existing_rows = (
                 supabase
                 .table("games")
@@ -335,12 +360,20 @@ def upsert_games_to_db(raw_data: list) -> None:
             ).data or []
             incoming_ids = {str(row["game_id"]) for row in rows if row.get("game_id")}
 
-            for existing_row in existing_rows:
-                game_id = str(existing_row.get("game_id") or "").strip()
-                if not game_id or game_id in incoming_ids:
-                    continue
-                supabase.table("games").delete().eq("game_id", game_id).execute()
-                stale_row_count += 1
+            doomed = [
+                str(r.get("game_id") or "").strip()
+                for r in existing_rows
+                if str(r.get("game_id") or "").strip()
+                and str(r.get("game_id") or "").strip() not in incoming_ids
+            ]
+            if existing_rows and len(doomed) > max(2, len(existing_rows) // 2):
+                print(f"   games upsert: REFUSING to delete {len(doomed)}/{len(existing_rows)} "
+                      f"games in window - looks like a partial fetch, not a schedule change. "
+                      f"Leaving rows intact.")
+            else:
+                for game_id in doomed:
+                    supabase.table("games").delete().eq("game_id", game_id).execute()
+                    stale_row_count += 1
 
         if not rows:
             print(f"   games upsert: 0 games written to Supabase ({stale_row_count} stale rows removed)")
@@ -361,18 +394,24 @@ def get_nba_schedule():
         "accept-language": "en-US,en;q=0.9",
         "connection": "keep-alive",
         "dnt": "1",
-        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+        # cdn.nba.com's edge rejects requests without a referer (403 Access Denied)
+        "referer": "https://www.nba.com/",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
     }
 
+    # cdn.nba.com 403s this host directly (measured). The worker allows
+    # cdn.nba.com, injects the referer its edge demands, and re-rolls its UA
+    # pool on each attempt, so proxied_get handles both the block and the
+    # intermittent stale-UA 403s. It retries internally, hence the single pass.
     last_error = None
     for attempt in range(1, SCHEDULE_REQUEST_ATTEMPTS + 1):
         try:
-            response = requests.get(
-                url=SCHEDULE_URL,
+            response = proxied_get(
+                SCHEDULE_URL,
                 headers=HEADERS,
                 timeout=SCHEDULE_REQUEST_TIMEOUT_SECONDS,
+                label="nba-schedule",
             )
-            response.raise_for_status()
 
             try:
                 payload = response.json()

@@ -366,9 +366,29 @@ def run_odds_update(
         except Exception as e:
             logger.warning("Failed to load PrizePicks CSV (%s): %s", pp_path, e)
 
-    # --- Build PlayerMatcher from season stats roster ---
+    # --- Build PlayerMatcher from season stats + the league-wide roster ---
+    # season_stats only contains players with GP > 0, so at the start of a season
+    # it cannot cover the upcoming slate (measured 2026-10-20: 41 stats players vs
+    # 147 DraftKings players, zero overlap -> every prop unresolved). The player
+    # index is GP-independent, so union the two. Season-stats records go FIRST so
+    # they win on duplicates: they carry the live team, which is more current than
+    # the roster endpoint for anyone recently traded.
     stats_records = df_stats[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].to_dict('records')
-    matcher = PlayerMatcher(stats_records)
+    roster_records = []
+    try:
+        from utils.player_index import get_player_index
+        known_pids = {int(r['PLAYER_ID']) for r in stats_records if r.get('PLAYER_ID') is not None}
+        roster_records = [
+            r for r in get_player_index()
+            if int(r['PLAYER_ID']) not in known_pids
+        ]
+        if roster_records:
+            log_status(logger, "INFO", "Extended matcher roster with league player index",
+                       stats_players=len(stats_records), index_players=len(roster_records))
+    except Exception as exc:
+        logger.warning("Player index unavailable, matching on season stats only: %s", exc)
+
+    matcher = PlayerMatcher(stats_records + roster_records)
     team_by_pid = {
         int(row['PLAYER_ID']): str(row.get('TEAM_ABBREVIATION', '') or '').strip()
         for _, row in df_stats.iterrows()

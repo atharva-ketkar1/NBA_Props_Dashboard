@@ -41,7 +41,7 @@ HEADERS = {
     "dnt": "1",
     "origin": "https://www.nba.com",
     "referer": "https://www.nba.com/",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 }
 
 PT_MEASURE_TYPES = ["Passing", "Rebounding", "Drives"]

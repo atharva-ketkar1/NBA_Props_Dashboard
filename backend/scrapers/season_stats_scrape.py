@@ -9,6 +9,10 @@ import time
 import random
 from pathlib import Path
 
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
+
 try:
     from .season_type import encoded_season_type, resolve_season, resolve_season_type
 except ImportError:
@@ -43,7 +47,7 @@ class NBAStatsEngine:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-site",
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
         }
         self.session.headers.update(self.headers)
 
@@ -69,8 +73,13 @@ class NBAStatsEngine:
             time.sleep(random.uniform(0.1, 0.5))
             
             # Timeout prevents the script from hanging forever if the server is slow
-            r = self.session.get(url, timeout=15)
-            r.raise_for_status() # Raises error for 4xx/5xx codes
+            # stats.nba.com is unreachable directly from a datacenter IP, so this
+            # must route through the worker. proxied_get raises on failure, so the
+            # explicit raise_for_status() is no longer needed.
+            # Pass self.headers explicitly: the original call relied on
+            # session-level headers (set at __init__), which do not survive
+            # the switch to proxied_get.
+            r = proxied_get(url, headers=self.headers, label=tag or "season-stats")
             
             data = r.json()
             headers = data['resultSets'][0]['headers']
@@ -250,13 +259,30 @@ class NBAStatsEngine:
                 .str.upper()
             )
 
-        main_df['AST_CONVERSION_PCT'] = main_df.apply(
-            lambda x: round(x['AST'] / x['POTENTIAL_AST'], 3) if x['POTENTIAL_AST'] > 0 else 0, axis=1
-        )
-        main_df['REB_HUSTLE_PCT'] = main_df.apply(
-            lambda x: round(x['REB'] / x['REB_CHANCES'], 3) if x['REB_CHANCES'] > 0 else 0, axis=1
-        )
-        main_df['AGGRESSION_SCORE'] = main_df['FGA'] + main_df['FTA'] + main_df['DRIVES']
+        # The Passing / Rebounding / Drives merges above are all conditional on
+        # those tracking endpoints returning rows. At the start of a season they
+        # return 0 rows (headers only), so the merges are skipped and these
+        # derived columns would raise KeyError -- which is exactly how the
+        # 2026-27 opening-night run failed with KeyError('POTENTIAL_AST').
+        # Derive each only when its source column actually arrived.
+        if 'POTENTIAL_AST' in main_df.columns:
+            main_df['AST_CONVERSION_PCT'] = main_df.apply(
+                lambda x: round(x['AST'] / x['POTENTIAL_AST'], 3) if x['POTENTIAL_AST'] > 0 else 0, axis=1
+            )
+        else:
+            main_df['AST_CONVERSION_PCT'] = 0
+
+        if 'REB_CHANCES' in main_df.columns:
+            main_df['REB_HUSTLE_PCT'] = main_df.apply(
+                lambda x: round(x['REB'] / x['REB_CHANCES'], 3) if x['REB_CHANCES'] > 0 else 0, axis=1
+            )
+        else:
+            main_df['REB_HUSTLE_PCT'] = 0
+
+        if 'DRIVES' in main_df.columns:
+            main_df['AGGRESSION_SCORE'] = main_df['FGA'] + main_df['FTA'] + main_df['DRIVES']
+        else:
+            main_df['AGGRESSION_SCORE'] = main_df['FGA'] + main_df['FTA']
 
         print(f"Data Fetch & Processing Complete: {time.time() - start_time:.2f} seconds")
         

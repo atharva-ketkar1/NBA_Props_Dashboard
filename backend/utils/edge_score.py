@@ -69,7 +69,7 @@ BOXSCORE_CDN_HEADERS = {
     "referer": "https://www.nba.com/",
     "user-agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
     ),
 }
 ISO8601_DURATION_RE = re.compile(
@@ -3398,8 +3398,11 @@ def _build_style_vector(player: Dict[str, Any]) -> Dict[str, float]:
     vector["potential_ast"] = (_safe_float(stats.get("POTENTIAL_AST"), 0.0) or 0.0) / 18.0
     vector["reb_chances"] = (_safe_float(stats.get("REB_CHANCES"), 0.0) or 0.0) / 22.0
 
-    shot_type_analysis = player.get("shot_type_analysis", {})
-    player_shot_type = shot_type_analysis.get("player", {}) if isinstance(shot_type_analysis, dict) else {}
+    shot_type_analysis = player.get("shot_type_analysis") or {}
+    # NOTE: .get("player", {}) is not enough -- the aggregator writes an
+    # explicit None here whenever the shot-type lookup misses, which is the
+    # norm early in a season, so the default never fires and we get None.
+    player_shot_type = (shot_type_analysis.get("player") or {}) if isinstance(shot_type_analysis, dict) else {}
     for key in ("catch_and_shoot", "pull_up", "less_than_10_ft"):
         vector[f"shot:{key}"] = (_safe_float((player_shot_type.get(key) or {}).get("percentage"), 0.0) or 0.0) / 100.0
 
@@ -5025,8 +5028,12 @@ def _boxscore_cache_for_game(
 
     url = f"{BOXSCORE_CDN_BASE_URL}/boxscore_{game_id}.json"
     try:
-        response = requests.get(url, headers=BOXSCORE_CDN_HEADERS, timeout=10)
-        response.raise_for_status()
+        # cdn.nba.com 403s datacenter IPs, so this fallback has to go through the
+        # worker or it never succeeds on the VM. proxied_get raises on failure,
+        # which the existing except block already handles.
+        from utils.http_client import proxied_get
+        response = proxied_get(url, headers=BOXSCORE_CDN_HEADERS,
+                               label="edge-boxscore-" + str(game_id))
         payload = response.json()
     except Exception as exc:
         logger.warning("Boxscore fallback fetch failed for %s: %s", game_id, exc)

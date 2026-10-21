@@ -41,7 +41,13 @@ def fetch_opponent_assists_allowed(season=None):
     }
 
     session = requests.Session()
-    retry = Retry(connect=3, read=3, redirect=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    # 429 was missing here, so rate limits were never backed off -- a single 429
+    # dropped the whole fetch. 408/425 and the Cloudflare 52x family are also
+    # transient. backoff_factor=1.5 => 1.5s, 3s, 6s.
+    retry = Retry(total=5, connect=3, read=3, redirect=3, backoff_factor=1.5,
+                  status_forcelist=[408, 425, 429, 500, 502, 503, 504,
+                                    520, 521, 522, 524, 525, 526, 530],
+                  respect_retry_after_header=True)
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('https://', adapter)
 

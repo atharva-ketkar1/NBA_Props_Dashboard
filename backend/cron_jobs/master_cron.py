@@ -118,22 +118,14 @@ def load_state():
         "pipeline_failures_today": 0,
         "last_pipeline_attempt_ts": 0,
     }
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, 'r') as f:
-                raw_state = json.load(f)
-                if isinstance(raw_state, dict):
-                    return {**default_state, **raw_state}
-        except Exception as e:
-            logger.error(f"Error loading state: {e}")
-    return default_state
+    # Scheduler state lives in Supabase so a rebuilt VM resumes mid-season; STATE_FILE
+    # is kept in sync as a local cache for when Supabase is unreachable.
+    from utils.cron_state_store import load_state as _load_durable_state
+    return _load_durable_state(STATE_FILE, default_state)
 
 def save_state(state):
-    try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving state: {e}")
+    from utils.cron_state_store import save_state as _save_durable_state
+    _save_durable_state(STATE_FILE, state)
 
 
 def _is_pid_running(pid):

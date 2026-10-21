@@ -46,6 +46,9 @@ docs/deployment/
 
 backend/scrapers/archive/
 /supabase/*
+# ...but migrations ARE schema source-of-truth and must be versioned. Without this
+# negation, new migrations are silently untracked and the DB becomes unrebuildable.
+!/supabase/migrations/
 /vercel.json
 sql/
 .vercel
@@ -61,3 +64,7 @@ backend/prop_modeling/generated/
 catboost_info/
 backend/prop_modeling/*.ipynb
 backend/prop_modeling/*test*.py
+
+# data archives built by backend/scripts/snapshot.py (never commit: public repo)
+nba_dashboard_backup_*.zip
+*.zip

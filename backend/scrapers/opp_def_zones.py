@@ -5,6 +5,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get  # noqa: E402  (needs the path insert above)
+
 try:
     from .season_type import resolve_season, resolve_season_type
 except ImportError:
@@ -27,7 +31,7 @@ HEADERS = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-site",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 }
 
 # ---- SESSION WITH RETRIES ----
@@ -68,8 +72,8 @@ def fetch_positional_defense(position, season=None):
         VsDivision=''
     )
 
-    response = session.get(URL, headers=HEADERS, params=params, timeout=15)
-    response.raise_for_status()
+    response = proxied_get(URL, headers=HEADERS, params=params,
+                           label="opp-def-zones")
 
     data = response.json()
     result_set = data["resultSets"]

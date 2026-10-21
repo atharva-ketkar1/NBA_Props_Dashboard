@@ -1,17 +1,25 @@
+// Akamai (cdn.nba.com, www.nba.com, DraftKings) rejects stale browser versions with a
+// 403 "Access Denied". Verified cutoff: Chrome <=145 is blocked, >=150 passes. Firefox is
+// refused at any version, so it is intentionally absent. Keep these current -- a UA that
+// ages out of support turns into intermittent 403s, because this pool is sampled at random.
 const USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/121.0.0.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
 ];
 
+// ak-static.cms.nba.com and official.nba.com serve the injury report: the HTML
+// index page lives on official.nba.com and the PDF it links to is on
+// ak-static.cms.nba.com. Both Akamai-front and both return 403 to datacenter
+// IPs (measured from the Oracle VM, 2026-10-20), so both must be proxied.
 const DEFAULT_ALLOWED_UPSTREAM_HOSTS = new Set([
+    "ak-static.cms.nba.com",
     "api.pbpstats.com",
     "api.prizepicks.com",
     "api.sportsbook.fanduel.com",
     "cdn.nba.com",
+    "official.nba.com",
     "sportsbook-nash.draftkings.com",
     "sportsbook.draftkings.com",
     "stats.nba.com",
@@ -101,10 +109,24 @@ function getUpstreamOriginAndReferer(targetObj) {
         };
     }
 
-    if (hostname === "stats.nba.com" || hostname === "cdn.nba.com" || hostname === "www.nba.com") {
+    if (
+        hostname === "stats.nba.com" ||
+        hostname === "cdn.nba.com" ||
+        hostname === "www.nba.com" ||
+        hostname === "official.nba.com"
+    ) {
         return {
             origin: "https://www.nba.com",
             referer: "https://www.nba.com/",
+        };
+    }
+
+    // The injury report PDF is linked from the official.nba.com report page, so
+    // that is the referer a browser would actually send when fetching it.
+    if (hostname === "ak-static.cms.nba.com") {
+        return {
+            origin: "https://official.nba.com",
+            referer: "https://official.nba.com/",
         };
     }
 

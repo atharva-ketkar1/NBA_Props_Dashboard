@@ -53,8 +53,11 @@ def fetch_team_assists(team_id, season=None):
     }
 
     session = requests.Session()
-    retry = Retry(connect=3, read=3, redirect=3, backoff_factor=1,
-                  status_forcelist=[500, 502, 503, 504])
+    # 429 was missing here too, so rate limits were never backed off.
+    retry = Retry(total=5, connect=3, read=3, redirect=3, backoff_factor=1.5,
+                  status_forcelist=[408, 425, 429, 500, 502, 503, 504,
+                                    520, 521, 522, 524, 525, 526, 530],
+                  respect_retry_after_header=True)
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('https://', adapter)
 

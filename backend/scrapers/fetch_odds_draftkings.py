@@ -19,7 +19,7 @@ DK_API_BASE = "https://sportsbook-nash.draftkings.com/sites/US-IL-SB/api/sportsc
 LEAGUE_ID = "42648" # NBA
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
     "Referer": "https://sportsbook.draftkings.com/",
     "Origin": "https://sportsbook.draftkings.com",
     "Accept": "*/*",
