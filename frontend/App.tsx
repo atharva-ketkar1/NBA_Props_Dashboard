@@ -762,6 +762,7 @@ function App() {
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [filterGameCount, setFilterGameCount] = useState<number>(19);
+  const hasManualFilterGameCountRef = useRef(false);
   const [activeSeason, setActiveSeason] = useState<SeasonLabel>(LIVE_SEASON);
   const [archiveGameLogs, setArchiveGameLogs] = useState<Record<string, any[]>>({});
   // Archive injury reports arrive with the archive game log, keyed the same
@@ -1800,9 +1801,23 @@ function App() {
     && Boolean(displayPlayer)
     && (!areSimilarCandidatesCurrent || isSimilarCandidatesLoading);
 
+  // The user hasn't picked a custom game count yet for this player/season, so
+  // keep tracking the default as the archive game log finishes loading (it
+  // can briefly report a partial length, e.g. 1, before the full log lands).
+  useEffect(() => {
+    hasManualFilterGameCountRef.current = false;
+  }, [activeSeason, displayPlayer?.id]);
+
   useEffect(() => {
     if (!isFiltersOpen) {
       setFilterGameCount(defaultFilterGameCount);
+      return;
+    }
+
+    if (!hasManualFilterGameCountRef.current) {
+      if (filterGameCount !== defaultFilterGameCount) {
+        setFilterGameCount(defaultFilterGameCount);
+      }
       return;
     }
 
@@ -2187,6 +2202,7 @@ function App() {
                 onTeammateModeSelect={handleTeammateModeSelect}
                 gameCount={effectiveFilterGameCount}
                 onGameCountChange={(count) => {
+                  hasManualFilterGameCountRef.current = true;
                   const maxGameCount = maxAvailableHistoricalGames || count;
                   setFilterGameCount(Math.max(1, Math.min(maxGameCount, count)));
                 }}

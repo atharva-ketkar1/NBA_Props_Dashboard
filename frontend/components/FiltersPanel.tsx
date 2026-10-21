@@ -222,6 +222,21 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
             return left.playerName.localeCompare(right.playerName);
         });
     }, [teammateInjuryCards]);
+    const isArchiveTeammatesView = isArchiveSeason(activeSeason);
+    // Past-season report: the inline card row would otherwise imply this is
+    // today's status for every teammate, when it's really that one game's
+    // report. Only surface the teammates who actually missed that game, and
+    // only on hover -- "All" still opens the full list below.
+    const archiveDnpTeammates = React.useMemo(() => {
+        if (!isArchiveTeammatesView) {
+            return [];
+        }
+        return teammateInjuryCards
+            .filter((card) => card.currentStatus === 'Out' || card.currentStatus === 'Doubtful')
+            .sort((left, right) => right.prominenceScore - left.prominenceScore)
+            .slice(0, 3);
+    }, [isArchiveTeammatesView, teammateInjuryCards]);
+    const [isArchiveTeammateHoverOpen, setIsArchiveTeammateHoverOpen] = React.useState(false);
     const teamLogoUrl = React.useMemo(() => {
         const teamTricode = String(player?.team ?? teamInjuryReport?.team_tricode ?? '').trim().toUpperCase();
         if (!teamTricode) {
@@ -861,9 +876,18 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                         {/* Teammates Section */}
                         <div className="flex flex-col gap-3 mt-2 border-t border-borderMedium/40 pt-4">
                             <div className="flex items-center justify-between">
-                                <div className="flex min-w-0 flex-col">
+                                <div
+                                    className="relative flex min-w-0 flex-col"
+                                    onMouseEnter={() => isArchiveTeammatesView && setIsArchiveTeammateHoverOpen(true)}
+                                    onMouseLeave={() => setIsArchiveTeammateHoverOpen(false)}
+                                >
                                     <span className="text-white text-[14px] font-semibold tracking-[-0.01em]">Teammates</span>
-                                    {archiveInjuryNote ? (
+                                    {isArchiveTeammatesView ? (
+                                        <span className="flex items-center gap-1.5 text-[10px] leading-tight text-fgSubtle/70">
+                                            <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full border border-borderMedium/80" />
+                                            <span className="truncate">Hover for that game's report</span>
+                                        </span>
+                                    ) : archiveInjuryNote ? (
                                         <span className="flex items-center gap-1.5 text-[10px] leading-tight text-fgSubtle/70">
                                             {archiveInjuryNote.tone === 'data' ? (
                                                 <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-blue500" />
@@ -874,6 +898,36 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                             )}
                                             <span className="truncate">{archiveInjuryNote.label}</span>
                                         </span>
+                                    ) : null}
+
+                                    {isArchiveTeammatesView && isArchiveTeammateHoverOpen ? (
+                                        <div className="absolute left-0 top-full z-30 mt-1.5 w-56 rounded-lg border border-borderMedium/60 bg-bgElevation2 p-3 shadow-xl">
+                                            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-fgSubtle/70">
+                                                {archiveInjuryNote?.label ?? 'That game’s report'}
+                                            </div>
+                                            {archiveDnpTeammates.length > 0 ? (
+                                                <ul className="flex flex-col gap-1.5">
+                                                    {archiveDnpTeammates.map((teammate) => {
+                                                        const statusMeta = getTeammateStatusMeta(teammate.currentStatus, teammate.reportStatus);
+                                                        return (
+                                                            <li
+                                                                key={`archive-dnp-${teammate.playerId ?? teammate.playerName}`}
+                                                                className="flex items-center justify-between gap-2 text-[12px]"
+                                                            >
+                                                                <span className="truncate text-white">{teammate.displayName}</span>
+                                                                <span className={`shrink-0 text-[10px] font-bold ${statusMeta.textClass}`}>
+                                                                    {statusMeta.badge || statusMeta.label}
+                                                                </span>
+                                                            </li>
+                                                        );
+                                                    })}
+                                                </ul>
+                                            ) : (
+                                                <div className="text-[12px] text-fgSubtle">
+                                                    No teammates missed this game.
+                                                </div>
+                                            )}
+                                        </div>
                                     ) : null}
                                 </div>
                                 <button
@@ -891,6 +945,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                 </button>
                             </div>
 
+                            {isArchiveTeammatesView ? null : (
                             <div className="relative">
                                 <div ref={teammateScrollRef} className="flex items-center gap-2.5 overflow-x-auto no-scrollbar pb-3 scroll-smooth">
                                     {teammatePreviewCards.length > 0 ? teammatePreviewCards.map((teammate) => (
@@ -936,6 +991,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                     </button>
                                 ) : null}
                             </div>
+                            )}
                         </div>
                     </>
                 ) : activeTab === 'Opp Rankings' ? (
