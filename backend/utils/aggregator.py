@@ -5,11 +5,14 @@ import numpy as np
 import gc
 import logging
 import time
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import resolve_prop_game_date
 from utils.pregame_props import is_pregame_schedule_game, is_prop_pregame_by_time
+from utils.prop_types import PROP_MAP
 
 logger = logging.getLogger(__name__)
 UNDATED_PROP_KEY = '__undated__'
@@ -113,12 +116,8 @@ def upsert_players_to_db(master_data: dict):
 # ==========================================
 # 1. CONFIGURATION MAPPINGS
 # ==========================================
-# Maps betting props to internal column names
-PROP_MAP = {
-    'points': 'PTS', 'rebounds': 'REB', 'assists': 'AST',
-    'threes': 'FG3M', 'blocks': 'BLK', 'steals': 'STL',
-    'pra': 'PTS+REB+AST', 'pr': 'PTS+REB', 'pa': 'PTS+AST', 'ra': 'REB+AST', 'stocks': 'STL+BLK'
-}
+# PROP_MAP (betting prop -> internal column name) now lives in utils/prop_types.py,
+# shared with the closing-line cron and the props upsert.
 
 # The explicit list of stats to send to the Frontend
 DISPLAY_STATS = [
@@ -136,22 +135,6 @@ DISPLAY_STATS = [
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
-def normalize_name(name):
-    """Standardizes names for fuzzy matching."""
-    if not isinstance(name, str): return ""
-    name = name.lower().strip().replace('.', '').replace("'", "")
-    for suffix in [' jr', ' sr', ' ii', ' iii', ' iv', ' v']:
-        if name.endswith(suffix): name = name[:-len(suffix)]
-    return name
-
-def get_best_match_id(name, name_to_id_map):
-    """Finds the PLAYER_ID for a messy betting name."""
-    norm = normalize_name(name)
-    if norm in name_to_id_map: return name_to_id_map[norm]
-    # Fuzzy match
-    matches = difflib.get_close_matches(norm, list(name_to_id_map.keys()), n=1, cutoff=0.85)
-    return name_to_id_map[matches[0]] if matches else None
-
 def safe_float(x):
     """Converts to float safely, handling errors."""
     try:
@@ -721,9 +704,16 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     gc.collect()
 
     # E. Merge Betting Odds
+    # A prop row whose player we cannot resolve is dropped entirely, which is
+    # invisible in the output: the feed just has fewer props. When a sportsbook
+    # renames a player the loss can be systematic, so count the drops and name
+    # the worst offenders instead of failing silently.
+    unmatched_by_book = {}
+
     # Helper to process odds files
     def process_odds(df, book_name):
         if df.empty: return
+        unmatched_names = unmatched_by_book.setdefault(book_name, Counter())
         for _, row in df.iterrows():
             # Extract basic info
             player_name = row.get('player', '')
@@ -740,8 +730,10 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
             # Match Player using robust matcher
             pid = matcher.match_player(player_name, team_context, team_opts)
-            
-            if not pid or pid not in master_data: continue
+
+            if not pid or pid not in master_data:
+                unmatched_names[str(player_name).strip() or '<blank>'] += 1
+                continue
             canonical_team = master_data[pid]['team']
             row_game_date, _ = resolve_prop_game_date(
                 row.get('game_date'),
@@ -795,7 +787,22 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     process_odds(df_dk, "dk")
     process_odds(df_fd, "fd")
     process_odds(df_pp, "pp")
-    
+
+    for book_name, unmatched_names in unmatched_by_book.items():
+        if not unmatched_names:
+            continue
+        log_status(
+            logger,
+            "WARN",
+            "Dropped prop rows with unresolvable players",
+            book=book_name,
+            rows=sum(unmatched_names.values()),
+            distinct_players=len(unmatched_names),
+            top_unmatched=[
+                f"{name} x{count}" for name, count in unmatched_names.most_common(10)
+            ],
+        )
+
     del df_dk
     del df_fd
     del df_pp

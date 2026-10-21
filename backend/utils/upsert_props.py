@@ -28,6 +28,7 @@ from utils.logging_utils import log_status
 from utils.player_matcher import PlayerMatcher
 from utils.pregame_props import has_game_started
 from utils.prop_date_resolver import load_schedule_rows, resolve_prop_game_date
+from utils.prop_types import PROP_MAP
 from utils.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
@@ -45,22 +46,6 @@ SYNC_STATE_PATH = os.path.join(
     "current",
     "player_props_sync_state.json",
 )
-
-# Mirrors PROP_MAP in aggregator.py — kept in sync manually.
-# Maps raw prop_type strings from scrapers → internal stat keys.
-PROP_MAP = {
-    'points':   'PTS',
-    'rebounds': 'REB',
-    'assists':  'AST',
-    'threes':   'FG3M',
-    'blocks':   'BLK',
-    'steals':   'STL',
-    'pra':      'PTS+REB+AST',
-    'pr':       'PTS+REB',
-    'pa':       'PTS+AST',
-    'ra':       'REB+AST',
-    'stocks':   'STL+BLK',
-}
 
 PP_LABEL_PROP_MAP = {
     "3PTM": "threes",

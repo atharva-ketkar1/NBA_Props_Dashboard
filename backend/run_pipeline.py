@@ -363,6 +363,16 @@ def main():
             total_time = time.time() - start_time
             log_status(logger, "OK", "Pipeline complete", duration_s=f"{total_time:.1f}")
 
+            # Stamp current-roster membership. Must run after run_aggregation(),
+            # which is what upserts the players rows being stamped. Non-fatal and
+            # self-guarding: it skips rather than writing a partial sweep, so a
+            # bad upstream roster response can never age out the league.
+            try:
+                from utils.roster_sync import sync_roster_membership
+                sync_roster_membership()
+            except Exception as e:
+                log_status(logger, "WARN", "Roster membership sync failed", error=e)
+
             # STEP 3: Upsert props to Supabase (non-fatal)
             # The players table was already upserted inside aggregator.run_aggregation().
             # This call pushes the resolved prop lines (DK + FD) into player_props.

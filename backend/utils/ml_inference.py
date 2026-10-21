@@ -1245,11 +1245,18 @@ class MLPredictor:
             return None
 
     def hit_probability(self, prediction: float, std_dev: float, line: float, side: str) -> float:
-        """Legacy interface — Kept for backward compatibility."""
-        from scipy.stats import norm
+        """Legacy interface — Kept for backward compatibility.
+
+        Uses math.erf rather than scipy.stats.norm: this is the only scipy call
+        left in the runtime path, scipy is not installed on the VM, and the
+        caller in edge_score swallows the resulting ImportError as a warning --
+        so the edge board would go stale silently the first time a single-output
+        (non-quantile) model is exported. The identity is exact:
+        norm.cdf(x, loc, scale) == 0.5 * (1 + erf((x - loc) / (scale * sqrt(2)))).
+        """
         if std_dev is None or std_dev <= 0:
             return 0.6 if (side == "over") == (prediction > line) else 0.4
-        p_over = 1.0 - norm.cdf(line, loc=prediction, scale=std_dev)
+        p_over = 0.5 * (1.0 - math.erf((line - prediction) / (std_dev * math.sqrt(2.0))))
         return p_over if side == "over" else 1.0 - p_over
 
 def get_ml_predictor() -> MLPredictor:

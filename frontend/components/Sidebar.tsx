@@ -546,25 +546,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
         });
     }, [players, propsAvailabilityByDate]);
 
+    // Games that have at least one player with a known/available prop line.
+    // Games without any props yet are hidden from the sidebar entirely, since
+    // there's nothing useful to show behind their dropdown.
+    const gameIdsWithProps = useMemo(() => {
+        const ids = new Set<string>();
+        scheduleData.forEach(game => {
+            const hasAnyPlayer = players.some(p => {
+                const isInGame = p.team === game.home_team_tricode || p.team === game.away_team_tricode;
+                if (!isInGame) return false;
+                return playerHasKnownSportsbookLineForDate(p, propsAvailabilityByDate, statFilter, activeSportsbook, game.game_date);
+            });
+            if (hasAnyPlayer) ids.add(game.game_id);
+        });
+        return ids;
+    }, [scheduleData, players, statFilter, activeSportsbook, propsAvailabilityByDate]);
+
     const gameOptions = useMemo(() => {
         const options = [{ label: 'All Games', value: 'All Games' }];
         scheduleData.forEach(game => {
+            if (!gameIdsWithProps.has(game.game_id)) return;
             options.push({
                 label: `${game.away_team_tricode}-${game.home_team_tricode}`,
                 value: game.game_id
             });
         });
         return options;
-    }, [scheduleData]);
+    }, [scheduleData, gameIdsWithProps]);
 
     // Group active players into the schedule with Filters
     const processedGames = useMemo(() => {
         if (!scheduleData.length) return [];
 
         // 1. Game Filter
-        let filteredSchedule = scheduleData;
+        let filteredSchedule = scheduleData.filter(g => gameIdsWithProps.has(g.game_id));
         if (gameFilter !== 'All Games') {
-            filteredSchedule = scheduleData.filter(g => g.game_id === gameFilter);
+            filteredSchedule = filteredSchedule.filter(g => g.game_id === gameFilter);
         }
 
         // 2. Process Games & Players

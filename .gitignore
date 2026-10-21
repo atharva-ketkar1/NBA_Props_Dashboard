@@ -68,3 +68,4 @@ backend/prop_modeling/*test*.py
 # data archives built by backend/scripts/snapshot.py (never commit: public repo)
 nba_dashboard_backup_*.zip
 *.zip
+vm_logs/

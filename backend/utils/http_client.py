@@ -51,6 +51,15 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
+from dotenv import load_dotenv
+
+# Load backend/.env here rather than relying on the caller. In production
+# master_cron loads it before importing anything, so PBPSTATS_PROXY_URL is
+# visible; any standalone entry point (run_pipeline.py, utils/roster_sync.py,
+# a scraper run by hand) otherwise sees no proxy URL and proxied_get refuses,
+# which looks exactly like a missing config. load_dotenv does not override
+# variables already in the environment, so the production path is unchanged.
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 logger = logging.getLogger("http_client")
 

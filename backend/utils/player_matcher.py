@@ -12,6 +12,14 @@ class PlayerMatcher:
         self.id_map = {}      # ID -> Player Data
         
         # Manual Aliases (Normalize these keys too!)
+        # Nickname pairs are deliberately listed in BOTH directions (e.g.
+        # "nic claxton" <-> "nicolas claxton") so that a prop row spelled either
+        # way resolves. Which side the NBA stats feed treats as canonical is not
+        # something this table should assume -- as of the 2025-26 feed it is the
+        # short form ("Nic Claxton", "Mo Bamba", "Alex Sarr", "Bub Carrington"),
+        # which is the opposite direction from several entries below. match_player
+        # therefore resolves one step and then prefers whichever spelling actually
+        # exists in players_map, which keeps the lookup direction-agnostic.
         self.aliases = {
             "nic claxton": "nicolas claxton",
             "kj martin": "kenyon martin",
@@ -84,10 +92,23 @@ class PlayerMatcher:
         """
         norm_input = self.normalize_name(raw_name)
         
-        # Check Aliases
-        if norm_input in self.aliases:
-            norm_input = self.aliases[norm_input]
-            
+        # Check Aliases.
+        # Aliases are applied exactly once -- a "resolve until fixpoint" loop would
+        # spin forever on the two-way nickname pairs above. Because the table holds
+        # both directions, substituting unconditionally can map an already-canonical
+        # spelling *away* from players_map, and the fallback fuzzy tier does not save
+        # it (fuzz.ratio("nicolas claxton", "nic claxton") is ~84, under the 85
+        # cutoff). So prefer whichever of the two spellings the stats feed actually
+        # uses, which makes the lookup direction-agnostic.
+        alias_target = self.aliases.get(norm_input)
+        if alias_target:
+            if alias_target in self.players_map:
+                norm_input = alias_target
+            elif norm_input not in self.players_map:
+                # Neither spelling is a known player; fall through on the alias,
+                # as before, so the fuzzy tiers work off the canonical form.
+                norm_input = alias_target
+
         # 1. EXACT MATCH
         if norm_input in self.players_map:
             candidates = self.players_map[norm_input]
@@ -108,18 +129,23 @@ class PlayerMatcher:
             matched_name, score, _ = match
             candidates = self.players_map[matched_name]
             
-            # If score is high but not perfect, and we have multiple candidates?
-            # Usually fuzzy match returns one best string.
-            if len(candidates) > 1:
-                return self._disambiguate_by_team(candidates, team_context, team_options)
-            
-            # TEAM CHECK for Tier 2 fuzzy matches (lower confidence requiring team match)
-            # If the name is "Alex Sarr" vs "Alexandre Sarr", score might be lower like 70-80?
-            # Actually fuzz.ratio("alex sarr", "alexandre sarr") -> 78
-            # So 85 cutoff might miss it.
-            
-            # Let's try Token Set Ratio for substrings
-            # "Alex Sarr" vs "Alexandre Sarr" -> Token Set is 100? No, Sarr is in both.
+            # TEAM CHECK for Tier 2 fuzzy matches (lower confidence requiring team match).
+            # The input did not match exactly, so an 85-similar name can still be a
+            # different player ("jalen smith" vs "jaden smith"); attaching that ID
+            # would hang the prop line on the wrong player. If the row carries usable
+            # team info it therefore has to agree -- whether there is one candidate
+            # or several. Routing the multi-candidate case through
+            # _disambiguate_by_team instead would reintroduce exactly this bug,
+            # because that helper falls back to candidates[0] on disagreement.
+            # _required_teams distinguishes "no team info given" from "team info
+            # given but it disagrees": with no team info there is nothing to
+            # contradict the match, and rejecting would silently drop legitimate props.
+            if self._required_teams(team_context, team_options):
+                team_match = self._check_team_match(candidates, team_context, team_options)
+                return team_match['id'] if team_match else None
+
+            # No usable team info. Same-normalized-name collisions are rare and
+            # unresolvable here, so take the first candidate as before.
             return candidates[0]['id']
             
         # 3. LOOSE MATCH w/ TEAM CONTEXT
@@ -144,18 +170,23 @@ class PlayerMatcher:
             return match['id']
         return candidates[0]['id'] # Default to first found
 
-    def _check_team_match(self, candidates, team_context, team_options):
-        """Helper to find a candidate matching the team info."""
-        if not team_context and not team_options:
-            return None
-            
+    def _required_teams(self, team_context, team_options):
+        """The teams a row claims the player is on, ignoring 'UNK' placeholders.
+
+        An empty set means "no usable team info", which callers must treat
+        differently from "team info that disagrees".
+        """
         required_teams = set()
         if team_context and team_context != 'UNK':
             required_teams.add(team_context)
         if team_options:
             for t in team_options:
                 if t and t != 'UNK': required_teams.add(t)
-        
+        return required_teams
+
+    def _check_team_match(self, candidates, team_context, team_options):
+        """Helper to find a candidate matching the team info."""
+        required_teams = self._required_teams(team_context, team_options)
         if not required_teams:
             return None
 

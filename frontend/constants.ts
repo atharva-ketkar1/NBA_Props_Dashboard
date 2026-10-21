@@ -169,6 +169,23 @@ export function archiveSeasonKey(season: string | null | undefined): string | nu
   return season && season in ARCHIVE_SEASONS ? ARCHIVE_SEASONS[season] : null;
 }
 
+/**
+ * LIVE_SEASON in NBA format: '26/27' -> '2026-27'.
+ *
+ * This is the value the backend stamps into players.roster_season (it comes from
+ * resolve_season() there), so the live read can filter to players actually on a
+ * roster. Derived from LIVE_SEASON rather than hardcoded so a rollover stays a
+ * one-line change — and the read that uses it fails open, because resolve_season()
+ * rolls over in September and LIVE_SEASON is updated by hand.
+ */
+export function liveSeasonKey(): string | null {
+  const startYear = seasonLabelStartYear(LIVE_SEASON);
+  if (startYear === null) {
+    return null;
+  }
+  return `${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`;
+}
+
 export function isSelectableSeason(season: string | null | undefined): boolean {
   return season === LIVE_SEASON || isArchiveSeason(season);
 }

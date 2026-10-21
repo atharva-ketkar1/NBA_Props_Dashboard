@@ -1,4 +1,3 @@
-import requests
 import time
 import random
 import re
@@ -9,6 +8,10 @@ import pandas as pd
 import os
 import urllib.parse
 from dotenv import load_dotenv
+
+import os as _hc_os, sys as _hc_sys
+_hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
+from utils.http_client import proxied_get_json, UpstreamFailed, WorkerRejected, ProxyNotConfigured  # noqa: E402  (needs the path insert above)
 
 load_dotenv()
 
@@ -87,21 +90,12 @@ def fetch_category(subcategory_id, prop_label):
         f"&marketsQuery=%24filter%3DclientMetadata%2FsubCategoryId%20eq%20%27{subcategory_id}%27%20AND%20tags%2Fall%28t%3A%20t%20ne%20%27SportcastBetBuilder%27%29&include=Events&entity=events"
         f"&_={timestamp}"
     )
-    
-    proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
-    if not proxy_url:
-        logger.warning("PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
-        proxy_url = url
-        params = {}
-    else:
-        params = {"url": url}
-    
+
     try:
-        #resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp = requests.get(proxy_url, params=params, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
+        # proxied_get_json retries 403s with a fresh worker-side User-Agent
+        # instead of dropping the category on the first stale-UA response.
+        return proxied_get_json(url, headers=HEADERS, label=f"draftkings-{prop_label}")
+    except (UpstreamFailed, WorkerRejected, ProxyNotConfigured) as e:
         logger.error("Error fetching %s: %s", prop_label, e)
         return None
 

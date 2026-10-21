@@ -4,6 +4,7 @@ import logging
 import argparse
 import re
 import unicodedata
+from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,7 @@ from scrapers import fetch_odds_fanduel as fanduel
 from utils.player_matcher import PlayerMatcher
 from utils.pregame_props import has_game_started, is_within_pregame_window
 from utils.prop_date_resolver import resolve_prop_game_date
+from utils.prop_types import PROP_MAP
 from utils.snapshot_manager import SnapshotManager
 from utils.odds_csv import write_odds_csv
 from utils.prizepicks_archive import archive_prizepicks_rows
@@ -39,13 +41,6 @@ SCHEDULE_PATH = os.path.join(DATA_DIR, "today_schedule.json")
 # We will use this file to track which games we have already scraped today
 # so we don't double-scrape a game if the cron checks multiple times in a window.
 STATE_PATH = os.path.join(BASE_DIR, "logs", "cron_state_today.json")
-
-# Map betting props to internal names to match aggregator
-PROP_MAP = {
-    'points': 'PTS', 'rebounds': 'REB', 'assists': 'AST',
-    'threes': 'FG3M', 'blocks': 'BLK', 'steals': 'STL',
-    'pra': 'PTS+REB+AST', 'pr': 'PTS+REB', 'pa': 'PTS+AST', 'ra': 'REB+AST', 'stocks': 'STL+BLK'
-}
 
 
 def normalize_lookup_name(name):
@@ -250,6 +245,13 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     skipped_schedule_mismatch = 0
     skipped_non_target_game = 0
     skipped_live_game = 0
+    # An unresolved player is not dropped here -- it is keyed by normalized name
+    # instead of player_id, which then propagates into the snapshot and the
+    # historical archive as a non-numeric key (see utils/audit_non_numeric_keys.py
+    # and utils/repair_line_movement_keys.py, which exist to clean that up after
+    # the fact). Count them so the condition is visible while it is still cheap
+    # to fix.
+    unresolved_player_names = Counter()
     filtered_fd_data = []
     filtered_dk_data = []
     
@@ -259,6 +261,8 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             row.get("player", ""),
             row.get("team", "UNK"),
         )
+        if not pid:
+            unresolved_player_names[str(row.get("player", "")).strip() or "<blank>"] += 1
         pid = str(pid) if pid else normalize_lookup_name(row.get("player", ""))
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
@@ -320,6 +324,8 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             row.get("team", "UNK"),
             row.get("team_options"),
         )
+        if not pid:
+            unresolved_player_names[str(row.get("player", "")).strip() or "<blank>"] += 1
         pid = str(pid) if pid else normalize_lookup_name(row.get("player", ""))
         
         prop = PROP_MAP.get(row.get("prop_type", ""), row.get("prop_type", "")).upper()
@@ -381,6 +387,17 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         }
         filtered_dk_data.append(row)
 
+    if unresolved_player_names:
+        log_status(
+            logger,
+            "WARN",
+            "Odds rows keyed by name because the player could not be resolved",
+            rows=sum(unresolved_player_names.values()),
+            distinct_players=len(unresolved_player_names),
+            top_unresolved=[
+                f"{name} x{count}" for name, count in unresolved_player_names.most_common(10)
+            ],
+        )
     if skipped_schedule_mismatch:
         log_status(
             logger,

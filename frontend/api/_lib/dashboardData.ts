@@ -7,6 +7,7 @@ import {
   getDashboardDate,
   getFastRefreshDates,
 } from './dashboardDate.js';
+import { liveSeasonKey } from '../../constants.js';
 import { rankSimilarPlayers } from '../../utils/similarPlayers.js';
 import { playerHasAnyProp } from '../../utils/propResolution.js';
 import type {
@@ -147,6 +148,19 @@ function isMissingRelationError(error: { message?: string } | null, tableName: s
     (message.includes('relation') && message.includes('does not exist') && message.includes(tableToken))
     || (message.includes('could not find the table') && message.includes(tableToken))
     || (message.includes('schema cache') && message.includes(tableToken))
+  );
+}
+
+function isMissingColumnError(error: { message?: string } | null, columnName: string) {
+  const message = String(error?.message ?? '').toLowerCase();
+  const columnToken = columnName.toLowerCase();
+  return (
+    message.includes(columnToken)
+    && (
+      (message.includes('column') && message.includes('does not exist'))
+      || message.includes('could not find the')
+      || message.includes('schema cache')
+    )
   );
 }
 
@@ -571,15 +585,74 @@ async function resolvePropsRowsForSportsbook(
   };
 }
 
-async function fetchPlayers(selectClause: string) {
+/** Returns null when `rosterSeason` is requested but the column does not exist yet. */
+async function fetchPlayerRows(selectClause: string, rosterSeason: string | null) {
+  const supabase = getSupabaseAdmin();
+  const allRows: any[] = [];
+
+  // PostgREST caps rows per response, so an unpaginated select truncates
+  // silently once the table outgrows the ceiling -- and nothing prunes
+  // `players`, so it only grows. Page it like every other bulk read here,
+  // ordered by id so pages neither overlap nor skip.
+  for (let start = 0; ; start += PAGE_SIZE) {
+    let query = supabase
+      .from('players')
+      .select(selectClause)
+      .order('id', { ascending: true });
+
+    if (rosterSeason) {
+      query = query.eq('roster_season', rosterSeason);
+    }
+
+    const { data, error } = await query.range(start, start + PAGE_SIZE - 1);
+
+    if (rosterSeason && isMissingColumnError(error, 'roster_season')) {
+      // The migration has not been applied yet. Signal the caller to retry
+      // unfiltered rather than 500 the dashboard: a filter on a column that
+      // does not exist is an error, not an empty result, so the zero-row
+      // fail-open below would never be reached.
+      return null;
+    }
+
+    assertNoError(error, 'players');
+
+    if (!data?.length) {
+      return allRows;
+    }
+
+    allRows.push(...data);
+
+    if (data.length < PAGE_SIZE) {
+      return allRows;
+    }
+  }
+}
+
+async function fetchPlayers(selectClause: string, options: { currentRosterOnly?: boolean } = {}) {
+  // Retirees are never deleted from `players` (archive seasons still read their
+  // identity from it), so the live reads filter to players the backend has
+  // stamped as being on a current NBA roster — see backend/utils/roster_sync.py.
+  const rosterSeason = options.currentRosterOnly ? liveSeasonKey() : null;
+
   return readCached(
-    buildCacheKey(['players', selectClause]),
+    buildCacheKey(['players', selectClause, rosterSeason ?? 'all']),
     PLAYERS_CACHE_MS,
     async () => {
-      const supabase = getSupabaseAdmin();
-      const { data, error } = await supabase.from('players').select(selectClause);
-      assertNoError(error, 'players');
-      return data ?? [];
+      const rows = await fetchPlayerRows(selectClause, rosterSeason);
+
+      if (rosterSeason && (rows === null || !rows.length)) {
+        // Fail open. roster_season is stamped from the backend's
+        // resolve_season(), which rolls over in September, while LIVE_SEASON is
+        // updated by hand; a migration that has not run yet leaves the column
+        // NULL for everyone. Any of those desyncs should cost a larger payload,
+        // never an empty dashboard.
+        console.warn(
+          `[api/players] ${rows === null ? 'roster_season column missing' : `no rows for roster_season=${rosterSeason}`}; falling back to the unfiltered read`,
+        );
+        return (await fetchPlayerRows(selectClause, null)) ?? [];
+      }
+
+      return rows ?? [];
     },
   );
 }
@@ -799,7 +872,7 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
   const includeLineMovements = activeSportsbook !== 'pp';
 
   const [playersRows, requestedPropsRows, availabilityRows, lineRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
-    fetchPlayers(PLAYER_BASE_SELECT),
+    fetchPlayers(PLAYER_BASE_SELECT, { currentRosterOnly: true }),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT, activeSportsbook),
     fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_AVAIL_SELECT),
     includeLineMovements
@@ -1001,7 +1074,7 @@ export async function fetchSimilarCandidatesPayload({
       const propDates = selectedGameDate ? [selectedGameDate] : buildFutureDates(today, SIMILAR_PROP_DAYS);
 
       const [playersRows, propsRows] = await Promise.all([
-        fetchPlayers(PLAYER_SIMILAR_SELECT),
+        fetchPlayers(PLAYER_SIMILAR_SELECT, { currentRosterOnly: true }),
         fetchAllPlayerPropsForDates(propDates, PLAYER_PROP_SELECT, activeSportsbook),
       ]);
 

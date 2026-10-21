@@ -91,10 +91,11 @@ def _read_cache(cache_path):
         with open(cache_path) as fh:
             blob = json.load(fh)
     except (OSError, ValueError):
-        return None, 0
+        return None, 0, None
     records = blob.get("players") or []
     fetched_at = float(blob.get("fetched_at") or 0)
-    return (records or None), fetched_at
+    cached_season = blob.get("season") or None
+    return (records or None), fetched_at, cached_season
 
 
 def _write_cache(cache_path, season, records):
@@ -109,20 +110,39 @@ def _write_cache(cache_path, season, records):
         logger.warning("Could not cache player index: %s", exc)
 
 
-def get_player_index(season=None, cache_path=None, force_refresh=False):
-    """Return roster records for PlayerMatcher, or [] if unavailable.
+def get_player_index_result(season=None, cache_path=None, force_refresh=False):
+    """Roster records plus where they came from.
 
-    Never raises: an empty list leaves the caller with its previous behaviour.
+    Returns a dict:
+        players       list of records (possibly empty)
+        source        "fetch" (live upstream), "cache" (disk fallback) or
+                      "empty" (nothing usable)
+        season        the season that was asked for
+        cache_season  the season the cache was written for, when served from cache
+        fetched_at    cache write time, when served from cache
+
+    `get_player_index` deliberately degrades to a stale cache or an empty list
+    rather than raising, because the matcher only needs best-effort coverage.
+    Callers that *write* roster state need to tell those cases apart -- stamping
+    "who is on a roster" from an empty or previous-season list would age out the
+    entire league in one run -- so the provenance is reported here rather than
+    inferred from the row count.
     """
     if season is None:
         from scrapers.season_type import resolve_season
         season = resolve_season()
     cache_path = Path(cache_path or DEFAULT_CACHE_PATH)
 
-    cached, fetched_at = _read_cache(cache_path)
+    cached, fetched_at, cached_season = _read_cache(cache_path)
     fresh = cached and (time.time() - fetched_at) < CACHE_TTL_SECONDS
     if fresh and not force_refresh:
-        return cached
+        return {
+            "players": cached,
+            "source": "cache",
+            "season": season,
+            "cache_season": cached_season,
+            "fetched_at": fetched_at,
+        }
 
     try:
         records = _fetch_roster(season)
@@ -130,13 +150,43 @@ def get_player_index(season=None, cache_path=None, force_refresh=False):
             _write_cache(cache_path, season, records)
             logger.info("Player index refreshed: %d players for %s",
                         len(records), season)
-            return records
+            return {
+                "players": records,
+                "source": "fetch",
+                "season": season,
+                "cache_season": season,
+                "fetched_at": time.time(),
+            }
         raise ValueError("commonallplayers returned 0 usable rows")
     except Exception as exc:
         if cached:
             logger.warning("Player index refresh failed (%s); using cache of %d players",
                            exc, len(cached))
-            return cached
+            return {
+                "players": cached,
+                "source": "cache",
+                "season": season,
+                "cache_season": cached_season,
+                "fetched_at": fetched_at,
+            }
         logger.warning("Player index unavailable (%s); matcher will fall back to "
                        "season stats only, which resolves poorly early in a season", exc)
-        return []
+        return {
+            "players": [],
+            "source": "empty",
+            "season": season,
+            "cache_season": None,
+            "fetched_at": 0,
+        }
+
+
+def get_player_index(season=None, cache_path=None, force_refresh=False):
+    """Return roster records for PlayerMatcher, or [] if unavailable.
+
+    Never raises: an empty list leaves the caller with its previous behaviour.
+    """
+    return get_player_index_result(
+        season=season,
+        cache_path=cache_path,
+        force_refresh=force_refresh,
+    )["players"]
