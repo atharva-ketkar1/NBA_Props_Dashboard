@@ -380,7 +380,14 @@ def run_odds_update(
     }
     schedule_rows = load_schedule_rows(os.path.join(os.path.dirname(__file__), '..', 'data', 'current'))
     schedule_lookup = _build_schedule_lookup(schedule_rows)
-    archived_pp_rows, archived_pp_dates = _load_archived_live_prizepicks_rows(schedule_rows)
+    # PrizePicks is paused (cookie not refreshed) — skip loading archived PrizePicks
+    # rows entirely so no "pp" rows enter `rows` below, which in turn means no pp
+    # upserts and no stale-pp deletes (both are wasted Supabase I/O while paused).
+    from scrapers import fetch_odds_prizepicks as prizepicks
+    if prizepicks.prizepicks_enabled():
+        archived_pp_rows, archived_pp_dates = _load_archived_live_prizepicks_rows(schedule_rows)
+    else:
+        archived_pp_rows, archived_pp_dates = [], 0
 
     if df_dk.empty and df_fd.empty and df_pp.empty and not archived_pp_rows:
         logger.warning("All sportsbook CSVs are empty — nothing to upsert.")

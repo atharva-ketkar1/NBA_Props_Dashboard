@@ -3,6 +3,7 @@ import json
 import os
 import numpy as np
 import gc
+import hashlib
 import logging
 import time
 from collections import Counter
@@ -16,6 +17,47 @@ from utils.prop_types import PROP_MAP
 
 logger = logging.getLogger(__name__)
 UNDATED_PROP_KEY = '__undated__'
+
+# Per-player season-average stat keys attached to each DNP entry in a game
+# log's `dnps` list, so the hover tooltip can show "what they average" for
+# whichever stat is selected. Shared with scripts/build_season_archive.py,
+# which attaches the same shape to archived (past-season) game logs.
+DNP_STAT_KEYS = [
+    'PTS', 'AST', 'REB', 'FG3M', 'STL', 'BLK', 'TOV',
+    'PTS+REB+AST', 'PTS+REB', 'PTS+AST', 'REB+AST', 'STL+BLK',
+    '1Q_PTS', '1Q_AST', '1Q_REB', '1H_PTS',
+]
+
+
+PLAYERS_SYNC_STATE_PATH = os.path.join(
+    os.path.dirname(__file__), '..', 'data', 'current', 'players_upsert_sync_state.json'
+)
+
+
+def _load_players_sync_state() -> dict:
+    try:
+        with open(PLAYERS_SYNC_STATE_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_players_sync_state(state: dict):
+    try:
+        os.makedirs(os.path.dirname(PLAYERS_SYNC_STATE_PATH), exist_ok=True)
+        tmp_path = PLAYERS_SYNC_STATE_PATH + '.tmp'
+        with open(tmp_path, 'w') as f:
+            json.dump(state, f)
+        os.replace(tmp_path, PLAYERS_SYNC_STATE_PATH)
+    except Exception as e:
+        logger.warning("Could not persist players sync state: %s", e)
+
+
+def _row_fingerprint(row: dict) -> str:
+    """Hash of a players row's mutable payload (everything but 'id')."""
+    payload = {k: v for k, v in row.items() if k != 'id'}
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(serialized.encode('utf-8')).hexdigest()
 
 
 def _is_retryable_players_upsert_error(error) -> bool:
@@ -91,12 +133,38 @@ def upsert_players_to_db(master_data: dict):
             'play_type_analysis':          data.get('play_type_analysis', []),  # already a list
         })
 
-    logger.info("Upserting %d players to Supabase...", len(rows))
+    # Skip rows whose payload hasn't changed since the last successful upsert —
+    # this table carries wide JSONB columns (game_log, shooting/assist zones, etc.)
+    # and rewriting all ~450+ players every run burns Supabase disk-I/O credits
+    # for players whose underlying data didn't move that day.
+    sync_state = _load_players_sync_state()
+    next_sync_state = {}
+    changed_rows = []
+    for row in rows:
+        key = str(row['id'])
+        fingerprint = _row_fingerprint(row)
+        next_sync_state[key] = fingerprint
+        if sync_state.get(key) != fingerprint:
+            changed_rows.append(row)
 
-    # Batch in smaller chunks to stay within PostgREST request size and timeout limits
+    skipped = len(rows) - len(changed_rows)
+    logger.info(
+        "Upserting %d/%d players to Supabase (%d unchanged, skipped)...",
+        len(changed_rows), len(rows), skipped,
+    )
+
+    if not changed_rows:
+        _save_players_sync_state(next_sync_state)
+        logger.info("✅ players upsert skipped — no changes.")
+        return
+
+    # Batch in smaller chunks to stay within PostgREST request size and timeout limits.
+    # Track which ids actually made it to the DB so a failed chunk gets retried
+    # (not silently marked "synced") on the next run.
     chunk_size = 25
-    for i in range(0, len(rows), chunk_size):
-        chunk = rows[i:i + chunk_size]
+    failed_ids = set()
+    for i in range(0, len(changed_rows), chunk_size):
+        chunk = changed_rows[i:i + chunk_size]
         last_error = None
         for attempt in range(1, 4):
             try:
@@ -109,9 +177,23 @@ def upsert_players_to_db(master_data: dict):
                     break
                 time.sleep(1.5 * attempt)
         if last_error is not None:
+            failed_ids.update(str(row['id']) for row in chunk)
             logger.error("players upsert failed for chunk %d–%d: %s", i, i + chunk_size, last_error)
 
-    logger.info("✅ players upsert complete (%d rows).", len(rows))
+    if failed_ids:
+        for key in failed_ids:
+            next_sync_state.pop(key, None)
+        logger.warning("%d players failed to upsert — will retry next run.", len(failed_ids))
+
+    # Unchanged rows from this run still belong in the persisted state (merged
+    # onto whatever succeeded), so the next run's comparison stays correct.
+    merged_state = dict(sync_state)
+    merged_state.update(next_sync_state)
+    for key in failed_ids:
+        merged_state.pop(key, None)
+    _save_players_sync_state(merged_state)
+
+    logger.info("✅ players upsert complete (%d/%d rows).", len(changed_rows) - len(failed_ids), len(rows))
 
 # ==========================================
 # 1. CONFIGURATION MAPPINGS
@@ -269,22 +351,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     id_to_stats_map = {}
     for _, row in df_stats.iterrows():
         id_to_stats_map[int(row['PLAYER_ID'])] = {
-            'PTS': safe_float(row.get('PTS', 0)),
-            'AST': safe_float(row.get('AST', 0)),
-            'REB': safe_float(row.get('REB', 0)),
-            'FG3M': safe_float(row.get('FG3M', 0)),
-            'STL': safe_float(row.get('STL', 0)),
-            'BLK': safe_float(row.get('BLK', 0)),
-            'TOV': safe_float(row.get('TOV', 0)),
-            'PTS+REB+AST': safe_float(row.get('PTS+REB+AST', 0)),
-            'PTS+REB': safe_float(row.get('PTS+REB', 0)),
-            'PTS+AST': safe_float(row.get('PTS+AST', 0)),
-            'REB+AST': safe_float(row.get('REB+AST', 0)),
-            'STL+BLK': safe_float(row.get('STL+BLK', 0)),
-            '1Q_PTS': safe_float(row.get('1Q_PTS', 0)),
-            '1Q_AST': safe_float(row.get('1Q_AST', 0)),
-            '1Q_REB': safe_float(row.get('1Q_REB', 0)),
-            '1H_PTS': safe_float(row.get('1H_PTS', 0)),
+            k: safe_float(row.get(k, 0)) for k in DNP_STAT_KEYS
         }
 
     # C. Prepare Game Logs (Group by Player)
@@ -315,7 +382,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                             dnp_pid = matcher.match_player(dnp['name'], team, [])
                             d_stats = id_to_stats_map.get(dnp_pid, {}) if dnp_pid else {}
                             if not d_stats:
-                                d_stats = {k: 0.0 for k in ['PTS', 'AST', 'REB', 'FG3M', 'STL', 'BLK', 'TOV', 'PTS+REB+AST', 'PTS+REB', 'PTS+AST', 'REB+AST', 'STL+BLK', '1Q_PTS', '1Q_AST', '1Q_REB', '1H_PTS']}
+                                d_stats = {k: 0.0 for k in DNP_STAT_KEYS}
                             
                             team_dnps.append({
                                 'name': dnp['name'],
