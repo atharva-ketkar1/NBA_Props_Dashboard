@@ -56,6 +56,7 @@ import {
   fetchDashboardSimilar,
 } from './utils/dashboardApi';
 import { STAT_LABELS, TAB_ORDER } from './utils/statLabels';
+import { usePanelSeasons, useSeasonSplits } from './utils/useSeasonSplits';
 
 
 const EDGE_STAT_TO_TAB: Record<string, string> = {
@@ -637,6 +638,9 @@ function teammateSelectionMatches(
 
   return normalizePersonName(selection.playerName) === normalizePersonName(card.playerName);
 }
+
+/** The panels that carry their own season dropdown, in render order. */
+const PANEL_IDS = ['shooting', 'assists', 'shotType', 'playType', 'similar'] as const;
 
 function resolveSlateOpponent(
   player: Player | null | undefined,
@@ -1656,6 +1660,19 @@ function App() {
   const displayPlayerOpponent = useMemo(() => (
     resolveSlateOpponent(displayPlayer, resolvedSelectedGameDate, slateOpponentByTeamDate)
   ), [displayPlayer, resolvedSelectedGameDate, slateOpponentByTeamDate]);
+  // The four season-aggregate panels each carry their own season, plus Similar
+  // Players, which has the control but not yet the data behind it.
+  const { panelSeasons, setPanelSeason } = usePanelSeasons(PANEL_IDS, displayPlayer?.id ?? null);
+  const { getSplits } = useSeasonSplits(
+    displayPlayer?.id ?? null,
+    displayPlayerOpponent,
+    Object.values(panelSeasons),
+  );
+  const shootingPanel = getSplits(panelSeasons.shooting);
+  const assistPanel = getSplits(panelSeasons.assists);
+  const shotTypePanel = getSplits(panelSeasons.shotType);
+  const playTypePanel = getSplits(panelSeasons.playType);
+
   const displayPlayerAvailability = useMemo(() => {
     if (!displayPlayer) {
       return {};
@@ -2373,6 +2390,8 @@ function App() {
                 isLoadingCandidates={shouldShowSimilarLoading}
                 similarCandidatesByProp={readySimilarCandidatesByProp}
                 similarCandidatesByPosition={readySimilarCandidatesByPosition}
+                panelSeason={panelSeasons.similar}
+                onPanelSeasonChange={(next) => setPanelSeason('similar', next)}
               />
             </div>
           ) : (
@@ -2383,13 +2402,35 @@ function App() {
                   : mobileView !== 'shooting' ? 'hidden md:flex' : ''
                 }`}>
                 {['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) ? (
-                  <AssistZones player={displayPlayer} activeSeason={activeSeason} />
+                  <AssistZones
+                    player={displayPlayer}
+                    season={panelSeasons.assists}
+                    onSeasonChange={(next) => setPanelSeason('assists', next)}
+                    splits={assistPanel.splits}
+                    isLoadingSplits={assistPanel.isLoading}
+                    hasSplitsError={assistPanel.hasError}
+                  />
                 ) : (
-                  <ShootingZones player={displayPlayer} activeSeason={activeSeason} />
+                  <ShootingZones
+                    player={displayPlayer}
+                    season={panelSeasons.shooting}
+                    onSeasonChange={(next) => setPanelSeason('shooting', next)}
+                    splits={shootingPanel.splits}
+                    isLoadingSplits={shootingPanel.isLoading}
+                    hasSplitsError={shootingPanel.hasError}
+                  />
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className="flex-1 min-h-0 hidden md:block">
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} activeSeason={activeSeason} />
+                    <PlayTypeAnalysis
+                      playTypes={displayPlayer?.play_type_analysis ?? []}
+                      gamesPlayed={displayPlayer?.stats?.GP}
+                      season={panelSeasons.playType}
+                      onSeasonChange={(next) => setPanelSeason('playType', next)}
+                      splits={playTypePanel.splits}
+                      isLoadingSplits={playTypePanel.isLoading}
+                    hasSplitsError={playTypePanel.hasError}
+                    />
                   </div>
                 )}
               </div>
@@ -2398,47 +2439,28 @@ function App() {
               <div className="xl:col-span-6 flex flex-col gap-4 h-full">
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`${mobileView !== 'shooting' ? 'hidden md:block' : ''}`}>
-                    <ShotTypeAnalysis activeSeason={activeSeason} shotTypes={(() => {
-                      if (!displayPlayer?.shot_type_analysis) return [];
-                      const sta = displayPlayer.shot_type_analysis;
-                      const p = sta.player || {};
-                      const d = sta.opp_def || {};
-                      const cs = p.catch_and_shoot;
-                      const pu = p.pull_up;
-                      const lt10 = p.less_than_10_ft;
-                      if (!cs && !pu && !lt10) return undefined;
-                      return [
-                        {
-                          type: 'C&S',
-                          percentage: cs?.percentage || 0,
-                          attempts: Math.round(cs?.points || 0),
-                          frequency: cs?.percentage || 0,
-                          width: cs?.percentage || 33.3,
-                          rank: d.catch_and_shoot?.rank
-                        },
-                        {
-                          type: '< 10 ft',
-                          percentage: lt10?.percentage || 0,
-                          attempts: Math.round(lt10?.points || 0),
-                          frequency: lt10?.percentage || 0,
-                          width: lt10?.percentage || 33.3,
-                          rank: d.less_than_10_ft?.rank
-                        },
-                        {
-                          type: 'Pull Up',
-                          percentage: pu?.percentage || 0,
-                          attempts: Math.round(pu?.points || 0),
-                          frequency: pu?.percentage || 0,
-                          width: pu?.percentage || 33.3,
-                          rank: d.pull_up?.rank
-                        }
-                      ];
-                    })()} />
+                    <ShotTypeAnalysis
+                      shotTypeAnalysis={displayPlayer?.shot_type_analysis}
+                      gamesPlayed={displayPlayer?.stats?.GP}
+                      season={panelSeasons.shotType}
+                      onSeasonChange={(next) => setPanelSeason('shotType', next)}
+                      splits={shotTypePanel.splits}
+                      isLoadingSplits={shotTypePanel.isLoading}
+                    hasSplitsError={shotTypePanel.hasError}
+                    />
                   </div>
                 )}
                 {!['Assists', '1Q Assists', 'Reb+Ast'].includes(activeTab) && (
                   <div className={`md:hidden ${mobileView !== 'types' ? 'hidden' : ''}`}>
-                    <PlayTypeAnalysis playTypes={displayPlayer?.play_type_analysis ?? []} activeSeason={activeSeason} />
+                    <PlayTypeAnalysis
+                      playTypes={displayPlayer?.play_type_analysis ?? []}
+                      gamesPlayed={displayPlayer?.stats?.GP}
+                      season={panelSeasons.playType}
+                      onSeasonChange={(next) => setPanelSeason('playType', next)}
+                      splits={playTypePanel.splits}
+                      isLoadingSplits={playTypePanel.isLoading}
+                    hasSplitsError={playTypePanel.hasError}
+                    />
                   </div>
                 )}
                 <div className={`flex-1 min-h-0 xl:col-span-12 w-full h-full ${mobileView !== 'similar' ? 'hidden md:flex' : ''}`}>
@@ -2452,6 +2474,8 @@ function App() {
                     isLoadingCandidates={shouldShowSimilarLoading}
                     similarCandidatesByProp={readySimilarCandidatesByProp}
                     similarCandidatesByPosition={readySimilarCandidatesByPosition}
+                    panelSeason={panelSeasons.similar}
+                    onPanelSeasonChange={(next) => setPanelSeason('similar', next)}
                   />
                 </div>
               </div>

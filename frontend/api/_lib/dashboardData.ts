@@ -1494,3 +1494,165 @@ export async function fetchEdgePayload(): Promise<EdgeScorePayload> {
     },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Season splits: the four panels that are season aggregates rather than game logs
+// ---------------------------------------------------------------------------
+
+const PLAYER_SEASON_SPLIT_SELECT =
+  'player_id, season, player_name, team, position, stats, shooting_zones, assist_zones, shot_type_points, play_type_points';
+const TEAM_SEASON_DEFENSE_SELECT =
+  'team, season, team_name, opp_def_zones, opp_assist_zones, shot_type_ranks, play_type_ranks';
+
+/** Collapse a listed position to the G/F/C bucket the defensive splits are cut by. */
+function simplePosition(position?: string | null) {
+  const text = String(position ?? '').toUpperCase();
+  if (text.includes('G')) {
+    return 'G';
+  }
+  if (text.includes('C')) {
+    return 'C';
+  }
+  if (text.includes('F')) {
+    return 'F';
+  }
+  return 'G';
+}
+
+/**
+ * ALL first, the player's own position as the fallback.
+ *
+ * This is the order utils/aggregator.py uses for the live season, and the two
+ * have to agree: a panel that silently switched from league-wide to positional
+ * defense when you changed the season dropdown would show a rank move that no
+ * team actually made.
+ */
+function pickDefensiveBucket(buckets: any, position?: string | null) {
+  if (!buckets || typeof buckets !== 'object') {
+    return { bucket: null as any, positional: null as any };
+  }
+
+  const positional = buckets[simplePosition(position)] ?? null;
+  return {
+    bucket: buckets.ALL ?? positional,
+    positional,
+  };
+}
+
+/**
+ * A season's splits for one player, joined to one opponent's defense.
+ *
+ * The player half is fixed for the season; the opponent half is whoever they
+ * play in the game the user is looking at, which is a fixture in the CURRENT
+ * season even when the splits are last season's. That asymmetry is the whole
+ * point of the panel -- last season's profile against the team in front of them
+ * -- so the opponent is a request parameter rather than something stored.
+ */
+export async function fetchSeasonSplitsPayload(
+  playerId: number,
+  season: string,
+  opponent: string | null,
+) {
+  return readCached(
+    buildCacheKey(['season_splits', playerId, season, opponent ?? 'no-opponent']),
+    ARCHIVE_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+
+      const playerPromise = supabase
+        .from('player_season_splits')
+        .select(PLAYER_SEASON_SPLIT_SELECT)
+        .eq('player_id', playerId)
+        .eq('season', season)
+        .maybeSingle();
+
+      const defensePromise = opponent
+        ? supabase
+          .from('team_season_defense')
+          .select(TEAM_SEASON_DEFENSE_SELECT)
+          .eq('team', opponent)
+          .eq('season', season)
+          .maybeSingle()
+        : Promise.resolve({ data: null, error: null });
+
+      const [
+        { data: playerRow, error: playerError },
+        { data: defenseRow, error: defenseError },
+      ] = await Promise.all([playerPromise, defensePromise]);
+
+      // Before the migration lands the tables are simply absent. That is a
+      // deployment state, not a failure: report "no data for this season" and
+      // let the live panel carry on.
+      if (playerError && !isMissingRelationError(playerError, 'player_season_splits')) {
+        assertNoError(playerError, 'player_season_splits');
+      }
+      if (defenseError && !isMissingRelationError(defenseError, 'team_season_defense')) {
+        assertNoError(defenseError, 'team_season_defense');
+      }
+
+      if (!playerRow) {
+        return {
+          season,
+          opponent,
+          hasData: false,
+          stats: null,
+          shootingZones: null,
+          assistZones: null,
+          oppDefZones: null,
+          oppDefZonesPositional: null,
+          oppAssistZones: null,
+          oppAssistZonesPositional: null,
+          shotTypeAnalysis: null,
+          playTypeAnalysis: null,
+        };
+      }
+
+      const position = (playerRow as any).position;
+      const defZones = pickDefensiveBucket((defenseRow as any)?.opp_def_zones, position);
+      const assistDefZones = pickDefensiveBucket((defenseRow as any)?.opp_assist_zones, position);
+
+      const shotTypeRanks = ((defenseRow as any)?.shot_type_ranks ?? {}) as Record<string, number>;
+      const shotTypePoints = (playerRow as any).shot_type_points;
+      const shotTypeAnalysis = shotTypePoints
+        ? {
+          player: shotTypePoints,
+          opp_def: defenseRow
+            ? {
+              catch_and_shoot: { rank: shotTypeRanks.catchAndShoot },
+              pull_up: { rank: shotTypeRanks.pullups },
+              less_than_10_ft: { rank: shotTypeRanks.lessThanTenFeet },
+            }
+            : {},
+        }
+        : null;
+
+      // The stored rows carry `key` (the synergy identifier) purely so the rank
+      // can be matched here; the panel never reads it.
+      const playTypeRanks = ((defenseRow as any)?.play_type_ranks ?? {}) as Record<string, number>;
+      const storedPlayTypes = (playerRow as any).play_type_points;
+      const playTypeAnalysis = Array.isArray(storedPlayTypes)
+        ? storedPlayTypes.map((item: any) => ({
+          type: item.type,
+          points: item.points,
+          percent: item.percent,
+          rank: playTypeRanks[item.key] ?? 'N/A',
+        }))
+        : null;
+
+      return {
+        season,
+        opponent,
+        hasData: true,
+        stats: (playerRow as any).stats ?? null,
+        shootingZones: (playerRow as any).shooting_zones ?? null,
+        assistZones: (playerRow as any).assist_zones ?? null,
+        oppDefZones: defZones.bucket,
+        oppDefZonesPositional: defZones.positional,
+        oppAssistZones: assistDefZones.bucket,
+        oppAssistZonesPositional: assistDefZones.positional,
+        shotTypeAnalysis,
+        playTypeAnalysis,
+      };
+    },
+  );
+}

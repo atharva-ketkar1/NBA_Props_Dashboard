@@ -93,9 +93,17 @@ def fetch_team_assists(team_id, season=None):
         print(f"Error fetching PBPStats via proxy for team {team_id}: {e}")
         raise e # Throw it so the main loop can count the errors
 
-def get_assist_zones_data():
-    """Fetches and transforms assist data for all players."""
-    team_ids = get_all_team_ids()
+def get_assist_zones_data(team_ids=None):
+    """Fetches and transforms assist data for all players.
+
+    `team_ids` defaults to whatever is in the live season_stats.csv, which is the
+    right list for the daily pipeline and the wrong one for any other season: in
+    the opening week that file holds only the teams that have already played, so
+    a caller scraping a completed season has to pass that season's teams in
+    explicitly or it will silently get a handful of them.
+    """
+    if team_ids is None:
+        team_ids = get_all_team_ids()
     all_player_stats = {}
     
     error_count = 0

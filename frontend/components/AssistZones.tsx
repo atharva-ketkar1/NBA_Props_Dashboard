@@ -3,7 +3,9 @@ import { Info } from 'lucide-react';
 import { Player } from '../types';
 
 import { colors } from '../utils/propsmadness_colors';
-import { SeasonScopeNote } from './SeasonScopeNote';
+import { describePanelGap, PanelNoData, PanelSeasonSelect } from './PanelSeason';
+import { hasEnoughPanelGames, LIVE_SEASON } from '../constants';
+import type { SeasonSplitsResponse } from '../utils/dashboardApi';
 
 function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
@@ -165,18 +167,53 @@ const CourtView = ({ pView, oView, vsView, activeTab }: { pView: any, oView: any
   </div>
 );
 
-export const AssistZones = ({ player, activeSeason }: { player: Player; activeSeason?: string }) => {
+interface AssistZonesProps {
+  player: Player;
+  /** This panel's own season, independent of the global game-log filter. */
+  season?: string;
+  onSeasonChange?: (season: string) => void;
+  /** The prior-season bundle, when this panel is not on the live season. */
+  splits?: SeasonSplitsResponse | null;
+  isLoadingSplits?: boolean;
+  /** The prior-season request failed, as opposed to coming back empty. */
+  hasSplitsError?: boolean;
+}
+
+export const AssistZones = ({
+  player,
+  season = LIVE_SEASON,
+  onSeasonChange,
+  splits,
+  isLoadingSplits = false,
+  hasSplitsError = false,
+}: AssistZonesProps) => {
   const [activeTab, setActiveTab] = useState<'player' | 'vs' | 'opp'>('vs');
 
-  const rawZones = (player as any)?.assist_zones;
-  const isMissing = !rawZones || Object.keys(rawZones).length === 0;
+  const isLiveSeason = season === LIVE_SEASON;
+  const rawZones = isLiveSeason ? (player as any)?.assist_zones : splits?.assistZones;
+  const oppZones = isLiveSeason ? (player as any)?.opp_assist_zones : splits?.oppAssistZones;
 
-  const playerView = processZoneData((player as any)?.assist_zones);
-  const oppView = processZoneData((player as any)?.opp_assist_zones, true);
-  const vsView = processVsZoneData((player as any)?.assist_zones, (player as any)?.opp_assist_zones);
+  const gamesPlayed = isLiveSeason ? (player as any)?.stats?.GP : splits?.stats?.GP;
+  const isLoading = !isLiveSeason && isLoadingSplits;
+  // Thin seasons are treated as missing: an assist map off three games is a
+  // picture of three games, drawn to look like a season.
+  const isMissing = !rawZones
+    || Object.keys(rawZones).length === 0
+    || !hasEnoughPanelGames(gamesPlayed);
+  const gap = describePanelGap({
+    gamesPlayed,
+    season,
+    isLiveSeason,
+    hasError: hasSplitsError,
+    seasonHasNoRecord: !isLiveSeason && splits?.hasData === false,
+  });
+
+  const playerView = processZoneData(rawZones);
+  const oppView = processZoneData(oppZones, true);
+  const vsView = processVsZoneData(rawZones, oppZones);
 
   return (
-    <div className={`bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0 ${isMissing ? 'opacity-50' : ''}`}>
+    <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0">
       <div className="flex flex-col sm:flex-row gap-3 justify-between items-start mb-4">
         <div>
           <div className="flex items-center gap-2 mb-1 relative z-50">
@@ -188,7 +225,11 @@ export const AssistZones = ({ player, activeSeason }: { player: Player; activeSe
               </div>
             </div>
           </div>
-          <SeasonScopeNote activeSeason={activeSeason} className="text-[12px] text-gray-400 font-medium" />
+          <PanelSeasonSelect
+            season={season}
+            onSeasonChange={(next) => onSeasonChange?.(next)}
+            className="text-[12px] text-gray-400 font-medium"
+          />
         </div>
 
         <div className="flex bg-bgElevation1 rounded-card p-1 border-transparent items-center">
@@ -219,21 +260,27 @@ export const AssistZones = ({ player, activeSeason }: { player: Player; activeSe
       </div>
 
       <div className="mt-8 relative">
-        {isMissing && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center">
-            <div className="bg-black/80 px-4 py-2 rounded-lg text-white font-semibold text-sm border border-gray-700">
-              Assist zones aren't available for this player.
-            </div>
+        {isLoading ? (
+          <div className="flex items-center justify-center h-[260px] text-[13px] text-fgSubtle">
+            Loading {season}...
           </div>
+        ) : isMissing ? (
+          <PanelNoData
+            message={gap.message}
+            detail={gap.detail}
+            season={season}
+            onSeasonChange={(next) => onSeasonChange?.(next)}
+            className="h-[260px]"
+          />
+        ) : (
+          /* Always render exactly one CourtView */
+          <CourtView
+            pView={playerView}
+            oView={oppView}
+            vsView={vsView}
+            activeTab={activeTab}
+          />
         )}
-
-        {/* Always render exactly one CourtView */}
-        <CourtView
-          pView={playerView}
-          oView={oppView}
-          vsView={vsView}
-          activeTab={activeTab}
-        />
       </div>
     </div>
   );

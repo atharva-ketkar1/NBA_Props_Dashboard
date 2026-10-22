@@ -3,6 +3,7 @@ import { Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Player, SimilarPlayerCandidate, SimilarPlayersMode, SportsbookId } from '../types';
 import { buildSimilarPlayersDataset } from '../utils/similarPlayers';
 import { LIVE_SEASON } from '../constants';
+import { PanelSeasonSelect } from './PanelSeason';
 
 interface SimilarPlayersProps {
    player?: Player | null;
@@ -14,6 +15,9 @@ interface SimilarPlayersProps {
    isLoadingCandidates?: boolean;
    similarCandidatesByProp: SimilarPlayerCandidate[];
    similarCandidatesByPosition: SimilarPlayerCandidate[];
+   /** This panel's own season. Only the live season has comps; see below. */
+   panelSeason?: string;
+   onPanelSeasonChange?: (season: string) => void;
 }
 
 const PAGE_SIZE = 8;
@@ -43,6 +47,8 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    isLoadingCandidates = false,
    similarCandidatesByProp,
    similarCandidatesByPosition,
+   panelSeason = LIVE_SEASON,
+   onPanelSeasonChange,
 }) => {
    const [mode, setMode] = useState<SimilarPlayersMode>('prop');
    const [page, setPage] = useState(0);
@@ -142,6 +148,32 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       );
    };
 
+   /**
+    * The one panel the season dropdown cannot yet serve.
+    *
+    * Unlike the four aggregate panels, comps are not a stored season split: they
+    * are ranked from the live slate and then matched against archived closing
+    * lines. A prior-season version has to rank comps from that season's rosters
+    * and read historical_player_props instead, which is a separate build. The
+    * control is here so the panel reads consistently with its neighbours, and it
+    * says plainly that the data is not wired up rather than showing an empty
+    * table that looks like "no comps found".
+    */
+   const renderPriorSeasonUnavailable = () => (
+      <div className="flex-1 flex flex-col items-center justify-center gap-lg text-center px-6 py-10">
+         <span className="text-sm font-medium leading-[21px] text-textGeneralSecondary">
+            Similar players are only available for the {LIVE_SEASON} season
+         </span>
+         <button
+            type="button"
+            onClick={() => onPanelSeasonChange?.(LIVE_SEASON)}
+            className="flex items-center justify-center h-7 px-2 rounded-btn bg-bgElevation3 hover:bg-borderMuted text-[12px] font-medium leading-[18px] text-textGeneralPrimary transition-colors"
+         >
+            Back to {LIVE_SEASON} season
+         </button>
+      </div>
+   );
+
    const renderLoadingState = () => (
       <div className="flex-1 flex flex-col items-center justify-center text-center px-6 py-10">
          <div className="w-8 h-8 rounded-full border-2 border-borderMedium border-t-white animate-spin mb-3" aria-hidden="true" />
@@ -165,11 +197,18 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                      <Info className="w-3.5 h-3.5 text-gray-400" />
                   </span>
                </div>
-               <p className="text-xs text-gray-500">
-                  {activeSeason === LIVE_SEASON ? `${LIVE_SEASON} live-slate comps` : 'Current-season comps only'}
-                  {targetOpponent ? ` • vs ${targetOpponent}` : ''}
-                  {dataset.currentLine !== null ? ` • Current line ${formatValue(dataset.currentLine)}` : ''}
-               </p>
+               <div className="flex items-center gap-2 flex-wrap text-xs text-gray-500">
+                  <PanelSeasonSelect
+                     season={panelSeason}
+                     onSeasonChange={(next) => onPanelSeasonChange?.(next)}
+                     className="text-xs text-gray-500"
+                  />
+                  <span>
+                     {activeSeason === LIVE_SEASON ? `${LIVE_SEASON} live-slate comps` : 'Current-season comps only'}
+                     {targetOpponent ? ` • vs ${targetOpponent}` : ''}
+                     {dataset.currentLine !== null ? ` • Current line ${formatValue(dataset.currentLine)}` : ''}
+                  </span>
+               </div>
                <p className="text-[11px] text-gray-400 mt-1 max-w-[34rem]">
                   {modeDescription}
                   {candidatePreview ? ` Top comps: ${candidatePreview}.` : ''}
@@ -224,7 +263,9 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
             </div>
          </div>
 
-         {showLoadingState ? renderLoadingState() : dataset.rows.length > 0 ? (
+         {panelSeason !== LIVE_SEASON ? (
+            renderPriorSeasonUnavailable()
+         ) : showLoadingState ? renderLoadingState() : dataset.rows.length > 0 ? (
             <>
                <div className="w-full overflow-x-auto custom-scrollbar pb-2">
                   <div className="min-w-[600px]">

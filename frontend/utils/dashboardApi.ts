@@ -66,6 +66,22 @@ type SimilarResponse = {
   similarCandidatesByPosition: SimilarPlayerCandidate[];
 };
 
+/** One season's worth of the four aggregate panels, joined to one opponent. */
+export type SeasonSplitsResponse = {
+  season: string;
+  opponent: string | null;
+  hasData: boolean;
+  stats: Record<string, number> | null;
+  shootingZones: any;
+  assistZones: any;
+  oppDefZones: any;
+  oppDefZonesPositional: any;
+  oppAssistZones: any;
+  oppAssistZonesPositional: any;
+  shotTypeAnalysis: { player: any; opp_def: any } | null;
+  playTypeAnalysis: any[] | null;
+};
+
 type BookPreviewResponse = {
   propsRows: any[];
 };
@@ -139,4 +155,16 @@ export function fetchDashboardBookPreview(
 
 export function fetchDashboardEdge() {
   return fetchAppJson<EdgeResponse>('/api/edge');
+}
+
+export function fetchDashboardSeasonSplits(
+  playerId: number,
+  season: string,
+  opponent?: string | null,
+) {
+  return fetchAppJson<SeasonSplitsResponse>('/api/season-splits', {
+    opponent,
+    playerId,
+    season,
+  });
 }

@@ -267,3 +267,57 @@ Still open:
   still reachable. Check for FK constraints first — no DDL for those tables is in the repo.
 - [ ] **[S] Alert when the sync skips.** It is deliberately non-fatal and self-guarding, so a
   persistent skip is invisible. Fold it into the Section 2 alerting work.
+
+## 8. Per-panel season splits (follow-up)
+
+The four season-aggregate panels — Shooting Zones, Assist Zones, Shot Type Analysis, Play
+Type Analysis — now carry their own season dropdown and an empty state that offers
+`25/26` when the live season has nothing to show. Backed by two new tables,
+`player_season_splits` and `team_season_defense`, filled by
+`backend/scripts/build_season_splits.py`.
+
+Why the tables exist rather than reusing what was there: `public.players` holds exactly
+one copy of each aggregate and the pipeline overwrites it every run, and the on-disk
+`backend/data/archive/season_2025-26/` is a 2026-05-09 **Playoffs** snapshot — 16 teams, a
+subset of players, and `shooting_zones.json` empty at 2 bytes. Neither can answer "show me
+last season". The script re-pulls the completed season with `SeasonType=Regular Season`
+instead and caches the raw scrape to `backend/data/archive/season_splits_<season>.json`.
+
+Still open:
+
+- [ ] **[S] Apply the migration.** Same constraint as Section 7: PostgREST does not execute
+  DDL and there is no direct Postgres credential on this machine or the VM. Run
+  `supabase/migrations/20261022_season_splits.sql` in the Supabase SQL editor, or
+  `supabase db push` with the project linked. It is additive and idempotent — two new
+  tables, nothing existing is touched.
+- [ ] **[S] Then load 25/26.** `python3 backend/scripts/build_season_splits.py --season 2025-26`
+  from the repo root. The raw scrape is already cached, so this is an upsert only (no
+  network): expect 579 player rows and 30 team rows. Until it runs, every panel's `25/26`
+  option shows the same "No data for this season" state it is meant to resolve — the API
+  treats the missing tables as a deployment state and fails open rather than 500ing.
+- [ ] **[S] Re-pull once 25/26 is final if it was pulled mid-season.** The cache is a point
+  in time; `--refresh` re-scrapes (several minutes, paced by `utils/http_client`).
+- [ ] **[S] Run the script every October, right after `LIVE_SEASON` rolls over.**
+  `PRIOR_PANEL_SEASON` is derived from `LIVE_SEASON` in `frontend/constants.ts`, so the
+  label and the dropdown roll over on their own — the *data* does not. The season the UI
+  starts offering is whichever one just ended, and until
+  `build_season_splits.py --season <that season>` has run, the tables have nothing for it
+  and every panel's fallback shows "No data for this season". The panels degrade honestly
+  rather than breaking, but the offer is useless until the script runs.
+- [ ] **[M] Decide whether to offer two seasons back.** The script takes any `--season`
+  unchanged; `PANEL_SEASON_OPTIONS` currently derives exactly one prior season.
+- [ ] **[M] Revisit `PANEL_MIN_GAMES` after a full season of use.** Set to 10: below that
+  a panel shows "Not enough data for this season (N games played, 10 needed)" and offers
+  the prior season instead of drawing the splits. The number is a judgement, not a
+  measurement — these panels cut a season into six zones, twelve play types or three shot
+  types, so each slice gets a fraction of an already small sample, and a one-game shot map
+  draws just as confidently as a sixty-game one. Deliberately stricter than
+  `PRIOR_SEASON_MIN_GAMES` (5), which answers the easier question of whether a season is
+  substantial enough to be someone's prior season at all.
+- [ ] **[M] Similar Players is wired but not backed.** Its dropdown exists and says so
+  plainly. A prior-season version has to rank comps from that season's rosters and read
+  `historical_player_props` rather than the live slate, which is a separate build.
+- [ ] **[S] Watch the assist-zone team list.** `scrapers/assist_zones.py` derives its teams
+  from the live `season_stats.csv` unless a caller passes `team_ids`. That is correct for
+  the daily pipeline and was silently capping the 2025-26 pull at 115 players (8 teams)
+  until the explicit list was added — the same trap waits for any other off-season caller.

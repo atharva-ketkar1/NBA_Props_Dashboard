@@ -1,11 +1,22 @@
 import React from 'react';
 import { Info } from 'lucide-react';
-import { SeasonScopeNote } from './SeasonScopeNote';
+import { describePanelGap, PanelNoData, PanelSeasonSelect } from './PanelSeason';
+import { hasEnoughPanelGames, LIVE_SEASON } from '../constants';
 import { PlayTypeData } from '../types';
+import type { SeasonSplitsResponse } from '../utils/dashboardApi';
 
 interface PlayTypeAnalysisProps {
   playTypes?: PlayTypeData[];
-  activeSeason?: string;
+  /** Games behind the live aggregate; the prior season brings its own count. */
+  gamesPlayed?: number | null;
+  /** This panel's own season, independent of the global game-log filter. */
+  season?: string;
+  onSeasonChange?: (season: string) => void;
+  /** The prior-season bundle, when this panel is not on the live season. */
+  splits?: SeasonSplitsResponse | null;
+  isLoadingSplits?: boolean;
+  /** The prior-season request failed, as opposed to coming back empty. */
+  hasSplitsError?: boolean;
 }
 
 function getPlayTypeRankColor(rank?: number | string, points?: number) {
@@ -54,10 +65,31 @@ const RankBadge = ({ rank, points }: { rank: number | string; points?: string | 
   );
 };
 
-export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes, activeSeason }) => {
+export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({
+  playTypes,
+  gamesPlayed,
+  season = LIVE_SEASON,
+  onSeasonChange,
+  splits,
+  isLoadingSplits = false,
+  hasSplitsError = false,
+}) => {
+  const isLiveSeason = season === LIVE_SEASON;
   // Not PLAY_TYPES: that is placeholder data and would read as this player's own.
-  const data = playTypes ?? [];
-  const hasData = data.length > 0;
+  const data = (isLiveSeason ? playTypes : splits?.playTypeAnalysis) ?? [];
+  const games = isLiveSeason ? gamesPlayed : splits?.stats?.GP;
+  // Twelve play types over a handful of games means most rows rest on one or
+  // two possessions, and the rank badge beside them looks just as authoritative.
+  const hasData = data.length > 0 && hasEnoughPanelGames(games);
+  const gap = describePanelGap({
+    gamesPlayed: games,
+    noDataMessage: 'No play-type data for this season',
+    season,
+    isLiveSeason,
+    hasError: hasSplitsError,
+    seasonHasNoRecord: !isLiveSeason && splits?.hasData === false,
+  });
+  const isLoading = !isLiveSeason && isLoadingSplits;
 
   return (
     <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full h-full min-w-0">
@@ -70,7 +102,13 @@ export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes, a
           </div>
         </div>
       </div>
-      <SeasonScopeNote activeSeason={activeSeason} className="text-xs text-gray-500 mb-4" />
+      <div className="mb-4">
+        <PanelSeasonSelect
+          season={season}
+          onSeasonChange={(next) => onSeasonChange?.(next)}
+          className="text-xs text-gray-500"
+        />
+      </div>
 
       {hasData ? (
         <div className="w-full">
@@ -92,10 +130,18 @@ export const PlayTypeAnalysis: React.FC<PlayTypeAnalysisProps> = ({ playTypes, a
             ))}
           </div>
         </div>
-      ) : (
-        <div className="flex items-center justify-center h-[180px] text-center text-xs text-gray-500">
-          Play type data loads after the player profile is ready.
+      ) : isLoading ? (
+        <div className="flex items-center justify-center h-[180px] text-center text-xs text-fgSubtle">
+          Loading {season}...
         </div>
+      ) : (
+        <PanelNoData
+          message={gap.message}
+          detail={gap.detail}
+          season={season}
+          onSeasonChange={(next) => onSeasonChange?.(next)}
+          className="h-[180px]"
+        />
       )}
     </div>
   );

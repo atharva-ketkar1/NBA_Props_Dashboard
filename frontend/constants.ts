@@ -275,3 +275,84 @@ export function seasonKeyToLabel(seasonKey: string | null | undefined): string |
   const match = /^(\d{4})-(\d{2})$/.exec(String(seasonKey ?? '').trim());
   return match ? `${match[1].slice(2)}/${match[2]}` : null;
 }
+
+// ---------------------------------------------------------------------------
+// Per-panel seasons
+//
+// The four season-aggregate panels -- shooting zones, assist zones, shot types,
+// play types -- each carry their own season, because they are distributions
+// rather than game logs and the global season filter has nothing to swap for
+// them. Everything below is DERIVED from LIVE_SEASON rather than written out,
+// so the October rollover stays the one-line change it already is everywhere
+// else in this file.
+// ---------------------------------------------------------------------------
+
+/**
+ * The season a panel falls back to when the live one is too thin to read.
+ *
+ * Derived from LIVE_SEASON through the same helpers the chart's prior-season
+ * backfill uses, so the two can never disagree about which season is "last
+ * season". When LIVE_SEASON becomes '27/28', this becomes '26/27' on its own.
+ *
+ * What does NOT follow automatically is the data: a panel season is one whose
+ * AGGREGATES are stored in player_season_splits / team_season_defense, which
+ * only happens once backend/scripts/build_season_splits.py has been run for it.
+ * The label rolling over without that script having run leaves the dropdown
+ * offering a season the tables have nothing for -- which the panels render as
+ * "No data for this season" rather than anything broken, but it is still the
+ * yearly chore. See docs/audit/IMPROVEMENT_CHECKLIST.md section 8.
+ */
+export const PRIOR_PANEL_SEASON = seasonKeyToLabel(priorSeasonKeys(liveSeasonKey(), 1)[0])
+  ?? LIVE_SEASON;
+
+/** Seasons offered in each panel's own season dropdown, live first. */
+export const PANEL_SEASON_OPTIONS = PRIOR_PANEL_SEASON === LIVE_SEASON
+  ? [LIVE_SEASON]
+  : [LIVE_SEASON, PRIOR_PANEL_SEASON];
+
+/**
+ * The season key the splits tables are keyed by, or null for the live season
+ * (which is served off the players row and needs no lookup).
+ *
+ * Derived from the label rather than looked up in ARCHIVE_SEASONS: that map is
+ * a hand-maintained list of seasons whose GAME LOGS exist, and a panel season
+ * that had rolled past the last entry would silently resolve to null and
+ * quietly stop fetching.
+ */
+export function panelSeasonKey(season: string | null | undefined): string | null {
+  if (!season || season === LIVE_SEASON) {
+    return null;
+  }
+  const startYear = seasonLabelStartYear(season);
+  if (startYear === null) {
+    return null;
+  }
+  return `${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`;
+}
+
+/**
+ * How many games a season needs before a panel will draw its splits.
+ *
+ * Not the same question as PRIOR_SEASON_MIN_GAMES (5), which asks whether a
+ * season is substantial enough to be treated as a player's prior season. This
+ * asks whether a season is stable enough to READ AS A DISTRIBUTION, and that is
+ * a harder test: these panels cut one season into six shooting zones, twelve
+ * play types or three shot types, so each slice gets a fraction of an already
+ * small sample. At five games a rotation player has a handful of attempts per
+ * zone and one made shot moves a zone by double digits.
+ *
+ * Ten is where shot-location mix and play-type frequency settle enough to
+ * describe a player. They are rate stats, so they stabilise far sooner than
+ * efficiency (FG% needs hundreds of attempts) -- but not in a week.
+ *
+ * It is one number on purpose. Lower it if blanking real data in November is
+ * the bigger annoyance; raise it if early-season splits still read as noise.
+ */
+export const PANEL_MIN_GAMES = 10;
+
+/** Whether a season has enough games behind it for a panel to draw its splits. */
+export function hasEnoughPanelGames(gamesPlayed: unknown): boolean {
+  const games = Number(gamesPlayed);
+  return Number.isFinite(games) && games >= PANEL_MIN_GAMES;
+}
+

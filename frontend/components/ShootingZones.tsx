@@ -3,7 +3,9 @@ import { Info } from 'lucide-react';
 import { Player } from '../types';
 
 import { colors } from '../utils/propsmadness_colors';
-import { SeasonScopeNote } from './SeasonScopeNote';
+import { describePanelGap, PanelNoData, PanelSeasonSelect } from './PanelSeason';
+import { hasEnoughPanelGames, LIVE_SEASON } from '../constants';
+import type { SeasonSplitsResponse } from '../utils/dashboardApi';
 
 function getZoneColor(percentageString: string) {
   const pct = parseInt(percentageString.replace('%', '')) || 0;
@@ -163,14 +165,61 @@ const CourtView = ({ pView, oView, vsView, activeTab }: { pView: any, oView: any
   </div>
 );
 
-export const ShootingZones = ({ player, activeSeason }: { player: Player | any; activeSeason?: string }) => {
+interface ShootingZonesProps {
+  player: Player | any;
+  /** This panel's own season, independent of the global game-log filter. */
+  season?: string;
+  onSeasonChange?: (season: string) => void;
+  /** The prior-season bundle, when this panel is not on the live season. */
+  splits?: SeasonSplitsResponse | null;
+  isLoadingSplits?: boolean;
+  /** The prior-season request failed, as opposed to coming back empty. */
+  hasSplitsError?: boolean;
+}
+
+/** A zone map of all zeroes is what an unplayed season looks like, not a profile. */
+function hasZoneData(zones: any) {
+  if (!zones || typeof zones !== 'object') {
+    return false;
+  }
+
+  return Object.values(zones).some((zone: any) => (
+    parseInt(String(zone?.makes ?? '0'), 10) > 0
+    || parseInt(String(zone?.percentage ?? '0').replace('%', ''), 10) > 0
+  ));
+}
+
+export const ShootingZones = ({
+  player,
+  season = LIVE_SEASON,
+  onSeasonChange,
+  splits,
+  isLoadingSplits = false,
+  hasSplitsError = false,
+}: ShootingZonesProps) => {
   const [activeTab, setActiveTab] = useState<'player' | 'vs' | 'opp'>('vs');
 
-  const playerView = processZoneData((player as any)?.shooting_zones);
-  const oppView = processZoneData((player as any)?.opp_def_zones, true);
+  const isLiveSeason = season === LIVE_SEASON;
+  const shootingZones = isLiveSeason ? (player as any)?.shooting_zones : splits?.shootingZones;
+  const oppDefZones = isLiveSeason ? (player as any)?.opp_def_zones : splits?.oppDefZones;
+  const playerFgPct = (isLiveSeason ? player?.stats?.FG_PCT : splits?.stats?.FG_PCT) || 0;
 
-  const playerFgPct = player?.stats?.FG_PCT || 0;
-  const vsView = processVsZoneData((player as any)?.shooting_zones, (player as any)?.opp_def_zones, playerFgPct);
+  const playerView = processZoneData(shootingZones);
+  const oppView = processZoneData(oppDefZones, true);
+  const vsView = processVsZoneData(shootingZones, oppDefZones, playerFgPct);
+
+  // A zone map needs both: something in it, and enough games behind it to mean
+  // anything. One game of shot locations draws a full, confident-looking court.
+  const gamesPlayed = isLiveSeason ? player?.stats?.GP : splits?.stats?.GP;
+  const hasData = hasZoneData(shootingZones) && hasEnoughPanelGames(gamesPlayed);
+  const gap = describePanelGap({
+    gamesPlayed,
+    season,
+    isLiveSeason,
+    hasError: hasSplitsError,
+    seasonHasNoRecord: !isLiveSeason && splits?.hasData === false,
+  });
+  const isLoading = !isLiveSeason && isLoadingSplits;
 
   return (
     <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0">
@@ -185,7 +234,11 @@ export const ShootingZones = ({ player, activeSeason }: { player: Player | any; 
               </div>
             </div>
           </div>
-          <SeasonScopeNote activeSeason={activeSeason} className="text-[12px] text-gray-400 font-medium" />
+          <PanelSeasonSelect
+            season={season}
+            onSeasonChange={(next) => onSeasonChange?.(next)}
+            className="text-[12px] text-gray-400 font-medium"
+          />
         </div>
 
         <div className="flex bg-bgElevation1 rounded-card p-1 border-transparent items-center">
@@ -216,13 +269,27 @@ export const ShootingZones = ({ player, activeSeason }: { player: Player | any; 
       </div>
 
       <div className="mt-8">
-        {/* Simplified block: Always render exactly one CourtView */}
-        <CourtView
-          pView={playerView}
-          oView={oppView}
-          vsView={vsView}
-          activeTab={activeTab}
-        />
+        {isLoading ? (
+          <div className="flex items-center justify-center h-[260px] text-[13px] text-fgSubtle">
+            Loading {season}...
+          </div>
+        ) : hasData ? (
+          /* Simplified block: Always render exactly one CourtView */
+          <CourtView
+            pView={playerView}
+            oView={oppView}
+            vsView={vsView}
+            activeTab={activeTab}
+          />
+        ) : (
+          <PanelNoData
+            message={gap.message}
+            detail={gap.detail}
+            season={season}
+            onSeasonChange={(next) => onSeasonChange?.(next)}
+            className="h-[260px]"
+          />
+        )}
       </div>
     </div>
   );

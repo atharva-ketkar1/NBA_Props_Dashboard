@@ -2,7 +2,9 @@ import React from 'react';
 import { Info } from 'lucide-react';
 import { ShotTypeData } from '../types';
 import { colors } from '../utils/propsmadness_colors';
-import { SeasonScopeNote } from './SeasonScopeNote';
+import { describePanelGap, PanelNoData, PanelSeasonSelect } from './PanelSeason';
+import { hasEnoughPanelGames, LIVE_SEASON } from '../constants';
+import type { SeasonSplitsResponse } from '../utils/dashboardApi';
 
 function getOppRankColor(rank?: number, percentage?: number) {
    if (rank === undefined) return colors.bgElevation2; // default neutral
@@ -35,17 +37,95 @@ function getOppRankColor(rank?: number, percentage?: number) {
 }
 
 interface ShotTypeAnalysisProps {
-   shotTypes?: ShotTypeData[];
-   activeSeason?: string;
+   /** The raw {player, opp_def} aggregate, in the shape both seasons store it. */
+   shotTypeAnalysis?: any;
+   /** Games behind the live aggregate; the prior season brings its own count. */
+   gamesPlayed?: number | null;
+   /** This panel's own season, independent of the global game-log filter. */
+   season?: string;
+   onSeasonChange?: (season: string) => void;
+   /** The prior-season bundle, when this panel is not on the live season. */
+   splits?: SeasonSplitsResponse | null;
+   isLoadingSplits?: boolean;
+   /** The prior-season request failed, as opposed to coming back empty. */
+   hasSplitsError?: boolean;
 }
 
-export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes, activeSeason }) => {
-   // Never fall back to placeholder shot splits: a caller that passes undefined (the
-   // App does, when a player has a shot_type_analysis object with no actual shot
-   // splits) would render those placeholder percentages as the player's real
-   // profile. An empty panel is the honest result.
-   const data = shotTypes ?? [];
-   const hasData = data.length > 0;
+/**
+ * Reshape the stored aggregate into the three bars the panel draws.
+ *
+ * Lives here rather than at the call site because both seasons go through it:
+ * the live row and the prior-season bundle store the same shape, and the bar
+ * widths, labels and ordering have to be identical or switching season would
+ * look like the data changed when only its source did.
+ */
+function buildShotTypeBars(shotTypeAnalysis: any): ShotTypeData[] {
+   const player = shotTypeAnalysis?.player ?? {};
+   const oppDef = shotTypeAnalysis?.opp_def ?? {};
+   const catchAndShoot = player.catch_and_shoot;
+   const pullUp = player.pull_up;
+   const lessThanTen = player.less_than_10_ft;
+
+   // Never fall back to placeholder shot splits: a player with a
+   // shot_type_analysis object but no actual splits would otherwise render those
+   // placeholder percentages as their real profile. An empty panel is honest.
+   if (!catchAndShoot && !pullUp && !lessThanTen) {
+      return [];
+   }
+
+   return [
+      {
+         type: 'C&S',
+         percentage: catchAndShoot?.percentage || 0,
+         attempts: Math.round(catchAndShoot?.points || 0),
+         frequency: catchAndShoot?.percentage || 0,
+         width: catchAndShoot?.percentage || 33.3,
+         rank: oppDef.catch_and_shoot?.rank,
+      },
+      {
+         type: '< 10 ft',
+         percentage: lessThanTen?.percentage || 0,
+         attempts: Math.round(lessThanTen?.points || 0),
+         frequency: lessThanTen?.percentage || 0,
+         width: lessThanTen?.percentage || 33.3,
+         rank: oppDef.less_than_10_ft?.rank,
+      },
+      {
+         type: 'Pull Up',
+         percentage: pullUp?.percentage || 0,
+         attempts: Math.round(pullUp?.points || 0),
+         frequency: pullUp?.percentage || 0,
+         width: pullUp?.percentage || 33.3,
+         rank: oppDef.pull_up?.rank,
+      },
+   ] as ShotTypeData[];
+}
+
+export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({
+   shotTypeAnalysis,
+   gamesPlayed,
+   season = LIVE_SEASON,
+   onSeasonChange,
+   splits,
+   isLoadingSplits = false,
+   hasSplitsError = false,
+}) => {
+   const isLiveSeason = season === LIVE_SEASON;
+   const source = isLiveSeason ? shotTypeAnalysis : splits?.shotTypeAnalysis;
+   const games = isLiveSeason ? gamesPlayed : splits?.stats?.GP;
+   const data = buildShotTypeBars(source);
+   // Three bars that always sum to 100% read as a settled shot diet whatever
+   // they rest on, so the games test is doing real work here.
+   const hasData = data.length > 0 && hasEnoughPanelGames(games);
+   const gap = describePanelGap({
+      gamesPlayed: games,
+      noDataMessage: 'No shot-type data for this season',
+      season,
+      isLiveSeason,
+      hasError: hasSplitsError,
+      seasonHasNoRecord: !isLiveSeason && splits?.hasData === false,
+   });
+   const isLoading = !isLiveSeason && isLoadingSplits;
 
    return (
       <div className="bg-bgElevation0 rounded-lg p-3 lg:p-5 w-full min-w-0">
@@ -58,7 +138,13 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes, a
                </div>
             </div>
          </div>
-         <SeasonScopeNote activeSeason={activeSeason} className="text-xs text-gray-500 mb-6" />
+         <div className="mb-6">
+            <PanelSeasonSelect
+               season={season}
+               onSeasonChange={(next) => onSeasonChange?.(next)}
+               className="text-xs text-gray-500"
+            />
+         </div>
 
          {hasData ? (
             <>
@@ -97,10 +183,18 @@ export const ShotTypeAnalysis: React.FC<ShotTypeAnalysisProps> = ({ shotTypes, a
                   })}
                </div>
             </>
-         ) : (
-            <div className="flex items-center justify-center h-[88px] text-center text-xs text-gray-500">
-               Shot type data loads after the player profile is ready.
+         ) : isLoading ? (
+            <div className="flex items-center justify-center h-[88px] text-center text-xs text-fgSubtle">
+               Loading {season}...
             </div>
+         ) : (
+            <PanelNoData
+               message={gap.message}
+               detail={gap.detail}
+               season={season}
+               onSeasonChange={(next) => onSeasonChange?.(next)}
+               className="h-[88px]"
+            />
          )}
       </div>
    );

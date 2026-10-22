@@ -14,6 +14,7 @@ from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import resolve_prop_game_date
 from utils.pregame_props import is_pregame_schedule_game, is_prop_pregame_by_time
 from utils.prop_types import PROP_MAP
+from utils.team_names import ABBR_TO_FULL as _ABBR_TO_FULL, TEAM_FULL_NAMES as _TEAM_FULL_NAMES
 
 logger = logging.getLogger(__name__)
 UNDATED_PROP_KEY = '__undated__'
@@ -405,32 +406,11 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         if pid:
             assists_by_pid[pid] = data
 
-    # Define team mapping because games api returns mascots ("Suns") but stats api returns full names ("Phoenix Suns")
-    TEAM_FULL_NAMES = {
-        'Hawks': 'Atlanta Hawks', 'Celtics': 'Boston Celtics', 'Nets': 'Brooklyn Nets',
-        'Hornets': 'Charlotte Hornets', 'Bulls': 'Chicago Bulls', 'Cavaliers': 'Cleveland Cavaliers',
-        'Mavericks': 'Dallas Mavericks', 'Nuggets': 'Denver Nuggets', 'Pistons': 'Detroit Pistons',
-        'Warriors': 'Golden State Warriors', 'Rockets': 'Houston Rockets', 'Pacers': 'Indiana Pacers',
-        'Clippers': 'LA Clippers', 'Lakers': 'Los Angeles Lakers', 'Grizzlies': 'Memphis Grizzlies',
-        'Heat': 'Miami Heat', 'Bucks': 'Milwaukee Bucks', 'Timberwolves': 'Minnesota Timberwolves',
-        'Pelicans': 'New Orleans Pelicans', 'Knicks': 'New York Knicks', 'Thunder': 'Oklahoma City Thunder',
-        'Magic': 'Orlando Magic', '76ers': 'Philadelphia 76ers', 'Suns': 'Phoenix Suns',
-        'Trail Blazers': 'Portland Trail Blazers', 'Kings': 'Sacramento Kings', 'Spurs': 'San Antonio Spurs',
-        'Raptors': 'Toronto Raptors', 'Jazz': 'Utah Jazz', 'Wizards': 'Washington Wizards'
-    }
-    
-    ABBR_TO_FULL = {
-        'ATL': 'Atlanta Hawks', 'BKN': 'Brooklyn Nets', 'BOS': 'Boston Celtics',
-        'CHA': 'Charlotte Hornets', 'CHI': 'Chicago Bulls', 'CLE': 'Cleveland Cavaliers',
-        'DAL': 'Dallas Mavericks', 'DEN': 'Denver Nuggets', 'DET': 'Detroit Pistons',
-        'GSW': 'Golden State Warriors', 'HOU': 'Houston Rockets', 'IND': 'Indiana Pacers',
-        'LAC': 'LA Clippers', 'LAL': 'Los Angeles Lakers', 'MEM': 'Memphis Grizzlies',
-        'MIA': 'Miami Heat', 'MIL': 'Milwaukee Bucks', 'MIN': 'Minnesota Timberwolves',
-        'NOP': 'New Orleans Pelicans', 'NYK': 'New York Knicks', 'OKC': 'Oklahoma City Thunder',
-        'ORL': 'Orlando Magic', 'PHI': 'Philadelphia 76ers', 'PHX': 'Phoenix Suns',
-        'POR': 'Portland Trail Blazers', 'SAC': 'Sacramento Kings', 'SAS': 'San Antonio Spurs',
-        'TOR': 'Toronto Raptors', 'UTA': 'Utah Jazz', 'WAS': 'Washington Wizards'
-    }
+    # The games api returns mascots ("Suns"), the stats api full names
+    # ("Phoenix Suns") and the game logs tricodes ("PHX"). One shared map, so
+    # this join and build_season_splits.py cannot drift apart.
+    TEAM_FULL_NAMES = _TEAM_FULL_NAMES
+    ABBR_TO_FULL = _ABBR_TO_FULL
 
     # D. Build Games Map
     team_games = {}
