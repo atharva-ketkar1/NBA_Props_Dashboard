@@ -56,6 +56,12 @@ import {
   fetchDashboardSimilar,
 } from './utils/dashboardApi';
 import { STAT_LABELS, TAB_ORDER } from './utils/statLabels';
+import {
+  DEFAULT_SPORTSBOOK,
+  SPORTSBOOK_FALLBACK_PRIORITY,
+  getKnownSportsbooksForDate,
+  resolveBestSportsbook,
+} from './utils/sportsbooks';
 import { usePanelSeasons, useSeasonSplits } from './utils/useSeasonSplits';
 
 
@@ -75,9 +81,6 @@ const EDGE_STAT_TO_TAB: Record<string, string> = {
   PF: 'Fouls',
   FTA: 'FT Attempted',
 };
-
-const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
-const SPORTSBOOK_FALLBACK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
 
 function parsePollMs(rawValue: string | undefined, fallbackMs: number) {
   const parsed = Number(rawValue);
@@ -1061,13 +1064,7 @@ function App() {
       });
     });
 
-    if ((counts[activeSportsbook] ?? 0) > 0) {
-      return;
-    }
-
-    const fallbackSportsbook = SPORTSBOOK_FALLBACK_PRIORITY
-      .filter((sportsbook) => (counts[sportsbook] ?? 0) > 0)
-      .sort((left, right) => (counts[right] ?? 0) - (counts[left] ?? 0))[0];
+    const fallbackSportsbook = resolveBestSportsbook(counts, activeSportsbook);
 
     if (fallbackSportsbook && fallbackSportsbook !== activeSportsbook) {
       setActiveSportsbook(fallbackSportsbook);
@@ -1525,6 +1522,26 @@ function App() {
     }
 
     const nextPlayer = playersWithProps[index];
+
+    // The sidebar lists a game on whichever book posted its lines, which may not be
+    // the active one. Follow that book on selection so the toggle keeps matching the
+    // numbers on screen rather than reading DK while the panel prices off FanDuel.
+    const selectionSportsbooks = getKnownSportsbooksForDate(
+      nextPlayer,
+      propsAvailabilityByDate,
+      activeStatKey,
+      nextGameDate,
+    );
+    if (selectionSportsbooks.length && !selectionSportsbooks.includes(activeSportsbook)) {
+      const nextSportsbook = resolveBestSportsbook(
+        Object.fromEntries(selectionSportsbooks.map((sportsbook) => [sportsbook, 1])),
+        activeSportsbook,
+      );
+      if (nextSportsbook && nextSportsbook !== activeSportsbook) {
+        setActiveSportsbook(nextSportsbook);
+      }
+    }
+
     const shouldPreloadArchive = USE_DB && isArchiveSeason(activeSeason);
     const needsDetailLoad = USE_DB && !hasLoadedPlayerDetail(nextPlayer);
     const needsArchiveLoad = shouldPreloadArchive

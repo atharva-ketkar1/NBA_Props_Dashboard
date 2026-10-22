@@ -23,7 +23,6 @@ import type {
 } from '../../types.js';
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
-const PLAYER_PROP_AVAIL_SELECT = 'player_id, stat_type, sportsbook, game_date';
 const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
 const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis, play_type_analysis';
 const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analysis, shot_type_analysis';
@@ -556,35 +555,56 @@ function chooseFallbackSportsbook(
     })[0]?.[0] ?? requestedSportsbook ?? null;
 }
 
-async function resolvePropsRowsForSportsbook(
-  gameDates: string[],
+/** One line slot: a book either has this player/stat/date priced or it doesn't. */
+function propCoverageKey(row: any) {
+  return `${row?.player_id}|${row?.stat_type}|${row?.game_date ?? ''}`;
+}
+
+/** Drop the priced columns; the client only needs to know the line exists. */
+function toAvailabilityRows(propRows: any[] = []) {
+  return propRows.map((row) => ({
+    player_id: row?.player_id,
+    stat_type: row?.stat_type,
+    sportsbook: row?.sportsbook,
+    game_date: row?.game_date,
+  }));
+}
+
+/**
+ * The active book's lines, plus other books' lines for the slots it hasn't
+ * priced yet.
+ *
+ * Shipping the active book alone meant the sidebar could not show a game no book
+ * but FanDuel had posted: early in a slate only one book has the later games up,
+ * and those rows arrived with availability but no body, so they rendered as
+ * permanently "updating". The client picks a book per game off these rows, and
+ * the active book still wins every slot it has priced.
+ */
+function resolvePropsRowsForSportsbook(
   requestedSportsbook: SportsbookId,
-  availabilityRows: any[] = [],
-  prefetchedRequestedRows?: any[] | null,
+  allBookRows: any[] = [],
 ) {
-  const requestedRows = prefetchedRequestedRows
-    ?? await fetchAllPlayerPropsForDates(gameDates, PLAYER_PROP_SELECT, requestedSportsbook);
-  if (requestedRows.length > 0) {
-    return {
-      effectiveSportsbook: requestedSportsbook,
-      propsRows: requestedRows,
-      requestedSportsbook,
-    };
+  const effectiveSportsbook = chooseFallbackSportsbook(allBookRows, requestedSportsbook)
+    ?? requestedSportsbook;
+
+  const effectiveRows: any[] = [];
+  const otherBookRows: any[] = [];
+  const pricedByEffectiveBook = new Set<string>();
+
+  for (const row of allBookRows) {
+    if (row?.sportsbook === effectiveSportsbook) {
+      effectiveRows.push(row);
+      pricedByEffectiveBook.add(propCoverageKey(row));
+    } else {
+      otherBookRows.push(row);
+    }
   }
 
-  const fallbackSportsbook = chooseFallbackSportsbook(availabilityRows, requestedSportsbook);
-  if (!fallbackSportsbook || fallbackSportsbook === requestedSportsbook) {
-    return {
-      effectiveSportsbook: requestedSportsbook,
-      propsRows: requestedRows,
-      requestedSportsbook,
-    };
-  }
+  const gapFillRows = otherBookRows.filter((row) => !pricedByEffectiveBook.has(propCoverageKey(row)));
 
-  const fallbackRows = await fetchAllPlayerPropsForDates(gameDates, PLAYER_PROP_SELECT, fallbackSportsbook);
   return {
-    effectiveSportsbook: fallbackRows.length > 0 ? fallbackSportsbook : requestedSportsbook,
-    propsRows: fallbackRows.length > 0 ? fallbackRows : requestedRows,
+    effectiveSportsbook,
+    propsRows: [...effectiveRows, ...gapFillRows],
     requestedSportsbook,
   };
 }
@@ -875,10 +895,9 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
   const fastRefreshDates = getFastRefreshDates(null);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [playersRows, requestedPropsRows, availabilityRows, lineRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
+  const [playersRows, allBookPropRows, lineRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
     fetchPlayers(PLAYER_BASE_SELECT, { currentRosterOnly: true }),
-    fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT, activeSportsbook),
-    fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_AVAIL_SELECT),
+    fetchAllPlayerPropsForDates(futureDates, PLAYER_PROP_SELECT),
     includeLineMovements
       ? fetchLineMovementsForDates(fastRefreshDates, INITIAL_LINE_SELECT, LINE_ROWS_CACHE_MS, 'line_movements')
       : Promise.resolve([]),
@@ -886,12 +905,8 @@ export async function fetchBootstrapPayload(activeSportsbook: SportsbookId = 'dk
     fetchGameMarketsForDates(futureDates),
     fetchGameInjuryReportsForDates(futureDates),
   ]);
-  const resolvedProps = await resolvePropsRowsForSportsbook(
-    futureDates,
-    activeSportsbook,
-    availabilityRows,
-    requestedPropsRows,
-  );
+  const availabilityRows = toAvailabilityRows(allBookPropRows);
+  const resolvedProps = resolvePropsRowsForSportsbook(activeSportsbook, allBookPropRows);
 
   return {
     requestedSportsbook: activeSportsbook,
@@ -919,9 +934,8 @@ export async function fetchHotPayload(
   const activeDates = getFastRefreshDates(selectedDate);
   const includeLineMovements = activeSportsbook !== 'pp';
 
-  const [propsRows, availabilityRows, lineMetaRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
-    fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_SELECT, activeSportsbook),
-    fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_AVAIL_SELECT),
+  const [allBookPropRows, lineMetaRows, gamesRows, gameMarketsRows, gameInjuryRows] = await Promise.all([
+    fetchAllPlayerPropsForDates(activeDates, PLAYER_PROP_SELECT),
     includeLineMovements
       ? fetchLineMovementsForDates(
         activeDates,
@@ -934,12 +948,8 @@ export async function fetchHotPayload(
     fetchGameMarketsForDates(activeDates),
     fetchGameInjuryReportsForDates(activeDates),
   ]);
-  const resolvedProps = await resolvePropsRowsForSportsbook(
-    activeDates,
-    activeSportsbook,
-    availabilityRows,
-    propsRows,
-  );
+  const availabilityRows = toAvailabilityRows(allBookPropRows);
+  const resolvedProps = resolvePropsRowsForSportsbook(activeSportsbook, allBookPropRows);
 
   const mergedGamesRows = mergeGamesWithInjuries(
     mergeGamesWithMarkets(gamesRows ?? [], gameMarketsRows ?? []),

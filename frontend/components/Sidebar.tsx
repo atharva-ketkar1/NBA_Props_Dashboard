@@ -7,6 +7,11 @@ import { getSportsbookProp, playerHasSportsbookPropForDate } from '../utils/prop
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
 import { STAT_LABELS as STAT_MAP, TAB_ORDER } from '../utils/statLabels';
+import {
+    countSportsbookCoverage,
+    getAvailableSportsbooksForDate,
+    resolveBestSportsbook,
+} from '../utils/sportsbooks';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -19,9 +24,8 @@ function playerHasAvailableSportsbookPropForDate(
     sportsbook: SportsbookId | string,
     gameDate?: string | null,
 ) {
-    const availabilityBucket = availabilityByPlayer?.[playerId]?.[statType]?.[sportsbook] ?? {};
-    const dateKey = gameDate || '__undated__';
-    return Boolean(availabilityBucket[dateKey] || availabilityBucket.__undated__);
+    return getAvailableSportsbooksForDate(availabilityByPlayer, playerId, statType, gameDate)
+        .includes(String(sportsbook));
 }
 
 function playerHasKnownSportsbookLineForDate(
@@ -318,12 +322,19 @@ const PlayerRow = ({
 
 interface ProcessedGame extends Game {
     players: Player[];
+    // Book the card's rows are priced from; falls back off the active book when
+    // that book has no lines for this game yet.
+    sportsbook?: SportsbookId;
 }
 
 const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: () => void, activePlayerId?: number, activeGameDate?: string | null, pendingPlayerId?: number, pendingGameDate?: string | null, activeSportsbook?: SportsbookId, propsAvailabilityByDate?: PlayerAvailabilityByDate, onSelectPlayer: (id: number, gameDate?: string | null) => void, onPrefetchPlayer?: (id: number, gameDate?: string | null) => void, statFilter: string, emptyPlayersLabel?: string }> = ({
     game, isExpanded, onToggle, activePlayerId, activeGameDate, pendingPlayerId, pendingGameDate, activeSportsbook, propsAvailabilityByDate = {}, onSelectPlayer, onPrefetchPlayer, statFilter, emptyPlayersLabel = 'No props posted for this game yet.'
 }) => {
     const getNickname = (name: string) => name ? name.split(' ').pop() : '';
+
+    // Rows are priced from the book that actually posted this game's lines, which
+    // is the active book unless it has nothing up for this game yet.
+    const gameSportsbook = game.sportsbook ?? activeSportsbook ?? 'dk';
 
     const isTipoffTbd = hasTbdTipoff(game);
     const gameTimeObj = game.game_time_utc ? new Date(game.game_time_utc) : new Date(game.game_date + 'T23:59:59Z');
@@ -390,12 +401,12 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
                                     player={player}
                                     statFilter={statFilter}
                                     gameDate={game.game_date}
-                                    activeSportsbook={activeSportsbook}
+                                    activeSportsbook={gameSportsbook}
                                     isAvailable={playerHasAvailableSportsbookPropForDate(
                                         propsAvailabilityByDate,
                                         player.id,
                                         statFilter,
-                                        activeSportsbook ?? 'dk',
+                                        gameSportsbook,
                                         game.game_date,
                                     )}
                                     isActive={player.id === activePlayerId && game.game_date === activeGameDate}
@@ -531,40 +542,47 @@ export const Sidebar: React.FC<SidebarProps> = ({
         });
     }, [players, propsAvailabilityByDate]);
 
-    // Games that have at least one player with a known/available prop line.
-    // Games without any props yet are hidden from the sidebar entirely, since
-    // there's nothing useful to show behind their dropdown.
-    const gameIdsWithProps = useMemo(() => {
-        const ids = new Set<string>();
+    // The book each game is shown with: the active book when it has posted any
+    // line for this game, otherwise whichever book has. A game is listed as long
+    // as *some* book covers it, so a game that only has FanDuel lines still shows
+    // up while DraftKings is selected (with FanDuel rows behind its dropdown).
+    // Games no book covers stay hidden, since there's nothing to show.
+    const gameSportsbookById = useMemo(() => {
+        const resolved = new Map<string, SportsbookId>();
         scheduleData.forEach(game => {
-            const hasAnyPlayer = players.some(p => {
-                const isInGame = p.team === game.home_team_tricode || p.team === game.away_team_tricode;
-                if (!isInGame) return false;
-                return playerHasKnownSportsbookLineForDate(p, propsAvailabilityByDate, statFilter, activeSportsbook, game.game_date);
-            });
-            if (hasAnyPlayer) ids.add(game.game_id);
+            const gameRoster = players.filter(p => (
+                p.team === game.home_team_tricode || p.team === game.away_team_tricode
+            ));
+            const coverage = countSportsbookCoverage(
+                gameRoster,
+                propsAvailabilityByDate,
+                statFilter,
+                game.game_date,
+            );
+            const sportsbook = resolveBestSportsbook(coverage, activeSportsbook);
+            if (sportsbook) resolved.set(game.game_id, sportsbook);
         });
-        return ids;
+        return resolved;
     }, [scheduleData, players, statFilter, activeSportsbook, propsAvailabilityByDate]);
 
     const gameOptions = useMemo(() => {
         const options = [{ label: 'All Games', value: 'All Games' }];
         scheduleData.forEach(game => {
-            if (!gameIdsWithProps.has(game.game_id)) return;
+            if (!gameSportsbookById.has(game.game_id)) return;
             options.push({
                 label: `${game.away_team_tricode}-${game.home_team_tricode}`,
                 value: game.game_id
             });
         });
         return options;
-    }, [scheduleData, gameIdsWithProps]);
+    }, [scheduleData, gameSportsbookById]);
 
     // Group active players into the schedule with Filters
     const processedGames = useMemo(() => {
         if (!scheduleData.length) return [];
 
         // 1. Game Filter
-        let filteredSchedule = scheduleData.filter(g => gameIdsWithProps.has(g.game_id));
+        let filteredSchedule = scheduleData.filter(g => gameSportsbookById.has(g.game_id));
         if (gameFilter !== 'All Games') {
             filteredSchedule = filteredSchedule.filter(g => g.game_id === gameFilter);
         }
@@ -573,6 +591,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         const result: ProcessedGame[] = [];
 
         filteredSchedule.forEach(game => {
+            const gameSportsbook = gameSportsbookById.get(game.game_id) ?? activeSportsbook;
+
             // Check if Game matches Search (Team Name)
             const gameMatchesSearch = !searchTerm ||
                 game.home_team_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -585,7 +605,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 const isInGame = p.team === game.home_team_tricode || p.team === game.away_team_tricode;
                 if (!isInGame) return false;
 
-                if (!playerHasKnownSportsbookLineForDate(p, propsAvailabilityByDate, statFilter, activeSportsbook, game.game_date)) {
+                if (!playerHasKnownSportsbookLineForDate(p, propsAvailabilityByDate, statFilter, gameSportsbook, game.game_date)) {
                     return false;
                 }
 
@@ -599,7 +619,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             });
 
             if (gamePlayers.length > 0 || gameMatchesSearch) {
-                result.push({ ...game, players: gamePlayers });
+                result.push({ ...game, players: gamePlayers, sportsbook: gameSportsbook });
             }
         });
 
@@ -612,7 +632,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         }
 
         return result;
-    }, [scheduleData, players, statFilter, gameFilter, searchTerm, activeSportsbook, propsAvailabilityByDate]);
+    }, [scheduleData, players, statFilter, gameFilter, searchTerm, activeSportsbook, gameSportsbookById, propsAvailabilityByDate]);
 
     const toggleGame = (gameId: string) => {
         setExpandedGames(prev => ({

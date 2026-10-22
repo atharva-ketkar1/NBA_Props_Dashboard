@@ -153,6 +153,20 @@ export function getSportsbookProp(
   };
 }
 
+export function getSportsbooksWithPropForDate(
+  player: Player,
+  statType: string,
+  gameDate?: string | null,
+) {
+  const propsByDate = getPropsByDate(player);
+  const sportsbookMap = propsByDate[statType];
+
+  if (!sportsbookMap) return [];
+
+  return Object.keys(sportsbookMap)
+    .filter((sportsbook) => !!resolvePropBucket(sportsbookMap[sportsbook], gameDate));
+}
+
 export function playerHasSportsbookPropForDate(
   player: Player,
   statType: string,
