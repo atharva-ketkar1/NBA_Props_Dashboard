@@ -49,6 +49,13 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 ET_ZONE = ZoneInfo("America/New_York")
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CURRENT_DIR = os.path.join(BASE_DIR, "data", "current")
@@ -138,6 +145,24 @@ EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = max(
     _env_float("EDGE_SCORE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS", 30.0),
 )
 _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL: Dict[str, float] = {}
+
+# Below-threshold preview. Early in a season most components score 0 (the ML
+# term stays dark until a player has 3+ same-season games), so the composite
+# rarely reaches EDGE_DISCORD_MIN_SIGNAL_SCORE and the alert channel goes
+# silent for days. That silence is correct but useless: it gives no way to see
+# whether the model's ordering is any good. When nothing clears the real bar,
+# post the top N anyway, clearly marked as below threshold, as a single message
+# per slate that is edited in place so it never spams the channel.
+EDGE_DISCORD_PREVIEW_ENABLED = _env_bool("EDGE_SCORE_DISCORD_PREVIEW_ENABLED", True)
+EDGE_DISCORD_PREVIEW_COUNT = max(1, _env_int("EDGE_SCORE_DISCORD_PREVIEW_COUNT", 5))
+# Optional: route previews to their own channel. Defaults to the alert webhook.
+EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL = os.getenv("EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL", "").strip()
+# 0.0 means "no floor": show the best available even if the scores are poor.
+EDGE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE = max(
+    0.0,
+    min(99.0, _env_float("EDGE_SCORE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE", 0.0)),
+)
+
 UNDATED_PROP_KEY = "__undated__"
 
 SUPPORTED_BOOKS = {"dk", "fd"}
@@ -434,7 +459,11 @@ def _format_odds(raw_odds: Any) -> str:
 
 
 def _has_discord_alert_target() -> bool:
-    return bool(EDGE_SCORE_DISCORD_WEBHOOK_URL or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL)
+    return bool(
+        EDGE_SCORE_DISCORD_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL
+    )
 
 
 def _results_recap_webhook_url() -> str:
@@ -989,7 +1018,13 @@ def _filter_discord_recommendations(
     *,
     min_signal_score: float,
     per_book_limit: Optional[int] = None,
+    max_rank: Optional[int] = None,
+    limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    """Apply the shared Discord eligibility gates.
+
+    `per_book_limit`, `max_rank` and `limit` are all "no cap" when None.
+    """
     per_book_counts: Dict[str, int] = {}
     per_player_counts: Dict[str, int] = {}
     selected_by_player: Dict[str, List[Dict[str, Any]]] = {}
@@ -1010,7 +1045,7 @@ def _filter_discord_recommendations(
             continue
 
         rank = _safe_int(recommendation.get("rank"))
-        if rank is not None and rank > EDGE_DISCORD_MAX_RANK:
+        if max_rank is not None and rank is not None and rank > max_rank:
             continue
 
         if per_book_limit is not None and per_book_counts.get(book, 0) >= per_book_limit:
@@ -1032,6 +1067,8 @@ def _filter_discord_recommendations(
         if player_key:
             per_player_counts[player_key] = per_player_counts.get(player_key, 0) + 1
             selected_by_player.setdefault(player_key, []).append(recommendation)
+        if limit is not None and len(filtered) >= limit:
+            break
 
     return filtered
 
@@ -4342,6 +4379,7 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
         recommendations,
         min_signal_score=EDGE_DISCORD_MIN_SIGNAL_SCORE,
         per_book_limit=EDGE_DISCORD_PER_BOOK_LIMIT,
+        max_rank=EDGE_DISCORD_MAX_RANK,
     )
 
 
@@ -4350,6 +4388,24 @@ def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> Li
         recommendations,
         min_signal_score=EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE,
         per_book_limit=None,
+        max_rank=EDGE_DISCORD_MAX_RANK,
+    )
+
+
+def _filter_preview_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The top N regardless of score, for the below-threshold preview.
+
+    The rank cap is deliberately dropped: EDGE_DISCORD_MAX_RANK exists to stop
+    the alert channel reaching far down the board, but here the whole point is
+    to show the best available even when it is mediocre. Per-player and
+    conflicting-pick dedupe still apply, so `limit` does the trimming.
+    """
+    return _filter_discord_recommendations(
+        recommendations,
+        min_signal_score=EDGE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE,
+        per_book_limit=None,
+        max_rank=None,
+        limit=EDGE_DISCORD_PREVIEW_COUNT,
     )
 
 
@@ -5578,7 +5634,15 @@ def _build_discord_book_embed(
 ) -> Dict[str, Any]:
     book_recommendations = group["recommendations"]
     lines = []
-    for display_rank, recommendation in enumerate(book_recommendations, start=1):
+    for position, recommendation in enumerate(book_recommendations, start=1):
+        # The preview exists to show the model's ordering, so it numbers by
+        # board rank. Grouping by book would otherwise restart at 1 per embed
+        # and make the board's #2 look like a #1.
+        if channel_variant == "preview":
+            board_rank = _safe_int(recommendation.get("rank"))
+            display_rank = board_rank if board_rank is not None else position
+        else:
+            display_rank = position
         player_name = recommendation.get("player_name") or "Unknown Player"
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         pick_label = recommendation.get("pick_label") or _side_name(str(recommendation.get("pick") or "").lower())
@@ -5853,6 +5917,88 @@ def _build_discord_tracker_payload(
 
     return {
         "username": "NBA Dashboard Prop Tracker",
+        "embeds": embeds,
+    }
+
+
+def _build_discord_preview_payload(
+    payload: Dict[str, Any],
+    preview_recommendations: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Render the top N as an explicitly below-threshold preview.
+
+    Deliberately styled differently from a real alert (amber, "PREVIEW" in the
+    title, the gap to the threshold spelled out) so that a preview can never be
+    mistaken for a pick that actually cleared EDGE_DISCORD_MIN_SIGNAL_SCORE.
+    """
+    if not preview_recommendations:
+        return None
+
+    grouped_books = _group_recommendations_by_sportsbook(
+        preview_recommendations,
+        limit_per_book=max(len(preview_recommendations), 1),
+    )
+    if not grouped_books:
+        return None
+
+    refresh_label_text = REFRESH_LABELS.get(
+        payload.get("refresh_label"),
+        str(payload.get("refresh_label") or "Refresh").replace("_", " ").title(),
+    )
+    scores = [_ranking_edge_score(recommendation) for recommendation in preview_recommendations]
+    best_score = max(scores) if scores else 0.0
+    threshold_text = _format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)
+
+    summary_fields: List[Dict[str, Any]] = [
+        {
+            "name": "Updated",
+            "value": _format_discord_timestamp(payload.get("generated_at")),
+            "inline": False,
+        },
+        {
+            "name": "Best score today",
+            "value": f"{best_score:.1f}",
+            "inline": True,
+        },
+        {
+            "name": "Alert threshold",
+            "value": f"{threshold_text} (short by {max(0.0, EDGE_DISCORD_MIN_SIGNAL_SCORE - best_score):.1f})",
+            "inline": True,
+        },
+        {
+            "name": "Slate",
+            "value": ", ".join(payload.get("game_dates", [])) or "n/a",
+            "inline": True,
+        },
+    ]
+
+    embeds = [
+        {
+            "title": f"⚠️ Below-Threshold Preview • {refresh_label_text}",
+            "description": (
+                f"**No pick cleared the {threshold_text} alert threshold.** These are simply the "
+                f"top {len(preview_recommendations)} on the board right now, posted so the model's "
+                "ordering can be checked against results. **Not alerts, and not a recommendation "
+                "to bet.** This message updates in place as the board moves, and is replaced by a "
+                "real alert the moment anything clears the bar."
+            ),
+            "color": 0xF59E0B,
+            "timestamp": payload.get("generated_at"),
+            "fields": summary_fields,
+        }
+    ]
+    for group in grouped_books:
+        embeds.append(
+            _build_discord_book_embed(
+                group,
+                alert_kind="opening",
+                change_lookup={},
+                channel_variant="preview",
+            )
+        )
+
+    return {
+        "username": "NBA Dashboard Preview",
         "embeds": embeds,
     }
 
@@ -6186,6 +6332,11 @@ def _send_discord_webhook(
             notification_delta,
             running_recommendations=running_recommendations,
         )
+    elif channel_variant == "preview":
+        discord_payload = _build_discord_preview_payload(
+            payload,
+            running_recommendations or [],
+        )
     else:
         discord_payload = _build_discord_alert_payload(
             payload,
@@ -6194,7 +6345,7 @@ def _send_discord_webhook(
         )
     if not discord_payload:
         return None
-    if existing_message_id and channel_variant == "tracker":
+    if existing_message_id and channel_variant in {"tracker", "preview"}:
         edit_webhook_url = str(existing_message_webhook_url or webhook_url or "").strip()
         edited = _edit_discord_webhook_message(edit_webhook_url, existing_message_id, discord_payload)
         if edited is not None:
@@ -6516,6 +6667,9 @@ def run_edge_score_refresh(
             "cooldown_active": bool(notification_delta.get("cooldown_active")),
             "alert_kind": notification_delta.get("alert_kind"),
             "official_candidate_count": len(official_recommendations),
+            "preview_enabled": EDGE_DISCORD_PREVIEW_ENABLED,
+            "preview_active": bool(EDGE_DISCORD_PREVIEW_ENABLED and not official_recommendations),
+            "preview_count": EDGE_DISCORD_PREVIEW_COUNT,
             "tracker_min_signal_score": EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE,
             "change_count": len(notification_delta.get("changes", [])),
             "removed_count": len(notification_delta.get("removed", [])),
@@ -6584,6 +6738,35 @@ def run_edge_score_refresh(
         and tracker_running_recommendations
         and not tracker_existing_message_id
     )
+
+    # Below-threshold preview. Only considered when nothing cleared the real
+    # alert bar, so a preview can never compete with a genuine alert.
+    discord_preview_sent = False
+    preview_message_response: Optional[Dict[str, Any]] = None
+    preview_recommendations: List[Dict[str, Any]] = []
+    preview_webhook_url = (
+        EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+    )
+    if EDGE_DISCORD_PREVIEW_ENABLED and not official_recommendations:
+        preview_recommendations = _filter_preview_recommendations(display_recommendations)
+    # notification_delta's slate_date is derived from official recommendations,
+    # so it is empty exactly when a preview is wanted. Derive our own.
+    preview_slate_dates = sorted({
+        _normalize_game_date(recommendation.get("game_date"))
+        for recommendation in preview_recommendations
+        if _normalize_game_date(recommendation.get("game_date"))
+    })
+    preview_slate_date = preview_slate_dates[0] if preview_slate_dates else ""
+    preview_message_ref = _latest_discord_message_ref(
+        state,
+        slate_date=preview_slate_date,
+        channel="preview",
+    )
+    preview_existing_message_id = str((preview_message_ref or {}).get("message_id") or "").strip() or None
+    preview_existing_webhook_url = str((preview_message_ref or {}).get("webhook_url") or "").strip() or None
+
     if refresh_label in DISCORD_ALERT_REFRESH_LABELS and _has_discord_alert_target():
         if EDGE_SCORE_DISCORD_WEBHOOK_URL and notification_delta.get("should_send"):
             try:
@@ -6612,7 +6795,34 @@ def run_edge_score_refresh(
                 discord_tracker_sent = bool(tracker_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score tracker webhook failed: %s", exc)
-        discord_sent = bool(discord_main_sent or discord_tracker_sent)
+        if preview_recommendations and preview_webhook_url and preview_slate_date:
+            try:
+                preview_message_response = _send_discord_webhook(
+                    payload,
+                    {},
+                    webhook_url=preview_webhook_url,
+                    channel_variant="preview",
+                    existing_message_id=preview_existing_message_id,
+                    existing_message_webhook_url=preview_existing_webhook_url,
+                    running_recommendations=preview_recommendations,
+                )
+                discord_preview_sent = bool(preview_message_response)
+            except Exception as exc:
+                logger.warning("Discord Edge Score preview webhook failed: %s", exc)
+        discord_sent = bool(discord_main_sent or discord_tracker_sent or discord_preview_sent)
+
+    if discord_preview_sent and preview_message_response:
+        if _store_discord_message_ref(
+            state,
+            slate_date=preview_slate_date,
+            channel="preview",
+            message=preview_message_response,
+            webhook_url=preview_webhook_url,
+            alert_kind="preview",
+            sent_at=payload["generated_at"],
+            game_ids=_recommendation_game_ids(preview_recommendations),
+        ):
+            state_changed = True
 
     if discord_main_sent:
         alert_state_by_date = state.get("discord_alert_state_by_date", {})
@@ -6712,6 +6922,7 @@ def run_edge_score_refresh(
             blocked=len(blocked_candidates),
             top=len(top_recommendations),
             discord_sent=True,
+            discord_preview_sent=discord_preview_sent,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),
             deleted_discord_messages=recap_result.get("deleted_messages", 0),
             supabase_sync_ok=sync_ok,
@@ -6728,6 +6939,7 @@ def run_edge_score_refresh(
             blocked=len(blocked_candidates),
             top=len(top_recommendations),
             discord_sent=False,
+            discord_preview_sent=discord_preview_sent,
             results_recaps_sent=len(recap_result.get("sent_dates", [])),
             deleted_discord_messages=recap_result.get("deleted_messages", 0),
             supabase_sync_ok=sync_ok,
