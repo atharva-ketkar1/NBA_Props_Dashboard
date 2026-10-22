@@ -5925,11 +5925,13 @@ def _build_discord_preview_payload(
     payload: Dict[str, Any],
     preview_recommendations: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Render the top N as an explicitly below-threshold preview.
+    """Render the top N picks, grouped by sportsbook.
 
-    Deliberately styled differently from a real alert (amber, "PREVIEW" in the
-    title, the gap to the threshold spelled out) so that a preview can never be
-    mistaken for a pick that actually cleared EDGE_DISCORD_MIN_SIGNAL_SCORE.
+    Only ever built when nothing cleared EDGE_DISCORD_MIN_SIGNAL_SCORE, so no
+    header or disclaimer embed is included: the webhook username separates a
+    preview ("NBA Dashboard Preview") from a real alert ("NBA Dashboard Daily
+    Props"). The generated_at stamp rides on the last embed so a message that
+    updates in place still shows its age.
     """
     if not preview_recommendations:
         return None
@@ -5941,61 +5943,18 @@ def _build_discord_preview_payload(
     if not grouped_books:
         return None
 
-    refresh_label_text = REFRESH_LABELS.get(
-        payload.get("refresh_label"),
-        str(payload.get("refresh_label") or "Refresh").replace("_", " ").title(),
-    )
-    scores = [_ranking_edge_score(recommendation) for recommendation in preview_recommendations]
-    best_score = max(scores) if scores else 0.0
-    threshold_text = _format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)
-
-    summary_fields: List[Dict[str, Any]] = [
-        {
-            "name": "Updated",
-            "value": _format_discord_timestamp(payload.get("generated_at")),
-            "inline": False,
-        },
-        {
-            "name": "Best score today",
-            "value": f"{best_score:.1f}",
-            "inline": True,
-        },
-        {
-            "name": "Alert threshold",
-            "value": f"{threshold_text} (short by {max(0.0, EDGE_DISCORD_MIN_SIGNAL_SCORE - best_score):.1f})",
-            "inline": True,
-        },
-        {
-            "name": "Slate",
-            "value": ", ".join(payload.get("game_dates", [])) or "n/a",
-            "inline": True,
-        },
-    ]
-
     embeds = [
-        {
-            "title": f"⚠️ Below-Threshold Preview • {refresh_label_text}",
-            "description": (
-                f"**No pick cleared the {threshold_text} alert threshold.** These are simply the "
-                f"top {len(preview_recommendations)} on the board right now, posted so the model's "
-                "ordering can be checked against results. **Not alerts, and not a recommendation "
-                "to bet.** This message updates in place as the board moves, and is replaced by a "
-                "real alert the moment anything clears the bar."
-            ),
-            "color": 0xF59E0B,
-            "timestamp": payload.get("generated_at"),
-            "fields": summary_fields,
-        }
-    ]
-    for group in grouped_books:
-        embeds.append(
-            _build_discord_book_embed(
-                group,
-                alert_kind="opening",
-                change_lookup={},
-                channel_variant="preview",
-            )
+        _build_discord_book_embed(
+            group,
+            alert_kind="opening",
+            change_lookup={},
+            channel_variant="preview",
         )
+        for group in grouped_books
+    ]
+    generated_at = payload.get("generated_at")
+    if generated_at:
+        embeds[-1]["timestamp"] = generated_at
 
     return {
         "username": "NBA Dashboard Preview",
