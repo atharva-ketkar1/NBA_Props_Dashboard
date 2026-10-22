@@ -6,17 +6,9 @@ import { ASSETS_BASE } from '../utils/config';
 import { getSportsbookProp, playerHasSportsbookPropForDate } from '../utils/propResolution';
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
+import { STAT_LABELS as STAT_MAP, TAB_ORDER } from '../utils/statLabels';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
-
-const STAT_MAP: Record<string, string> = {
-    'Points': 'PTS', 'Assists': 'AST', 'Rebounds': 'REB', 'Threes': 'FG3M',
-    'Pts+Ast': 'PTS+AST', 'Pts+Reb': 'PTS+REB', 'Reb+Ast': 'REB+AST',
-    'Pts+Reb+Ast': 'PTS+REB+AST', 'Fantasy': 'FAN', 'Blocks': 'BLK',
-    'Steals': 'STL', 'Turnovers': 'TOV', '1Q Points': '1Q_PTS',
-    '1Q Assists': '1Q_AST', '1Q Rebounds': '1Q_REB', '1H Points': '1H_PTS',
-    'Double Double': 'DD2', 'Triple Double': 'TD3'
-};
 
 type PlayerAvailabilityByDate = Record<number, Record<string, Record<string, Record<string, boolean>>>>;
 
@@ -528,13 +520,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         Object.values(propsAvailabilityByDate ?? {}).forEach(statMap => {
             Object.keys(statMap ?? {}).forEach(key => propSet.add(key));
         });
-
-        // Exact tabs from Header
-        const TAB_ORDER = [
-            'Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast',
-            'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists',
-            '1Q Rebounds', '1H Points', 'Blocks', 'Steals', 'Turnovers', 'Fantasy'
-        ];
 
         return TAB_ORDER.map(label => {
             const key = STAT_MAP[label] || label;

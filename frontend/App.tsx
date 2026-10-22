@@ -55,22 +55,8 @@ import {
   fetchDashboardPlayer,
   fetchDashboardSimilar,
 } from './utils/dashboardApi';
+import { STAT_LABELS, TAB_ORDER } from './utils/statLabels';
 
-
-const STAT_LABELS: Record<string, string> = {
-  'Points': 'PTS',
-  'Assists': 'AST',
-  'Rebounds': 'REB',
-  'Threes': 'FG3M',
-  'Pts+Ast': 'PTS+AST',
-  'Pts+Reb': 'PTS+REB',
-  'Reb+Ast': 'REB+AST',
-  'Pts+Reb+Ast': 'PTS+REB+AST',
-  'Fantasy': 'FAN',
-  'Blocks': 'BLK',
-  'Steals': 'STL',
-  'Turnovers': 'TOV'
-};
 
 const EDGE_STAT_TO_TAB: Record<string, string> = {
   PTS: 'Points',
@@ -89,7 +75,6 @@ const EDGE_STAT_TO_TAB: Record<string, string> = {
   FTA: 'FT Attempted',
 };
 
-const TAB_ORDER = ['Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast', 'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points'];
 const DEFAULT_SPORTSBOOK: SportsbookId = 'dk';
 const SPORTSBOOK_FALLBACK_PRIORITY: SportsbookId[] = ['pp', 'fd', 'dk', 'mgm', 'cz'];
 

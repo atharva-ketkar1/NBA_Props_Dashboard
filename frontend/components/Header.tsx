@@ -9,6 +9,7 @@ import { createPortal } from 'react-dom';
 import { ASSETS_BASE } from '../utils/config';
 import { MobileViewSwitcher, MobileView } from './MobileViewSwitcher';
 import { getSportsbookProp } from '../utils/propResolution';
+import { STAT_LABELS, TAB_ORDER } from '../utils/statLabels';
 
 type PlayerAvailabilityByDate = Record<string, Record<string, Record<string, boolean>>>;
 
@@ -42,36 +43,6 @@ interface HeaderProps {
   mobileView: MobileView;
   onMobileViewChange: (view: MobileView) => void;
 }
-
-const STAT_LABELS: Record<string, string> = {
-  'Points': 'PTS',
-  'Assists': 'AST',
-  'Rebounds': 'REB',
-  'Threes': 'FG3M',
-  'Pts+Ast': 'PTS+AST',
-  'Pts+Reb': 'PTS+REB',
-  'Reb+Ast': 'REB+AST',
-  'Pts+Reb+Ast': 'PTS+REB+AST',
-  'Fantasy': 'FAN',
-  'Blocks': 'BLK',
-  'Steals': 'STL',
-  'Turnovers': 'TOV',
-  'Double Double': 'DD2',
-  'Triple Double': 'TD3',
-  '1Q Points': '1Q_PTS',
-  '1Q Assists': '1Q_AST',
-  '1Q Rebounds': '1Q_REB',
-  '1H Points': '1H_PTS',
-  'Stl+Blk': 'STL+BLK',
-  'Fouls': 'PF',
-  'FT Attempted': 'FTA'
-};
-
-const TAB_ORDER = [
-  'Points', 'Assists', 'Rebounds', 'Threes', 'Pts+Ast', 'Pts+Reb', 'Reb+Ast', 'Pts+Reb+Ast',
-  'Double Double', 'Triple Double', '1Q Points', '1Q Assists', '1Q Rebounds', '1H Points',
-  'Steals', 'Blocks', 'Stl+Blk', 'Turnovers', 'Fouls', 'FT Attempted'
-];
 
 const ENABLE_PRIZEPICKS = import.meta.env.VITE_ENABLE_PRIZEPICKS !== 'false';
 
@@ -196,6 +167,8 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
         else if (statKey === 'PTS+REB') val = (game.PTS || 0) + (game.REB || 0);
         else if (statKey === 'PTS+AST') val = (game.PTS || 0) + (game.AST || 0);
         else if (statKey === 'REB+AST') val = (game.REB || 0) + (game.AST || 0);
+        else if (statKey === 'STL+BLK') val = (game.STL || 0) + (game.BLK || 0);
+        else if (statKey === 'FAN') val = game.FANTASY_PTS;
       }
       if (val !== undefined) {
         sum += val;
@@ -224,6 +197,8 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       else if (statKey === 'PTS+REB') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.REB || 0);
       else if (statKey === 'PTS+AST') seasonAvg = (seasonStats.PTS || 0) + (seasonStats.AST || 0);
       else if (statKey === 'REB+AST') seasonAvg = (seasonStats.REB || 0) + (seasonStats.AST || 0);
+      else if (statKey === 'STL+BLK') seasonAvg = (seasonStats.STL || 0) + (seasonStats.BLK || 0);
+      else if (statKey === 'FAN') seasonAvg = seasonStats.FANTASY_PTS ?? 0;
       else seasonAvg = 0;
     }
 

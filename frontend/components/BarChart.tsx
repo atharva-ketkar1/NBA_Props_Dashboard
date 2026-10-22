@@ -13,6 +13,7 @@ import {
 } from '../utils/filterOverlays';
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
+import { STAT_LABELS } from '../utils/statLabels';
 
 const USE_DB = import.meta.env.VITE_USE_DB === 'true';
 
@@ -28,21 +29,6 @@ interface BarChartProps {
     historicalGameCount?: number;
     activeSeason?: string;
 }
-
-const STAT_LABELS: Record<string, string> = {
-    'Points': 'PTS',
-    'Assists': 'AST',
-    'Rebounds': 'REB',
-    'Threes': 'FG3M',
-    'Pts+Ast': 'PTS+AST',
-    'Pts+Reb': 'PTS+REB',
-    'Reb+Ast': 'REB+AST',
-    'Pts+Reb+Ast': 'PTS+REB+AST',
-    'Fantasy': 'FAN',
-    'Blocks': 'BLK',
-    'Steals': 'STL',
-    'Turnovers': 'TOV'
-};
 
 // Season-overlay shading, measured off the live PropsMadness chart in DevTools.
 // The region is a low-opacity tint of the primary text colour rather than a solid
@@ -394,6 +380,8 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 else if (statKey === 'PTS+REB') val = (game.PTS || 0) + (game.REB || 0);
                 else if (statKey === 'PTS+AST') val = (game.PTS || 0) + (game.AST || 0);
                 else if (statKey === 'REB+AST') val = (game.REB || 0) + (game.AST || 0);
+                else if (statKey === 'STL+BLK') val = (game.STL || 0) + (game.BLK || 0);
+                else if (statKey === 'FAN') val = game.FANTASY_PTS || 0;
                 else val = 0;
             }
 

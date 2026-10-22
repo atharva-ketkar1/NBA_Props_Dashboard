@@ -254,7 +254,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
             return `${mVal}/${aVal} (${Math.round((mVal / aVal) * 100)}%)`;
         };
 
-        // Note: The stats backend keys (statKey) are mapped from STAT_LABELS in BarChart.tsx
+        // Note: The stats backend keys (statKey) are mapped from STAT_LABELS in utils/statLabels.ts
         switch (statKey) {
             case 'PTS':
                 rows.push({ label: 'Points', value: `${game.PTS || 0}` });
@@ -317,6 +317,12 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
             case 'BLK':
                 rows.push({ label: 'Blocks', value: `${game.BLK || 0}` });
                 rows.push({ label: 'Steals', value: `${game.STL || 0}` });
+                rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
+                break;
+            case 'STL+BLK':
+                rows.push({ label: 'Stl+Blk', value: `${(game.STL || 0) + (game.BLK || 0)}` });
+                rows.push({ label: 'Steals', value: `${game.STL || 0}` });
+                rows.push({ label: 'Blocks', value: `${game.BLK || 0}` });
                 rows.push({ label: 'Fouls (1Q)', value: `${game.PF || 0} (${game['1Q_PF'] || 0})` });
                 break;
             case 'TOV':
