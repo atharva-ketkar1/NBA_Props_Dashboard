@@ -13,7 +13,7 @@ const Section = ({ title, children }: { title: string; children: React.ReactNode
 );
 
 const ExampleBox = ({ children }: { children: React.ReactNode }) => (
-  <div className="my-3 rounded-lg border border-borderMedium/40 bg-bgElevation2 px-4 py-3 text-[12px] leading-relaxed text-neutral300">
+  <div className="my-3 rounded-card border border-borderMedium/40 bg-bgElevation2 px-4 py-3 text-[12px] leading-relaxed text-neutral300">
     {children}
   </div>
 );

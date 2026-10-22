@@ -438,7 +438,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
 
     return (
         <div
-            className="fixed z-[100] w-56 flex flex-col bg-bgElevation0 rounded-xl border border-borderMedium shadow-2xl overflow-hidden pointer-events-none transform -translate-y-1/2"
+            className="fixed z-[100] w-56 flex flex-col bg-bgElevation0 rounded-card border border-borderMedium shadow-2xl overflow-hidden pointer-events-none transform -translate-y-1/2"
             style={popoverStyle}
         >
             {/* Header Area */}
@@ -477,7 +477,7 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                     )}
                 </div>
 
-                <div className={`${badgeColor} text-white font-bold text-xs px-3 py-1.5 absolute top-0 right-0 rounded-bl-md z-10`}>
+                <div className={`${badgeColor} text-white font-bold text-xs px-3 py-1.5 absolute top-0 right-0 rounded-bl-sm z-10`}>
                     {badgeText}
                 </div>
             </div>

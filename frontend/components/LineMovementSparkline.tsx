@@ -229,7 +229,7 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
                 {/* Hover tooltip */}
                 {hovered && (
                     <div
-                        className="absolute z-50 pointer-events-none bg-bgElevation0 border border-borderMedium/60 rounded-md px-2 py-1 text-[10px] whitespace-nowrap shadow-xl"
+                        className="absolute z-50 pointer-events-none bg-bgElevation0 border border-borderMedium/60 rounded-sm px-2 py-1 text-[10px] whitespace-nowrap shadow-xl"
                         style={{ left: `clamp(0px, ${(hovered.x / VW * 100).toFixed(1)}%, calc(100% - 80px))`, bottom: '100%', marginBottom: '6px' }}
                     >
                         <div className="text-white font-bold">{formatVal(hovered.val)}</div>

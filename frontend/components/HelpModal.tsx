@@ -13,7 +13,7 @@ const Section = ({ title, children }: { title: string; children: React.ReactNode
 );
 
 const ExampleBox = ({ children }: { children: React.ReactNode }) => (
-    <div className="bg-bgElevation2 border border-borderMedium/40 rounded-lg px-4 py-3 my-3 text-[12px] text-neutral300 leading-relaxed">
+    <div className="bg-bgElevation2 border border-borderMedium/40 rounded-card px-4 py-3 my-3 text-[12px] text-neutral300 leading-relaxed">
         {children}
     </div>
 );

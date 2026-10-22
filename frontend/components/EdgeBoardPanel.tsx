@@ -667,7 +667,7 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
       />
 
       <div className="fixed inset-x-0 top-[68px] z-[70] flex justify-center px-2 sm:top-[72px] sm:px-4">
-        <section className="flex max-h-[calc(100vh-84px)] w-full max-w-[1120px] flex-col overflow-hidden rounded-xl border border-borderMedium bg-bgElevation0 shadow-2xl sm:max-h-[calc(100vh-92px)]">
+        <section className="flex max-h-[calc(100vh-84px)] w-full max-w-[1120px] flex-col overflow-hidden rounded-card border border-borderMedium bg-bgElevation0 shadow-2xl sm:max-h-[calc(100vh-92px)]">
           <div className="flex items-start justify-between gap-4 border-b border-borderMedium px-4 py-4 sm:px-5">
             <div className="min-w-0">
               <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-fgSubtle">
@@ -791,19 +791,19 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                         <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.5fr)_130px_110px] lg:items-center">
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className={`inline-flex min-w-[36px] items-center justify-center rounded-md px-2 py-1 text-xs font-bold ${isSelected
+                              <span className={`inline-flex min-w-[36px] items-center justify-center rounded-sm px-2 py-1 text-xs font-bold ${isSelected
                                 ? 'bg-blue500 text-white'
                                 : 'bg-bgElevation1 text-fgSubtle'
                                 }`}>
                                 #{displayRank}
                               </span>
                               {isActive && (
-                                <span className="rounded-md border border-borderMedium bg-bgElevation0 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
+                                <span className="rounded-sm border border-borderMedium bg-bgElevation0 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
                                   On dashboard
                                 </span>
                               )}
                               {selectedSportsbook !== 'all' && Number.isFinite(recommendation.rank) && (
-                                <span className="rounded-md border border-borderMedium bg-bgElevation0 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
+                                <span className="rounded-sm border border-borderMedium bg-bgElevation0 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
                                   Overall #{recommendation.rank}
                                 </span>
                               )}
@@ -857,7 +857,7 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-2 lg:flex-col lg:items-start lg:gap-2">
                               <div
-                                className="inline-flex rounded-md border px-2.5 py-1 font-chakra text-xl font-bold"
+                                className="inline-flex rounded-sm border px-2.5 py-1 font-chakra text-xl font-semibold"
                                 style={signalTone.solidStyle}
                               >
                                 {recommendation.edge_score.toFixed(1)}
@@ -885,7 +885,7 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                 event.stopPropagation();
                                 onSelectRecommendation(recommendation);
                               }}
-                              className="inline-flex items-center gap-1 rounded-md border border-borderMedium bg-bgElevation0 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-white transition-colors hover:bg-bgElevation1"
+                              className="inline-flex items-center gap-1 rounded-sm border border-borderMedium bg-bgElevation0 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-white transition-colors hover:bg-bgElevation1"
                             >
                               Open
                               <ChevronRight className="h-3.5 w-3.5" />
@@ -899,11 +899,11 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                             <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className="rounded-md border border-borderMedium px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
+                                <span className="rounded-sm border border-borderMedium px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-fgSubtle">
                                   {recommendation.sportsbook_label}
                                 </span>
                                 {recommendation.recommendation_key === activeRecommendationKey && (
-                                  <span className="rounded-md bg-blue500 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white">
+                                  <span className="rounded-sm bg-blue500 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white">
                                     On dashboard
                                   </span>
                                 )}
@@ -938,7 +938,7 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                     Signal Score
                                   </div>
                                   <div
-                                    className="mt-2 inline-flex rounded-md border px-3 py-1 font-chakra text-2xl font-bold"
+                                    className="mt-2 inline-flex rounded-sm border px-3 py-1 font-chakra text-2xl font-semibold"
                                     style={signalTone.solidStyle}
                                   >
                                     {recommendation.edge_score.toFixed(1)}

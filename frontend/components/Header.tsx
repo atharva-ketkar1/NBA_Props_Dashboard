@@ -449,7 +449,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
 
                   {/* FIX: Restored Sportsbook Logo (Full Color if possible, or standardized container) */}
                   {/* User asked for the LOGO back, removing the blue box and invert if it hides colors */}
-                  <div className="w-3.5 h-3.5 rounded-[2px] flex items-center justify-center shrink-0 overflow-hidden bg-white">
+                  <div className="w-3.5 h-3.5 rounded-xxs flex items-center justify-center shrink-0 overflow-hidden bg-white">
                     <img src={currentSbLogo} alt={activeSportsbook} className="w-full h-full object-contain" />
                   </div>
 
@@ -478,7 +478,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
                     We need an invisible bridge covering that gap.
                     Added `before:h-4 before:-top-4` to bridge the gap properly.
                 */}
-                  <div className="absolute top-full left-0 mt-2 bg-bgElevation1 border border-borderMedium rounded-md shadow-xl z-50 flex-col gap-1 p-1 hidden group-hover:flex min-w-[200px] 
+                  <div className="absolute top-full left-0 mt-2 bg-bgElevation1 border border-borderMedium rounded-sm shadow-xl z-50 flex-col gap-1 p-1 hidden group-hover:flex min-w-[200px] 
                                 before:absolute before:-top-4 before:left-0 before:w-full before:h-4 before:bg-transparent">
                     {SPORTSBOOKS.map(sb => {
                       const sbProp = getSportsbookProp(player, statKey, sb.id, activeGameDate)?.prop ?? null;
@@ -518,7 +518,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
                                     `}
                         >
                           <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                            <div className="w-4 h-4 rounded-[2px] overflow-hidden bg-white shrink-0 flex items-center justify-center">
+                            <div className="w-4 h-4 rounded-xxs overflow-hidden bg-white shrink-0 flex items-center justify-center">
                               <img src={sb.logo} alt={sb.label} className="w-full h-full object-contain" />
                             </div>
                             <span className="truncate tracking-wide">{sb.label}</span>
@@ -593,7 +593,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
             <div className="hidden md:flex items-center gap-4 px-4 h-full w-full xl:w-auto justify-end shrink-0 bg-bgElevation0 relative transition-all duration-300">
               <HelpCircle className="w-5 h-5 text-borderMuted cursor-pointer hover:text-neutral400 transition-colors shrink-0" onClick={() => setShowHelp(true)} />
               <div className="relative">
-                <button onClick={() => { if (onToggleFilters) onToggleFilters(); }} className="flex items-center gap-1.5 bg-bgElevation0 hover:bg-bgElevation1 border border-borderMedium hover:border-borderMuted text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-all whitespace-nowrap">
+                <button onClick={() => { if (onToggleFilters) onToggleFilters(); }} className="flex items-center gap-1.5 bg-bgElevation0 hover:bg-bgElevation1 border border-borderMedium hover:border-borderMuted text-white text-sm font-medium px-3 py-1.5 rounded-lg transition whitespace-nowrap">
                   <SlidersHorizontal className="w-4 h-4" />
                   Filters
                 </button>

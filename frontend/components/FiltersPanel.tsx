@@ -479,7 +479,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         label,
         rank,
         customRank,
-        className = 'px-2.5 py-1.5 rounded-[6px] text-[12px]',
+        className = 'px-2.5 py-1.5 rounded-btn text-[12px]',
     }: {
         filterId: string;
         label: string;
@@ -517,7 +517,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         }
 
         return (
-            <div className={`absolute -bottom-1 left-1/2 -translate-x-1/2 ${statusMeta.badgeClass} text-[8px] font-bold px-1 py-[1px] leading-tight rounded-sm border border-bgElevation1 whitespace-nowrap z-10 w-fit pointer-events-none`}>
+            <div className={`absolute -bottom-1 left-1/2 -translate-x-1/2 ${statusMeta.badgeClass} text-[8px] font-bold px-1 py-[1px] leading-tight rounded-xxs border border-bgElevation1 whitespace-nowrap z-10 w-fit pointer-events-none`}>
                 + {statusMeta.badge}
             </div>
         );
@@ -632,7 +632,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     </div>
 
                     <div className="shrink-0 border-b border-borderMedium/40 bg-bgElevation1/20 px-4 py-4">
-                        <div className="flex items-center justify-between rounded-[16px] border border-[#37586A] bg-[#0E1113] px-4 py-3">
+                        <div className="flex items-center justify-between rounded-2xl border border-[#37586A] bg-[#0E1113] px-4 py-3">
                             <div className="flex min-w-0 items-center gap-3">
                                 <span className="shrink-0 text-[14px] font-medium tracking-[-0.04em] text-[#8D8D8D] sm:text-[18px]">
                                     {activeSeason ?? LIVE_SEASON}
@@ -685,7 +685,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                             type="button"
                                             onClick={() => onTeammateModeSelect?.(teammate, 'with')}
                                             aria-label={`Show games with ${teammate.playerName}`}
-                                            className={`${withButtonClass} flex h-8 w-10 items-center justify-center rounded-[6px] border transition-colors sm:h-10 sm:w-[60px]`}
+                                            className={`${withButtonClass} flex h-8 w-10 items-center justify-center rounded-btn border transition-colors sm:h-10 sm:w-[60px]`}
                                         >
                                             <Plus className="h-4 w-4 sm:h-5 sm:w-5" strokeWidth={2.4} />
                                         </button>
@@ -693,7 +693,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                             type="button"
                                             onClick={() => onTeammateModeSelect?.(teammate, 'without')}
                                             aria-label={`Show games without ${teammate.playerName}`}
-                                            className={`${withoutButtonClass} flex h-8 w-10 items-center justify-center rounded-[6px] border transition-colors sm:h-10 sm:w-[60px]`}
+                                            className={`${withoutButtonClass} flex h-8 w-10 items-center justify-center rounded-btn border transition-colors sm:h-10 sm:w-[60px]`}
                                         >
                                             <Minus className="h-4 w-4 sm:h-5 sm:w-5" strokeWidth={2.4} />
                                         </button>
@@ -758,7 +758,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                 <div className="flex flex-col gap-2.5">
                     <div className="flex items-center justify-between">
                         <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[56px]">Season</span>
-                        <div className="flex bg-bgElevation1 rounded-md border border-borderMedium/40 p-0.5 flex-1 ml-2">
+                        <div className="flex bg-bgElevation1 rounded-sm border border-borderMedium/40 p-0.5 flex-1 ml-2">
                             {SEASON_FILTER_OPTIONS.map(s => {
                                 const isActive = s === (activeSeason || LIVE_SEASON);
                                 const isClickable = isSelectableSeason(s);
@@ -778,7 +778,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     <div className="flex items-center justify-between">
                         <span className="text-[11px] font-semibold text-fgSubtle uppercase tracking-wider w-[56px]">Games</span>
                         <div className="flex items-center gap-2 flex-1 ml-2">
-                            <div className="flex bg-bgElevation1 rounded-md border border-borderMedium/40 p-0.5 flex-1">
+                            <div className="flex bg-bgElevation1 rounded-sm border border-borderMedium/40 p-0.5 flex-1">
                                 {['10', '20', 'Max'].map(g => {
                                     const maxGames = player?.game_log?.length || 82;
                                     const isMax = g === 'Max';
@@ -801,7 +801,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                     );
                                 })}
                             </div>
-                            <div className="flex items-center justify-between bg-bgElevation2 border border-borderMedium/50 rounded-md px-2 py-1.5 shrink-0 w-[72px]">
+                            <div className="flex items-center justify-between bg-bgElevation2 border border-borderMedium/50 rounded-sm px-2 py-1.5 shrink-0 w-[72px]">
                                 <span onClick={() => onGameCountChange(Math.max(1, gameCount - 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1">-</span>
                                 <span className="text-white text-xs font-medium">{gameCount}</span>
                                 <span onClick={() => onGameCountChange(Math.min(player?.game_log?.length || 82, gameCount + 1))} className="text-fgSubtle text-xs cursor-pointer hover:text-white select-none px-1">+</span>
@@ -935,7 +935,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                     onClick={() => teammateInjuryCards.length > 0 && setIsTeammateModalOpen(true)}
                                     disabled={teammateInjuryCards.length === 0}
                                     aria-label="Open all teammates"
-                                    className={`bg-bgElevation1 border border-borderMedium/50 text-xs font-medium px-2.5 py-1 rounded-md flex items-center gap-1 transition-colors ${teammateInjuryCards.length > 0
+                                    className={`bg-bgElevation1 border border-borderMedium/50 text-xs font-medium px-2.5 py-1 rounded-sm flex items-center gap-1 transition-colors ${teammateInjuryCards.length > 0
                                         ? 'text-fgSubtle hover:text-white'
                                         : 'text-fgSubtle/40 cursor-not-allowed'
                                         }`}
@@ -951,7 +951,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                     {teammatePreviewCards.length > 0 ? teammatePreviewCards.map((teammate) => (
                                         renderPreviewTeammateCard(teammate)
                                     )) : archiveInjuryNote ? (
-                                        <div className="flex w-full items-center gap-3 rounded-[12px] border border-dashed border-borderMedium/50 bg-bgElevation1/40 px-3.5 py-3.5">
+                                        <div className="flex w-full items-center gap-3 rounded-xl border border-dashed border-borderMedium/50 bg-bgElevation1/40 px-3.5 py-3.5">
                                             <ClipboardX className="h-4 w-4 shrink-0 text-fgSubtle/50" strokeWidth={1.8} />
                                             <div className="flex min-w-0 flex-col gap-0.5">
                                                 <span className="text-[12px] font-medium leading-tight text-fgSubtle">
@@ -975,7 +975,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                         type="button"
                                         onClick={() => scrollTeammates('left')}
                                         aria-label="Scroll teammates left"
-                                        className="absolute left-0 top-1/2 z-20 flex h-8 w-6 -translate-y-1/2 items-center justify-center rounded-md border border-borderMedium/60 bg-bgElevation2/95 text-sm font-bold text-white shadow-lg hover:bg-bgElevation3"
+                                        className="absolute left-0 top-1/2 z-20 flex h-8 w-6 -translate-y-1/2 items-center justify-center rounded-sm border border-borderMedium/60 bg-bgElevation2/95 text-sm font-bold text-white shadow-lg hover:bg-bgElevation3"
                                     >
                                         {'<'}
                                     </button>
@@ -985,7 +985,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                         type="button"
                                         onClick={() => scrollTeammates('right')}
                                         aria-label="Scroll teammates right"
-                                        className="absolute right-0 top-1/2 z-20 flex h-8 w-6 -translate-y-1/2 items-center justify-center rounded-md border border-borderMedium/60 bg-bgElevation2/95 text-sm font-bold text-white shadow-lg hover:bg-bgElevation3"
+                                        className="absolute right-0 top-1/2 z-20 flex h-8 w-6 -translate-y-1/2 items-center justify-center rounded-sm border border-borderMedium/60 bg-bgElevation2/95 text-sm font-bold text-white shadow-lg hover:bg-bgElevation3"
                                     >
                                         {'>'}
                                     </button>
@@ -1028,7 +1028,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                         label: stat.label,
                                         rank: stat.rank,
                                         customRank: stat.customRank,
-                                        className: 'px-2 py-1.5 rounded-[6px] text-[13px]',
+                                        className: 'px-2 py-1.5 rounded-btn text-[13px]',
                                     }),
                                 )}
                             </div>
@@ -1044,7 +1044,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                         filterId: pt,
                                         label: pt,
                                         rank,
-                                        className: 'px-2 py-1.5 rounded-[6px] text-[13px]',
+                                        className: 'px-2 py-1.5 rounded-btn text-[13px]',
                                     });
                                 })}
                             </div>
@@ -1058,7 +1058,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                 renderFilterButton({
                                     filterId: pill,
                                     label: pill,
-                                    className: 'px-4 py-2 rounded-[6px] text-[13px] tracking-wide',
+                                    className: 'px-4 py-2 rounded-btn text-[13px] tracking-wide',
                                 }),
                             )}
                         </div>
@@ -1077,7 +1077,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                 renderFilterButton({
                                     filterId: stat,
                                     label: stat,
-                                    className: 'px-2 py-1.5 lg:py-1 rounded-[6px] text-[12px] lg:text-[11px]',
+                                    className: 'px-2 py-1.5 lg:py-1 rounded-btn text-[12px] lg:text-[11px]',
                                 }),
                             )}
                         </div>

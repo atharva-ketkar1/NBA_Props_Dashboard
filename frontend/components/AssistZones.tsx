@@ -126,20 +126,20 @@ const CourtShape = ({ viewData }: { viewData: any }) => (
 const ZoneLabel = ({ top, left, pStat, oStat, activeTab }: { top: string, left: string, pStat: any, oStat: any, activeTab: string }) => {
   if (activeTab === 'player') {
     return (
-      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold font-chakra border border-white z-10" style={{ top, left }}>
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-semibold font-chakra tracking-[-0.01em] border border-white z-10" style={{ top, left }}>
         <div className="px-1 py-0.5 text-black text-center min-w-[40px] tracking-tight">{pStat.percentage}</div>
       </div>
     );
   } else if (activeTab === 'opp') {
     return (
-      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold font-chakra border border-white z-10" style={{ top, left }}>
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 bg-white flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-semibold font-chakra tracking-[-0.01em] border border-white z-10" style={{ top, left }}>
         <div className="px-1 py-0.5 text-black text-center min-w-[40px] tracking-tight">{oStat.rank}</div>
       </div>
     );
   } else {
     // VS Tab
     return (
-      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-bold font-chakra border border-white z-10 bg-white" style={{ top, left }}>
+      <div className="absolute transform -translate-x-1/2 -translate-y-1/2 flex shadow-[0_2px_4px_rgba(0,0,0,0.3)] rounded-[3px] overflow-hidden text-[11px] font-semibold font-chakra tracking-[-0.01em] border border-white z-10 bg-white" style={{ top, left }}>
         <div className="px-1 py-0.5 text-black text-center min-w-[32px] tracking-tight">
           {pStat.percentage}
         </div>
@@ -191,10 +191,10 @@ export const AssistZones = ({ player, activeSeason }: { player: Player; activeSe
           <SeasonScopeNote activeSeason={activeSeason} className="text-[12px] text-gray-400 font-medium" />
         </div>
 
-        <div className="flex bg-bgElevation1 rounded-[10px] p-1 border-transparent items-center">
+        <div className="flex bg-bgElevation1 rounded-card p-1 border-transparent items-center">
           <button
             onClick={() => setActiveTab('player')}
-            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'player' ? 'text-white bg-bgElevationAccent shadow-sm' : 'text-fgMuted hover:text-fixedWhite'
+            className={`text-[13px] font-semibold px-3 py-1.5 rounded-sm transition ${activeTab === 'player' ? 'text-white bg-bgElevationAccent shadow-sm' : 'text-fgMuted hover:text-fixedWhite'
               }`}
           >
             Player
@@ -202,7 +202,7 @@ export const AssistZones = ({ player, activeSeason }: { player: Player; activeSe
 
           <button
             onClick={() => setActiveTab('vs')}
-            className={`px-2 py-1 text-[11px] font-bold rounded-[6px] mx-1 h-fit transition-all ${activeTab === 'vs' ? 'text-white bg-bgElevationAccent' : 'text-fgDisabled hover:text-fgMuted'
+            className={`px-2 py-1 text-[11px] font-bold rounded-btn mx-1 h-fit transition ${activeTab === 'vs' ? 'text-white bg-bgElevationAccent' : 'text-fgDisabled hover:text-fgMuted'
               }`}
           >
             vs
@@ -210,7 +210,7 @@ export const AssistZones = ({ player, activeSeason }: { player: Player; activeSe
 
           <button
             onClick={() => setActiveTab('opp')}
-            className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition-all ${activeTab === 'opp' ? 'text-white bg-bgElevationAccent shadow-sm' : 'text-fgMuted hover:text-fixedWhite'
+            className={`text-[13px] font-semibold px-3 py-1.5 rounded-sm transition ${activeTab === 'opp' ? 'text-white bg-bgElevationAccent shadow-sm' : 'text-fgMuted hover:text-fixedWhite'
               }`}
           >
             Opp Defense

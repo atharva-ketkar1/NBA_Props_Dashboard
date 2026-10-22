@@ -46,7 +46,7 @@ const RankBadge = ({ rank, points }: { rank: number | string; points?: string | 
 
   return (
     <span
-      className="text-[10px] font-bold font-chakra px-2 py-0.5 rounded-[4px] min-w-[24px] text-center inline-block"
+      className="text-[10px] font-semibold font-chakra tracking-[-0.01em] px-2 py-0.5 rounded-xs min-w-[24px] text-center inline-block"
       style={{ backgroundColor: colors.bg, color: colors.text }}
     >
       {rank}

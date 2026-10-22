@@ -738,7 +738,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 ref={svgRef}
                 viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
                 preserveAspectRatio="xMidYMid meet"
-                className="w-full h-full"
+                className="w-full h-full font-chakra tracking-[-0.01em]"
                 onMouseMove={handleMouseMove}
                 onTouchMove={handleMouseMove}
             >
@@ -791,7 +791,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 )}
 
                 {/* 1. Y-Axis Grid Lines & Labels */}
-                <g className="text-fgSubtle font-bold" fill="currentColor" textAnchor="end" fontSize="12">
+                <g className="text-fgSubtle font-semibold" fill="currentColor" textAnchor="end" fontSize="12">
                     <text x="50" y={getY(0)} dominantBaseline="middle">0</text>
                     <text x="50" y={getY(maxScore / 3)} dominantBaseline="middle">{Math.round(maxScore / 3)}</text>
                     <text x="50" y={getY((maxScore * 2) / 3)} dominantBaseline="middle">{Math.round((maxScore * 2) / 3)}</text>
@@ -805,7 +805,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
                 {/* Secondary Y-Axis Grid Lines & Labels (Right Side) */}
                 {hasSecondaryOverlay && (
-                    <g className="text-blue500 font-bold" fill="currentColor" textAnchor="start" fontSize="12">
+                    <g className="text-blue500 font-semibold" fill="currentColor" textAnchor="start" fontSize="12">
                         {secondaryTickValues.map((tickValue, index) => (
                             <text
                                 key={`${tickValue}-${index}`}
@@ -914,7 +914,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                         y={VIEWBOX_HEIGHT - 128}
                                         textAnchor="middle"
                                         fill={game.isUpcoming ? colors.fgSubtle : colors.fixedWhite}
-                                        fontWeight="900"
+                                        fontWeight="700"
                                         fontSize={fontSize}
                                         className="pointer-events-none drop-shadow-md transition-all duration-300"
                                     >
@@ -953,7 +953,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                                 <tspan x={0} dy="0" fill={colors.fgSubtle} fontSize="10" fontWeight="normal">
                                                     {game.dateMonth}
                                                 </tspan>
-                                                <tspan x={0} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="700">
+                                                <tspan x={0} dy="1.2em" fill={colors.fgDefault} fontSize="11" fontWeight="600">
                                                     {game.dateDay}
                                                 </tspan>
                                             </text>
@@ -966,7 +966,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                                     textAnchor="middle"
                                                     fill={colors.fgSubtle}
                                                     fontSize="11"
-                                                    fontWeight="700"
+                                                    fontWeight="600"
                                                 >
                                                     ..
                                                 </text>
@@ -1036,7 +1036,6 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         setCurrentValue(lineValue);
                     }}
                 >
-                                className="font-chakra tracking-tight font-bold"
                     {/* Invisible thicker line for easier hovering/grabbing */}
                     <motion.line
                         initial={false}
@@ -1142,7 +1141,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                 dominantBaseline="middle"
                                 textAnchor="middle"
                                 fontSize="12"
-                                fontWeight="900"
+                                fontWeight="700"
                                 fill={colors.black}
                             >
                                 {currentValue}
@@ -1155,13 +1154,13 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             {/* Bottom Legend Container */}
             <div className={`absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center justify-center gap-6 z-20 w-full`}>
                 <div className="flex items-center gap-1.5 flex-1 justify-end">
-                    <div className="w-2.5 h-2.5 bg-yellow400 rounded-[1px]" />
+                    <div className="w-2.5 h-2.5 bg-yellow400 rounded-2xs" />
                     <span className="text-fgSubtle font-bold text-[9px] tracking-widest uppercase">LINE</span>
                 </div>
 
                 {hasSecondaryOverlay && overlayDefinition ? (
                     <div className="flex items-center gap-1.5 flex-1 justify-start">
-                        <div className="w-2.5 h-2.5 bg-blue500 rounded-[1px]" />
+                        <div className="w-2.5 h-2.5 bg-blue500 rounded-2xs" />
                         <span className="text-blue500 font-bold text-[9px] tracking-widest uppercase whitespace-nowrap">
                             {overlayDefinition.label} {formatOverlayLegend(overlayDefinition, graphAvgSecondary, comparisonAvgSecondary)}
                         </span>

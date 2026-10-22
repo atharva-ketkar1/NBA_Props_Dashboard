@@ -44,14 +44,14 @@ const LeagueButton = ({ label, isActive = false, isDisabled = false, logoSrc }: 
         <button
             type="button"
             disabled={isDisabled}
-            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] transition-colors ${isActive
+            className={`flex items-center gap-2 rounded-sm px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] transition-colors ${isActive
                 ? 'bg-black/20 text-white'
                 : isDisabled
                     ? 'cursor-not-allowed text-gray-500 opacity-50'
                     : 'text-gray-300 hover:bg-borderMedium/60 hover:text-white'
                 }`}
         >
-            <div className="flex h-4 w-3.5 items-center justify-center overflow-hidden rounded-[1px] bg-black/20">
+            <div className="flex h-4 w-3.5 items-center justify-center overflow-hidden rounded-2xs bg-black/20">
                 {logoSrc && !imageError ? (
                     <img
                         src={logoSrc}

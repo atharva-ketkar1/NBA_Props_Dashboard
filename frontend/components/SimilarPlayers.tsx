@@ -206,19 +206,19 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
          <div className="grid grid-cols-3 mb-5 gap-2">
             <div className="text-center">
                <div className="text-[10px] text-fgSubtle font-bold uppercase mb-1 whitespace-nowrap">Avg Diff</div>
-               <div className={`${avgDiffColor} font-bold font-chakra text-lg`}>
+               <div className={`${avgDiffColor} font-semibold font-chakra text-lg`}>
                   {summary.total ? formatSignedValue(summary.avgDiff, 1) : '--'}
                </div>
             </div>
             <div className="text-center">
                <div className="text-[10px] text-fgSubtle font-bold uppercase mb-1 whitespace-nowrap">Avg Diff %</div>
-               <div className={`${avgDiffPercentColor} font-bold font-chakra text-lg`}>
+               <div className={`${avgDiffPercentColor} font-semibold font-chakra text-lg`}>
                   {summary.total ? `${formatSignedValue(summary.avgDiffPercent, 0)}%` : '--'}
                </div>
             </div>
             <div className="text-center">
                <div className="text-[10px] text-fgSubtle font-bold uppercase mb-1 whitespace-nowrap">Hit Rate</div>
-               <div className={`${hitRateColor} font-bold font-chakra text-lg whitespace-nowrap`}>
+               <div className={`${hitRateColor} font-semibold font-chakra text-lg whitespace-nowrap`}>
                   {summary.total ? `${summary.hitRate}% (${summary.hits}/${summary.total})` : '--'}
                </div>
             </div>
@@ -244,17 +244,17 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                               <div className="text-gray-300">{game.opponent ?? 'N/A'}</div>
                               <div className="text-white font-medium truncate pr-2">{game.player}</div>
                               <div className="text-center">
-                                 <span className={`px-1.5 py-0.5 rounded font-bold font-chakra border text-[11px] ${game.line === null ? 'text-gray-300 bg-bgElevation1 border-borderMedium/60' : 'text-white bg-borderMedium border-borderMuted'}`}>
+                                 <span className={`px-1.5 py-0.5 rounded font-semibold font-chakra tracking-[-0.01em] border text-[11px] ${game.line === null ? 'text-gray-300 bg-bgElevation1 border-borderMedium/60' : 'text-white bg-borderMedium border-borderMuted'}`}>
                                     {formatNullableValue(game.line)}
                                  </span>
                               </div>
                               <div className="text-center">
-                                 <span className={`px-1.5 py-0.5 rounded-[4px] text-white font-bold font-chakra text-[11px] min-w-[30px] inline-block ${game.hit === null ? 'bg-borderMedium text-gray-200' : game.hit ? 'bg-green600' : 'bg-red600'}`}>
+                                 <span className={`px-1.5 py-0.5 rounded-xs text-white font-semibold font-chakra tracking-[-0.01em] text-[11px] min-w-[30px] inline-block ${game.hit === null ? 'bg-borderMedium text-gray-200' : game.hit ? 'bg-green600' : 'bg-red600'}`}>
                                     {formatValue(game.result)}
                                  </span>
                               </div>
                               <div className="text-right">
-                                 <span className={`px-1.5 py-0.5 rounded-[4px] font-bold font-chakra text-[11px] min-w-[44px] inline-block text-center ${game.diffPercent === null ? 'bg-bgElevation1 text-gray-300' : game.diffPercent >= 0 ? 'bg-green600 text-white' : 'bg-red600 text-white'}`}>
+                                 <span className={`px-1.5 py-0.5 rounded-xs font-semibold font-chakra tracking-[-0.01em] text-[11px] min-w-[44px] inline-block text-center ${game.diffPercent === null ? 'bg-bgElevation1 text-gray-300' : game.diffPercent >= 0 ? 'bg-green600 text-white' : 'bg-red600 text-white'}`}>
                                     {game.diffPercent === null ? 'N/A' : `${formatSignedValue(game.diffPercent, 0)}%`}
                                  </span>
                               </div>

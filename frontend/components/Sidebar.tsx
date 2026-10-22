@@ -246,7 +246,7 @@ const PlayerRow = ({
             onFocus={schedulePrefetch}
             onBlur={cancelPrefetch}
             aria-busy={isPending}
-            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-md ${isPending ? 'bg-bgElevation2/80' : isActive ? 'bg-bgElevation1' : 'hover:bg-bgElevation1'}`}
+            className={`flex items-center justify-between p-3 border-b border-borderMedium bg-bgElevation0 transition-colors group cursor-pointer first:rounded-t-none last:rounded-b-sm ${isPending ? 'bg-bgElevation2/80' : isActive ? 'bg-bgElevation1' : 'hover:bg-bgElevation1'}`}
         >
             <div className="flex items-center gap-3">
                 <div className="relative w-10 h-10 rounded-full border border-borderMedium overflow-hidden bg-bgElevation1 flex items-center justify-center">
@@ -271,7 +271,7 @@ const PlayerRow = ({
                                     />
                                 )}
                             </div>
-                            <span className="text-white font-bold font-chakra text-xs">{line}</span>
+                            <span className="text-white font-semibold font-chakra text-xs">{line}</span>
                             {showPricedOdds ? (
                                 <div className="flex items-center gap-1">
                                     <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium">
@@ -296,13 +296,13 @@ const PlayerRow = ({
                                     />
                                 )}
                             </div>
-                            <span className="text-white font-bold font-chakra text-xs">...</span>
+                            <span className="text-white font-semibold font-chakra text-xs">...</span>
                             <div className="bg-bgElevation1 px-1.5 py-0.5 rounded text-[10px] font-bold border border-borderMedium text-fgSubtle uppercase tracking-[0.12em]">
                                 Updating
                             </div>
                         </div>
                     ) : (
-                        <div className="flex items-center gap-1.5 bg-borderMedium px-2 py-1 rounded-[4px] text-[10px] font-bold text-neutral400 border border-transparent w-fit mt-0.5">
+                        <div className="flex items-center gap-1.5 bg-borderMedium px-2 py-1 rounded-xs text-[10px] font-bold text-neutral400 border border-transparent w-fit mt-0.5">
                             <Lock className="w-2.5 h-2.5" />
                             UNAVAILABLE
                         </div>
@@ -311,7 +311,7 @@ const PlayerRow = ({
             </div>
 
             {/* Plus Button / Active Indicator */}
-            <button className={`w-4 h-4 rounded-[2px] flex items-center justify-center ${isPending || isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
+            <button className={`w-4 h-4 rounded-xxs flex items-center justify-center ${isPending || isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
                 {isPending ? (
                     <div className="w-2.5 h-2.5 rounded-full border-2 border-white/40 border-t-white animate-spin" aria-hidden="true" />
                 ) : isActive ? (
@@ -342,7 +342,7 @@ const GameCard: React.FC<{ game: ProcessedGame, isExpanded: boolean, onToggle: (
     const formattedTime = formatScheduledTipoff(game);
 
     return (
-        <div className={`transition-all duration-200 border rounded-xl overflow-hidden relative mb-2 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
+        <div className={`transition duration-200 border rounded-xl overflow-hidden relative mb-2 ${isExpanded ? 'bg-bgElevation0 border-borderMedium' : 'bg-bgElevation0 hover:bg-bgElevation1 border-borderMedium'}`}>
 
             {/* Active Game Indicator Line */}
             {isExpanded && <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-blue500 z-10"></div>}
