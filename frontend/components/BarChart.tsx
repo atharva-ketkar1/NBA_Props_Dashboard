@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { ActiveTeammateFilter, Player, Game, SportsbookId } from '../types';
-import { LIVE_SEASON, TEAM_IDS } from '../constants';
+import { LIVE_SEASON, SEASON_LABEL_KEY, TEAM_IDS } from '../constants';
 import { HoverTooltip, HoveredGameData } from './HoverTooltip';
 import { colors } from '../utils/propsmadness_colors';
 import { motion } from 'framer-motion';
@@ -43,6 +43,19 @@ const STAT_LABELS: Record<string, string> = {
     'Steals': 'STL',
     'Turnovers': 'TOV'
 };
+
+// Season-overlay shading, measured off the live PropsMadness chart in DevTools.
+// The region is a low-opacity tint of the primary text colour rather than a solid
+// grey, so it composites over whatever sits beneath and follows the theme instead
+// of needing a second hand-picked hex per background.
+const SEASON_PANEL_OPACITY = 0.065;
+
+// The divider is the same colour. The measured 2px width is kept; the opacity is
+// not, because the sampled full-strength stroke belongs to a 24x24 grid ICON on
+// that page (its path data, "M3 9h18", is a glyph, not a chart axis) -- drawn at
+// full strength across the plot it would be a white stripe, which is not what the
+// reference chart shows.
+const SEASON_DIVIDER_OPACITY = 0.14;
 
 const CHART_MODE_FILTERS = new Set(['H2H', 'Home', 'Away', 'B2B']);
 const ACTION_NETWORK_ODDS_PATH = '/data/current/action_network_odds.json';
@@ -659,6 +672,52 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             }];
         })
         : [];
+    // --- Season boundary -------------------------------------------------
+    // chartData runs oldest-left to newest-right, so when the window is topped
+    // up from last season those games sit on the left. Marking that split is the
+    // whole point of the overlay -- a chart that silently mixes seasons is worse
+    // than one that looks empty -- and it takes a shaded region rather than a
+    // rule: a 1px line between 30 bars does not register as a boundary.
+    let priorSeasonLabel: string | null = null;
+    let liveSeasonLabel: string | null = null;
+    let seasonBoundaryIndex = -1;
+
+    for (let index = 0; index < chartData.length; index += 1) {
+        const label = chartData[index]?.[SEASON_LABEL_KEY] ?? null;
+        if (!label) continue;
+        if (priorSeasonLabel === null) {
+            priorSeasonLabel = label;
+            continue;
+        }
+        if (label !== priorSeasonLabel) {
+            liveSeasonLabel = label;
+            seasonBoundaryIndex = index;
+            break;
+        }
+    }
+
+    // Every drawn game is last season's: the player has yet to play this year,
+    // so the boundary belongs immediately before the upcoming-game slot.
+    if (seasonBoundaryIndex === -1 && priorSeasonLabel && priorSeasonLabel !== LIVE_SEASON) {
+        const upcomingIndex = chartData.findIndex((game) => game?.isUpcoming);
+        if (upcomingIndex > 0) {
+            seasonBoundaryIndex = upcomingIndex;
+            liveSeasonLabel = LIVE_SEASON;
+        }
+    }
+
+    const hasSeasonBoundary = seasonBoundaryIndex > 0
+        && Boolean(priorSeasonLabel)
+        && Boolean(liveSeasonLabel);
+    const seasonBoundaryX = X_START + paddingLeft + (seasonBoundaryIndex * spacing);
+    // The panel starts at the first column, not at the y-axis, so the axis
+    // labels stay on the chart background where they belong.
+    const seasonPanelX = X_START + paddingLeft;
+    // getY(maxScore) is always the top gridline, so clamp rather than trusting
+    // the offset -- a bare subtraction put the panel above the viewBox.
+    const seasonPanelTop = Math.max(6, getY(maxScore) - 22);
+    const seasonLabelY = seasonPanelTop + 15;
+
     const upcomingSecondaryPoint = hasSecondaryOverlay && chartData.length > 0 ? (() => {
         const game = chartData[chartData.length - 1];
         if (!game?.isUpcoming || game.secondaryValue === null || game.secondaryValue === undefined) return null;
@@ -683,6 +742,54 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 onMouseMove={handleMouseMove}
                 onTouchMove={handleMouseMove}
             >
+                {/* Season boundary.
+                  * A thin rule alone did not read as a boundary -- the eye needs
+                  * a region, not a line. Last season sits on a raised panel and
+                  * this season on the chart's own background, so the split is
+                  * visible before the labels are read. Drawn first, so grid
+                  * lines and bars sit on top of it rather than being tinted. */}
+                {hasSeasonBoundary && (
+                    <g>
+                        <rect
+                            x={seasonPanelX}
+                            y={seasonPanelTop}
+                            width={Math.max(0, seasonBoundaryX - seasonPanelX)}
+                            height={Math.max(0, getY(0) - seasonPanelTop)}
+                            fill={colors.textGeneralPrimary}
+                            opacity={SEASON_PANEL_OPACITY}
+                        />
+                        <line
+                            x1={seasonBoundaryX}
+                            x2={seasonBoundaryX}
+                            y1={seasonPanelTop}
+                            y2={getY(0)}
+                            stroke={colors.textGeneralPrimary}
+                            strokeOpacity={SEASON_DIVIDER_OPACITY}
+                            strokeWidth="2"
+                        />
+                        <text
+                            x={seasonPanelX + 10}
+                            y={seasonLabelY}
+                            textAnchor="start"
+                            fill={colors.fgSubtle}
+                            fontSize="11"
+                            fontWeight="600"
+                        >
+                            {priorSeasonLabel}
+                        </text>
+                        <text
+                            x={seasonBoundaryX + 10}
+                            y={seasonLabelY}
+                            textAnchor="start"
+                            fill={colors.fgSubtle}
+                            fontSize="11"
+                            fontWeight="600"
+                        >
+                            {liveSeasonLabel}
+                        </text>
+                    </g>
+                )}
+
                 {/* 1. Y-Axis Grid Lines & Labels */}
                 <g className="text-fgSubtle font-bold" fill="currentColor" textAnchor="end" fontSize="12">
                     <text x="50" y={getY(0)} dominantBaseline="middle">0</text>
@@ -929,6 +1036,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                         setCurrentValue(lineValue);
                     }}
                 >
+                                className="font-chakra tracking-tight font-bold"
                     {/* Invisible thicker line for easier hovering/grabbing */}
                     <motion.line
                         initial={false}
@@ -1036,7 +1144,6 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                 fontSize="12"
                                 fontWeight="900"
                                 fill={colors.black}
-                                className="font-chakra tracking-tight font-bold"
                             >
                                 {currentValue}
                             </text>

@@ -221,3 +221,57 @@ export function isGameDateInSeason(gameDate: unknown, season: string | null | un
   const date = String(gameDate ?? '').slice(0, 10);
   return Boolean(date) && date >= window.start && date <= window.end;
 }
+
+// ---------------------------------------------------------------------------
+// Prior-season overlay
+//
+// A season that has just started has nothing to chart: on 2026-10-21 a typical
+// player had one game, so the dashboard looked broken unless the reader knew to
+// open the filter panel. The chart therefore backfills the window with the most
+// recent season the player actually played, drawn behind a divider, and the
+// backfill shrinks on its own as the live season fills in.
+//
+// These mirror backend/utils/prior_season.py (PRIOR_SEASON_DEPTH,
+// PRIOR_SEASON_MIN_GAMES) on purpose. That module feeds the Signal Score from the
+// same archive table for the same reason, and if the two disagreed about which
+// season counts as a player's prior, the chart and the Edge Board would describe
+// the same player differently.
+// ---------------------------------------------------------------------------
+
+/**
+ * Marks which season a game row came from, once the live log has been blended.
+ * Shared so the blend (App) and the divider that explains it (BarChart) cannot
+ * drift apart over a string literal.
+ */
+export const SEASON_LABEL_KEY = '__seasonLabel';
+
+/** How many seasons back to look for a player's most recent real season. */
+export const PRIOR_SEASON_DEPTH = 2;
+
+/**
+ * A season only counts as a prior if the player logged at least this many games
+ * in it. Anchoring a whole chart on a 2-game cup of coffee is worse than
+ * reaching back another year.
+ */
+export const PRIOR_SEASON_MIN_GAMES = 5;
+
+/** '2026-27' -> ['2025-26', '2024-25']. Derived, so a rollover needs no edit. */
+export function priorSeasonKeys(
+  currentSeasonKey: string | null | undefined,
+  depth: number = PRIOR_SEASON_DEPTH,
+): string[] {
+  const startYear = Number(String(currentSeasonKey ?? '').slice(0, 4));
+  if (!Number.isFinite(startYear) || startYear <= 0) {
+    return [];
+  }
+  return Array.from({ length: Math.max(0, depth) }, (_, index) => {
+    const year = startYear - (index + 1);
+    return `${year}-${String((year + 1) % 100).padStart(2, '0')}`;
+  });
+}
+
+/** '2025-26' -> '25/26', the form the season filter and chart labels use. */
+export function seasonKeyToLabel(seasonKey: string | null | undefined): string | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(seasonKey ?? '').trim());
+  return match ? `${match[1].slice(2)}/${match[2]}` : null;
+}

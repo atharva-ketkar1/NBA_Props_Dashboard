@@ -26,9 +26,19 @@ type GamesResponse = {
   games: any[];
 };
 
+/** The most recent season a player actually played, bundled with the live row so
+ *  the chart can backfill a short season without a second request. */
+export type PriorSeasonBundle = {
+  seasonKey: string;
+  games: any[];
+  olderTotals: Record<string, { sum: number; count: number }>;
+  totalGames: number;
+};
+
 type PlayerResponse = {
   detail: Record<string, any>;
   historicalOddsRows: any[];
+  priorSeason?: PriorSeasonBundle | null;
 };
 
 export type ArchiveInjuryCoverage = {

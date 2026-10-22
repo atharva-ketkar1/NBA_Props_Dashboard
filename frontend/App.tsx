@@ -16,6 +16,7 @@ import {
   Game,
   Player,
   PlayerPropsByDate,
+  PriorSeason,
   SimilarPlayerCandidate,
   SportsbookId,
   TeamInjuryReport,
@@ -31,6 +32,8 @@ import {
   isArchiveSeason,
   isGameDateInSeason,
   isSelectableSeason,
+  seasonKeyToLabel,
+  SEASON_LABEL_KEY,
 } from './constants';
 import { getDashboardDate } from './utils/dashboardDate';
 import {
@@ -754,6 +757,104 @@ function buildArchiveSeasonStats(liveStats: Record<string, any> | undefined, gam
   return next;
 }
 
+/**
+ * Widest historical sample the chart draws: 29 bars plus the upcoming-game slot
+ * makes the 30 columns the layout is built around.
+ */
+const CHART_WINDOW_GAMES = 29;
+
+/** Games behind the visible window, carried for the +/- baseline only. */
+const LIVE_BLEND_POOL_KEY = '__blendPool';
+
+/** The backfilled season's label ('25/26'), or null when nothing was blended. */
+const LIVE_BLEND_LABEL_KEY = '__blendPriorLabel';
+
+function tagGamesWithSeason(games: any[], label: string | null) {
+  if (!label) return games;
+  return games.map((game) => ({ ...game, [SEASON_LABEL_KEY]: label }));
+}
+
+/**
+ * The live season's game log, backfilled from last season while it is short.
+ *
+ * A season that is two nights old has nothing to chart, and the dashboard read
+ * as broken rather than as empty -- the only way to see any history was to find
+ * the filter button. So the window is topped up with the most recent season the
+ * player actually played, drawn behind a divider. The backfill shrinks on its
+ * own as real games arrive and stops once the live season can fill the window,
+ * which needs no cutoff date and no switch to flip next October.
+ *
+ * `pool` is deliberately longer than `log`: the +/- baseline averages the games
+ * OLDER than the visible window, so it needs the part of last season that the
+ * chart does not draw.
+ */
+function buildLiveSeasonLog(liveLog: any[], priorSeason?: PriorSeason | null) {
+  const liveTagged = tagGamesWithSeason(liveLog, LIVE_SEASON);
+
+  // A full live season needs no help, and must not be truncated to the window:
+  // the filter panel offers every game the player has.
+  if (!priorSeason || liveTagged.length >= CHART_WINDOW_GAMES) {
+    return { log: liveTagged, pool: liveTagged, priorSeasonLabel: null as string | null };
+  }
+
+  const priorSeasonLabel = seasonKeyToLabel(priorSeason.seasonKey);
+  const priorTagged = tagGamesWithSeason(priorSeason.games ?? [], priorSeasonLabel);
+  const pool = [...liveTagged, ...priorTagged];
+
+  return {
+    log: pool.slice(0, CHART_WINDOW_GAMES),
+    pool,
+    priorSeasonLabel,
+  };
+}
+
+/**
+ * Per-game averages over everything OLDER than the visible window.
+ *
+ * This is what the header's +/- compares the window against. While the chart is
+ * blended, comparing against the live season's own average would mean measuring
+ * 29 games against a one-game sample; comparing against the games that came
+ * before the window instead answers the question a reader is actually asking --
+ * is he above or below his established level.
+ *
+ * Returns null when there is nothing older to compare against, so the header can
+ * print a dash rather than a difference from zero.
+ */
+function buildPreWindowAverages(
+  pool: any[],
+  windowSize: number,
+  olderTotals?: Record<string, { sum: number; count: number }> | null,
+): Record<string, number> | null {
+  const totals: Record<string, { sum: number; count: number }> = {};
+
+  for (const [key, bucket] of Object.entries(olderTotals ?? {})) {
+    if (bucket && Number.isFinite(bucket.sum) && bucket.count > 0) {
+      totals[key] = { sum: bucket.sum, count: bucket.count };
+    }
+  }
+
+  for (const game of pool.slice(Math.max(0, windowSize))) {
+    for (const [key, raw] of Object.entries(game ?? {})) {
+      if (key === SEASON_LABEL_KEY) continue;
+      const value = Number(raw);
+      if (raw === null || raw === undefined || raw === '' || !Number.isFinite(value)) continue;
+      const bucket = totals[key] ?? (totals[key] = { sum: 0, count: 0 });
+      bucket.sum += value;
+      bucket.count += 1;
+    }
+  }
+
+  const averages: Record<string, number> = {};
+  let measured = 0;
+  for (const [key, bucket] of Object.entries(totals)) {
+    if (!bucket.count) continue;
+    averages[key] = bucket.sum / bucket.count;
+    measured += 1;
+  }
+
+  return measured > 0 ? averages : null;
+}
+
 function buildHistoricalOddsMap(playerId: number, historicalOddsRows: any[]) {
   return Object.fromEntries((historicalOddsRows ?? []).map((row: any) => [
     row.game_date,
@@ -1347,12 +1448,18 @@ function App() {
 
     const request = ensurePlayerAccess(playerId)
       .then((access) => fetchDashboardPlayer(access.playerToken))
-      .then(({ detail, historicalOddsRows }) => {
+      .then(({ detail, historicalOddsRows, priorSeason }) => {
         const historicalOddsMap = buildHistoricalOddsMap(playerId, historicalOddsRows);
 
         setRawData(prev => prev.map((player) => (
           player.id === playerId
-            ? { ...player, ...detail, historical_odds: historicalOddsMap, detail_loaded: true }
+            ? {
+              ...player,
+              ...detail,
+              historical_odds: historicalOddsMap,
+              prior_season: priorSeason ?? null,
+              detail_loaded: true,
+            }
             : player
         )));
       })
@@ -1544,18 +1651,21 @@ function App() {
       isGameDateInSeason(game?.GAME_DATE, LIVE_SEASON)
     ));
 
-    // Only short-circuit when there is genuinely nothing to change. An already
-    // empty game_log must still fall through, because that is the common case:
-    // the row was never rewritten for the new season but kept last season's
-    // stats, so the averages still need blanking.
-    if (liveLog.length && liveLog.length === (materializedPlayer.game_log?.length ?? 0)) {
-      return materializedPlayer;
-    }
+    // Top the window up from last season while this one is too short to fill it.
+    const { log, pool, priorSeasonLabel } = buildLiveSeasonLog(
+      liveLog,
+      materializedPlayer.prior_season,
+    );
 
     return {
       ...materializedPlayer,
-      game_log: liveLog,
+      game_log: log,
+      // The window's own averages still come from the live row when there are
+      // live games behind them; an empty stats object makes the header print a
+      // dash rather than a number nothing supports.
       stats: liveLog.length ? materializedPlayer.stats : {},
+      [LIVE_BLEND_POOL_KEY]: pool,
+      [LIVE_BLEND_LABEL_KEY]: priorSeasonLabel,
     } as Player;
   }, [currentPlayer, resolvedSelectedGameDate, activeSeason, archiveGameLogs]);
   const displayPlayerOpponent = useMemo(() => (
@@ -1581,6 +1691,25 @@ function App() {
   const appliedHistoricalGameCount = isFiltersOpen
     ? effectiveFilterGameCount
     : defaultHistoricalGameCount;
+
+  /**
+   * Baseline for the header's +/-, used only while the chart is blended.
+   *
+   * Null in every other case, which leaves the existing comparison against the
+   * live season average exactly as it was: once the live season can fill the
+   * window on its own, "vs season average" is both available and the right
+   * question again.
+   */
+  const preWindowAverages = useMemo(() => {
+    if (!displayPlayer || !displayPlayer[LIVE_BLEND_LABEL_KEY]) {
+      return null;
+    }
+    return buildPreWindowAverages(
+      displayPlayer[LIVE_BLEND_POOL_KEY] ?? [],
+      appliedHistoricalGameCount,
+      displayPlayer.prior_season?.olderTotals,
+    );
+  }, [displayPlayer, appliedHistoricalGameCount]);
   // The game an archive season's injury panel is "about": the player's most
   // recent appearance that season. The archive log is stored newest-first, so
   // that is simply the head. It is surfaced in the UI rather than used silently,
@@ -2180,6 +2309,8 @@ function App() {
               onToggleFilters={() => setIsFiltersOpen(!isFiltersOpen)}
               isFiltersOpen={isFiltersOpen}
               historicalGameCount={appliedHistoricalGameCount}
+              baselineAverages={preWindowAverages}
+              baselineSeasonLabel={displayPlayer?.[LIVE_BLEND_LABEL_KEY] ?? null}
               mobileView={mobileView}
               onMobileViewChange={setMobileView}
             />

@@ -20,7 +20,13 @@ load_dotenv()
 # CONFIGURATION
 # ==========================================
 UPDATE_WINDOW_DAYS = 2
-MAX_HISTORY_GAMES = 85
+# Per-player row cap, keeping the NEWEST games. 82 regular season + a Finals run
+# is up to ~106 games, so the old 85 silently deleted a deep-run player's October
+# games at the exact point in the year their history mattered most -- 29 players
+# were already over it in 2025-26. The chart's prior-season overlay averages the
+# games OLDER than the visible window, so anything dropped here moves a number
+# the user reads.
+MAX_HISTORY_GAMES = 110
 MAX_WORKERS = 1
 REQUEST_TIMEOUT = 60
 BASE_LOG_MAX_RETRIES = 5

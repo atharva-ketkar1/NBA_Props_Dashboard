@@ -433,6 +433,20 @@ def main():
                     legacy_historical_fallback_enabled=legacy_historical_fallback_enabled,
                 )
 
+            # Warm the prior-season cache before scoring. Early in a season the
+            # Signal Score has nothing but last season to project from, and the
+            # first build pulls ~550 players per season out of archive_gamelogs
+            # (about a minute). Doing it here keeps that one-off cost out of
+            # the scoring step and gives it its own log line. Non-fatal: a
+            # cold cache just means edge_score builds it lazily instead.
+            try:
+                from utils.prior_season import get_prior_history
+                prior_history = get_prior_history()
+                log_status(logger, "OK", "Prior-season history ready",
+                           players=len(prior_history))
+            except Exception as e:
+                log_status(logger, "WARN", "Prior-season history unavailable", error=e)
+
             try:
                 from utils.edge_score import run_edge_score_refresh
                 run_edge_score_refresh(refresh_label="pipeline")

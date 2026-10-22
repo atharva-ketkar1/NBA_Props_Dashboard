@@ -7,7 +7,11 @@ import {
   getDashboardDate,
   getFastRefreshDates,
 } from './dashboardDate.js';
-import { liveSeasonKey } from '../../constants.js';
+import {
+  PRIOR_SEASON_MIN_GAMES,
+  liveSeasonKey,
+  priorSeasonKeys,
+} from '../../constants.js';
 import { rankSimilarPlayers } from '../../utils/similarPlayers.js';
 import { playerHasAnyProp } from '../../utils/propResolution.js';
 import type {
@@ -1011,6 +1015,15 @@ export async function fetchPlayerPayload(playerId: number) {
       const supabase = getSupabaseAdmin();
       const detailPromise = supabase.from('players').select(PLAYER_DETAIL_SELECT).eq('id', playerId).maybeSingle();
       const normalizedHistoricalPromise = fetchAllHistoricalPlayerPropsForPlayer(playerId);
+      // Bundled rather than fetched on its own: early in a season EVERY player
+      // view needs this, and a second round trip would both stage the chart in
+      // two paints and spend the /api/archive rate limit on ordinary browsing.
+      // Fails open -- a player with no archived history just gets no overlay.
+      const priorSeasonPromise = fetchPriorSeasonPayload(playerId, liveSeasonKey())
+        .catch((error) => {
+          console.error('[api/player] prior season unavailable:', error);
+          return null;
+        });
       const legacyFallbackPromise = HISTORICAL_ODDS_LEGACY_FALLBACK
         ? supabase.from('historical_odds').select(HISTORICAL_ODDS_SELECT).eq('player_id', playerId)
         : Promise.resolve({ data: [], error: null });
@@ -1019,10 +1032,12 @@ export async function fetchPlayerPayload(playerId: number) {
         { data: detail, error: detailError },
         normalizedHistoricalRows,
         { data: fallbackHistoricalOddsRows, error: fallbackHistoricalOddsError },
+        priorSeason,
       ] = await Promise.all([
         detailPromise,
         normalizedHistoricalPromise,
         legacyFallbackPromise,
+        priorSeasonPromise,
       ]);
 
       assertNoError(detailError, 'player detail');
@@ -1038,6 +1053,7 @@ export async function fetchPlayerPayload(playerId: number) {
 
       return {
         detail,
+        priorSeason,
         historicalOddsRows: HISTORICAL_ODDS_LEGACY_FALLBACK
           ? mergeHistoricalOddsRows(
             normalizedHistoricalOddsRows,
@@ -1264,6 +1280,132 @@ async function fetchArchiveInjuryReports(gameLog: any[], season: string) {
     : null;
 
   return { reportsByDate, coverage };
+}
+
+/** Games the chart can draw behind the divider. One more than the widest window
+ *  (29 historical bars), so there is always at least one game left over to prove
+ *  the overlay reached back far enough rather than simply running dry. */
+const PRIOR_SEASON_TAIL_GAMES = 30;
+
+/** Keys that are identifiers, not measurements; averaging them is meaningless. */
+const PRIOR_SEASON_NON_NUMERIC_KEYS = new Set([
+  'GAME_ID',
+  'PLAYER_ID',
+  'SEASON_ID',
+  'TEAM_ID',
+]);
+
+type PriorSeasonTotals = Record<string, { sum: number; count: number }>;
+
+export interface PriorSeasonPayload {
+  seasonKey: string;
+  /** Newest-first, full row shape, so the chart and its overlays read them
+   *  exactly as they read live games. */
+  games: any[];
+  /** Per-stat sums for every game OLDER than `games` -- the rest of that season
+   *  plus any earlier season we hold.
+   *
+   *  The chart's +/- compares the visible window against everything older than
+   *  it, and that boundary slides: with 1 live game the window reaches 28 games
+   *  into last season, with 20 it reaches 9. Shipping the whole history so the
+   *  client could average it would mean ~100KB per player on every click, so the
+   *  far side travels as sums instead. Combined with the unused part of `games`,
+   *  the client still reconstructs the exact mean for any boundary. */
+  olderTotals: PriorSeasonTotals;
+  /** Total games found across every season considered, for coverage checks. */
+  totalGames: number;
+}
+
+function accumulateTotals(totals: PriorSeasonTotals, games: any[]) {
+  for (const game of games) {
+    for (const [key, raw] of Object.entries(game ?? {})) {
+      if (PRIOR_SEASON_NON_NUMERIC_KEYS.has(key)) continue;
+      const value = Number(raw);
+      if (raw === null || raw === undefined || raw === '' || !Number.isFinite(value)) continue;
+      const bucket = totals[key] ?? (totals[key] = { sum: 0, count: 0 });
+      bucket.sum += value;
+      bucket.count += 1;
+    }
+  }
+}
+
+/**
+ * The most recent season this player actually played, for the chart's overlay.
+ *
+ * Mirrors backend/utils/prior_season.py: walk back at most PRIOR_SEASON_DEPTH
+ * seasons and take the first with at least PRIOR_SEASON_MIN_GAMES. A player with
+ * 3 games last year is better served by the year before than by anchoring a whole
+ * chart on 3 games -- and the Signal Score already makes that same call, so
+ * making it differently here would have the two disagree about the same player.
+ */
+export async function fetchPriorSeasonPayload(
+  playerId: number,
+  currentSeasonKey: string | null,
+): Promise<PriorSeasonPayload | null> {
+  const seasonKeys = priorSeasonKeys(currentSeasonKey);
+  if (!seasonKeys.length) {
+    return null;
+  }
+
+  return readCached(
+    buildCacheKey(['prior_season', playerId, seasonKeys.join(',')]),
+    ARCHIVE_CACHE_MS,
+    async () => {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase
+        .from('archive_gamelogs')
+        .select('season, game_log')
+        .eq('player_id', playerId)
+        .in('season', seasonKeys);
+
+      assertNoError(error, 'archive_gamelogs prior season');
+
+      const bySeason = new Map<string, any[]>();
+      for (const row of (data ?? []) as Array<{ season?: string; game_log?: unknown }>) {
+        if (!row?.season) continue;
+        bySeason.set(row.season, Array.isArray(row.game_log) ? row.game_log as any[] : []);
+      }
+
+      // seasonKeys is already newest-first, so the first qualifying season wins.
+      const anchorKey = seasonKeys.find(
+        (key) => (bySeason.get(key)?.length ?? 0) >= PRIOR_SEASON_MIN_GAMES,
+      );
+      if (!anchorKey) {
+        return null;
+      }
+
+      const sortDesc = (games: any[]) => [...games].sort(
+        (a, b) => String(b?.GAME_DATE ?? '').localeCompare(String(a?.GAME_DATE ?? '')),
+      );
+
+      const anchorGames = sortDesc(bySeason.get(anchorKey) ?? []);
+      const tail = anchorGames.slice(0, PRIOR_SEASON_TAIL_GAMES);
+
+      // Deliberately the anchor season alone, not every season on file.
+      //
+      // The +/- answers "against his level before this stretch", and a level is
+      // only meaningful for one season at a time: folding 2024-25 in behind
+      // 2025-26 moved SGA's points baseline from 31.8 to 32.2 and blended two
+      // different players' worth of form into one number. Seasons older than
+      // the anchor are still counted in `totalGames` for coverage, but they do
+      // not move the comparison.
+      const olderTotals: PriorSeasonTotals = {};
+      accumulateTotals(olderTotals, anchorGames.slice(PRIOR_SEASON_TAIL_GAMES));
+
+      let totalGames = anchorGames.length;
+      for (const key of seasonKeys) {
+        if (key >= anchorKey) continue;
+        totalGames += (bySeason.get(key) ?? []).length;
+      }
+
+      return {
+        seasonKey: anchorKey,
+        games: tail,
+        olderTotals,
+        totalGames,
+      };
+    },
+  );
 }
 
 export async function fetchArchivePayload(playerId: number, season: string) {

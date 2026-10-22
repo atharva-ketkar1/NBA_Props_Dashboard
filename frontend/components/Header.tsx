@@ -24,6 +24,21 @@ interface HeaderProps {
   onToggleFilters?: () => void;
   isFiltersOpen?: boolean;
   historicalGameCount?: number;
+  /**
+   * Per-game averages over the games OLDER than the visible window, supplied
+   * only while the chart is backfilled from last season. When set, the +/-
+   * compares against these instead of the live season average -- measuring a
+   * 29-game window against a one-game season average is arithmetic, not
+   * information. Null restores the normal season-average comparison.
+   *
+   * Scale note: these come from game logs, where USG_PCT is already a
+   * percentage (33.3). players.stats holds the same figure as a fraction
+   * (0.333), which is why the season-average path multiplies by 100 and this
+   * one must not.
+   */
+  baselineAverages?: Record<string, number> | null;
+  /** The blended season's label, for the caption under the +/- row. */
+  baselineSeasonLabel?: string | null;
   mobileView: MobileView;
   onMobileViewChange: (view: MobileView) => void;
 }
@@ -87,7 +102,7 @@ const StatItem = ({ label, value, diff, isCompact }: { label: string, value: str
   );
 };
 
-export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate = {}, activeTab, onTabChange, activeSportsbook, onSportsbookChange, activeGameDate, customLine, onToggleFilters, isFiltersOpen, historicalGameCount, mobileView, onMobileViewChange }) => {
+export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate = {}, activeTab, onTabChange, activeSportsbook, onSportsbookChange, activeGameDate, customLine, onToggleFilters, isFiltersOpen, historicalGameCount, baselineAverages, baselineSeasonLabel, mobileView, onMobileViewChange }) => {
   const [sparklineMode, setSparklineMode] = useState<'line' | 'juice'>('line');
   const [showHelp, setShowHelp] = useState(false);
 
@@ -194,7 +209,10 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
     const rate = (hasLine && gamesShown > 0) ? ((hits / gamesShown) * 100).toFixed(1) : '0.0';
     const graphAvg = validGamesCount > 0 ? (sum / validGamesCount) : 0;
 
-    const seasonStats: Record<string, any> = player.stats || {};
+    // While the chart is backfilled from last season, the comparison baseline is
+    // the games older than the window rather than the live season average.
+    const isBlended = Boolean(baselineAverages);
+    const seasonStats: Record<string, any> = (baselineAverages ?? player.stats ?? {}) as Record<string, any>;
     // An empty stats object means no games this season back these averages (App
     // blanks it for rows that are last season's leftovers). Render a dash for
     // that, never 0.0 -- a zero reads as a real measurement of zero.
@@ -209,7 +227,11 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       else seasonAvg = 0;
     }
 
-    const diff = (seasonAvg === null || historicalGameCount === 82 || historicalGameCount === totalGames)
+    // "Showing every game" means there is nothing to contrast the window with --
+    // but only against the season average. A blended window always has games
+    // behind it, so the comparison stays meaningful there.
+    const showsWholeSample = historicalGameCount === 82 || historicalGameCount === totalGames;
+    const diff = (seasonAvg === null || (!isBlended && showsWholeSample))
       ? 0
       : (graphAvg - seasonAvg);
 
@@ -227,16 +249,22 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       if (!visibleLogs.length && !hasSeasonStats) {
         return { label: item.label, value: '\u2014', diff: undefined };
       }
-      const seasonVal = seasonStats[item.key] || 0;
+      const rawSeasonVal = seasonStats[item.key] || 0;
+      // Game logs store USG_PCT as 33.3, players.stats as 0.333. The baseline is
+      // built from game logs, so it is already on the chart's scale and must not
+      // be scaled again -- doing so would have printed a 3300% usage comparison.
+      const seasonVal = (item.key === 'USG_PCT' && !isBlended)
+        ? rawSeasonVal * 100
+        : rawSeasonVal;
       let avg = 0;
       if (visibleLogs.length > 0) {
         const itemSum = visibleLogs.reduce((acc, g) => acc + (g[item.key] || 0), 0);
         avg = itemSum / visibleLogs.length;
       }
-      if (historicalGameCount === 82 || historicalGameCount === totalGames) {
-        avg = item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal;
+      if (!isBlended && showsWholeSample) {
+        avg = seasonVal;
       }
-      const itemDiff = (historicalGameCount === 82 || historicalGameCount === totalGames) ? 0 : avg - (item.key === 'USG_PCT' ? seasonVal * 100 : seasonVal);
+      const itemDiff = (!isBlended && showsWholeSample) ? 0 : avg - seasonVal;
 
       if (item.key === 'USG_PCT') {
         return { label: item.label, value: avg > 0 ? `${avg.toFixed(1)}%` : item.fallback, diff: itemDiff };
@@ -279,7 +307,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       mobileHitRateInfo: { rate: mobileRate, hits: mobileHits, gamesShown: mobileGameCount },
       mobileGraphAvg
     };
-  }, [player, statKey, activeSportsbook, activeSportsbookProp, customLine, historicalGameCount, mobileGameCount]);
+  }, [player, statKey, activeSportsbook, activeSportsbookProp, customLine, historicalGameCount, mobileGameCount, baselineAverages]);
 
 
   const currentSbLogo = SPORTSBOOKS.find(sb => sb.id === activeSportsbook)?.logo;

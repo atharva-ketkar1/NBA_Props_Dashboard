@@ -630,33 +630,40 @@ def _sportsbook_logo_url(book: Any) -> Optional[str]:
 
 
 def _stat_value_from_stats(stats: Dict[str, Any], stat_type: str) -> Optional[float]:
+    """Season average for a stat type, or None when the season has no basis.
+
+    Returning None rather than 0.0 for a missing stat is load-bearing. These
+    season dicts can be the zero-filled skeleton aggregator.py writes for a
+    rostered player with GP == 0, or a prior-season profile missing a column,
+    and a 0.0 here reads downstream as "projected for nothing", which clamps
+    the projection component to its maximum on whichever side is the under.
+    """
     if not isinstance(stats, dict):
         return None
 
     if stat_type in {"PTS", "REB", "AST", "FG3M", "BLK", "STL"}:
         return _safe_float(stats.get(stat_type))
-    if stat_type == "STL+BLK":
-        return _average([
-            _safe_float(stats.get("STL+BLK")),
-            (_safe_float(stats.get("STL"), 0.0) or 0.0) + (_safe_float(stats.get("BLK"), 0.0) or 0.0),
-        ])
-    if stat_type == "PTS+REB+AST":
-        if stats.get(stat_type) is not None:
-            return _safe_float(stats.get(stat_type))
-        return sum((_safe_float(stats.get(key), 0.0) or 0.0) for key in ("PTS", "REB", "AST"))
-    if stat_type == "PTS+REB":
-        if stats.get(stat_type) is not None:
-            return _safe_float(stats.get(stat_type))
-        return sum((_safe_float(stats.get(key), 0.0) or 0.0) for key in ("PTS", "REB"))
-    if stat_type == "PTS+AST":
-        if stats.get(stat_type) is not None:
-            return _safe_float(stats.get(stat_type))
-        return sum((_safe_float(stats.get(key), 0.0) or 0.0) for key in ("PTS", "AST"))
-    if stat_type == "REB+AST":
-        if stats.get(stat_type) is not None:
-            return _safe_float(stats.get(stat_type))
-        return sum((_safe_float(stats.get(key), 0.0) or 0.0) for key in ("REB", "AST"))
-    return None
+
+    combo_components = {
+        "STL+BLK": ("STL", "BLK"),
+        "PTS+REB+AST": ("PTS", "REB", "AST"),
+        "PTS+REB": ("PTS", "REB"),
+        "PTS+AST": ("PTS", "AST"),
+        "REB+AST": ("REB", "AST"),
+    }.get(stat_type)
+    if combo_components is None:
+        return None
+
+    combined = _safe_float(stats.get(stat_type))
+    if combined is not None:
+        return combined
+    # Sum only the components that are actually present. Summing with a 0.0
+    # default would turn an entirely absent profile into a confident 0.0.
+    parts = [_safe_float(stats.get(key)) for key in combo_components]
+    present = [part for part in parts if part is not None]
+    if not present:
+        return None
+    return sum(present)
 
 
 def _stat_value_from_game(game: Dict[str, Any], stat_type: str) -> Optional[float]:
@@ -1069,6 +1076,154 @@ def _extract_logs(player: Dict[str, Any]) -> List[Dict[str, Any]]:
         ordered.append((game_date, game))
     ordered.sort(key=lambda item: item[0], reverse=True)
     return [game for _, game in ordered]
+
+
+# ── Prior-season blending ───────────────────────────────────────────────────
+# season_stats.csv only carries players with GP > 0, so aggregator.py hands
+# every other rostered player a zero-filled stats dict just to have somewhere
+# to attach their props. 0.0 is not None, so every consumer below used to read
+# those zeros as a real season average: baseline_projection came out at 0.0
+# with available=True, and projection_gap for an under became -1 * (0 - line),
+# which clamps the component to its maximum. Measured on 2026-10-21, all 15
+# recommendations were unders projected at 0.0. See utils/prior_season.py.
+#
+# The fix is empirical-Bayes shrinkage toward the player's most recent real
+# season rather than a hard early-season switch. The prior fades out on its
+# own as games accumulate -- all prior at GP=0, half at GP=10, ~80% current by
+# GP=40 -- so there is no cutover date to maintain and no discontinuity in the
+# board when it passes.
+PRIOR_SHRINKAGE_GAMES = _env_float("EDGE_SCORE_PRIOR_SHRINKAGE_GAMES", 10.0)
+
+# Identity and count fields describe *which* season a row came from, so they
+# must never be averaged across two of them.
+_PRIOR_BLEND_SKIP_KEYS = {"PLAYER_ID", "TEAM_ABBREVIATION", "GP"}
+
+
+def _current_season_games(player: Dict[str, Any], logs: List[Dict[str, Any]]) -> int:
+    stats = player.get("stats") if isinstance(player.get("stats"), dict) else {}
+    games_played = _safe_int(stats.get("GP"), 0) or 0
+    # Logs are the ground truth. The season-stats scrape can lag behind the
+    # gamelog scrape, and GP can never be lower than games actually logged.
+    return max(games_played, len(logs))
+
+
+def _prior_current_weight(current_games: int) -> float:
+    """Weight on the current season: gp / (gp + k). 0.0 at GP=0, 0.5 at GP=k."""
+    if current_games <= 0:
+        return 0.0
+    return current_games / (current_games + max(PRIOR_SHRINKAGE_GAMES, 1.0))
+
+
+def _blend_season_stats(
+    current_stats: Dict[str, Any],
+    prior_stats: Dict[str, Any],
+    current_weight: float,
+) -> Dict[str, Any]:
+    blended = dict(current_stats)
+    for key in set(current_stats) | set(prior_stats):
+        if key in _PRIOR_BLEND_SKIP_KEYS:
+            continue
+        prior_value = _safe_float(prior_stats.get(key))
+        current_value = _safe_float(current_stats.get(key))
+        if prior_value is None:
+            # No prior to lean on. With no current season either, the existing
+            # value is a placeholder zero -- blank it so downstream treats the
+            # stat as missing instead of as a real 0.0.
+            if current_weight <= 0.0 and key in current_stats:
+                blended[key] = None
+            continue
+        if current_weight <= 0.0 or current_value is None:
+            blended[key] = prior_value
+        else:
+            blended[key] = (current_value * current_weight) + (prior_value * (1.0 - current_weight))
+    return blended
+
+
+def _apply_prior_season_history(player: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a scoring view of `player` with prior-season history blended in.
+
+    Called once per active entry so that every component reading
+    player["stats"] or _extract_logs(player) -- projection, recent form, rate
+    context, expected minutes, style vector, similar players, head-to-head,
+    back-to-back and the ML regression -- picks up the blend without needing
+    to know it happened.
+
+    Prior games are appended *after* the current ones, which is exactly how
+    the model was trained: build_regression_dataset._build_history merges every
+    gamelog season into one date-sorted history per player with no season
+    partitioning, so season-opener rows carry a ~165-day days_rest in training
+    too (478 such rows, matching the shipped drift baseline). Nothing is
+    clamped here, because clamping is what would create train/serve skew.
+
+    The returned dict is a shallow copy; master_feed is never mutated, so none
+    of this reaches players.game_log or the frontend's season view.
+    """
+    if not isinstance(player, dict):
+        return player
+
+    current_logs = _extract_logs(player)
+    current_games = _current_season_games(player, current_logs)
+    current_stats = player.get("stats") if isinstance(player.get("stats"), dict) else {}
+
+    prior_profile: Dict[str, Any] = {}
+    prior_logs: List[Dict[str, Any]] = []
+    prior_season: Optional[str] = None
+    try:
+        from utils.prior_season import get_prior_history
+        history = get_prior_history()
+        prior_profile = history.profile(player.get("id"))
+        prior_logs = history.logs(player.get("id"))
+        prior_season = history.season_for(player.get("id"))
+    except Exception as exc:
+        logger.warning("Prior-season history unavailable (%s); scoring on current season only", exc)
+
+    if not prior_profile:
+        # No history anywhere. A player with real current-season games is still
+        # scoreable; one without is a rookie who has not played, and there is
+        # no basis for any projection -- _build_candidate drops these.
+        basis = "current" if current_games > 0 else "none"
+        view = dict(player)
+        if basis == "none":
+            view["stats"] = _blend_season_stats(current_stats, {}, 0.0)
+        view["history_basis"] = {
+            "basis": basis,
+            "current_games": current_games,
+            "prior_games": 0,
+            "prior_season": None,
+            "current_weight": 1.0 if current_games > 0 else 0.0,
+        }
+        return view
+
+    current_weight = _prior_current_weight(current_games)
+
+    # Shrinkage fixes sample size, not role. A player who changed teams over
+    # the offseason carries his old team's usage into the prior, and until the
+    # current season outweighs it the projection will lean on a role he no
+    # longer has -- systematically, and in whichever direction the move went.
+    # Measured on 2026-10-21: 42 of the 171 players with props had changed
+    # teams. Flag it rather than hide it, so a reader can tell a real edge
+    # from a stale role.
+    current_team = str(player.get("team") or "").strip().upper()
+    prior_teams = sorted({
+        str(log.get("TEAM_ABBREVIATION") or "").strip().upper()
+        for log in prior_logs
+        if log.get("TEAM_ABBREVIATION")
+    })
+    team_changed = bool(current_team and prior_teams and current_team not in prior_teams)
+
+    view = dict(player)
+    view["stats"] = _blend_season_stats(current_stats, prior_profile, current_weight)
+    view["game_log"] = list(current_logs) + list(prior_logs)
+    view["history_basis"] = {
+        "basis": "current" if current_weight >= 0.95 else ("prior" if current_games == 0 else "blended"),
+        "current_games": current_games,
+        "prior_games": _safe_int(prior_profile.get("GP"), 0) or 0,
+        "prior_season": prior_season,
+        "current_weight": round(current_weight, 3),
+        "prior_teams": prior_teams,
+        "team_changed": team_changed,
+    }
+    return view
 
 
 def _weighted_average(pairs: List[Tuple[Optional[float], float]]) -> Optional[float]:
@@ -3702,17 +3857,47 @@ def _build_reason_strings(
     line: float,
     stat_type: str,
     components: Dict[str, Dict[str, Any]],
+    history_basis: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     reasons = []
     profile = STAT_PROFILES.get(stat_type, {})
     projection_details = components["projection"]["details"]
     projection_gap = projection_details.get("projection_gap")
     if projection_gap is not None:
-        direction_word = "above" if projection_gap >= 0 else "below"
+        # projection_gap is already side-signed by SIDE_MULTIPLIERS, so a
+        # favourable under reads as positive. Undo that to describe where the
+        # projection actually sits, or every under says "above the line".
+        raw_gap = projection_gap * SIDE_MULTIPLIERS[side]
+        direction_word = "above" if raw_gap >= 0 else "below"
         model_label = "Opportunity-based baseline" if projection_details.get("model_type") == "opportunity_v1" else "Baseline projection"
         reasons.append(
-            f"{model_label} sits {abs(projection_gap):.1f} {direction_word} the line."
+            f"{model_label} sits {abs(raw_gap):.1f} {direction_word} the line."
         )
+
+    # Say so when the projection is leaning on last season, so a thin
+    # early-season number is never mistaken for a settled one.
+    if isinstance(history_basis, dict) and history_basis.get("basis") in ("prior", "blended"):
+        prior_games = history_basis.get("prior_games") or 0
+        prior_season = history_basis.get("prior_season")
+        current_games = history_basis.get("current_games") or 0
+        if prior_season and prior_games:
+            if current_games <= 0:
+                reasons.append(
+                    f"No {stat_type} history this season yet — projected from "
+                    f"{prior_games} games in {prior_season}."
+                )
+            else:
+                weight = history_basis.get("current_weight") or 0.0
+                reasons.append(
+                    f"Early sample: {current_games} game(s) this season weighted "
+                    f"{weight * 100:.0f}% against {prior_season}."
+                )
+            if history_basis.get("team_changed"):
+                prior_teams = "/".join(history_basis.get("prior_teams") or [])
+                reasons.append(
+                    f"Caution: that history is from {prior_teams}, so the role "
+                    f"behind it may no longer hold."
+                )
 
     expected_minutes = _safe_float(projection_details.get("expected_minutes"))
     expected_rate = _safe_float(projection_details.get("expected_rate"))
@@ -3775,6 +3960,14 @@ def _build_candidate(
     player = entry["player"]
     profile = STAT_PROFILES.get(stat_type)
     if not profile:
+        return None
+
+    # No current-season games and no prior season to fall back on: an unplayed
+    # rookie. Every stat-derived component would be scoring a placeholder, so
+    # there is no honest projection to make -- leave them off the board until
+    # they have played. They re-enter on their own once logs exist.
+    history_basis = player.get("history_basis") if isinstance(player.get("history_basis"), dict) else {}
+    if history_basis.get("basis") == "none":
         return None
 
     chosen = market_selection.get("chosen", {})
@@ -3874,7 +4067,7 @@ def _build_candidate(
     display_edge_score = promotion_guardrail.get("display_edge_score", edge_score)
     display_confidence = promotion_guardrail.get("display_confidence", confidence)
 
-    reasons = _build_reason_strings(side, line, stat_type, components)
+    reasons = _build_reason_strings(side, line, stat_type, components, history_basis)
     recommendation_key = f"{player_id}|{game_date}|{stat_type}|{side}"
     return {
         "recommendation_key": recommendation_key,
@@ -3914,6 +4107,7 @@ def _build_candidate(
         "eligibility_block_reason": str(eligibility.get("eligibility_block_reason") or ""),
         "reasons": reasons,
         "inputs": {
+            "history_basis": history_basis,
             "projection": components["projection"]["details"],
             "recent_form": components["recent_form"]["details"],
             "matchup": components["matchup"]["details"],
@@ -6172,7 +6366,9 @@ def run_edge_score_refresh(
                     break
 
         active_entries.append({
-            "player": player,
+            # Blend prior-season history in once, here, so every component
+            # downstream reads a player view that is never a placeholder zero.
+            "player": _apply_prior_season_history(player),
             "team": team,
             "props": merged_props,
             "game_id": game.get("game_id"),

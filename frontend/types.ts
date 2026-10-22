@@ -125,7 +125,17 @@ export interface Player {
   active_game_date?: string | null;
   historical_odds?: Record<string, any>;
   intraday_movements?: any[];
+  /** Last season's tail, bundled with the live row to backfill a short season. */
+  prior_season?: PriorSeason | null;
   [key: string]: any; // Allow generic injection like shot_type_analysis
+}
+
+/** @see fetchPriorSeasonPayload in api/_lib/dashboardData.ts */
+export interface PriorSeason {
+  seasonKey: string;
+  games: GameLog[];
+  olderTotals: Record<string, { sum: number; count: number }>;
+  totalGames: number;
 }
 
 export interface Game {
