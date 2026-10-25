@@ -260,6 +260,73 @@ class PartialGradingTests(unittest.TestCase):
         self.assertEqual(graded["summary"]["unresolved_count"], 1)
 
 
+class MessageContentTests(unittest.TestCase):
+    """Every payload needs plain text, not just embeds.
+
+    An embed-only message is blank in the channel list, in a push
+    notification, and for any client not rendering embeds.
+    """
+
+    def _board(self):
+        game_date = _tomorrow()
+        return [
+            _recommendation(player_id=1, game_id="G1", score=90.0, rank=1, game_date=game_date),
+            _recommendation(player_id=2, game_id="G2", score=80.0, rank=2, book="fd", game_date=game_date),
+        ]
+
+    def test_alert_payload_carries_text(self):
+        board = self._board()
+        delta = {
+            "send_recommendations": board,
+            "alert_kind": "opening",
+            "changes": [],
+            "removed": [],
+        }
+        payload = es._build_discord_alert_payload(
+            {"generated_at": "2026-10-25T17:11:00-04:00", "refresh_label": "intraday", "summary": {}},
+            delta,
+            channel_variant="main",
+        )
+
+        self.assertTrue(payload["content"].strip())
+        self.assertIn("Player 1", payload["content"])
+        self.assertLessEqual(len(payload["content"]), 2000)
+
+    def test_tracker_payload_carries_text(self):
+        board = self._board()
+        payload = es._build_discord_tracker_payload(
+            {"generated_at": "2026-10-25T17:11:00-04:00", "refresh_label": "intraday"},
+            {"new_recommendations": board},
+            running_recommendations=board,
+        )
+
+        self.assertTrue(payload["content"].strip())
+        self.assertLessEqual(len(payload["content"]), 2000)
+
+    def test_preview_payload_carries_text(self):
+        payload = es._build_discord_preview_payload(
+            {"generated_at": "2026-10-25T17:11:00-04:00"},
+            self._board(),
+        )
+
+        self.assertTrue(payload["content"].strip())
+        self.assertLessEqual(len(payload["content"]), 2000)
+
+    def test_content_line_summarizes_and_truncates(self):
+        many = [
+            _recommendation(player_id=index, game_id=f"G{index}", score=80.0, rank=index, game_date=_tomorrow())
+            for index in range(1, 11)
+        ]
+
+        content = es._discord_message_content("10 picks", many)
+
+        self.assertIn("+7 more", content)
+        self.assertLessEqual(len(content), 1900)
+
+    def test_content_line_without_recommendations_is_still_text(self):
+        self.assertEqual(es._discord_message_content("Results 2026-10-24 • 15-17"), "**Results 2026-10-24 • 15-17**")
+
+
 class RecapPaginationTests(unittest.TestCase):
     def test_a_full_slate_of_results_is_not_truncated(self):
         lines = [f"line {index} " + "x" * 120 for index in range(40)]

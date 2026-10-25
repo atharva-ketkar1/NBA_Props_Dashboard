@@ -5808,7 +5808,16 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
     first_response: Optional[Dict[str, Any]] = None
     for batch_index in range(0, len(embeds), RESULTS_RECAP_EMBEDS_PER_MESSAGE):
         batch = embeds[batch_index:batch_index + RESULTS_RECAP_EMBEDS_PER_MESSAGE]
-        response = _post_discord_webhook(webhook_url, {"username": username, "embeds": batch})
+        headline = (
+            f"Results {recap_date or 'recap'} • {_results_record_text(summary)}"
+            f" • {summary.get('graded_count', 0)} graded"
+        )
+        if batch_index:
+            headline = f"{headline} (continued)"
+        response = _post_discord_webhook(
+            webhook_url,
+            {"content": _discord_message_content(headline), "username": username, "embeds": batch},
+        )
         if first_response is None:
             first_response = response
     return first_response
@@ -5851,6 +5860,39 @@ def _book_labels_summary(book_keys: List[str]) -> str:
         for book in sorted({str(book or "").strip().lower() for book in book_keys if str(book or "").strip()}, key=_book_sort_key)
     ]
     return ", ".join(labels) or "None"
+
+
+def _discord_message_content(
+    headline: str,
+    recommendations: Optional[List[Dict[str, Any]]] = None,
+    *,
+    limit: int = 3,
+) -> str:
+    """One line of plain text to carry alongside a message's embeds.
+
+    An embed-only webhook message is blank wherever embeds are not rendered:
+    the channel list, a push notification, the mobile preview, and any client
+    with embeds switched off all show nothing at all, so a message that is
+    complete over the API still reads as empty. Every payload therefore also
+    carries readable text. Capped well under Discord's 2000-character limit.
+    """
+    parts: List[str] = []
+    for recommendation in (recommendations or [])[:limit]:
+        stat_token = str(recommendation.get("stat_type") or recommendation.get("stat_label") or "PROP").strip().upper()
+        side_token = "O" if str(recommendation.get("pick") or "").lower() == "over" else "U"
+        line_value = _safe_float(recommendation.get("line"))
+        line_text = f"{line_value:g}" if line_value is not None else ""
+        parts.append(f"{recommendation.get('player_name') or 'Unknown'} {stat_token} {side_token}{line_text}")
+
+    remaining = len(recommendations or []) - len(parts)
+    if remaining > 0:
+        parts.append(f"+{remaining} more")
+
+    detail = " • ".join(parts)
+    text = f"**{headline}**"
+    if detail:
+        text = f"{text} — {detail}"
+    return text[:1900]
 
 
 def _build_discord_book_embed(
@@ -6071,6 +6113,10 @@ def _build_discord_alert_payload(
 
     username = "NBA Dashboard Daily Props"
     return {
+        "content": _discord_message_content(
+            f"{title_label} • {len(recommendations)} pick(s)",
+            recommendations,
+        ),
         "username": username,
         "embeds": embeds,
     }
@@ -6149,6 +6195,10 @@ def _build_discord_tracker_payload(
         )
 
     return {
+        "content": _discord_message_content(
+            f"Prop tracker • {len(recommendations)} logged today",
+            recommendations,
+        ),
         "username": "NBA Dashboard Prop Tracker",
         "embeds": embeds,
     }
@@ -6193,6 +6243,10 @@ def _build_discord_preview_payload(
         embeds[-1]["timestamp"] = generated_at
 
     return {
+        "content": _discord_message_content(
+            f"Below threshold • {len(preview_recommendations)} pick(s) logged",
+            preview_recommendations,
+        ),
         "username": "NBA Dashboard Preview",
         "embeds": embeds,
     }
