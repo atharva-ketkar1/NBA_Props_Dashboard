@@ -103,12 +103,27 @@ EDGE_DISCORD_MIN_SIGNAL_SCORE = max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCOR
 EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
 EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
 EDGE_DISCORD_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_PLAYER_LIMIT", 1))
+# One pick per game on the alert side. A 12-game slate whose alerts all come
+# from the same matchup is worse than useless: the correlated picks win or lose
+# together, so the channel reads as a single bet with five lines.
+EDGE_DISCORD_PER_GAME_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_GAME_LIMIT", 1))
 EDGE_TOP_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_TOP_PER_PLAYER_LIMIT", 1))
-EDGE_TOP_PER_GAME_LIMIT = max(1, _env_int("EDGE_SCORE_TOP_PER_GAME_LIMIT", 5))
+# The 15-slot board feeds the alert selection, so a loose per-game cap here
+# caps diversity downstream too: at 5, three games could fill the whole board.
+EDGE_TOP_PER_GAME_LIMIT = max(1, _env_int("EDGE_SCORE_TOP_PER_GAME_LIMIT", 2))
 EDGE_TRACKER_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_TRACKER_PER_PLAYER_LIMIT", 1))
-EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = max(
-    1.0,
-    min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 72.5)),
+# Never stricter than the alert bar. A tracker floor above
+# EDGE_DISCORD_MIN_SIGNAL_SCORE means picks get alerted and then never logged,
+# so they are never graded and the next-day recap silently omits them.
+EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = min(
+    EDGE_DISCORD_MIN_SIGNAL_SCORE,
+    max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 72.5))),
+)
+# How long to wait for an unresolved pick's box score before recapping the rest
+# of the slate anyway, measured from midnight ET after the slate date.
+EDGE_RESULTS_RECAP_GRACE_HOURS = max(
+    0.0,
+    _env_float("EDGE_SCORE_RESULTS_RECAP_GRACE_HOURS", 18.0),
 )
 EDGE_SPORTSBOOK_BOARD_LIMIT = max(1, _env_int("EDGE_SPORTSBOOK_BOARD_LIMIT", 10))
 EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD = max(
@@ -162,6 +177,18 @@ EDGE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE = max(
     0.0,
     min(99.0, _env_float("EDGE_SCORE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE", 0.0)),
 )
+# The preview message is a running list for the slate, not a live top-N. Picks
+# leave the board as their games tip, so re-rendering only what is still
+# pregame rewrites the message down to whatever starts last — by the end of a
+# night it showed five picks from one late game, and every earlier pick the
+# channel had already published vanished. Keep them, like the tracker does.
+# The log itself is unbounded (every logged pick gets graded); this only caps
+# how many each book embed renders, so one message cannot outgrow Discord's
+# per-message character budget. The rest show as an overflow count.
+EDGE_DISCORD_PREVIEW_RENDER_LIMIT = max(
+    EDGE_DISCORD_PREVIEW_COUNT,
+    _env_int("EDGE_SCORE_DISCORD_PREVIEW_RENDER_LIMIT", 8),
+)
 
 UNDATED_PROP_KEY = "__undated__"
 
@@ -207,6 +234,14 @@ COMPONENT_WEIGHTS = {
     "back_to_back": 0.02,
 }
 TOTAL_COMPONENT_WEIGHT = sum(COMPONENT_WEIGHTS.values())
+# Floor for the renormalization denominator in _score_candidate. Scoring a pick
+# over the weight that actually scored keeps the scale stable when a component
+# is dark, but dividing by a sliver of coverage would amplify two weak signals
+# into a confident-looking number, so thin books stay damped instead.
+MIN_RENORMALIZED_COMPONENT_WEIGHT = max(
+    0.1,
+    min(1.0, _env_float("EDGE_SCORE_MIN_RENORMALIZED_COMPONENT_WEIGHT", 0.5)),
+)
 
 STAT_PROFILES = {
     "PTS": {
@@ -1018,14 +1053,17 @@ def _filter_discord_recommendations(
     *,
     min_signal_score: float,
     per_book_limit: Optional[int] = None,
+    per_game_limit: Optional[int] = None,
     max_rank: Optional[int] = None,
     limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Apply the shared Discord eligibility gates.
 
-    `per_book_limit`, `max_rank` and `limit` are all "no cap" when None.
+    `per_book_limit`, `per_game_limit`, `max_rank` and `limit` are all "no cap"
+    when None.
     """
     per_book_counts: Dict[str, int] = {}
+    per_game_counts: Dict[str, int] = {}
     per_player_counts: Dict[str, int] = {}
     selected_by_player: Dict[str, List[Dict[str, Any]]] = {}
     filtered = []
@@ -1051,6 +1089,10 @@ def _filter_discord_recommendations(
         if per_book_limit is not None and per_book_counts.get(book, 0) >= per_book_limit:
             continue
 
+        game_key = str(recommendation.get("game_id") or "").strip()
+        if per_game_limit is not None and game_key and per_game_counts.get(game_key, 0) >= per_game_limit:
+            continue
+
         player_key = str(recommendation.get("player_id") or "").strip()
         selected_for_player = selected_by_player.get(player_key, [])
         if player_key and per_player_counts.get(player_key, 0) >= EDGE_DISCORD_PER_PLAYER_LIMIT:
@@ -1064,6 +1106,8 @@ def _filter_discord_recommendations(
         filtered.append(recommendation)
         if per_book_limit is not None:
             per_book_counts[book] = per_book_counts.get(book, 0) + 1
+        if game_key:
+            per_game_counts[game_key] = per_game_counts.get(game_key, 0) + 1
         if player_key:
             per_player_counts[player_key] = per_player_counts.get(player_key, 0) + 1
             selected_by_player.setdefault(player_key, []).append(recommendation)
@@ -3889,6 +3933,17 @@ def _component_available_weight(components: Dict[str, Dict[str, Any]]) -> float:
     return available_weight
 
 
+def _normalized_weighted_score(weighted_score: float, available_weight: float) -> float:
+    """Rescale a weighted score over the weight that actually scored.
+
+    A dark component contributes 0 to the numerator, so dividing by the full
+    book quietly compresses the scale rather than widening the error bars. The
+    floor keeps a sliver of coverage from being amplified into a
+    confident-looking number.
+    """
+    return weighted_score / max(available_weight, MIN_RENORMALIZED_COMPONENT_WEIGHT)
+
+
 def _build_reason_strings(
     side: str,
     line: float,
@@ -4062,6 +4117,18 @@ def _build_candidate(
 
     available_weight = _component_available_weight(components)
     confidence = round((available_weight / TOTAL_COMPONENT_WEIGHT) * 100.0, 1) if TOTAL_COMPONENT_WEIGHT else 0.0
+
+    # Score over the weight that actually scored, not the whole book. A dark
+    # component contributes 0 to the numerator, so leaving the full weight in
+    # the denominator quietly compresses the scale instead of widening the
+    # error bars: early in a season ml_regression (0.25) and line_movement
+    # (0.06) are both unavailable, which costs ~11 points off the top of the
+    # range and holds every pick under a fixed alert threshold for the first
+    # week — the 2026-27 opening week peaked at 71.5 against a 72.5 bar and the
+    # alert channel never fired once. Coverage is reported separately as
+    # `confidence` and still discounts the score through
+    # confidence_multiplier, so this is not double-counting it.
+    weighted_score = _normalized_weighted_score(weighted_score, available_weight)
 
     # ── ML p_over soft boost ─────────────────────────────────────────────────
     # When the ML model has high directional conviction (p_over >= 0.60 for an
@@ -4354,6 +4421,13 @@ def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, 
             "recommendation_key": recommendation.get("recommendation_key"),
             "player_name": recommendation.get("player_name"),
             "player_id": recommendation.get("player_id"),
+            # Grading needs these to find the box score and the DNP list; rank
+            # is deliberately absent, because a logged pick drifts down the
+            # board all night and _filter_tracker_recommendations would then
+            # drop it from the running message it was already published in.
+            "game_id": recommendation.get("game_id"),
+            "team": recommendation.get("team"),
+            "opponent": recommendation.get("opponent"),
             "stat_type": recommendation.get("stat_type"),
             "stat_label": recommendation.get("stat_label"),
             "pick": recommendation.get("pick"),
@@ -4379,11 +4453,19 @@ def _filter_official_alert_recommendations(recommendations: List[Dict[str, Any]]
         recommendations,
         min_signal_score=EDGE_DISCORD_MIN_SIGNAL_SCORE,
         per_book_limit=EDGE_DISCORD_PER_BOOK_LIMIT,
+        per_game_limit=EDGE_DISCORD_PER_GAME_LIMIT,
         max_rank=EDGE_DISCORD_MAX_RANK,
     )
 
 
 def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Gate the tracker's candidates and its running list.
+
+    No per-game cap: the alert selection upstream already enforces spread per
+    snapshot, and this also filters the accumulated running list, where a cap
+    would retroactively hide picks the channel has already published and that
+    the next-day recap is going to grade anyway.
+    """
     return _filter_discord_recommendations(
         recommendations,
         min_signal_score=EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE,
@@ -4397,13 +4479,14 @@ def _filter_preview_recommendations(recommendations: List[Dict[str, Any]]) -> Li
 
     The rank cap is deliberately dropped: EDGE_DISCORD_MAX_RANK exists to stop
     the alert channel reaching far down the board, but here the whole point is
-    to show the best available even when it is mediocre. Per-player and
-    conflicting-pick dedupe still apply, so `limit` does the trimming.
+    to show the best available even when it is mediocre. Per-player, per-game
+    and conflicting-pick dedupe still apply, so `limit` does the trimming.
     """
     return _filter_discord_recommendations(
         recommendations,
         min_signal_score=EDGE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE,
         per_book_limit=None,
+        per_game_limit=EDGE_DISCORD_PER_GAME_LIMIT,
         max_rank=None,
         limit=EDGE_DISCORD_PREVIEW_COUNT,
     )
@@ -5178,6 +5261,68 @@ def _tracker_running_recommendations(
     return recommendations
 
 
+def _preview_running_recommendations(
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    preview_recommendations: List[Dict[str, Any]],
+    generated_at: Any,
+) -> List[Dict[str, Any]]:
+    """The slate's accumulated preview picks, oldest first.
+
+    The preview message is edited in place, so rendering only the current board
+    rewrites history: picks drop off the board the moment their game tips, and
+    the last edit of the night would leave the channel showing a handful of
+    picks from whatever started last. Accumulating means the message only ever
+    grows, every pick the channel published stays readable, and the set lines
+    up with what the next-day recap grades.
+    """
+    preview_state_by_date = state.get("discord_preview_state_by_date", {})
+    if not isinstance(preview_state_by_date, dict):
+        preview_state_by_date = {}
+    existing_entry = preview_state_by_date.get(slate_date, {}) if slate_date else {}
+    if not isinstance(existing_entry, dict):
+        existing_entry = {}
+    stored_snapshot = existing_entry.get("sent_snapshot", {})
+    if not isinstance(stored_snapshot, dict):
+        stored_snapshot = {}
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for recommendation_key, stored in stored_snapshot.items():
+        key = str(recommendation_key or "").strip()
+        if not key or not isinstance(stored, dict):
+            continue
+        if not _recommendation_uses_supported_book(stored):
+            continue
+        merged[key] = {**stored, "recommendation_key": key}
+
+    # A pick already in the log keeps the line, price and score it was
+    # published at — the stored copy wins on conflict, as it does for the
+    # tracker. That immutability is what makes it gradeable: the recap can
+    # settle it against the number the channel actually showed, not against
+    # wherever the book moved afterwards.
+    for recommendation_key, current in _tracker_state_snapshot_for_recommendations(preview_recommendations).items():
+        key = str(recommendation_key or "").strip()
+        if not key:
+            continue
+        existing = merged.get(key, {})
+        merged[key] = {
+            **current,
+            **existing,
+            "recommendation_key": key,
+            "first_logged_at": existing.get("first_logged_at") or generated_at,
+        }
+
+    return sorted(
+        merged.values(),
+        key=lambda recommendation: (
+            str(recommendation.get("first_logged_at") or ""),
+            -_ranking_edge_score(recommendation),
+            str(recommendation.get("player_name") or ""),
+        ),
+    )
+
+
 def _write_results_recap_history(entry: Dict[str, Any]) -> None:
     history = _load_json(EDGE_SCORE_RESULTS_HISTORY_PATH, {"recaps": []})
     if not isinstance(history, dict):
@@ -5391,9 +5536,30 @@ def _grade_pick_result(stat_value: float, line: float, side: str) -> str:
     return "cashed" if stat_value < line else "lost"
 
 
+def _results_recap_grace_elapsed(game_date: str, *, now_et: Optional[datetime] = None) -> bool:
+    """Has the slate waited long enough to be recapped with gaps?
+
+    Measured from midnight ET after the slate date, so a late game that never
+    lands a box score cannot hold a whole day's results hostage forever.
+    """
+    normalized_date = _normalize_game_date(game_date)
+    if not normalized_date:
+        return False
+    try:
+        slate_day = datetime.strptime(normalized_date, "%Y-%m-%d")
+    except ValueError:
+        return False
+
+    now = now_et or get_et_now()
+    deadline = slate_day + timedelta(days=1, hours=EDGE_RESULTS_RECAP_GRACE_HOURS)
+    return now.replace(tzinfo=None) >= deadline
+
+
 def _grade_results_recap(
     recap_payload: Dict[str, Any],
     master_feed: List[Dict[str, Any]],
+    *,
+    allow_partial: bool = False,
 ) -> Dict[str, Any]:
     player_lookup = {
         str(player.get("id")): player
@@ -5467,8 +5633,11 @@ def _grade_results_recap(
         "unresolved_count": len(unresolved),
     }
 
+    # Hold the recap back while a box score might still land, but not forever:
+    # one pick that never resolves used to keep the whole slate pending, so a
+    # single bad player match cost every other result for that day.
     return {
-        "ready": len(unresolved) == 0 and len(graded_recommendations) > 0,
+        "ready": len(graded_recommendations) > 0 and (len(unresolved) == 0 or allow_partial),
         "unresolved": unresolved,
         "summary": summary,
         "recommendations": graded_recommendations,
@@ -5529,6 +5698,39 @@ def _result_status_emoji(status: str) -> str:
     return "⚪"
 
 
+# Discord allows 4096 characters per embed description and 6000 across one
+# message's embeds, so keep a page well under the per-embed cap and send few
+# enough pages per message to stay under the message cap.
+RESULTS_RECAP_CHARS_PER_EMBED = 1600
+RESULTS_RECAP_EMBEDS_PER_MESSAGE = 3
+
+
+def _chunk_discord_descriptions(
+    lines: List[str],
+    *,
+    chars_per_embed: int = RESULTS_RECAP_CHARS_PER_EMBED,
+) -> List[str]:
+    """Pack lines into embed-sized descriptions without splitting a line."""
+    pages: List[str] = []
+    current: List[str] = []
+    current_length = 0
+
+    for line in lines:
+        entry = str(line)
+        projected = current_length + len(entry) + (1 if current else 0)
+        if current and projected > chars_per_embed:
+            pages.append("\n".join(current))
+            current = [entry]
+            current_length = len(entry)
+            continue
+        current.append(entry)
+        current_length = projected
+
+    if current:
+        pages.append("\n".join(current))
+    return pages
+
+
 def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     webhook_url = _results_recap_webhook_url()
     if not webhook_url:
@@ -5536,7 +5738,10 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
 
     summary = graded_results.get("summary", {})
     lines = []
-    for display_rank, recommendation in enumerate(graded_results.get("recommendations", [])[:EDGE_LIMIT], start=1):
+    # Every graded pick is listed. The old EDGE_LIMIT slice silently dropped
+    # results once a slate logged more picks than the board has slots, which is
+    # the normal case: the tracker accumulates all day, the board holds 15.
+    for display_rank, recommendation in enumerate(graded_results.get("recommendations", []), start=1):
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         final_value = recommendation.get("final_value")
         final_text = f"{final_value:.1f}" if isinstance(final_value, (float, int)) else (recommendation.get("result_note") or "Void")
@@ -5549,41 +5754,64 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
         )
 
     recap_date = _normalize_game_date(recap_payload.get("game_date"))
-    discord_payload = {
-        "username": "NBA Dashboard Prop Tracker" if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL else "NBA Dashboard Daily Props",
-        "embeds": [
-            {
-                "title": "Daily Prop Tracker Results",
-                "description": "\n".join(lines)[:3800],
-                "color": 0x3B82F6,
-                "timestamp": get_et_now().isoformat(),
-                "fields": [
-                    {
-                        "name": "Slate Date",
-                        "value": recap_date or "n/a",
-                        "inline": True,
-                    },
-                    {
-                        "name": "Record",
-                        "value": _results_record_text(summary),
-                        "inline": True,
-                    },
-                    {
-                        "name": "Tracked Picks",
-                        "value": str(summary.get("graded_count", 0)),
-                        "inline": True,
-                    },
-                    {
-                        "name": "Recapped",
-                        "value": _format_discord_timestamp(get_et_now().isoformat()),
-                        "inline": False,
-                    },
-                ],
-            }
-        ],
-    }
+    username = "NBA Dashboard Prop Tracker" if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL else "NBA Dashboard Daily Props"
+    fields = [
+        {
+            "name": "Slate Date",
+            "value": recap_date or "n/a",
+            "inline": True,
+        },
+        {
+            "name": "Record",
+            "value": _results_record_text(summary),
+            "inline": True,
+        },
+        {
+            "name": "Tracked Picks",
+            "value": str(summary.get("graded_count", 0)),
+            "inline": True,
+        },
+    ]
+    unresolved_count = int(summary.get("unresolved_count", 0) or 0)
+    if unresolved_count:
+        fields.append({
+            "name": "Still Unresolved",
+            "value": f"{unresolved_count} pick(s) had no final box score",
+            "inline": True,
+        })
+    fields.append({
+        "name": "Recapped",
+        "value": _format_discord_timestamp(get_et_now().isoformat()),
+        "inline": False,
+    })
 
-    return _post_discord_webhook(webhook_url, discord_payload)
+    embeds = []
+    for page_index, description in enumerate(_chunk_discord_descriptions(lines)):
+        embed: Dict[str, Any] = {
+            "description": description[:4000],
+            "color": 0x3B82F6,
+        }
+        if page_index == 0:
+            embed["title"] = "Daily Prop Tracker Results"
+            embed["fields"] = fields
+        else:
+            embed["title"] = f"Daily Prop Tracker Results (cont. {page_index + 1})"
+        embeds.append(embed)
+
+    if not embeds:
+        return None
+    embeds[-1]["timestamp"] = get_et_now().isoformat()
+
+    # A full slate's results outrun one message, and Discord caps a message at
+    # 6000 characters across its embeds. Send as many messages as the results
+    # need and report the first, which is the one the state file points at.
+    first_response: Optional[Dict[str, Any]] = None
+    for batch_index in range(0, len(embeds), RESULTS_RECAP_EMBEDS_PER_MESSAGE):
+        batch = embeds[batch_index:batch_index + RESULTS_RECAP_EMBEDS_PER_MESSAGE]
+        response = _post_discord_webhook(webhook_url, {"username": username, "embeds": batch})
+        if first_response is None:
+            first_response = response
+    return first_response
 
 
 def _group_recommendations_by_sportsbook(
@@ -5635,14 +5863,11 @@ def _build_discord_book_embed(
     book_recommendations = group["recommendations"]
     lines = []
     for position, recommendation in enumerate(book_recommendations, start=1):
-        # The preview exists to show the model's ordering, so it numbers by
-        # board rank. Grouping by book would otherwise restart at 1 per embed
-        # and make the board's #2 look like a #1.
-        if channel_variant == "preview":
-            board_rank = _safe_int(recommendation.get("rank"))
-            display_rank = board_rank if board_rank is not None else position
-        else:
-            display_rank = position
+        # Previews used to number by board rank, to show the model's ordering.
+        # They are a running log now, ordered by when each pick was logged, and
+        # a pick's board rank drifts all day — so numbering by it would make an
+        # edited message look reshuffled. Number by position, like the tracker.
+        display_rank = position
         player_name = recommendation.get("player_name") or "Unknown Player"
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         pick_label = recommendation.get("pick_label") or _side_name(str(recommendation.get("pick") or "").lower())
@@ -5673,8 +5898,13 @@ def _build_discord_book_embed(
         why_summary = str(recommendation.get("why_summary") or "").strip()
         if not why_summary:
             why_summary = _discord_signal_summary(recommendation)
+        if channel_variant == "preview":
+            logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
+            header = f"**{display_rank}. [{logged_at}] {player_name}**"
+        else:
+            header = f"**{display_rank}.** {player_name}"
         lines.append(
-            f"**{display_rank}.** {player_name} — "
+            f"{header} — "
             f"{stat_label} {pick_label} {line_text}\n"
             f"{_discord_book_label(recommendation)} | Signal Score {edge_text}\n"
             f"{reason_prefix}Why: {why_summary}"
@@ -5682,7 +5912,10 @@ def _build_discord_book_embed(
 
     overflow_count = max(0, int(group.get("total_count", 0)) - len(book_recommendations))
     if overflow_count:
-        suffix = "in this tracker batch" if channel_variant == "tracker" else "in this alert"
+        suffix = {
+            "tracker": "in this tracker batch",
+            "preview": "logged for this slate",
+        }.get(channel_variant, "in this alert")
         lines.append(f"`+{overflow_count} more {group['sportsbook_label']} spot(s) {suffix}`")
 
     book_embed: Dict[str, Any] = {
@@ -5925,7 +6158,10 @@ def _build_discord_preview_payload(
     payload: Dict[str, Any],
     preview_recommendations: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Render the top N picks, grouped by sportsbook.
+    """Render the slate's logged preview picks, grouped by sportsbook.
+
+    The caller passes a running log, oldest first, not the live board — see
+    _preview_running_recommendations for why.
 
     Only ever built when nothing cleared EDGE_DISCORD_MIN_SIGNAL_SCORE, so no
     header or disclaimer embed is included: the webhook username separates a
@@ -5938,7 +6174,7 @@ def _build_discord_preview_payload(
 
     grouped_books = _group_recommendations_by_sportsbook(
         preview_recommendations,
-        limit_per_book=max(len(preview_recommendations), 1),
+        limit_per_book=EDGE_DISCORD_PREVIEW_RENDER_LIMIT,
     )
     if not grouped_books:
         return None
@@ -6236,7 +6472,11 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
         if not recap_payload.get("tracked_recommendations"):
             continue
 
-        graded_results = _grade_results_recap(recap_payload, master_feed)
+        graded_results = _grade_results_recap(
+            recap_payload,
+            master_feed,
+            allow_partial=_results_recap_grace_elapsed(normalized_date),
+        )
         if not graded_results.get("ready"):
             remaining_pending[normalized_date] = recap_payload
             continue
@@ -6638,6 +6878,7 @@ def run_edge_score_refresh(
             "suppressed_repeats": notification_delta.get("suppressed_repeats", []),
             "dedupe_rules": {
                 "per_book_limit": EDGE_DISCORD_PER_BOOK_LIMIT,
+                "per_game_limit": EDGE_DISCORD_PER_GAME_LIMIT,
                 "per_player_limit": EDGE_DISCORD_PER_PLAYER_LIMIT,
                 "top_per_player_limit": EDGE_TOP_PER_PLAYER_LIMIT,
                 "top_per_game_limit": EDGE_TOP_PER_GAME_LIMIT,
@@ -6718,6 +6959,14 @@ def run_edge_score_refresh(
         if _normalize_game_date(recommendation.get("game_date"))
     })
     preview_slate_date = preview_slate_dates[0] if preview_slate_dates else ""
+    preview_running_recommendations: List[Dict[str, Any]] = []
+    if preview_slate_date:
+        preview_running_recommendations = _preview_running_recommendations(
+            state,
+            slate_date=preview_slate_date,
+            preview_recommendations=preview_recommendations,
+            generated_at=payload["generated_at"],
+        )
     preview_message_ref = _latest_discord_message_ref(
         state,
         slate_date=preview_slate_date,
@@ -6754,7 +7003,7 @@ def run_edge_score_refresh(
                 discord_tracker_sent = bool(tracker_message_response)
             except Exception as exc:
                 logger.warning("Discord Edge Score tracker webhook failed: %s", exc)
-        if preview_recommendations and preview_webhook_url and preview_slate_date:
+        if preview_running_recommendations and preview_webhook_url and preview_slate_date:
             try:
                 preview_message_response = _send_discord_webhook(
                     payload,
@@ -6763,7 +7012,7 @@ def run_edge_score_refresh(
                     channel_variant="preview",
                     existing_message_id=preview_existing_message_id,
                     existing_message_webhook_url=preview_existing_webhook_url,
-                    running_recommendations=preview_recommendations,
+                    running_recommendations=preview_running_recommendations,
                 )
                 discord_preview_sent = bool(preview_message_response)
             except Exception as exc:
@@ -6779,9 +7028,26 @@ def run_edge_score_refresh(
             webhook_url=preview_webhook_url,
             alert_kind="preview",
             sent_at=payload["generated_at"],
-            game_ids=_recommendation_game_ids(preview_recommendations),
+            game_ids=_recommendation_game_ids(preview_running_recommendations),
         ):
             state_changed = True
+
+        preview_state_by_date = state.get("discord_preview_state_by_date", {})
+        if not isinstance(preview_state_by_date, dict):
+            preview_state_by_date = {}
+        preview_date_state = preview_state_by_date.get(preview_slate_date, {})
+        if not isinstance(preview_date_state, dict):
+            preview_date_state = {}
+        preview_date_state["sent_snapshot"] = _tracker_state_snapshot_for_recommendations(
+            preview_running_recommendations
+        )
+        preview_date_state.setdefault("first_sent_at", payload["generated_at"])
+        preview_date_state["last_sent_at"] = payload["generated_at"]
+        preview_state_by_date[preview_slate_date] = preview_date_state
+        # Only the pending-recap window is ever read back, so old slates are
+        # dead weight in a state file the VM rewrites every few minutes.
+        state["discord_preview_state_by_date"] = dict(sorted(preview_state_by_date.items())[-10:])
+        state_changed = True
 
     if discord_main_sent:
         alert_state_by_date = state.get("discord_alert_state_by_date", {})
@@ -6862,6 +7128,20 @@ def run_edge_score_refresh(
             generated_at=payload["generated_at"],
             refresh_label=refresh_label,
             alert_kind="tracker",
+        )
+        state_changed = True
+
+    # Anything the channel published gets graded, including previews. Queueing
+    # only tracker picks meant a slate where nothing cleared the alert bar was
+    # never recapped at all: the previews went out, the games played, and no
+    # result ever came back for them.
+    if discord_preview_sent and preview_running_recommendations:
+        _queue_results_recap_payload(
+            state,
+            preview_running_recommendations,
+            generated_at=payload["generated_at"],
+            refresh_label=refresh_label,
+            alert_kind="preview",
         )
         state_changed = True
 

@@ -49,6 +49,13 @@ def main() -> int:
     recommendations = payload.get("recommendations") or []
     official = es._filter_official_alert_recommendations(recommendations)
     preview = es._filter_preview_recommendations(recommendations)
+    # Live previews render a running log, where every pick carries the time it
+    # was first published. Stamp them so a dry run reads like the real message
+    # instead of a column of "Unknown ET".
+    preview = [
+        {**recommendation, "first_logged_at": recommendation.get("first_logged_at") or payload.get("generated_at")}
+        for recommendation in preview
+    ]
 
     print(f"board:            {len(recommendations)} recommendations")
     print(f"generated_at:     {payload.get('generated_at')}")
