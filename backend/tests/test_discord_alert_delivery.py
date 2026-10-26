@@ -260,6 +260,67 @@ class PartialGradingTests(unittest.TestCase):
         self.assertEqual(graded["summary"]["unresolved_count"], 1)
 
 
+class AlertVolumeTests(unittest.TestCase):
+    """One slate should not produce a message per line wobble."""
+
+    def _state_with_opening_sent(self, posted):
+        game_date = _tomorrow()
+        return {
+            "discord_alert_state_by_date": {
+                game_date: {
+                    "opening_sent_at": "2026-10-25T15:00:00-04:00",
+                    "last_sent_at": "2026-10-25T15:00:00-04:00",
+                    "last_sent_snapshot": es._state_snapshot_for_recommendations(posted),
+                }
+            }
+        }
+
+    def test_a_line_move_on_a_posted_pick_does_not_alert(self):
+        posted = [_recommendation(player_id=1, game_id="G1", score=80.0, rank=1, line=20.5, game_date=_tomorrow())]
+        state = self._state_with_opening_sent(posted)
+        moved = [{**posted[0], "line": 23.5}]
+
+        delta = es._compute_notification_delta(moved, state, "intraday")
+
+        self.assertFalse(delta["should_send"])
+        self.assertTrue(delta["changes"], "the move is still recorded for the board")
+
+    def test_a_new_pick_still_alerts(self):
+        posted = [_recommendation(player_id=1, game_id="G1", score=80.0, rank=1, game_date=_tomorrow())]
+        state = self._state_with_opening_sent(posted)
+        board = posted + [
+            _recommendation(player_id=2, game_id="G2", score=79.0, rank=2, book="fd", game_date=_tomorrow())
+        ]
+
+        delta = es._compute_notification_delta(board, state, "intraday")
+
+        self.assertTrue(delta["should_send"])
+        self.assertEqual(
+            [recommendation["player_id"] for recommendation in delta["send_recommendations"]],
+            [2],
+            "only the new pick is sent, not the whole board again",
+        )
+
+    def test_update_messages_drop_the_repeated_header(self):
+        board = [_recommendation(player_id=1, game_id="G1", score=80.0, rank=1, game_date=_tomorrow())]
+        base_payload = {"generated_at": "2026-10-25T17:11:00-04:00", "refresh_label": "intraday", "summary": {}}
+
+        update = es._build_discord_alert_payload(
+            base_payload,
+            {"send_recommendations": board, "alert_kind": "update", "changes": [], "removed": []},
+            channel_variant="main",
+        )
+        opening = es._build_discord_alert_payload(
+            base_payload,
+            {"send_recommendations": board, "alert_kind": "opening", "changes": [], "removed": []},
+            channel_variant="main",
+        )
+
+        self.assertEqual([embed["title"] for embed in update["embeds"]], ["DraftKings"])
+        self.assertIn("Today's Best Props", opening["embeds"][0]["title"])
+        self.assertTrue(update["embeds"][-1].get("timestamp"), "a compact update still shows its age")
+
+
 class MessageContentTests(unittest.TestCase):
     """Every payload needs plain text, not just embeds.
 
@@ -288,8 +349,8 @@ class MessageContentTests(unittest.TestCase):
             channel_variant="main",
         )
 
-        self.assertTrue(payload["content"].strip())
-        self.assertIn("Player 1", payload["content"])
+        # A label, not a restatement of the card: the picks live in the embed.
+        self.assertEqual(payload["content"], "**Today's Best Props**")
         self.assertLessEqual(len(payload["content"]), 2000)
 
     def test_tracker_payload_carries_text(self):

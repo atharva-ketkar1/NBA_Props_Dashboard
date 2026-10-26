@@ -119,6 +119,16 @@ EDGE_DISCORD_TRACKER_MIN_SIGNAL_SCORE = min(
     EDGE_DISCORD_MIN_SIGNAL_SCORE,
     max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCORD_TRACKER_MIN_SIGNAL_SCORE", 72.5))),
 )
+# Alert only when a genuinely new pick appears. A line move, price move or
+# rank drift on a pick the channel already posted is not a new thing to act on,
+# and giving each one its own message is what turned one slate into six
+# near-identical posts. Those still reach the board, the dashboard and the
+# tracker ledger — they just stop pinging.
+EDGE_DISCORD_ALERT_NEW_PICKS_ONLY = _env_bool("EDGE_SCORE_DISCORD_ALERT_NEW_PICKS_ONLY", True)
+# Updates post as the picks alone. The slate's opening alert carries the rules
+# and the Signal Score legend once; repeating that header on every update is
+# most of the bulk and none of the information.
+EDGE_DISCORD_COMPACT_UPDATES = _env_bool("EDGE_SCORE_DISCORD_COMPACT_UPDATES", True)
 # How long to wait for an unresolved pick's box score before recapping the rest
 # of the slate anyway, measured from midnight ET after the slate date.
 EDGE_RESULTS_RECAP_GRACE_HOURS = max(
@@ -4625,9 +4635,18 @@ def _compute_notification_delta(
             send_recommendations = official_recommendations
         elif changes:
             alert_kind = "update"
+            alerting_changes = changes
+            if EDGE_DISCORD_ALERT_NEW_PICKS_ONLY:
+                alerting_changes = [
+                    change
+                    for change in changes
+                    if "new entrant" in (change.get("reasons") or [])
+                ]
+            # An update with nothing new leaves send_recommendations empty, so
+            # should_send stays false and the move lands silently on the board.
             changed_keys = {
                 str(change.get("recommendation_key") or "").strip()
-                for change in changes
+                for change in alerting_changes
                 if str(change.get("recommendation_key") or "").strip()
             }
             send_recommendations = [
@@ -6091,15 +6110,15 @@ def _build_discord_alert_payload(
         for change in changes
         if str(change.get("recommendation_key") or "").strip()
     }
-    embeds = [
-        {
+    embeds = []
+    if not (EDGE_DISCORD_COMPACT_UPDATES and alert_kind == "update"):
+        embeds.append({
             "title": f"{title_label} • {refresh_label_text}",
             "description": description[:4096],
             "color": 0x22C55E,
             "timestamp": payload.get("generated_at"),
             "fields": summary_fields,
-        }
-    ]
+        })
 
     for group in grouped_books:
         embeds.append(
@@ -6111,12 +6130,19 @@ def _build_discord_alert_payload(
             )
         )
 
+    if not embeds:
+        return None
+    # The header carried the timestamp; without it the picks card does, so a
+    # compact update still shows its age.
+    embeds[-1].setdefault("timestamp", payload.get("generated_at"))
+
     username = "NBA Dashboard Daily Props"
     return {
-        "content": _discord_message_content(
-            f"{title_label} • {len(recommendations)} pick(s)",
-            recommendations,
-        ),
+        # A label, not a summary: the card below carries the picks, and
+        # repeating them above it read as a plain-text message with the card
+        # as an afterthought. This exists so the notification and the channel
+        # list are not blank.
+        "content": _discord_message_content(title_label),
         "username": username,
         "embeds": embeds,
     }
@@ -6195,10 +6221,7 @@ def _build_discord_tracker_payload(
         )
 
     return {
-        "content": _discord_message_content(
-            f"Prop tracker • {len(recommendations)} logged today",
-            recommendations,
-        ),
+        "content": _discord_message_content(f"Prop tracker • {len(recommendations)} logged today"),
         "username": "NBA Dashboard Prop Tracker",
         "embeds": embeds,
     }
@@ -6243,10 +6266,7 @@ def _build_discord_preview_payload(
         embeds[-1]["timestamp"] = generated_at
 
     return {
-        "content": _discord_message_content(
-            f"Below threshold • {len(preview_recommendations)} pick(s) logged",
-            preview_recommendations,
-        ),
+        "content": _discord_message_content(f"Below threshold • {len(preview_recommendations)} logged"),
         "username": "NBA Dashboard Preview",
         "embeds": embeds,
     }
