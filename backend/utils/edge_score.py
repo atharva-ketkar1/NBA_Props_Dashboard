@@ -5,7 +5,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -112,6 +112,21 @@ EDGE_TOP_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_TOP_PER_PLAYER_LIMIT", 1
 # caps diversity downstream too: at 5, three games could fill the whole board.
 EDGE_TOP_PER_GAME_LIMIT = max(1, _env_int("EDGE_SCORE_TOP_PER_GAME_LIMIT", 2))
 EDGE_TRACKER_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_TRACKER_PER_PLAYER_LIMIT", 1))
+# One prop per player per slate, slate-wide and across every channel.
+#
+# The existing per-player caps are all per-tick: the 15-slot board, the alert
+# filter and the tracker delta each allow one prop per player in the snapshot
+# they can see. The channels accumulate across a day of 5-minute refreshes, and
+# nothing capped the accumulation, so a player whose best prop changed during
+# the day was logged once per change. One slate logged four Austin Reaves props
+# because the board's best Reaves prop moved from PTS+REB+AST to FG3M to
+# PTS+REB to AST between 21:46 and 12:26.
+#
+# Props on one player are not independent bets — they share his minutes, his
+# usage and the game's pace, so they win and lose together and stack risk
+# without stacking edge. The board already backfills to the next-best player,
+# so capping the player costs a correlated leg, not a slot.
+EDGE_PLAYER_PROPS_PER_SLATE = max(1, _env_int("EDGE_SCORE_PLAYER_PROPS_PER_SLATE", 1))
 # Never stricter than the alert bar. A tracker floor above
 # EDGE_DISCORD_MIN_SIGNAL_SCORE means picks get alerted and then never logged,
 # so they are never graded and the next-day recap silently omits them.
@@ -878,6 +893,26 @@ def _recommendation_player_identity(recommendation: Dict[str, Any]) -> str:
     return ""
 
 
+def _recommendation_player_identities(recommendation: Dict[str, Any]) -> List[str]:
+    """Every identity one player may be stored under, not just the best one.
+
+    _recommendation_player_identity returns the id when there is one and falls
+    back to the name, so the same player is "id:1630559" in one snapshot and
+    "name:austin reaves" in another — older alert snapshots carry no player_id
+    at all. Keying the per-slate cap on a single identity therefore gave a
+    player one slot per spelling, and a prop already alerted under his name let
+    a second one through under his id.
+    """
+    identities: List[str] = []
+    player_id = str(recommendation.get("player_id") or "").strip()
+    if player_id:
+        identities.append(f"id:{player_id}")
+    player_name = _recommendation_player_name_key(recommendation)
+    if player_name:
+        identities.append(f"name:{player_name}")
+    return identities
+
+
 def _recommendations_same_player(candidate: Dict[str, Any], existing: Dict[str, Any]) -> bool:
     candidate_player_id = str(candidate.get("player_id") or "").strip()
     existing_player_id = str(existing.get("player_id") or "").strip()
@@ -907,6 +942,107 @@ def _discord_recommendations_conflict(
         return True
 
     return _stat_component_overlap(candidate_stat, existing_stat) >= EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD
+
+
+def _published_player_props_for_slate(
+    state: Dict[str, Any],
+    slate_date: str,
+) -> Dict[str, Set[str]]:
+    """Every distinct prop each player already has published for this slate.
+
+    Read from all three channels plus the grading queue, because the cap is on
+    the player, not on a channel: a prop logged in the tracker, shown in the
+    below-threshold preview or alerted all count the same against his one slot.
+    """
+    published: Dict[str, Set[str]] = {}
+    if not slate_date or not isinstance(state, dict):
+        return published
+
+    def _record(payload: Any, fallback_key: str) -> None:
+        if not isinstance(payload, dict):
+            return
+        if not _recommendation_uses_supported_book(payload):
+            return
+        game_date = _normalize_game_date(payload.get("game_date"))
+        if game_date and game_date != slate_date:
+            return
+        identities = _recommendation_player_identities(payload)
+        if not identities:
+            return
+        recommendation_key = str(payload.get("recommendation_key") or fallback_key or "").strip()
+        if not recommendation_key:
+            return
+        for identity in identities:
+            published.setdefault(identity, set()).add(recommendation_key)
+
+    for state_key, entry_key in (
+        ("discord_tracker_state_by_date", "sent_snapshot"),
+        ("discord_preview_state_by_date", "sent_snapshot"),
+        ("discord_alert_state_by_date", "sent_concept_snapshot"),
+        ("discord_alert_state_by_date", "last_sent_snapshot"),
+        # The grading queue is the record of what results will state, so a prop
+        # queued but somehow absent from a channel snapshot still spends the
+        # player's slot rather than letting a second one through.
+        ("pending_result_recaps", "tracked_recommendations"),
+    ):
+        by_date = state.get(state_key, {})
+        if not isinstance(by_date, dict):
+            continue
+        entry = by_date.get(slate_date, {})
+        if not isinstance(entry, dict):
+            continue
+        stored = entry.get(entry_key, {})
+        if not isinstance(stored, dict):
+            continue
+        for fallback_key, payload in stored.items():
+            _record(payload, str(fallback_key))
+
+    return published
+
+
+def _drop_second_prop_per_player(
+    recommendations: List[Dict[str, Any]],
+    *,
+    published_by_player: Dict[str, Set[str]],
+    limit: int = EDGE_PLAYER_PROPS_PER_SLATE,
+) -> List[Dict[str, Any]]:
+    """Hold each player to `limit` distinct props for the slate.
+
+    Deliberately keyed on the player and not on stat correlation.
+    _discord_recommendations_conflict only fires on a shared side above a 0.45
+    component overlap, so it reads Reaves PTS over and Reaves AST under as two
+    unrelated bets. They are not: both ride his minutes and the game's pace.
+
+    Candidates arrive best-first, so the prop kept for a player is his highest
+    scoring one and the rest of the board fills with other players.
+    """
+    selected: Dict[str, Set[str]] = {
+        player: set(keys) for player, keys in published_by_player.items()
+    }
+    kept: List[Dict[str, Any]] = []
+    for recommendation in recommendations:
+        if not isinstance(recommendation, dict):
+            continue
+        identities = _recommendation_player_identities(recommendation)
+        recommendation_key = str(recommendation.get("recommendation_key") or "").strip()
+        if not identities or not recommendation_key:
+            kept.append(recommendation)
+            continue
+        already_published: Set[str] = set()
+        for identity in identities:
+            already_published |= selected.get(identity, set())
+        # Refreshing a prop the channel already published is always allowed:
+        # the cap is on how many distinct props a player gets, not on how often
+        # one of them may be re-sent as its line or price moves.
+        if recommendation_key in already_published:
+            kept.append(recommendation)
+            continue
+        if len(already_published) >= limit:
+            continue
+        for identity in identities:
+            selected.setdefault(identity, set()).add(recommendation_key)
+        kept.append(recommendation)
+    return kept
 
 
 def _discord_concept_storage_key(recommendation: Dict[str, Any]) -> str:
@@ -4484,6 +4620,44 @@ def _filter_tracker_recommendations(recommendations: List[Dict[str, Any]]) -> Li
     )
 
 
+def _filter_tracker_ledger_recommendations(
+    recommendations: List[Dict[str, Any]],
+    *,
+    slate_date: str,
+) -> List[Dict[str, Any]]:
+    """Gate the tracker's *published* ledger, not its candidates.
+
+    _filter_tracker_recommendations is a selection gate: signal score, board
+    rank, pregame state, per-player count and conflicting-pick dedupe. Those
+    decide what may enter the tracker, and not one of them stays true after a
+    pick is published. Re-running them over the accumulated running list evicts
+    picks the channel already showed — the per-player cap inside
+    _filter_discord_recommendations keeps only a player's earliest pick, so a
+    slate holding several picks on one player rendered one and dropped the rest.
+
+    The drop fed itself. An evicted pick never reached sent_snapshot, so the
+    next _compute_tracker_delta saw nothing logged for that player, admitted a
+    fresh pick, queued it for grading, and this stage evicted it again. One
+    slate graded four Austin Reaves props while the tracker displayed one.
+
+    A published pick is therefore only ever dropped for something that was
+    already true when it was logged: an unsupported book, or a game date that
+    does not belong to this slate.
+    """
+    target_date = _normalize_game_date(slate_date)
+    ledger: List[Dict[str, Any]] = []
+    for recommendation in recommendations:
+        if not isinstance(recommendation, dict):
+            continue
+        if not _recommendation_uses_supported_book(recommendation):
+            continue
+        game_date = _normalize_game_date(recommendation.get("game_date"))
+        if target_date and game_date and game_date != target_date:
+            continue
+        ledger.append(recommendation)
+    return ledger
+
+
 def _filter_preview_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The top N regardless of score, for the below-threshold preview.
 
@@ -4508,13 +4682,22 @@ def _compute_notification_delta(
     refresh_label: str,
 ) -> Dict[str, Any]:
     official_recommendations = _filter_official_alert_recommendations(recommendations)
-    current_snapshot = _state_snapshot_for_recommendations(official_recommendations)
     slate_dates = sorted({
         _normalize_game_date(recommendation.get("game_date"))
         for recommendation in official_recommendations
         if _normalize_game_date(recommendation.get("game_date"))
     })
     slate_date = slate_dates[0] if slate_dates else ""
+    # Before the snapshot, so a prop held back for the player cap never lands in
+    # last_sent_snapshot and cannot read as "removed" on the next refresh. The
+    # repeat suppressor below cannot carry this: it expires after
+    # EDGE_DISCORD_REPEAT_SUPPRESSION_HOURS, yields to a major line move, and
+    # treats opposite sides of one player as unrelated bets.
+    official_recommendations = _drop_second_prop_per_player(
+        official_recommendations,
+        published_by_player=_published_player_props_for_slate(state, slate_date),
+    )
+    current_snapshot = _state_snapshot_for_recommendations(official_recommendations)
 
     alert_state_by_date = state.get("discord_alert_state_by_date", {})
     if not isinstance(alert_state_by_date, dict):
@@ -5161,6 +5344,14 @@ def _compute_tracker_delta(
     generated_at: Any,
 ) -> Dict[str, Any]:
     tracker_candidates = _filter_tracker_recommendations(recommendations)
+    # Slate-wide, so a player whose best prop changed during the day does not
+    # get logged once per change. The local per-player check below only sees
+    # this channel's snapshot; this also counts what the alert and preview
+    # channels already published for him.
+    tracker_candidates = _drop_second_prop_per_player(
+        tracker_candidates,
+        published_by_player=_published_player_props_for_slate(state, slate_date),
+    )
     tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
     if not isinstance(tracker_state_by_date, dict):
         tracker_state_by_date = {}
@@ -5305,6 +5496,15 @@ def _preview_running_recommendations(
     stored_snapshot = existing_entry.get("sent_snapshot", {})
     if not isinstance(stored_snapshot, dict):
         stored_snapshot = {}
+
+    # Gate the incoming picks, never the stored ones: a pick already in the log
+    # stays in it, exactly as the tracker ledger does. Without this the preview
+    # accumulated a fresh prop every time a player's best one changed, which is
+    # how the tracker came to log four props on one player.
+    preview_recommendations = _drop_second_prop_per_player(
+        preview_recommendations,
+        published_by_player=_published_player_props_for_slate(state, slate_date),
+    )
 
     merged: Dict[str, Dict[str, Any]] = {}
     for recommendation_key, stored in stored_snapshot.items():
@@ -5695,6 +5895,75 @@ def _filter_recap_payload_to_supported_books(
     }, changed
 
 
+def _filter_recap_payload_to_published_picks(
+    recap_payload: Dict[str, Any],
+    state: Dict[str, Any],
+    *,
+    game_date: str,
+) -> Tuple[Dict[str, Any], bool]:
+    """Drop queued picks that no channel actually published.
+
+    The last guard on the invariant that results only ever grade what a channel
+    stated. Queueing now reads the rendered tracker ledger, so nothing fresh can
+    diverge — but state written by the old code already holds picks the tracker
+    evicted before render, and those would still post once. Checking the queue
+    against the published snapshots settles that on the way out.
+
+    Only tracker-sourced picks are checked. A preview pick lives in the preview
+    channel's snapshot and is graded into the same recap by design, so it is
+    left alone, as is any pick from a slate with no tracker snapshot at all —
+    absent state is not evidence that a pick went unpublished.
+    """
+    tracked = recap_payload.get("tracked_recommendations", {})
+    if not isinstance(tracked, dict) or not tracked:
+        return recap_payload, False
+
+    tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
+    if not isinstance(tracker_state_by_date, dict):
+        tracker_state_by_date = {}
+    tracker_entry = tracker_state_by_date.get(game_date, {})
+    if not isinstance(tracker_entry, dict):
+        tracker_entry = {}
+    published_keys = tracker_entry.get("sent_snapshot", {})
+    if not isinstance(published_keys, dict) or not published_keys:
+        return recap_payload, False
+
+    def _was_published(key: str, recommendation: Any) -> bool:
+        if str((recommendation or {}).get("first_alert_kind") or "").strip() != "tracker":
+            return True
+        return key in published_keys
+
+    filtered_tracked = {
+        key: recommendation
+        for key, recommendation in tracked.items()
+        if _was_published(key, recommendation)
+    }
+    if len(filtered_tracked) == len(tracked):
+        return recap_payload, False
+
+    dropped = sorted(set(tracked) - set(filtered_tracked))
+    logger.warning(
+        "Dropping %d queued pick(s) the tracker never published for %s: %s",
+        len(dropped),
+        game_date,
+        ", ".join(dropped),
+    )
+
+    recommendations = recap_payload.get("recommendations", [])
+    if not isinstance(recommendations, list):
+        recommendations = []
+
+    return {
+        **recap_payload,
+        "tracked_recommendations": filtered_tracked,
+        "recommendations": [
+            recommendation
+            for recommendation in recommendations
+            if str(recommendation.get("recommendation_key") or "") in filtered_tracked
+        ],
+    }, True
+
+
 def _results_record_text(summary: Dict[str, Any]) -> str:
     base = f"{summary.get('cashed', 0)}-{summary.get('lost', 0)}"
     extras = []
@@ -6021,9 +6290,13 @@ def _build_discord_alert_payload(
         str(payload.get("refresh_label") or "Refresh").replace("_", " ").title(),
     )
     threshold_text = _format_signal_score_threshold(EDGE_DISCORD_MIN_SIGNAL_SCORE)
+    # The per-player figure is the slate-wide cap, not the per-snapshot one:
+    # EDGE_DISCORD_PER_PLAYER_LIMIT governs a single alert, and quoting it
+    # promised a limit the channel used to exceed across a day of refreshes.
     rules_text = (
         f"Top {EDGE_DISCORD_MAX_RANK} props only, max {EDGE_DISCORD_PER_BOOK_LIMIT} per sportsbook, "
-        f"and max {EDGE_DISCORD_PER_PLAYER_LIMIT} per player at Signal Score {threshold_text}+."
+        f"and max {EDGE_PLAYER_PROPS_PER_SLATE} per player per slate "
+        f"at Signal Score {threshold_text}+."
     )
     books_summary = _changed_books_summary(grouped_books)
     visible_books = {
@@ -6534,7 +6807,12 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             continue
         if normalized_date >= today_str:
             filtered_recap_payload, pruned = _filter_recap_payload_to_supported_books(recap_payload)
-            state_changed = bool(state_changed or pruned)
+            filtered_recap_payload, unpublished_pruned = _filter_recap_payload_to_published_picks(
+                filtered_recap_payload,
+                state,
+                game_date=normalized_date,
+            )
+            state_changed = bool(state_changed or pruned or unpublished_pruned)
             if filtered_recap_payload.get("tracked_recommendations"):
                 remaining_pending[normalized_date] = filtered_recap_payload
             continue
@@ -6542,7 +6820,12 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             continue
 
         recap_payload, pruned = _filter_recap_payload_to_supported_books(recap_payload)
-        state_changed = bool(state_changed or pruned)
+        recap_payload, unpublished_pruned = _filter_recap_payload_to_published_picks(
+            recap_payload,
+            state,
+            game_date=normalized_date,
+        )
+        state_changed = bool(state_changed or pruned or unpublished_pruned)
         if not recap_payload.get("tracked_recommendations"):
             continue
 
@@ -6957,6 +7240,7 @@ def run_edge_score_refresh(
                 "top_per_player_limit": EDGE_TOP_PER_PLAYER_LIMIT,
                 "top_per_game_limit": EDGE_TOP_PER_GAME_LIMIT,
                 "tracker_per_player_limit": EDGE_TRACKER_PER_PLAYER_LIMIT,
+                "player_props_per_slate": EDGE_PLAYER_PROPS_PER_SLATE,
                 "max_rank": EDGE_DISCORD_MAX_RANK,
                 "component_overlap_threshold": EDGE_DISCORD_COMPONENT_OVERLAP_THRESHOLD,
                 "min_signal_score": EDGE_DISCORD_MIN_SIGNAL_SCORE,
@@ -6998,7 +7282,10 @@ def run_edge_score_refresh(
         slate_date=slate_date,
         tracker_delta=tracker_delta,
     )
-    tracker_running_recommendations = _filter_tracker_recommendations(tracker_running_recommendations)
+    tracker_running_recommendations = _filter_tracker_ledger_recommendations(
+        tracker_running_recommendations,
+        slate_date=slate_date,
+    )
     tracker_message_ref = _latest_discord_message_ref(
         state,
         slate_date=slate_date,
@@ -7195,10 +7482,18 @@ def run_edge_score_refresh(
             state_changed = True
 
     tracker_visible_sent = bool(discord_tracker_sent or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and discord_main_sent))
-    if tracker_visible_sent and tracker_delta.get("new_recommendations"):
+    # Grade the ledger that was rendered, not the delta that fed it. Queueing
+    # tracker_delta["new_recommendations"] made the recap a parallel list: a
+    # pick admitted by the delta but dropped before render was still graded, so
+    # results carried props the tracker never stated. Reading the same list the
+    # message was built from makes that divergence unrepresentable. Queueing is
+    # keyed by recommendation_key and keeps the first copy of each pick, so
+    # re-queueing the whole ledger every send is idempotent, and it backfills
+    # any pick that was rendered but missed the queue earlier in the slate.
+    if tracker_visible_sent and tracker_running_recommendations:
         _queue_results_recap_payload(
             state,
-            tracker_delta.get("new_recommendations", []),
+            tracker_running_recommendations,
             generated_at=payload["generated_at"],
             refresh_label=refresh_label,
             alert_kind="tracker",
