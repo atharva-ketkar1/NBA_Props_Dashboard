@@ -378,6 +378,25 @@ class ClosingLineValueTests(unittest.TestCase):
         self.assertFalse(es._closing_line_value(recommendation)["available"])
         self.assertEqual(es._closing_line_value_text(recommendation), "line pulled")
 
+    def test_a_pick_published_before_tracking_says_nothing(self):
+        """"Line pulled" asserts the book removed the prop. A pick published
+        before closing lines were recorded has no such fact behind it, and six
+        of them went out on the 10-27 recap claiming otherwise."""
+        legacy = _recommendation(player_id=1, game_id="g0", game_date=D0, side="over", line=25.5)
+        self.assertNotIn("current_line", legacy)
+        self.assertNotIn("closing_line", legacy)
+        value = es._closing_line_value(legacy)
+        self.assertTrue(value["untracked"])
+        self.assertFalse(value["available"])
+        self.assertEqual(es._closing_line_value_text(legacy), "")
+
+    def test_an_untracked_pick_is_left_out_of_the_beat_the_close_rate(self):
+        legacy = _recommendation(player_id=2, game_id="g1", game_date=D0, side="over", line=20.5)
+        tracked = self._pick(side="over", line=20.5, current=22.5)
+        summary = es._closing_line_value_summary([legacy, tracked])
+        self.assertEqual(summary["measured"], 1, "an unmeasured pick must not dilute the rate")
+        self.assertEqual(summary["beat_close"], 1)
+
     def test_an_unmoved_line_says_so(self):
         text = es._closing_line_value_text(self._pick(side="over", line=25.5, current=25.5))
         self.assertIn("held", text)

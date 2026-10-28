@@ -5883,10 +5883,15 @@ def _closing_line_value(recommendation: Any) -> Dict[str, Any]:
 
     locked_line = _safe_float(recommendation.get("line"))
     # Live ledger entries carry `current_line`; a queued recap entry has frozen
-    # the same number as `closing_line`.
+    # the same number as `closing_line`. Neither key being present at all means
+    # the pick was published before this was recorded, which is a different fact
+    # from the book having pulled the prop, and must not be reported as one.
+    tracked = "current_line" in recommendation or "closing_line" in recommendation
     current_line = _safe_float(recommendation.get("current_line"))
     if current_line is None:
         current_line = _safe_float(recommendation.get("closing_line"))
+    if not tracked:
+        return {**blank, "locked_line": locked_line, "current_line": None, "untracked": True}
     if locked_line is None or current_line is None:
         return {**blank, "locked_line": locked_line, "current_line": current_line}
 
@@ -5912,6 +5917,10 @@ def _closing_line_value_text(recommendation: Any) -> str:
     value = _closing_line_value(recommendation)
     locked_line = value.get("locked_line")
     if locked_line is None:
+        return ""
+    if value.get("untracked"):
+        # Published before closing lines were recorded. Say nothing rather than
+        # claim the book pulled a prop we simply never followed.
         return ""
     if not value.get("available"):
         # The book has pulled the prop. Saying so is more use than a blank,
