@@ -90,6 +90,26 @@ EDGE_NOTIFICATION_MIN_INTERVAL_SECONDS = max(
     0,
     _env_int("EDGE_SCORE_NOTIFICATION_MIN_INTERVAL_SECONDS", 900),
 )
+# How many days past the nearest slate to score. The books post player props a
+# day ahead and the official injury report covers the same two days, so 1 is the
+# useful setting and 2 is the point where lines thin out to a handful of players
+# with no injury report behind them. 0 reproduces the single-date behavior
+# exactly, which is how this ships: main is the only branch and a push deploys
+# the VM and Vercel at once, so the widening is turned on by env var, not by the
+# merge.
+EDGE_SLATE_LOOKAHEAD_DAYS = max(0, _env_int("EDGE_SCORE_SLATE_LOOKAHEAD_DAYS", 0))
+# Per-date state buckets are pruned by date window rather than by count. A
+# count-based tail is only correct while every key is in the past: once future
+# slates are in the file, the lexicographic tail keeps tomorrow and evicts
+# yesterday, which is the bucket grading still needs.
+EDGE_STATE_RETENTION_DAYS = max(2, _env_int("EDGE_SCORE_STATE_RETENTION_DAYS", 7))
+# Discord caps one message at 6000 characters across all of its embeds, and a
+# single embed description at 4096. The per-book default below is what one book
+# embed may use when it is the only one; _book_embed_char_budget divides the
+# message budget when there are several, so a header plus two full book embeds
+# cannot add up past the message ceiling.
+DISCORD_MESSAGE_EMBED_CHAR_BUDGET = 5400
+DISCORD_BOOK_EMBED_CHAR_BUDGET = 3800
 EDGE_SCORE_DISCORD_WEBHOOK_URL = os.getenv("EDGE_SCORE_DISCORD_WEBHOOK_URL", "").strip()
 EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL = (
     os.getenv("EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL", "")
@@ -100,8 +120,19 @@ EDGE_SCORE_DISCORD_ASSETS_BASE_URL = (
     or os.getenv("VITE_ASSETS_URL", "")
 ).strip().rstrip("/")
 EDGE_DISCORD_MIN_SIGNAL_SCORE = max(1.0, min(99.0, _env_float("EDGE_SCORE_DISCORD_MIN_SIGNAL_SCORE", 72.5)))
-EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", 5))
-EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 2))
+# How many picks a slate may publish is an output of the Signal Score bar, not
+# an input: if ten props clear the bar they are all worth having, and if none
+# clear it the channel stays quiet. This is a runaway guard, not a curator --
+# the quality guards that matter are one pick per game, one prop per player and
+# the correlated-leg check, which is what stops a bad night from being a bad
+# night ten times over.
+EDGE_DISCORD_MAX_PICKS_PER_SLATE = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_PICKS_PER_SLATE", 15))
+# Kept as an explicit override for anyone who wants a hard rank cut; it now
+# defaults to the runaway guard rather than to a top-5 board.
+EDGE_DISCORD_MAX_RANK = max(1, _env_int("EDGE_SCORE_DISCORD_MAX_RANK", EDGE_DISCORD_MAX_PICKS_PER_SLATE))
+# Raised from 2 so a single message can actually render everything that cleared
+# the bar instead of hiding most of it behind a "+N more" footer.
+EDGE_DISCORD_PER_BOOK_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_BOOK_LIMIT", 8))
 EDGE_DISCORD_PER_PLAYER_LIMIT = max(1, _env_int("EDGE_SCORE_DISCORD_PER_PLAYER_LIMIT", 1))
 # One pick per game on the alert side. A 12-game slate whose alerts all come
 # from the same matchup is worse than useless: the correlated picks win or lose
@@ -2045,6 +2076,98 @@ def _is_live_or_final_schedule_game(game: Dict[str, Any]) -> bool:
     return has_game_started(game, now_et=get_et_now())
 
 
+def _prune_state_dates(
+    bucket: Dict[str, Any],
+    *,
+    retention_days: int = EDGE_STATE_RETENTION_DAYS,
+    now_et: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Keep recent and future slate dates, drop the rest.
+
+    Pruning by date window rather than by a `sorted(...)[-N:]` tail. A count
+    based tail is only correct while every key is in the past: once a future
+    slate is in the file the lexicographic tail keeps tomorrow and evicts
+    yesterday, which is exactly the bucket the next day's grading reads back
+    through `_filter_recap_payload_to_published_picks`.
+    """
+    if not isinstance(bucket, dict) or not bucket:
+        return bucket if isinstance(bucket, dict) else {}
+
+    now = now_et or get_et_now()
+    cutoff = (now - timedelta(days=max(2, retention_days))).strftime("%Y-%m-%d")
+    pruned = {}
+    for raw_date, value in bucket.items():
+        normalized = _normalize_game_date(raw_date)
+        # An unparseable key is kept rather than silently dropped: it is not
+        # worth losing a published-pick record over a date we failed to read.
+        if not normalized or normalized >= cutoff:
+            pruned[str(raw_date)] = value
+    return dict(sorted(pruned.items()))
+
+
+PRUNABLE_STATE_DATE_BUCKETS = (
+    "discord_tracker_state_by_date",
+    "discord_alert_state_by_date",
+    "discord_preview_state_by_date",
+    "injury_context_by_date",
+    "injury_changes_seen_by_date",
+)
+
+
+def _prune_notification_state(state: Dict[str, Any], *, now_et: Optional[datetime] = None) -> bool:
+    """Trim every per-date bucket once per refresh. Returns True if it changed.
+
+    Deliberately not tied to whether a message went out. Hanging this off a
+    successful send coupled housekeeping to an unrelated condition: a quiet
+    slate, or a run with the webhooks unset, would leave the file untrimmed
+    indefinitely. `sent_result_recaps` is excluded on purpose -- it is the
+    "never post a recap twice" guard and is small enough to keep long.
+    """
+    changed = False
+    for key in PRUNABLE_STATE_DATE_BUCKETS:
+        bucket = state.get(key)
+        if not isinstance(bucket, dict) or not bucket:
+            continue
+        pruned = _prune_state_dates(bucket, now_et=now_et)
+        if len(pruned) != len(bucket):
+            state[key] = pruned
+            changed = True
+    return changed
+
+
+def _slate_window_dates(candidate_games: List[Dict[str, Any]]) -> List[str]:
+    """The game dates this refresh is allowed to score, nearest first.
+
+    Anchored on the earliest upcoming game date rather than on today. Anchoring
+    on today would return nothing on an off-day — the All-Star break, or any gap
+    in the calendar — and the guarantee worth keeping is that the next slate is
+    always scored, whenever it happens to be.
+    """
+    dates = sorted({
+        _normalize_game_date(game.get("game_date"))
+        for game in candidate_games
+        if _normalize_game_date(game.get("game_date"))
+    })
+    if not dates:
+        return []
+
+    anchor = _parse_date(dates[0])
+    if anchor is None:
+        return [dates[0]]
+    horizon = (anchor + timedelta(days=EDGE_SLATE_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d")
+    return [game_date for game_date in dates if game_date <= horizon]
+
+
+def _games_within_slate_window(candidate_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    window = set(_slate_window_dates(candidate_games))
+    if not window:
+        return []
+    return [
+        game for game in candidate_games
+        if _normalize_game_date(game.get("game_date")) in window
+    ]
+
+
 def _build_schedule_context(schedule_payload: Any, action_network_payload: Any = None) -> Dict[str, Any]:
     if isinstance(schedule_payload, dict):
         games = schedule_payload.get("games", [])
@@ -2070,15 +2193,7 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
 
     active_games = []
     if active_candidates:
-        target_date = min(
-            _normalize_game_date(game.get("game_date"))
-            for game in active_candidates
-            if _normalize_game_date(game.get("game_date"))
-        )
-        active_games = [
-            game for game in active_candidates
-            if _normalize_game_date(game.get("game_date")) == target_date
-        ]
+        active_games = _games_within_slate_window(active_candidates)
 
     if not active_games:
         future_games = []
@@ -2092,11 +2207,7 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
 
         future_games.sort(key=lambda item: (item[0], _normalize_game_date(item[1].get("game_date"))))
         if future_games:
-            target_date = _normalize_game_date(future_games[0][1].get("game_date"))
-            active_games = [
-                game for _, game in future_games
-                if _normalize_game_date(game.get("game_date")) == target_date
-            ]
+            active_games = _games_within_slate_window([game for _, game in future_games])
 
     an_games = action_network_payload.get("games", []) if isinstance(action_network_payload, dict) else []
     for game in active_games:
@@ -2116,6 +2227,19 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
     opponent_by_team = {}
     game_by_team = {}
     game_by_id = {}
+    # A team on a back-to-back plays twice inside the window, so the per-team
+    # lookups have to hold a list. game_by_team/opponent_by_team keep their old
+    # single-game meaning — the nearest game, since active_games is ordered
+    # nearest first — for the callers that only ever want tonight.
+    games_by_team: Dict[str, List[Dict[str, Any]]] = {}
+    opponent_by_team_date: Dict[Tuple[str, str], str] = {}
+    active_games = sorted(
+        active_games,
+        key=lambda game: (
+            _normalize_game_date(game.get("game_date")),
+            str(game.get("game_time_utc") or ""),
+        ),
+    )
     for game in active_games:
         game_id = str(game.get("game_id") or "").strip()
         if game_id:
@@ -2123,16 +2247,16 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
         home_team = game.get("home_team_tricode")
         away_team = game.get("away_team_tricode")
         game_date = _normalize_game_date(game.get("game_date"))
-        if home_team:
-            active_teams.add(home_team)
-            game_by_team[home_team] = game
-            if away_team:
-                opponent_by_team[home_team] = away_team
-        if away_team:
-            active_teams.add(away_team)
-            game_by_team[away_team] = game
-            if home_team:
-                opponent_by_team[away_team] = home_team
+        for team, opponent in ((home_team, away_team), (away_team, home_team)):
+            if not team:
+                continue
+            active_teams.add(team)
+            games_by_team.setdefault(team, []).append(game)
+            game_by_team.setdefault(team, game)
+            if opponent:
+                opponent_by_team.setdefault(team, opponent)
+                if game_date:
+                    opponent_by_team_date[(team, game_date)] = opponent
         if game_date:
             active_dates.add(game_date)
 
@@ -2141,8 +2265,10 @@ def _build_schedule_context(schedule_payload: Any, action_network_payload: Any =
         "active_teams": active_teams,
         "active_dates": active_dates,
         "game_by_team": game_by_team,
+        "games_by_team": games_by_team,
         "game_by_id": game_by_id,
         "opponent_by_team": opponent_by_team,
+        "opponent_by_team_date": opponent_by_team_date,
     }
 
 
@@ -4004,10 +4130,16 @@ def _compute_similar_players_context(
     target_style = style_cache.get(player_id, {})
 
     candidates = []
+    entry_game_date = _normalize_game_date(entry.get("game_date"))
     for candidate_entry in active_entries:
         candidate_player = candidate_entry["player"]
         candidate_id = int(candidate_player.get("id"))
         if candidate_id == player_id:
+            continue
+        # Comparable pricing means comparable pricing *for the same slate*. With
+        # more than one date live, a player on a back-to-back appears twice and
+        # tomorrow's board would otherwise be compared against tonight's lines.
+        if entry_game_date and _normalize_game_date(candidate_entry.get("game_date")) != entry_game_date:
             continue
         if stat_type not in candidate_entry["props"]:
             continue
@@ -4422,6 +4554,71 @@ def _diversify_candidates(
     return output
 
 
+def _diversify_candidates_by_date(
+    candidates: List[Dict[str, Any]],
+    limit_per_date: int,
+    *,
+    per_player_limit: int = EDGE_TOP_PER_PLAYER_LIMIT,
+    per_game_limit: int = EDGE_TOP_PER_GAME_LIMIT,
+    prevent_component_overlap: bool = True,
+) -> List[Dict[str, Any]]:
+    """Diversify each slate date against its own budget, nearest date first.
+
+    A single global cut is won outright by the nearest date: it has the most
+    games, the most priced players and the most line-movement history behind its
+    scores, so a later date never places. Giving each date its own budget is
+    what makes a future slate visible at all, and it keeps one heavy night from
+    deciding whether tomorrow gets looked at.
+    """
+    by_date: Dict[str, List[Dict[str, Any]]] = {}
+    undated: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        game_date = _normalize_game_date(candidate.get("game_date"))
+        if game_date:
+            by_date.setdefault(game_date, []).append(candidate)
+        else:
+            undated.append(candidate)
+
+    output: List[Dict[str, Any]] = []
+    for game_date in sorted(by_date):
+        output.extend(
+            _diversify_candidates(
+                by_date[game_date],
+                limit_per_date,
+                per_player_limit=per_player_limit,
+                per_game_limit=per_game_limit,
+                prevent_component_overlap=prevent_component_overlap,
+            )
+        )
+    if undated:
+        output.extend(
+            _diversify_candidates(
+                undated,
+                limit_per_date,
+                per_player_limit=per_player_limit,
+                per_game_limit=per_game_limit,
+                prevent_component_overlap=prevent_component_overlap,
+            )
+        )
+    return output
+
+
+def _assign_board_ranks(recommendations: List[Dict[str, Any]], *, field: str = "rank") -> None:
+    """Rank within the slate date, not across the board.
+
+    `EDGE_DISCORD_MAX_RANK` and the repeat suppressor's "rank changed" signal
+    both read this, and both are meant per slate: a pick is not demoted because
+    a different night produced a stronger one.
+    """
+    per_date: Dict[str, int] = {}
+    for board_position, recommendation in enumerate(recommendations, start=1):
+        game_date = _normalize_game_date(recommendation.get("game_date"))
+        next_rank = per_date.get(game_date, 0) + 1
+        per_date[game_date] = next_rank
+        recommendation[field] = next_rank
+        recommendation["board_position"] = board_position
+
+
 def _build_sportsbook_boards(candidates: List[Dict[str, Any]], limit_per_book: int) -> Dict[str, Dict[str, Any]]:
     boards: Dict[str, Dict[str, Any]] = {}
     ordered_books = sorted(SUPPORTED_BOOKS, key=_book_sort_key)
@@ -4585,6 +4782,10 @@ def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, 
             "odds_display": recommendation.get("odds_display"),
             "edge_score": recommendation.get("edge_score"),
             "display_edge_score": recommendation.get("display_edge_score"),
+            # Carried so the tracker and the next day's recap can still state
+            # how much of the component book was actually behind a pick.
+            "confidence": recommendation.get("confidence"),
+            "display_confidence": recommendation.get("display_confidence"),
             "guardrail_active": recommendation.get("guardrail_active"),
             "game_date": _normalize_game_date(recommendation.get("game_date")),
             "game_started": bool(recommendation.get("game_started")),
@@ -5260,6 +5461,11 @@ def _serialize_recommendation_for_results(recommendation: Dict[str, Any]) -> Dic
         "odds_display": recommendation.get("odds_display"),
         "edge_score": _safe_float(recommendation.get("display_edge_score"), _safe_float(recommendation.get("edge_score"))),
         "first_logged_at": recommendation.get("first_logged_at"),
+        # The last line the market showed while the pick was still live. `line`
+        # stays the published price and is what the result settles against; this
+        # is only ever the comparison.
+        "closing_line": _safe_float(recommendation.get("current_line")),
+        "closing_odds": _safe_float(recommendation.get("current_odds")),
     }
 
 
@@ -5310,12 +5516,23 @@ def _queue_results_recap_payload(
                 continue
 
             if alert_kind == "tracker" and not existing_recommendation.get("first_logged_at"):
-                tracked[recommendation_key] = {
+                existing_recommendation = {
                     **existing_recommendation,
                     **recommendation,
                     "first_logged_at": recommendation.get("first_logged_at") or generated_at,
                     "first_alert_kind": "tracker",
                 }
+                tracked[recommendation_key] = existing_recommendation
+
+            # The published price is first-copy-wins, but the market keeps
+            # moving after we publish, and the last number it showed is the
+            # whole comparison. Tracked separately so following the market can
+            # never overwrite what we actually stated.
+            closing_line = _safe_float(recommendation.get("closing_line"))
+            if closing_line is not None:
+                existing_recommendation["closing_line"] = closing_line
+                existing_recommendation["closing_odds"] = _safe_float(recommendation.get("closing_odds"))
+                tracked[recommendation_key] = existing_recommendation
 
         ordered_recommendations = sorted(
             tracked.values(),
@@ -5403,6 +5620,332 @@ def _compute_tracker_delta(
     }
 
 
+# Worsening order, so a change can be read as better or worse rather than just
+# different. Anything unrecognised sorts as "unknown" and is reported without a
+# direction.
+INJURY_STATUS_SEVERITY = {
+    "available": 0,
+    "probable": 1,
+    "questionable": 2,
+    "doubtful": 3,
+    "out": 4,
+}
+EDGE_INJURY_ALERT_SCORE_DELTA = max(
+    0.0, _env_float("EDGE_SCORE_DISCORD_INJURY_ALERT_SCORE_DELTA", 8.0)
+)
+
+
+def _normalize_injury_status(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _injury_status_severity(value: Any) -> Optional[int]:
+    return INJURY_STATUS_SEVERITY.get(_normalize_injury_status(value))
+
+
+def _injury_player_key(value: Any) -> str:
+    """Match the same spelling rule the rest of this module keys names by."""
+    return _recommendation_player_name_key({"player_name": value})
+
+
+def _build_injury_context(injury_report: Any) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Per-game player statuses, keyed by game date.
+
+    One official report PDF spans more than one date -- the 2026-10-21 11:30PM
+    report carried all eleven games on the 21st and both on the 22nd -- and the
+    parser already tags each entry with its own game_date, so this needs no
+    extra fetch to cover tomorrow.
+    """
+    context: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if not isinstance(injury_report, dict):
+        return context
+
+    report_timestamp = str(injury_report.get("report_timestamp_et") or "").strip()
+    for game in injury_report.get("games", []) or []:
+        if not isinstance(game, dict):
+            continue
+        game_date = _normalize_game_date(game.get("game_date"))
+        game_id = str(game.get("game_id") or "").strip()
+        if not game_date or not game_id:
+            continue
+
+        statuses: Dict[str, str] = {}
+        reasons: Dict[str, str] = {}
+        teams_by_player: Dict[str, str] = {}
+        teams = game.get("teams")
+        if not isinstance(teams, dict):
+            continue
+        for team_key, team in teams.items():
+            if not isinstance(team, dict):
+                continue
+            team_tricode = str(team.get("tricode") or team_key or "").strip().upper()
+            for player in team.get("players", []) or []:
+                if not isinstance(player, dict):
+                    continue
+                player_key = _injury_player_key(player.get("player_name"))
+                if not player_key:
+                    continue
+                statuses[player_key] = _normalize_injury_status(player.get("current_status"))
+                reasons[player_key] = str(player.get("reason") or "").strip()
+                teams_by_player[player_key] = team_tricode
+
+        context.setdefault(game_date, {})[game_id] = {
+            "report_timestamp_et": report_timestamp,
+            "statuses": statuses,
+            "reasons": reasons,
+            "teams": teams_by_player,
+        }
+    return context
+
+
+def _injury_status_transitions(
+    previous_game: Any,
+    current_game: Any,
+) -> List[Dict[str, Any]]:
+    """Every player whose status moved between two reports for one game."""
+    if not isinstance(previous_game, dict) or not isinstance(current_game, dict):
+        return []
+    previous_statuses = previous_game.get("statuses")
+    current_statuses = current_game.get("statuses")
+    if not isinstance(previous_statuses, dict) or not isinstance(current_statuses, dict):
+        return []
+
+    transitions = []
+    for player_key in sorted(set(previous_statuses) | set(current_statuses)):
+        # A player leaving the report entirely has effectively cleared it, which
+        # is a real improvement and worth reporting as one.
+        before = previous_statuses.get(player_key, "available")
+        after = current_statuses.get(player_key, "available")
+        if before == after:
+            continue
+        before_rank = _injury_status_severity(before)
+        after_rank = _injury_status_severity(after)
+        if before_rank is None or after_rank is None:
+            direction = "unknown"
+        elif after_rank > before_rank:
+            direction = "worse"
+        else:
+            direction = "better"
+        transitions.append({
+            "player_key": player_key,
+            "from_status": before,
+            "to_status": after,
+            "direction": direction,
+            "reason": (current_game.get("reasons") or {}).get(player_key, ""),
+            "team": (current_game.get("teams") or {}).get(player_key)
+                    or (previous_game.get("teams") or {}).get(player_key)
+                    or "",
+        })
+    return transitions
+
+
+def _injury_changes_for_picks(
+    recommendations: List[Dict[str, Any]],
+    *,
+    previous_context: Any,
+    current_context: Any,
+) -> List[Dict[str, Any]]:
+    """Injury moves that bear on a published pick, read against the pick's side.
+
+    A teammate ruled out opens a usage vacuum, which lifts the projection: good
+    news for an Over and bad news for an Under. Reporting the roster change
+    without resolving it against the side would leave the reader to work out
+    which, and get it wrong half the time.
+    """
+    if not isinstance(previous_context, dict) or not isinstance(current_context, dict):
+        return []
+
+    changes = []
+    for recommendation in recommendations:
+        if not isinstance(recommendation, dict):
+            continue
+        game_id = str(recommendation.get("game_id") or "").strip()
+        if not game_id:
+            continue
+        previous_game = previous_context.get(game_id)
+        current_game = current_context.get(game_id)
+        if not isinstance(previous_game, dict) or not isinstance(current_game, dict):
+            continue
+        previous_stamp = str(previous_game.get("report_timestamp_et") or "")
+        current_stamp = str(current_game.get("report_timestamp_et") or "")
+        if previous_stamp and current_stamp and previous_stamp == current_stamp:
+            continue
+
+        subject_key = _injury_player_key(recommendation.get("player_name"))
+        side = str(recommendation.get("pick") or "").strip().lower()
+        logged_score = _safe_float(
+            recommendation.get("display_edge_score"), _safe_float(recommendation.get("edge_score"))
+        )
+        current_score = _safe_float(recommendation.get("current_edge_score"))
+        score_delta = (
+            round(current_score - logged_score, 1)
+            if current_score is not None and logged_score is not None
+            else None
+        )
+
+        for transition in _injury_status_transitions(previous_game, current_game):
+            is_subject = bool(subject_key) and transition["player_key"] == subject_key
+            ruled_out = _normalize_injury_status(transition["to_status"]) == "out"
+
+            if is_subject:
+                # The pick's own player. Out kills it outright; anything else
+                # worsening is the confidence drop.
+                effect = "dead" if ruled_out else (
+                    "weaker" if transition["direction"] == "worse"
+                    else "stronger" if transition["direction"] == "better" else "unclear"
+                )
+            elif transition["direction"] == "unknown" or side not in {"over", "under"}:
+                effect = "unclear"
+            else:
+                # A teammate getting worse frees up usage.
+                vacancy_opens = transition["direction"] == "worse"
+                if side == "over":
+                    effect = "stronger" if vacancy_opens else "weaker"
+                else:
+                    effect = "weaker" if vacancy_opens else "stronger"
+
+            changes.append({
+                "recommendation_key": recommendation.get("recommendation_key"),
+                "player_name": recommendation.get("player_name"),
+                "pick": side,
+                "pick_label": recommendation.get("pick_label"),
+                "stat_type": recommendation.get("stat_type"),
+                "stat_label": recommendation.get("stat_label"),
+                "line": _safe_float(recommendation.get("line")),
+                "game_id": game_id,
+                "game_date": _normalize_game_date(recommendation.get("game_date")),
+                "subject": transition["player_key"] == subject_key,
+                "changed_player": transition["player_key"],
+                "changed_team": transition["team"],
+                "from_status": transition["from_status"],
+                "to_status": transition["to_status"],
+                "direction": transition["direction"],
+                "reason": transition["reason"],
+                "effect": effect,
+                "report_timestamp_et": current_stamp,
+                "logged_edge_score": logged_score,
+                "current_edge_score": current_score,
+                "score_delta": score_delta,
+                "closing_line_text": _closing_line_value_text(recommendation),
+                "first_logged_at": recommendation.get("first_logged_at"),
+            })
+    return changes
+
+
+def _injury_change_key(change: Dict[str, Any]) -> str:
+    return "|".join(str(change.get(field) or "") for field in (
+        "recommendation_key", "changed_player", "from_status", "to_status", "report_timestamp_et",
+    ))
+
+
+def _injury_change_is_alertable(change: Dict[str, Any]) -> bool:
+    """Which changes earn a new message rather than a quiet tracker edit.
+
+    The tracker always records the move. Pinging the alert channel is reserved
+    for a pick whose own player is out, or a score move big enough to change
+    whether the pick still belongs on the board -- without that split, a ten
+    pick two-date slate would turn every report refresh into a storm.
+    """
+    if change.get("effect") == "dead":
+        return True
+    score_delta = change.get("score_delta")
+    if score_delta is None:
+        # No live score to compare against means the pick has left the board;
+        # a subject-player change is still worth stating.
+        return bool(change.get("subject")) and change.get("direction") == "worse"
+    return abs(float(score_delta)) >= EDGE_INJURY_ALERT_SCORE_DELTA
+
+
+def _closing_line_value(recommendation: Any) -> Dict[str, Any]:
+    """How far the market moved past the price we published.
+
+    The sign convention is the one `_compute_line_movement_context` already
+    uses: for an Over the line moving *up* is favorable, because we took the
+    lower number; for an Under it is the reverse. Anchored on the published
+    price rather than on the market open, since the claim being made is about
+    this pick, not about the market's own drift.
+    """
+    blank = {"available": False, "locked_line": None, "current_line": None, "clv": None, "beat_close": False}
+    if not isinstance(recommendation, dict):
+        return blank
+
+    locked_line = _safe_float(recommendation.get("line"))
+    # Live ledger entries carry `current_line`; a queued recap entry has frozen
+    # the same number as `closing_line`.
+    current_line = _safe_float(recommendation.get("current_line"))
+    if current_line is None:
+        current_line = _safe_float(recommendation.get("closing_line"))
+    if locked_line is None or current_line is None:
+        return {**blank, "locked_line": locked_line, "current_line": current_line}
+
+    side = str(recommendation.get("pick") or "").strip().lower()
+    if side == "over":
+        clv = current_line - locked_line
+    elif side == "under":
+        clv = locked_line - current_line
+    else:
+        return {**blank, "locked_line": locked_line, "current_line": current_line}
+
+    return {
+        "available": True,
+        "locked_line": locked_line,
+        "current_line": current_line,
+        "clv": round(clv, 2),
+        "beat_close": clv > 0,
+    }
+
+
+def _closing_line_value_text(recommendation: Any) -> str:
+    """One trailing clause for a tracker or recap line, or "" when silent."""
+    value = _closing_line_value(recommendation)
+    locked_line = value.get("locked_line")
+    if locked_line is None:
+        return ""
+    if not value.get("available"):
+        # The book has pulled the prop. Saying so is more use than a blank,
+        # because it tells you the locked number is no longer gettable.
+        return "line pulled"
+
+    clv = value.get("clv") or 0.0
+    current_line = value.get("current_line")
+    if abs(clv) < 0.01:
+        return f"line held {_format_line(current_line)}"
+    marker = " ✅" if clv > 0 else ""
+    return f"now {_format_line(current_line)} · CLV {clv:+.1f}{marker}"
+
+
+def _format_line(value: Any) -> str:
+    number = _safe_float(value)
+    if number is None:
+        return "—"
+    return f"{number:.1f}"
+
+
+def _closing_line_value_summary(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Beat-the-close rate across a slate.
+
+    Over a sample this says more about whether the model is early than the
+    win rate does: a pick can lose and still have been the right price.
+    """
+    measured = [
+        _closing_line_value(recommendation)
+        for recommendation in recommendations
+        if isinstance(recommendation, dict)
+    ]
+    measured = [value for value in measured if value.get("available")]
+    if not measured:
+        return {"measured": 0, "beat_close": 0, "beat_close_rate": None, "average_clv": None}
+
+    beat = sum(1 for value in measured if value.get("beat_close"))
+    total_clv = sum(float(value.get("clv") or 0.0) for value in measured)
+    return {
+        "measured": len(measured),
+        "beat_close": beat,
+        "beat_close_rate": round(beat / len(measured), 3),
+        "average_clv": round(total_clv / len(measured), 2),
+    }
+
+
 def _tracker_running_recommendations(
     state: Dict[str, Any],
     *,
@@ -5459,8 +6002,35 @@ def _tracker_running_recommendations(
     recommendations = list(merged_snapshot.values())
     first_sent_at = existing_entry.get("first_sent_at") or existing_entry.get("last_sent_at")
     for recommendation in recommendations:
-        if isinstance(recommendation, dict) and not recommendation.get("first_logged_at") and first_sent_at:
+        if not isinstance(recommendation, dict):
+            continue
+        if not recommendation.get("first_logged_at") and first_sent_at:
             recommendation["first_logged_at"] = first_sent_at
+        # `line` is the price this pick was published at and stays that way:
+        # the stored snapshot deliberately wins over the live candidate above,
+        # which is what makes the ledger honest about what was bettable and what
+        # grading settles against. The market's current number rides alongside
+        # it so the two can be compared without displacing it. A pick the book
+        # has since pulled has no current line at all, and says so rather than
+        # implying it still trades.
+        live = candidate_snapshot.get(str(recommendation.get("recommendation_key") or "").strip())
+        if isinstance(live, dict):
+            recommendation["current_line"] = live.get("line")
+            recommendation["current_odds"] = live.get("odds")
+            recommendation["current_odds_display"] = live.get("odds_display")
+            # Carried for the same reason as the line: an injury that moves the
+            # projection shows up here, and quoting the real move is better than
+            # describing the roster change and leaving the reader to guess.
+            recommendation["current_edge_score"] = _safe_float(
+                live.get("display_edge_score"), _safe_float(live.get("edge_score"))
+            )
+            recommendation["current_confidence"] = _ranking_confidence(live) or None
+        else:
+            recommendation["current_line"] = None
+            recommendation["current_odds"] = None
+            recommendation["current_odds_display"] = None
+            recommendation["current_edge_score"] = None
+            recommendation["current_confidence"] = None
     recommendations.sort(
         key=lambda recommendation: (
             str(recommendation.get("first_logged_at") or ""),
@@ -6035,10 +6605,15 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
         final_text = f"{final_value:.1f}" if isinstance(final_value, (float, int)) else (recommendation.get("result_note") or "Void")
         tracked_at = _format_tracker_time(recommendation.get("first_logged_at") or recommendation.get("first_alerted_at"))
         status_emoji = _result_status_emoji(str(recommendation.get("result_status") or ""))
+        # The result settles against the line we published. Where the market
+        # closed sits beside it, because a pick can win at our number and lose
+        # at the close, or the reverse, and both facts are worth keeping.
+        clv_text = _closing_line_value_text(recommendation)
+        clv_suffix = f" | {clv_text}" if clv_text else ""
         lines.append(
             f"**#{display_rank} {status_emoji} {recommendation.get('player_name')}** — "
             f"{stat_label} {recommendation.get('pick_label')} {float(recommendation.get('line') or 0.0):.1f}\n"
-            f"Tracked: {tracked_at} | Final: {final_text} | {_discord_book_label(recommendation)}"
+            f"Tracked: {tracked_at} | Final: {final_text} | {_discord_book_label(recommendation)}{clv_suffix}"
         )
 
     recap_date = _normalize_game_date(recap_payload.get("game_date"))
@@ -6060,6 +6635,20 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
             "inline": True,
         },
     ]
+    # Beat-the-close rate, beside the win/loss record. Over a sample it is the
+    # better read on whether the model is early: a pick can lose and still have
+    # been the right price when it was published.
+    clv_summary = _closing_line_value_summary(graded_results.get("recommendations", []))
+    if clv_summary.get("measured"):
+        beat = clv_summary["beat_close"]
+        measured = clv_summary["measured"]
+        average_clv = clv_summary.get("average_clv")
+        average_text = f" · avg {average_clv:+.2f}" if average_clv is not None else ""
+        fields.append({
+            "name": "Beat the close",
+            "value": f"{beat}/{measured}{average_text}",
+            "inline": True,
+        })
     unresolved_count = int(summary.get("unresolved_count", 0) or 0)
     if unresolved_count:
         fields.append({
@@ -6183,12 +6772,59 @@ def _discord_message_content(
     return text[:1900]
 
 
+def _book_embed_char_budget(group_count: int, *, header_chars: int = 0) -> int:
+    """Split the message's embed budget across however many book embeds there are."""
+    groups = max(1, int(group_count or 1))
+    available = max(1200, DISCORD_MESSAGE_EMBED_CHAR_BUDGET - max(0, header_chars))
+    return max(600, min(DISCORD_BOOK_EMBED_CHAR_BUDGET, available // groups))
+
+
+def _fit_embed_description(
+    lines: List[str],
+    *,
+    budget: int,
+    overflow_label: str,
+    already_overflowing: int = 0,
+) -> Tuple[str, int]:
+    """Join lines to fit a char budget, dropping whole entries and saying so.
+
+    The old `"\\n\\n".join(lines)[:3800]` cut mid-entry and silently: the
+    tracker never truncates its *list*, so a long ledger lost its tail with no
+    marker at all, and a header plus two 3800-char book embeds is 7600 against
+    Discord's 6000-per-message ceiling. Dropping whole entries and counting
+    them keeps the message both legal and honest.
+    """
+    kept: List[str] = []
+    length = 0
+    dropped = 0
+    # Reserve room for the marker so adding it can never re-breach the budget.
+    reserve = len(overflow_label) + 48
+    for index, line in enumerate(lines):
+        projected = length + len(line) + (2 if kept else 0)
+        remaining = len(lines) - index
+        limit = budget - reserve if remaining > 1 or dropped else budget
+        if kept and projected > limit:
+            dropped = remaining
+            break
+        kept.append(line)
+        length = projected
+
+    total_overflow = dropped + max(0, already_overflowing)
+    if total_overflow:
+        kept.append(f"`+{total_overflow} more {overflow_label}`")
+    description = "\n\n".join(kept)
+    # A single entry longer than the whole budget is the only case left where a
+    # hard slice is unavoidable.
+    return description[:max(budget, 1)], total_overflow
+
+
 def _build_discord_book_embed(
     group: Dict[str, Any],
     *,
     alert_kind: str,
     change_lookup: Dict[str, Dict[str, Any]],
     channel_variant: str,
+    description_budget: int = DISCORD_BOOK_EMBED_CHAR_BUDGET,
 ) -> Dict[str, Any]:
     book_recommendations = group["recommendations"]
     lines = []
@@ -6211,9 +6847,14 @@ def _build_discord_book_embed(
             stat_token = str(recommendation.get("stat_type") or stat_label or "PROP").strip().upper()
             side_token = "O" if str(recommendation.get("pick") or "").lower() == "over" else "U"
             odds_text = _discord_tracker_odds_label(recommendation)
+            # The locked price first, then where the market went. A pick taken
+            # early and passed by the book is the model being right before the
+            # market was, and that is the part worth showing.
+            clv_text = _closing_line_value_text(recommendation)
+            clv_suffix = f" | {clv_text}" if clv_text else ""
             lines.append(
                 f"**{display_rank}. [{first_logged_at}] {player_name}** — "
-                f"{stat_token} {side_token}{line_text} | {odds_text} | SS {edge_text}"
+                f"{stat_token} {side_token}{line_text} | {odds_text} | SS {edge_text}{clv_suffix}"
             )
             continue
 
@@ -6233,30 +6874,135 @@ def _build_discord_book_embed(
             header = f"**{display_rank}. [{logged_at}] {player_name}**"
         else:
             header = f"**{display_rank}.** {player_name}"
+        # Confidence is component coverage, not a second opinion on the pick: a
+        # future-date prop has fewer components behind it by construction, and
+        # showing that is the difference between a thin read and a strong one.
+        confidence = _ranking_confidence(recommendation)
+        confidence_text = f" · confidence {confidence:.0f}%" if confidence else ""
         lines.append(
             f"{header} — "
             f"{stat_label} {pick_label} {line_text}\n"
-            f"{_discord_book_label(recommendation)} | Signal Score {edge_text}\n"
+            f"{_discord_book_label(recommendation)} | Signal Score {edge_text}{confidence_text}\n"
             f"{reason_prefix}Why: {why_summary}"
         )
 
+    suffix = {
+        "tracker": "in this tracker batch",
+        "preview": "logged for this slate",
+    }.get(channel_variant, "in this alert")
     overflow_count = max(0, int(group.get("total_count", 0)) - len(book_recommendations))
-    if overflow_count:
-        suffix = {
-            "tracker": "in this tracker batch",
-            "preview": "logged for this slate",
-        }.get(channel_variant, "in this alert")
-        lines.append(f"`+{overflow_count} more {group['sportsbook_label']} spot(s) {suffix}`")
+    description, trimmed_count = _fit_embed_description(
+        lines,
+        budget=description_budget,
+        overflow_label=f"{group['sportsbook_label']} spot(s) {suffix}",
+        already_overflowing=overflow_count,
+    )
 
     book_embed: Dict[str, Any] = {
         "title": group["sportsbook_label"],
-        "description": "\n\n".join(lines)[:3800],
+        "description": description,
         "color": BOOK_EMBED_COLORS.get(group["sportsbook"], 0x22C55E),
     }
     thumbnail_url = _sportsbook_logo_url(group["sportsbook"])
     if thumbnail_url:
         book_embed["thumbnail"] = {"url": thumbnail_url}
     return book_embed
+
+
+INJURY_EFFECT_HEADLINES = {
+    "dead": ("⛔", "Pick is dead"),
+    "weaker": ("⚠️", "Confidence drop"),
+    "stronger": ("✅", "Edge firmed"),
+    "unclear": ("ℹ️", "Injury update"),
+}
+
+
+def _injury_status_label(value: Any) -> str:
+    text = _normalize_injury_status(value)
+    return text.title() if text else "Unknown"
+
+
+def _build_discord_injury_payload(
+    payload: Dict[str, Any],
+    changes: List[Dict[str, Any]],
+    *,
+    slate_date: str,
+) -> Optional[Dict[str, Any]]:
+    """One message for the injury moves that bear on published picks."""
+    if not changes:
+        return None
+
+    severity_order = {"dead": 0, "weaker": 1, "stronger": 2, "unclear": 3}
+    ordered = sorted(
+        changes,
+        key=lambda change: (
+            severity_order.get(str(change.get("effect")), 9),
+            -abs(float(change.get("score_delta") or 0.0)),
+            str(change.get("player_name") or ""),
+        ),
+    )
+
+    lines = []
+    for change in ordered:
+        emoji, headline = INJURY_EFFECT_HEADLINES.get(
+            str(change.get("effect")), INJURY_EFFECT_HEADLINES["unclear"]
+        )
+        changed_player = str(change.get("changed_player") or "").title()
+        subject_note = "" if change.get("subject") else f" ({change.get('changed_team') or 'teammate'})"
+        reason = str(change.get("reason") or "").strip()
+        reason_note = f" — {reason}" if reason else ""
+
+        stat_label = _long_stat_label(change.get("stat_type"), change.get("stat_label"))
+        pick_label = change.get("pick_label") or _side_name(str(change.get("pick") or "").lower())
+        line_text = _format_line(change.get("line"))
+        logged_at = _format_tracker_time(change.get("first_logged_at"))
+
+        score_bits = []
+        logged_score = change.get("logged_edge_score")
+        current_score = change.get("current_edge_score")
+        if logged_score is not None and current_score is not None:
+            score_bits.append(f"Signal Score {logged_score:.1f} → {current_score:.1f}")
+            if current_score < EDGE_DISCORD_MIN_SIGNAL_SCORE <= logged_score:
+                score_bits.append("now below the alert bar")
+        elif current_score is None:
+            score_bits.append("no longer priced on the board")
+        closing_line_text = str(change.get("closing_line_text") or "").strip()
+        if closing_line_text:
+            score_bits.append(closing_line_text)
+
+        lines.append(
+            f"{emoji} **{headline}** — {changed_player}{subject_note}: "
+            f"{_injury_status_label(change.get('from_status'))} → "
+            f"{_injury_status_label(change.get('to_status'))}{reason_note}\n"
+            f"Pick: {change.get('player_name')} {stat_label} {pick_label} {line_text}"
+            f" · locked {logged_at}\n"
+            f"{' · '.join(score_bits) if score_bits else 'No score change recorded.'}"
+        )
+
+    description, _ = _fit_embed_description(
+        lines,
+        budget=DISCORD_BOOK_EMBED_CHAR_BUDGET,
+        overflow_label="injury change(s) for this slate",
+    )
+    headline_text = f"Injury report update • {slate_date or 'slate'}"
+    return {
+        "content": _discord_message_content(headline_text),
+        "username": "NBA Dashboard Injury Watch",
+        "embeds": [{
+            "title": headline_text,
+            "description": description,
+            "color": 0xF59E0B,
+            "timestamp": payload.get("generated_at"),
+            "fields": [{
+                "name": "Why you are seeing this",
+                "value": (
+                    "A pick was published before this report landed. The line it was "
+                    "locked at is unchanged; what moved is the injury picture behind it."
+                ),
+                "inline": False,
+            }],
+        }],
+    }
 
 
 def _build_discord_alert_payload(
@@ -6293,10 +7039,12 @@ def _build_discord_alert_payload(
     # The per-player figure is the slate-wide cap, not the per-snapshot one:
     # EDGE_DISCORD_PER_PLAYER_LIMIT governs a single alert, and quoting it
     # promised a limit the channel used to exceed across a day of refreshes.
+    # No rank cap is quoted any more: how many props fire is whatever clears the
+    # Signal Score bar, so promising a "top N" would misdescribe the channel.
     rules_text = (
-        f"Top {EDGE_DISCORD_MAX_RANK} props only, max {EDGE_DISCORD_PER_BOOK_LIMIT} per sportsbook, "
-        f"and max {EDGE_PLAYER_PROPS_PER_SLATE} per player per slate "
-        f"at Signal Score {threshold_text}+."
+        f"Every prop at Signal Score {threshold_text}+, "
+        f"one per game and max {EDGE_PLAYER_PROPS_PER_SLATE} per player per slate "
+        f"(max {EDGE_DISCORD_PER_BOOK_LIMIT} shown per sportsbook)."
     )
     books_summary = _changed_books_summary(grouped_books)
     visible_books = {
@@ -6393,6 +7141,8 @@ def _build_discord_alert_payload(
             "fields": summary_fields,
         })
 
+    header_chars = sum(len(str(embed.get("description") or "")) for embed in embeds)
+    book_budget = _book_embed_char_budget(len(grouped_books), header_chars=header_chars)
     for group in grouped_books:
         embeds.append(
             _build_discord_book_embed(
@@ -6400,6 +7150,7 @@ def _build_discord_alert_payload(
                 alert_kind=alert_kind,
                 change_lookup=change_lookup,
                 channel_variant=channel_variant,
+                description_budget=book_budget,
             )
         )
 
@@ -6483,6 +7234,10 @@ def _build_discord_tracker_payload(
             "fields": summary_fields,
         }
     ]
+    # The tracker never truncates its list, so without a budget a long ledger
+    # lost its tail inside the old description slice with nothing to show it.
+    tracker_header_chars = sum(len(str(embed.get("description") or "")) for embed in embeds)
+    tracker_budget = _book_embed_char_budget(len(grouped_books), header_chars=tracker_header_chars)
     for group in grouped_books:
         embeds.append(
             _build_discord_book_embed(
@@ -6490,6 +7245,7 @@ def _build_discord_tracker_payload(
                 alert_kind="opening",
                 change_lookup={},
                 channel_variant="tracker",
+                description_budget=tracker_budget,
             )
         )
 
@@ -6525,12 +7281,14 @@ def _build_discord_preview_payload(
     if not grouped_books:
         return None
 
+    preview_budget = _book_embed_char_budget(len(grouped_books))
     embeds = [
         _build_discord_book_embed(
             group,
             alert_kind="opening",
             change_lookup={},
             channel_variant="preview",
+            description_budget=preview_budget,
         )
         for group in grouped_books
     ]
@@ -6779,8 +7537,13 @@ def _cleanup_completed_discord_messages(state: Dict[str, Any], schedule_payload:
             remaining_messages_by_date[normalized_date] = remaining_channel_map
         elif normalized_date in messages_by_date:
             state_changed = True
+    # Pruned only after the sweep above has had its chance to delete, so a date
+    # is never dropped while it still owns messages that should come down.
+    pruned_messages_by_date = _prune_state_dates(remaining_messages_by_date, now_et=now)
+    if len(pruned_messages_by_date) != len(remaining_messages_by_date):
+        state_changed = True
     if state_changed:
-        state["discord_messages_by_date"] = remaining_messages_by_date
+        state["discord_messages_by_date"] = pruned_messages_by_date
     return {"deleted": deleted_count, "state_changed": state_changed}
 
 
@@ -6955,6 +7718,403 @@ def _sync_payload_to_supabase(payload: Dict[str, Any]) -> bool:
         return False
 
 
+def _process_injury_changes(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    published_recommendations: List[Dict[str, Any]],
+    current_injury_context: Dict[str, Dict[str, Any]],
+    refresh_label: str,
+) -> Dict[str, Any]:
+    """Diff this slate's injury report against the one its picks were scored on.
+
+    `report_timestamp_et` makes the no-op case free: when the report has not
+    been republished there is nothing to compare and this returns immediately.
+    """
+    outcome: Dict[str, Any] = {"sent": False, "changes": [], "state_changed": False}
+    if not isinstance(current_injury_context, dict) or not current_injury_context:
+        return outcome
+
+    context_by_date = state.get("injury_context_by_date")
+    if not isinstance(context_by_date, dict):
+        context_by_date = {}
+    previous_context = context_by_date.get(slate_date)
+
+    changes: List[Dict[str, Any]] = []
+    if isinstance(previous_context, dict) and previous_context:
+        changes = _injury_changes_for_picks(
+            published_recommendations,
+            previous_context=previous_context,
+            current_context=current_injury_context,
+        )
+
+    # Record the context before deciding whether to post: a send failure must
+    # not leave the next refresh re-reporting the same transition forever.
+    context_by_date[slate_date] = current_injury_context
+    state["injury_context_by_date"] = _prune_state_dates(context_by_date)
+    outcome["state_changed"] = True
+
+    if not changes:
+        return outcome
+
+    seen = state.get("injury_changes_seen_by_date")
+    if not isinstance(seen, dict):
+        seen = {}
+    date_seen = seen.get(slate_date)
+    if not isinstance(date_seen, dict):
+        date_seen = {}
+
+    fresh_changes = [
+        change for change in changes
+        if _injury_change_key(change) not in date_seen
+    ]
+    outcome["changes"] = fresh_changes
+    if not fresh_changes:
+        return outcome
+
+    for change in fresh_changes:
+        date_seen[_injury_change_key(change)] = payload.get("generated_at")
+    seen[slate_date] = date_seen
+    state["injury_changes_seen_by_date"] = _prune_state_dates(seen)
+
+    alertable = [change for change in fresh_changes if _injury_change_is_alertable(change)]
+    if not alertable:
+        # Still recorded, so the tracker edit on this pass tells the story
+        # without the channel being pinged for a marginal move.
+        return outcome
+
+    webhook_url = EDGE_SCORE_DISCORD_WEBHOOK_URL or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+    if not webhook_url or refresh_label not in DISCORD_ALERT_REFRESH_LABELS:
+        return outcome
+
+    injury_payload = _build_discord_injury_payload(payload, alertable, slate_date=slate_date)
+    if not injury_payload:
+        return outcome
+
+    try:
+        response = _post_discord_webhook(webhook_url, injury_payload)
+        outcome["sent"] = bool(response)
+        if response and isinstance(response, dict):
+            _store_discord_message_ref(
+                state,
+                slate_date=slate_date,
+                channel="injury",
+                message=response,
+                webhook_url=webhook_url,
+                alert_kind="injury",
+                sent_at=payload.get("generated_at"),
+                game_ids=sorted({
+                    str(change.get("game_id") or "").strip()
+                    for change in alertable
+                    if str(change.get("game_id") or "").strip()
+                }),
+            )
+    except Exception as exc:
+        logger.warning("Discord injury update failed (%s): %s", slate_date, exc)
+
+    return outcome
+
+
+def _publish_slate_date(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+    *,
+    slate_date: str,
+    notification_delta: Dict[str, Any],
+    display_recommendations: List[Dict[str, Any]],
+    refresh_label: str,
+    injury_context_for_date: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Publish one slate date's alert, tracker and preview, and persist its state.
+
+    Every state bucket this touches was already keyed by date; what it did not
+    have was a caller willing to visit more than one. The per-date payload copy
+    exists so the "Slate" field on each message names its own date instead of
+    the whole window.
+    """
+    date_payload = dict(payload)
+    date_payload["game_dates"] = [slate_date] if slate_date else []
+
+    official_recommendations = notification_delta.get("official_recommendations", [])
+    # The tracker intentionally backfills from the current official daily-props
+    # board, not from hidden overflow candidates outside the surfaced alert set.
+    tracker_delta = _compute_tracker_delta(
+        official_recommendations,
+        state,
+        slate_date=slate_date,
+        generated_at=payload["generated_at"],
+    )
+
+    result: Dict[str, Any] = {
+        "slate_date": slate_date,
+        "tracker_delta": tracker_delta,
+        "main_sent": False,
+        "tracker_sent": False,
+        "preview_sent": False,
+        "state_changed": False,
+    }
+
+    main_message_response: Optional[Dict[str, Any]] = None
+    tracker_message_response: Optional[Dict[str, Any]] = None
+    state_changed = False
+
+    tracker_running_recommendations = _tracker_running_recommendations(
+        state,
+        slate_date=slate_date,
+        tracker_delta=tracker_delta,
+    )
+    tracker_running_recommendations = _filter_tracker_ledger_recommendations(
+        tracker_running_recommendations,
+        slate_date=slate_date,
+    )
+    tracker_message_ref = _latest_discord_message_ref(
+        state,
+        slate_date=slate_date,
+        channel="tracker",
+    )
+    tracker_existing_message_id = str((tracker_message_ref or {}).get("message_id") or "").strip() or None
+    tracker_existing_webhook_url = str((tracker_message_ref or {}).get("webhook_url") or "").strip() or None
+    tracker_message_missing = bool(
+        EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+        and slate_date
+        and tracker_running_recommendations
+        and not tracker_existing_message_id
+    )
+
+    # Below-threshold preview. Only considered when nothing cleared the real
+    # alert bar *for this date* — a genuine alert on tonight's slate used to
+    # suppress tomorrow's preview entirely, because the test was global.
+    preview_message_response: Optional[Dict[str, Any]] = None
+    preview_recommendations: List[Dict[str, Any]] = []
+    preview_webhook_url = (
+        EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+    )
+    if EDGE_DISCORD_PREVIEW_ENABLED and not official_recommendations:
+        preview_recommendations = _filter_preview_recommendations([
+            recommendation for recommendation in display_recommendations
+            if _normalize_game_date(recommendation.get("game_date")) == slate_date
+        ])
+    preview_running_recommendations: List[Dict[str, Any]] = []
+    if slate_date and preview_recommendations:
+        preview_running_recommendations = _preview_running_recommendations(
+            state,
+            slate_date=slate_date,
+            preview_recommendations=preview_recommendations,
+            generated_at=payload["generated_at"],
+        )
+    preview_message_ref = _latest_discord_message_ref(
+        state,
+        slate_date=slate_date,
+        channel="preview",
+    )
+    preview_existing_message_id = str((preview_message_ref or {}).get("message_id") or "").strip() or None
+    preview_existing_webhook_url = str((preview_message_ref or {}).get("webhook_url") or "").strip() or None
+
+    if refresh_label in DISCORD_ALERT_REFRESH_LABELS and _has_discord_alert_target():
+        if EDGE_SCORE_DISCORD_WEBHOOK_URL and notification_delta.get("should_send"):
+            try:
+                main_message_response = _send_discord_webhook(
+                    date_payload,
+                    notification_delta,
+                    webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
+                    channel_variant="main",
+                )
+                result["main_sent"] = bool(main_message_response)
+            except Exception as exc:
+                logger.warning("Discord Edge Score webhook failed (%s): %s", slate_date, exc)
+        if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and (
+            tracker_delta.get("should_send") or tracker_message_missing
+        ):
+            try:
+                tracker_message_response = _send_discord_webhook(
+                    date_payload,
+                    tracker_delta,
+                    webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
+                    channel_variant="tracker",
+                    existing_message_id=tracker_existing_message_id,
+                    existing_message_webhook_url=tracker_existing_webhook_url,
+                    running_recommendations=tracker_running_recommendations,
+                )
+                result["tracker_sent"] = bool(tracker_message_response)
+            except Exception as exc:
+                logger.warning("Discord Edge Score tracker webhook failed (%s): %s", slate_date, exc)
+        if preview_running_recommendations and preview_webhook_url and slate_date:
+            try:
+                preview_message_response = _send_discord_webhook(
+                    date_payload,
+                    {},
+                    webhook_url=preview_webhook_url,
+                    channel_variant="preview",
+                    existing_message_id=preview_existing_message_id,
+                    existing_message_webhook_url=preview_existing_webhook_url,
+                    running_recommendations=preview_running_recommendations,
+                )
+                result["preview_sent"] = bool(preview_message_response)
+            except Exception as exc:
+                logger.warning("Discord Edge Score preview webhook failed (%s): %s", slate_date, exc)
+
+    if result["preview_sent"] and preview_message_response:
+        if _store_discord_message_ref(
+            state,
+            slate_date=slate_date,
+            channel="preview",
+            message=preview_message_response,
+            webhook_url=preview_webhook_url,
+            alert_kind="preview",
+            sent_at=payload["generated_at"],
+            game_ids=_recommendation_game_ids(preview_running_recommendations),
+        ):
+            state_changed = True
+
+        preview_state_by_date = state.get("discord_preview_state_by_date", {})
+        if not isinstance(preview_state_by_date, dict):
+            preview_state_by_date = {}
+        preview_date_state = preview_state_by_date.get(slate_date, {})
+        if not isinstance(preview_date_state, dict):
+            preview_date_state = {}
+        preview_date_state["sent_snapshot"] = _tracker_state_snapshot_for_recommendations(
+            preview_running_recommendations
+        )
+        preview_date_state.setdefault("first_sent_at", payload["generated_at"])
+        preview_date_state["last_sent_at"] = payload["generated_at"]
+        preview_state_by_date[slate_date] = preview_date_state
+        state["discord_preview_state_by_date"] = preview_state_by_date
+        state_changed = True
+
+    if result["main_sent"]:
+        alert_state_by_date = state.get("discord_alert_state_by_date", {})
+        if not isinstance(alert_state_by_date, dict):
+            alert_state_by_date = {}
+        date_state = alert_state_by_date.get(slate_date, {}) if slate_date else {}
+        if not isinstance(date_state, dict):
+            date_state = {}
+
+        date_state["last_sent_at"] = payload["generated_at"]
+        date_state["last_sent_snapshot"] = notification_delta.get("current_snapshot", {})
+        existing_sent_concepts = notification_delta.get(
+            "sent_concept_snapshot",
+            date_state.get("sent_concept_snapshot", {}),
+        )
+        date_state["sent_concept_snapshot"] = _merge_discord_sent_concepts(
+            existing_sent_concepts,
+            notification_delta.get("send_recommendations", []),
+            sent_at=payload["generated_at"],
+        )
+        if notification_delta.get("alert_kind") == "opening":
+            date_state["opening_sent_at"] = payload["generated_at"]
+        if notification_delta.get("alert_kind") == "pre_tip":
+            date_state.setdefault("opening_sent_at", payload["generated_at"])
+            date_state["pre_tip_sent_at"] = payload["generated_at"]
+
+        if slate_date:
+            alert_state_by_date[slate_date] = date_state
+            state["discord_alert_state_by_date"] = alert_state_by_date
+            state_changed = True
+
+        if slate_date and isinstance(main_message_response, dict):
+            if _store_discord_message_ref(
+                state,
+                slate_date=slate_date,
+                channel="main",
+                message=main_message_response,
+                webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
+                alert_kind=notification_delta.get("alert_kind", "update"),
+                sent_at=payload["generated_at"],
+                game_ids=_recommendation_game_ids(notification_delta.get("send_recommendations", [])),
+            ):
+                state_changed = True
+
+    if result["tracker_sent"] and slate_date:
+        tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
+        if not isinstance(tracker_state_by_date, dict):
+            tracker_state_by_date = {}
+        tracker_date_state = tracker_state_by_date.get(slate_date, {})
+        if not isinstance(tracker_date_state, dict):
+            tracker_date_state = {}
+        tracker_date_state["sent_snapshot"] = _tracker_state_snapshot_for_recommendations(
+            tracker_running_recommendations
+        )
+        tracker_date_state.setdefault("first_sent_at", payload["generated_at"])
+        tracker_date_state["last_sent_at"] = payload["generated_at"]
+        tracker_state_by_date[slate_date] = tracker_date_state
+        state["discord_tracker_state_by_date"] = tracker_state_by_date
+        state_changed = True
+
+        if isinstance(tracker_message_response, dict):
+            if _store_discord_message_ref(
+                state,
+                slate_date=slate_date,
+                channel="tracker",
+                message=tracker_message_response,
+                webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
+                alert_kind="tracker",
+                sent_at=payload["generated_at"],
+                game_ids=_recommendation_game_ids(tracker_running_recommendations),
+            ):
+                state_changed = True
+
+    tracker_visible_sent = bool(
+        result["tracker_sent"]
+        or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and result["main_sent"])
+    )
+    # Grade the ledger that was rendered, not the delta that fed it. Queueing
+    # tracker_delta["new_recommendations"] made the recap a parallel list: a
+    # pick admitted by the delta but dropped before render was still graded, so
+    # results carried props the tracker never stated. Reading the same list the
+    # message was built from makes that divergence unrepresentable. Queueing is
+    # keyed by recommendation_key and keeps the first copy of each pick, so
+    # re-queueing the whole ledger every send is idempotent, and it backfills
+    # any pick that was rendered but missed the queue earlier in the slate.
+    if tracker_visible_sent and tracker_running_recommendations:
+        _queue_results_recap_payload(
+            state,
+            tracker_running_recommendations,
+            generated_at=payload["generated_at"],
+            refresh_label=refresh_label,
+            alert_kind="tracker",
+        )
+        state_changed = True
+
+    # Anything the channel published gets graded, including previews. Queueing
+    # only tracker picks meant a slate where nothing cleared the alert bar was
+    # never recapped at all: the previews went out, the games played, and no
+    # result ever came back for them.
+    if result["preview_sent"] and preview_running_recommendations:
+        _queue_results_recap_payload(
+            state,
+            preview_running_recommendations,
+            generated_at=payload["generated_at"],
+            refresh_label=refresh_label,
+            alert_kind="preview",
+        )
+        state_changed = True
+
+    # Injury moves against picks this channel has already published. The point
+    # of publishing early is time; the risk is that the facts move underneath
+    # the pick, so this closes that loop rather than suppressing early picks.
+    published_for_injury_watch = tracker_running_recommendations or preview_running_recommendations
+    if slate_date and published_for_injury_watch and injury_context_for_date:
+        injury_result = _process_injury_changes(
+            payload,
+            state,
+            slate_date=slate_date,
+            published_recommendations=published_for_injury_watch,
+            current_injury_context=injury_context_for_date,
+            refresh_label=refresh_label,
+        )
+        result["injury_sent"] = injury_result.get("sent", False)
+        result["injury_changes"] = injury_result.get("changes", [])
+        state_changed = bool(state_changed or injury_result.get("state_changed"))
+
+    result["state_changed"] = state_changed
+    result["tracker_running_recommendations"] = tracker_running_recommendations
+    result["preview_running_recommendations"] = preview_running_recommendations
+    return result
+
+
 def run_edge_score_refresh(
     refresh_label: str = "manual",
     current_players_data: Optional[Dict[str, Any]] = None,
@@ -7029,6 +8189,9 @@ def run_edge_score_refresh(
 
     active_entries = []
     active_teams = set(schedule_context.get("active_teams") or [])
+    active_dates = schedule_context["active_dates"]
+    games_by_team = schedule_context.get("games_by_team") or {}
+    opponent_by_team_date = schedule_context.get("opponent_by_team_date") or {}
     for player in master_feed:
         if not isinstance(player, dict):
             continue
@@ -7037,53 +8200,73 @@ def run_edge_score_refresh(
             continue
 
         player_id = str(player.get("id"))
-        game = schedule_context["game_by_team"].get(team, {})
-        game_date = _normalize_game_date(game.get("game_date")) or ""
-
-        base_props = _merge_props_trees(
-            _normalize_props_tree_for_game_date(
-                player.get("props_by_date", {}),
-                target_game_date=game_date,
-                active_dates=schedule_context["active_dates"],
-            ),
-            _normalize_props_tree_for_game_date(
-                player.get("props", {}),
-                target_game_date=game_date,
-                active_dates=schedule_context["active_dates"],
-            ),
-        )
-        merged_props = _merge_props_trees(
-            base_props,
-            _normalize_props_tree_for_game_date(
-                overlay_props_index.get(player_id, {}),
-                target_game_date=game_date,
-                active_dates=schedule_context["active_dates"],
-            ),
-        )
-        if not merged_props:
+        # One entry per game, not per player: a team on a back-to-back has two
+        # games inside the window and each carries its own line, opponent and
+        # rest situation. Keyed per game, recommendation_key already separates
+        # them, so nothing downstream has to know this happened.
+        player_games = games_by_team.get(team) or []
+        if not player_games:
             continue
+        # Blended once per player rather than once per game — the blend reads
+        # prior-season history, which does not vary by tonight's opponent.
+        blended_player = None
 
-        if not game_date:
-            for book_map in merged_props.values():
-                for prop in book_map.values():
-                    if prop.get("game_date"):
-                        game_date = _normalize_game_date(prop.get("game_date"))
+        for game in player_games:
+            game_date = _normalize_game_date(game.get("game_date")) or ""
+
+            base_props = _merge_props_trees(
+                _normalize_props_tree_for_game_date(
+                    player.get("props_by_date", {}),
+                    target_game_date=game_date,
+                    active_dates=active_dates,
+                ),
+                _normalize_props_tree_for_game_date(
+                    player.get("props", {}),
+                    target_game_date=game_date,
+                    active_dates=active_dates,
+                ),
+            )
+            merged_props = _merge_props_trees(
+                base_props,
+                _normalize_props_tree_for_game_date(
+                    overlay_props_index.get(player_id, {}),
+                    target_game_date=game_date,
+                    active_dates=active_dates,
+                ),
+            )
+            if not merged_props:
+                continue
+
+            if not game_date:
+                for book_map in merged_props.values():
+                    for prop in book_map.values():
+                        if prop.get("game_date"):
+                            game_date = _normalize_game_date(prop.get("game_date"))
+                            break
+                    if game_date:
                         break
-                if game_date:
-                    break
+            # With one active date an undated prop is unambiguous. With several
+            # it would attach to whichever game happened to be iterated first,
+            # so it is dropped instead of guessed.
+            if not game_date and len(active_dates) > 1:
+                continue
 
-        active_entries.append({
-            # Blend prior-season history in once, here, so every component
-            # downstream reads a player view that is never a placeholder zero.
-            "player": _apply_prior_season_history(player),
-            "team": team,
-            "props": merged_props,
-            "game_id": game.get("game_id"),
-            "game_date": game_date,
-            "game_time_et": game.get("game_time_et"),
-            "opponent": schedule_context["opponent_by_team"].get(team),
-            "game_context": game,
-        })
+            if blended_player is None:
+                blended_player = _apply_prior_season_history(player)
+
+            active_entries.append({
+                "player": blended_player,
+                "team": team,
+                "props": merged_props,
+                "game_id": game.get("game_id"),
+                "game_date": game_date,
+                "game_time_et": game.get("game_time_et"),
+                "opponent": (
+                    opponent_by_team_date.get((team, game_date))
+                    or schedule_context["opponent_by_team"].get(team)
+                ),
+                "game_context": game,
+            })
 
     style_cache = {
         int(entry["player"].get("id")): _build_style_vector(entry["player"])
@@ -7137,24 +8320,22 @@ def run_edge_score_refresh(
         candidate for candidate in candidates
         if candidate.get("eligibility_blocked")
     ]
-    top_recommendations = _diversify_candidates(
+    top_recommendations = _diversify_candidates_by_date(
         eligible_candidates,
         EDGE_LIMIT,
         per_player_limit=EDGE_TOP_PER_PLAYER_LIMIT,
         per_game_limit=EDGE_TOP_PER_GAME_LIMIT,
         prevent_component_overlap=True,
     )
-    blocked_recommendations = _diversify_candidates(
+    blocked_recommendations = _diversify_candidates_by_date(
         blocked_candidates,
         EDGE_LIMIT,
         per_player_limit=EDGE_TOP_PER_PLAYER_LIMIT,
         per_game_limit=EDGE_TOP_PER_GAME_LIMIT,
         prevent_component_overlap=True,
     )
-    for rank, recommendation in enumerate(top_recommendations, start=1):
-        recommendation["rank"] = rank
-    for blocked_rank, recommendation in enumerate(blocked_recommendations, start=1):
-        recommendation["blocked_rank"] = blocked_rank
+    _assign_board_ranks(top_recommendations)
+    _assign_board_ranks(blocked_recommendations, field="blocked_rank")
     sportsbook_boards = _build_sportsbook_boards(eligible_candidates, EDGE_SPORTSBOOK_BOARD_LIMIT)
     blocked_stale_count = sum(
         1
@@ -7167,8 +8348,36 @@ def run_edge_score_refresh(
         if candidate.get("eligibility_block_reason") == "blocked_promotion_under"
     )
 
-    notification_delta = _compute_notification_delta(top_recommendations, state, refresh_label)
-    official_recommendations = notification_delta.get("official_recommendations", [])
+    # One delta per slate date. _compute_notification_delta already derives its
+    # slate_date from the recommendations it is handed, so feeding it a single
+    # date's board is all that is needed — the collapse was never in the delta,
+    # only in the caller that passed it everything at once.
+    slate_board_dates = sorted({
+        _normalize_game_date(recommendation.get("game_date"))
+        for recommendation in top_recommendations
+        if _normalize_game_date(recommendation.get("game_date"))
+    })
+    notification_delta_by_date: Dict[str, Dict[str, Any]] = {
+        board_date: _compute_notification_delta(
+            [
+                recommendation for recommendation in top_recommendations
+                if _normalize_game_date(recommendation.get("game_date")) == board_date
+            ],
+            state,
+            refresh_label,
+        )
+        for board_date in slate_board_dates
+    }
+    primary_slate_date = slate_board_dates[0] if slate_board_dates else ""
+    notification_delta = (
+        notification_delta_by_date.get(primary_slate_date)
+        or _compute_notification_delta(top_recommendations, state, refresh_label)
+    )
+    official_recommendations = [
+        recommendation
+        for board_date in slate_board_dates
+        for recommendation in notification_delta_by_date[board_date].get("official_recommendations", [])
+    ]
     display_recommendations = top_recommendations
     display_sportsbook_boards = sportsbook_boards
     preserved_board_generated_at = None
@@ -7193,7 +8402,15 @@ def run_edge_score_refresh(
         "refresh_label": refresh_label,
         "game_dates": sorted({entry["game_date"] for entry in active_entries if entry.get("game_date")}),
         "summary": {
-            "active_players": len(active_entries),
+            # Distinct players, not entries: a team on a back-to-back now
+            # contributes one entry per game, so len(active_entries) would read
+            # as a roster that grew overnight.
+            "active_players": len({
+                str(entry["player"].get("id"))
+                for entry in active_entries
+                if entry.get("player")
+            }),
+            "active_player_games": len(active_entries),
             "candidate_count": len(candidates),
             "eligible_candidate_count": len(eligible_candidates),
             "blocked_candidate_count": len(blocked_candidates),
@@ -7257,261 +8474,75 @@ def run_edge_score_refresh(
             },
         },
     }
-    # The tracker intentionally backfills from the current official daily-props board,
-    # not from hidden overflow candidates outside the surfaced alert set.
-    tracker_delta = _compute_tracker_delta(
-        notification_delta.get("official_recommendations", []),
-        state,
-        slate_date=notification_delta.get("slate_date", ""),
-        generated_at=payload["generated_at"],
-    )
-    payload["notification"]["tracker_new_count"] = len(tracker_delta.get("new_recommendations", []))
+    # One publish pass per slate date, nearest first, so tonight's alert lands
+    # in the channel above tomorrow's. Every state bucket these touch was
+    # already keyed by date; the collapse was only ever in this caller.
+    publish_dates = sorted({
+        *slate_board_dates,
+        *(
+            _normalize_game_date(recommendation.get("game_date"))
+            for recommendation in display_recommendations
+            if _normalize_game_date(recommendation.get("game_date"))
+        ),
+    })
+    empty_notification_delta = _compute_notification_delta([], state, refresh_label)
+    # One report PDF spans more than one date, so this covers every slate being
+    # published without a second fetch.
+    injury_context = _build_injury_context(injury_report)
+    publish_results = [
+        _publish_slate_date(
+            payload,
+            state,
+            slate_date=board_date,
+            notification_delta=notification_delta_by_date.get(board_date, empty_notification_delta),
+            display_recommendations=display_recommendations,
+            refresh_label=refresh_label,
+            injury_context_for_date=injury_context.get(board_date),
+        )
+        for board_date in publish_dates
+    ]
 
+    discord_main_sent = any(result["main_sent"] for result in publish_results)
+    discord_tracker_sent = any(result["tracker_sent"] for result in publish_results)
+    discord_preview_sent = any(result["preview_sent"] for result in publish_results)
+    discord_injury_sent = any(result.get("injury_sent") for result in publish_results)
+    discord_sent = bool(
+        discord_main_sent or discord_tracker_sent or discord_preview_sent or discord_injury_sent
+    )
+    state_changed = bool(recap_result.get("state_changed")) or any(
+        result["state_changed"] for result in publish_results
+    )
+    slate_date = primary_slate_date
+    tracker_delta = next(
+        (
+            result["tracker_delta"] for result in publish_results
+            if result["slate_date"] == primary_slate_date
+        ),
+        {},
+    )
+    payload["notification"]["tracker_new_count"] = sum(
+        len(result["tracker_delta"].get("new_recommendations", []))
+        for result in publish_results
+    )
+    payload["notification"]["published_slate_dates"] = [
+        result["slate_date"] for result in publish_results
+        if result["main_sent"] or result["tracker_sent"] or result["preview_sent"]
+    ]
+    payload["notification"]["injury_changes"] = [
+        change
+        for result in publish_results
+        for change in (result.get("injury_changes") or [])
+    ]
+
+    # Written after publishing so tracker_new_count reflects every date. All
+    # webhook calls are caught per channel inside _publish_slate_date, so a
+    # Discord outage still lands the artifact.
     _write_json_atomic(EDGE_SCORE_PATH, payload)
     _write_history_snapshot(payload)
 
-    discord_sent = False
-    discord_main_sent = False
-    discord_tracker_sent = False
-    main_message_response: Optional[Dict[str, Any]] = None
-    tracker_message_response: Optional[Dict[str, Any]] = None
-    state_changed = bool(recap_result.get("state_changed"))
-    slate_date = notification_delta.get("slate_date") or ""
-    tracker_running_recommendations = _tracker_running_recommendations(
-        state,
-        slate_date=slate_date,
-        tracker_delta=tracker_delta,
-    )
-    tracker_running_recommendations = _filter_tracker_ledger_recommendations(
-        tracker_running_recommendations,
-        slate_date=slate_date,
-    )
-    tracker_message_ref = _latest_discord_message_ref(
-        state,
-        slate_date=slate_date,
-        channel="tracker",
-    )
-    tracker_existing_message_id = str((tracker_message_ref or {}).get("message_id") or "").strip() or None
-    tracker_existing_webhook_url = str((tracker_message_ref or {}).get("webhook_url") or "").strip() or None
-    tracker_message_missing = bool(
-        EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
-        and slate_date
-        and tracker_running_recommendations
-        and not tracker_existing_message_id
-    )
-
-    # Below-threshold preview. Only considered when nothing cleared the real
-    # alert bar, so a preview can never compete with a genuine alert.
-    discord_preview_sent = False
-    preview_message_response: Optional[Dict[str, Any]] = None
-    preview_recommendations: List[Dict[str, Any]] = []
-    preview_webhook_url = (
-        EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL
-        or EDGE_SCORE_DISCORD_WEBHOOK_URL
-        or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
-    )
-    if EDGE_DISCORD_PREVIEW_ENABLED and not official_recommendations:
-        preview_recommendations = _filter_preview_recommendations(display_recommendations)
-    # notification_delta's slate_date is derived from official recommendations,
-    # so it is empty exactly when a preview is wanted. Derive our own.
-    preview_slate_dates = sorted({
-        _normalize_game_date(recommendation.get("game_date"))
-        for recommendation in preview_recommendations
-        if _normalize_game_date(recommendation.get("game_date"))
-    })
-    preview_slate_date = preview_slate_dates[0] if preview_slate_dates else ""
-    preview_running_recommendations: List[Dict[str, Any]] = []
-    if preview_slate_date:
-        preview_running_recommendations = _preview_running_recommendations(
-            state,
-            slate_date=preview_slate_date,
-            preview_recommendations=preview_recommendations,
-            generated_at=payload["generated_at"],
-        )
-    preview_message_ref = _latest_discord_message_ref(
-        state,
-        slate_date=preview_slate_date,
-        channel="preview",
-    )
-    preview_existing_message_id = str((preview_message_ref or {}).get("message_id") or "").strip() or None
-    preview_existing_webhook_url = str((preview_message_ref or {}).get("webhook_url") or "").strip() or None
-
-    if refresh_label in DISCORD_ALERT_REFRESH_LABELS and _has_discord_alert_target():
-        if EDGE_SCORE_DISCORD_WEBHOOK_URL and notification_delta.get("should_send"):
-            try:
-                main_message_response = _send_discord_webhook(
-                    payload,
-                    notification_delta,
-                    webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
-                    channel_variant="main",
-                )
-                discord_main_sent = bool(main_message_response)
-            except Exception as exc:
-                logger.warning("Discord Edge Score webhook failed: %s", exc)
-        if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and (
-            tracker_delta.get("should_send") or tracker_message_missing
-        ):
-            try:
-                tracker_message_response = _send_discord_webhook(
-                    payload,
-                    tracker_delta,
-                    webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
-                    channel_variant="tracker",
-                    existing_message_id=tracker_existing_message_id,
-                    existing_message_webhook_url=tracker_existing_webhook_url,
-                    running_recommendations=tracker_running_recommendations,
-                )
-                discord_tracker_sent = bool(tracker_message_response)
-            except Exception as exc:
-                logger.warning("Discord Edge Score tracker webhook failed: %s", exc)
-        if preview_running_recommendations and preview_webhook_url and preview_slate_date:
-            try:
-                preview_message_response = _send_discord_webhook(
-                    payload,
-                    {},
-                    webhook_url=preview_webhook_url,
-                    channel_variant="preview",
-                    existing_message_id=preview_existing_message_id,
-                    existing_message_webhook_url=preview_existing_webhook_url,
-                    running_recommendations=preview_running_recommendations,
-                )
-                discord_preview_sent = bool(preview_message_response)
-            except Exception as exc:
-                logger.warning("Discord Edge Score preview webhook failed: %s", exc)
-        discord_sent = bool(discord_main_sent or discord_tracker_sent or discord_preview_sent)
-
-    if discord_preview_sent and preview_message_response:
-        if _store_discord_message_ref(
-            state,
-            slate_date=preview_slate_date,
-            channel="preview",
-            message=preview_message_response,
-            webhook_url=preview_webhook_url,
-            alert_kind="preview",
-            sent_at=payload["generated_at"],
-            game_ids=_recommendation_game_ids(preview_running_recommendations),
-        ):
-            state_changed = True
-
-        preview_state_by_date = state.get("discord_preview_state_by_date", {})
-        if not isinstance(preview_state_by_date, dict):
-            preview_state_by_date = {}
-        preview_date_state = preview_state_by_date.get(preview_slate_date, {})
-        if not isinstance(preview_date_state, dict):
-            preview_date_state = {}
-        preview_date_state["sent_snapshot"] = _tracker_state_snapshot_for_recommendations(
-            preview_running_recommendations
-        )
-        preview_date_state.setdefault("first_sent_at", payload["generated_at"])
-        preview_date_state["last_sent_at"] = payload["generated_at"]
-        preview_state_by_date[preview_slate_date] = preview_date_state
-        # Only the pending-recap window is ever read back, so old slates are
-        # dead weight in a state file the VM rewrites every few minutes.
-        state["discord_preview_state_by_date"] = dict(sorted(preview_state_by_date.items())[-10:])
-        state_changed = True
-
-    if discord_main_sent:
-        alert_state_by_date = state.get("discord_alert_state_by_date", {})
-        if not isinstance(alert_state_by_date, dict):
-            alert_state_by_date = {}
-        date_state = alert_state_by_date.get(slate_date, {}) if slate_date else {}
-        if not isinstance(date_state, dict):
-            date_state = {}
-
-        date_state["last_sent_at"] = payload["generated_at"]
-        date_state["last_sent_snapshot"] = notification_delta.get("current_snapshot", {})
-        existing_sent_concepts = notification_delta.get(
-            "sent_concept_snapshot",
-            date_state.get("sent_concept_snapshot", {}),
-        )
-        date_state["sent_concept_snapshot"] = _merge_discord_sent_concepts(
-            existing_sent_concepts,
-            notification_delta.get("send_recommendations", []),
-            sent_at=payload["generated_at"],
-        )
-        if notification_delta.get("alert_kind") == "opening":
-            date_state["opening_sent_at"] = payload["generated_at"]
-        if notification_delta.get("alert_kind") == "pre_tip":
-            date_state.setdefault("opening_sent_at", payload["generated_at"])
-            date_state["pre_tip_sent_at"] = payload["generated_at"]
-
-        if slate_date:
-            alert_state_by_date[slate_date] = date_state
-            state["discord_alert_state_by_date"] = alert_state_by_date
-            state_changed = True
-
-        if slate_date and discord_main_sent and isinstance(main_message_response, dict):
-            if _store_discord_message_ref(
-                state,
-                slate_date=slate_date,
-                channel="main",
-                message=main_message_response,
-                webhook_url=EDGE_SCORE_DISCORD_WEBHOOK_URL,
-                alert_kind=notification_delta.get("alert_kind", "update"),
-                sent_at=payload["generated_at"],
-                game_ids=_recommendation_game_ids(notification_delta.get("send_recommendations", [])),
-            ):
-                state_changed = True
-
-    if discord_tracker_sent and slate_date:
-        tracker_state_by_date = state.get("discord_tracker_state_by_date", {})
-        if not isinstance(tracker_state_by_date, dict):
-            tracker_state_by_date = {}
-        tracker_date_state = tracker_state_by_date.get(slate_date, {})
-        if not isinstance(tracker_date_state, dict):
-            tracker_date_state = {}
-        sent_snapshot = _tracker_state_snapshot_for_recommendations(tracker_running_recommendations)
-        tracker_date_state["sent_snapshot"] = sent_snapshot
-        tracker_date_state.setdefault("first_sent_at", payload["generated_at"])
-        tracker_date_state["last_sent_at"] = payload["generated_at"]
-        tracker_state_by_date[slate_date] = tracker_date_state
-        state["discord_tracker_state_by_date"] = tracker_state_by_date
-        state_changed = True
-
-    if slate_date and discord_tracker_sent and isinstance(tracker_message_response, dict):
-        if _store_discord_message_ref(
-            state,
-            slate_date=slate_date,
-            channel="tracker",
-            message=tracker_message_response,
-            webhook_url=EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL,
-            alert_kind="tracker",
-            sent_at=payload["generated_at"],
-            game_ids=_recommendation_game_ids(tracker_running_recommendations),
-        ):
-            state_changed = True
-
-    tracker_visible_sent = bool(discord_tracker_sent or (not EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL and discord_main_sent))
-    # Grade the ledger that was rendered, not the delta that fed it. Queueing
-    # tracker_delta["new_recommendations"] made the recap a parallel list: a
-    # pick admitted by the delta but dropped before render was still graded, so
-    # results carried props the tracker never stated. Reading the same list the
-    # message was built from makes that divergence unrepresentable. Queueing is
-    # keyed by recommendation_key and keeps the first copy of each pick, so
-    # re-queueing the whole ledger every send is idempotent, and it backfills
-    # any pick that was rendered but missed the queue earlier in the slate.
-    if tracker_visible_sent and tracker_running_recommendations:
-        _queue_results_recap_payload(
-            state,
-            tracker_running_recommendations,
-            generated_at=payload["generated_at"],
-            refresh_label=refresh_label,
-            alert_kind="tracker",
-        )
-        state_changed = True
-
-    # Anything the channel published gets graded, including previews. Queueing
-    # only tracker picks meant a slate where nothing cleared the alert bar was
-    # never recapped at all: the previews went out, the games played, and no
-    # result ever came back for them.
-    if discord_preview_sent and preview_running_recommendations:
-        _queue_results_recap_payload(
-            state,
-            preview_running_recommendations,
-            generated_at=payload["generated_at"],
-            refresh_label=refresh_label,
-            alert_kind="preview",
-        )
+    # Housekeeping runs every refresh and forces the write when it trims, so a
+    # stale file cannot survive on the strength of a quiet slate.
+    if isinstance(state, dict) and _prune_notification_state(state):
         state_changed = True
 
     if state_changed or (not os.path.exists(EDGE_SCORE_STATE_PATH)):

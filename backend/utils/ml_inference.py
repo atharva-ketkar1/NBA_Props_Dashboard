@@ -133,6 +133,10 @@ class MLPredictor:
         self.live_team_presence_index: Dict[Tuple[str, date], set[str]] = {}
         self.live_team_game_dates_by_season: Dict[Tuple[str, int], List[date]] = {}
         self.live_team_game_dates: Dict[str, date] = {}
+        # Every date a team appears on, not just the last one written. A team on
+        # a back-to-back has two, and collapsing them is how a future game would
+        # silently inherit tonight's injury picture.
+        self.live_team_game_dates_all: Dict[str, set[date]] = {}
         self.live_team_matchup_dates: Dict[Tuple[str, str], date] = {}
 
         try:
@@ -273,6 +277,7 @@ class MLPredictor:
             self.live_team_presence_index = {}
             self.live_team_game_dates_by_season = {}
             self.live_team_game_dates = {}
+            self.live_team_game_dates_all = {}
             self.live_team_matchup_dates = {}
             self.live_injury_report_meta = {}
             self.live_position_resolution_summary = {}
@@ -375,6 +380,7 @@ class MLPredictor:
         self.live_missing_player_priors = {}
         self.live_active_player_priors = {}
         self.live_team_game_dates = {}
+        self.live_team_game_dates_all = {}
         self.live_team_matchup_dates = {}
         self.live_injury_report_meta = {}
         self.live_position_resolution_summary = {}
@@ -548,8 +554,10 @@ class MLPredictor:
             away_team = str(game.get("away_team_tricode") or "").strip().upper()
             if home_team:
                 self.live_team_game_dates[home_team] = game_date
+                self.live_team_game_dates_all.setdefault(home_team, set()).add(game_date)
             if away_team:
                 self.live_team_game_dates[away_team] = game_date
+                self.live_team_game_dates_all.setdefault(away_team, set()).add(game_date)
             if home_team and away_team:
                 self.live_team_matchup_dates[(home_team, away_team)] = game_date
                 self.live_team_matchup_dates[(away_team, home_team)] = game_date
@@ -674,6 +682,14 @@ class MLPredictor:
             matchup_date = self.live_team_matchup_dates.get((team_key, opp_key))
             if matchup_date is not None:
                 return matchup_date
+        # The matchup lookup above is the reliable one: keyed by both teams, it
+        # names a single game. A per-team fallback is only unambiguous when the
+        # team has one game in the payload; on a back-to-back without an
+        # opponent the nearest game is a better guess than whichever row
+        # happened to be written last.
+        team_dates = self.live_team_game_dates_all.get(team_key)
+        if team_dates:
+            return min(team_dates)
         if team_key and team_key in self.live_team_game_dates:
             return self.live_team_game_dates[team_key]
         payload_query_date = _parse_date(self.live_injury_report_meta.get("query_date"))

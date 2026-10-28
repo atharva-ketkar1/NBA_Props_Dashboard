@@ -666,9 +666,11 @@ def fetch_action_network_odds(
     
     offsets = [days_ahead] if query_date else [days_ahead, days_ahead + 1]
     combined_payload = None
-    
+    fetched_query_dates = []
+
     for offset in offsets:
         target_date = resolve_query_date(query_date, days_ahead=offset)
+        fetched_query_dates.append(target_date)
         logger.info("[RUN] Action Network odds fetch | date=%s", target_date)
         raw_payload = fetch_raw_action_network_payload(
             query_date=target_date,
@@ -692,9 +694,15 @@ def fetch_action_network_odds(
                 if key in payload:
                     combined_payload[key] = combined_payload.get(key, 0) + payload[key]
 
+    # `query_date` names only the first offset, but `games` spans every offset
+    # fetched, so on its own it understates what the payload holds. Readers that
+    # need to know the real coverage — the freshness check, and anything scoring
+    # more than one slate date — use `query_dates`.
+    combined_payload["query_dates"] = fetched_query_dates
+
     logger.info(
-        "[OK] Action Network odds fetch complete | date=%s games=%d",
-        combined_payload["query_date"],
+        "[OK] Action Network odds fetch complete | dates=%s games=%d",
+        ",".join(fetched_query_dates),
         combined_payload["game_count"],
     )
     return combined_payload
@@ -725,11 +733,32 @@ def _is_existing_payload_fresh(
     min_refresh_interval_seconds: int,
     now: Optional[datetime] = None,
 ) -> bool:
+    def _normalize_query_date_for_freshness(value: Any) -> str:
+        text = str(value or "").strip()
+        for fmt in ("%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt).date().isoformat()
+            except ValueError:
+                continue
+        return text
+
     if min_refresh_interval_seconds <= 0:
         return False
 
     expected_query_date = datetime.strptime(query_date, "%Y%m%d").date().isoformat()
-    if str(payload.get("query_date") or "").strip() != expected_query_date:
+    # The payload's own `query_date` names only the first offset it fetched, so
+    # comparing against it alone reports a stale payload whenever the anchor has
+    # rolled but the date is still covered. `query_dates` carries the full set;
+    # fall back to the single field for payloads written before it existed.
+    covered_dates = payload.get("query_dates")
+    if isinstance(covered_dates, list) and covered_dates:
+        covered = {
+            _normalize_query_date_for_freshness(value)
+            for value in covered_dates
+        }
+        if expected_query_date not in covered:
+            return False
+    elif str(payload.get("query_date") or "").strip() != expected_query_date:
         return False
 
     # A payload built while today_schedule.json was still stale (e.g. before
