@@ -11,8 +11,12 @@ from dotenv import load_dotenv
 
 import os as _hc_os, sys as _hc_sys
 _hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
-from utils.http_client import proxied_get_json, UpstreamFailed, WorkerRejected, ProxyNotConfigured  # noqa: E402  (needs the path insert above)
+from utils.http_client import proxied_get_json, CircuitOpen, UpstreamFailed, WorkerRejected, ProxyNotConfigured  # noqa: E402  (needs the path insert above)
 from utils.book_toggles import book_is_paused  # noqa: E402
+
+# Distinguishes "backed off, do not ask again this run" from "this one category
+# failed", which is a None. Neither is an exception to the caller.
+CIRCUIT_OPEN = object()
 
 load_dotenv()
 
@@ -94,8 +98,13 @@ def fetch_category(subcategory_id, prop_label):
 
     try:
         # proxied_get_json retries 403s with a fresh worker-side User-Agent
-        # instead of dropping the category on the first stale-UA response.
+        # instead of dropping the category on the first stale-UA response. The
+        # breaker inside it stops that retrying once the host is refusing this
+        # egress outright, where re-rolling the UA cannot help.
         return proxied_get_json(url, headers=HEADERS, label=f"draftkings-{prop_label}")
+    except CircuitOpen as e:
+        logger.warning("Backing off %s: %s", prop_label, e)
+        return CIRCUIT_OPEN
     except (UpstreamFailed, WorkerRejected, ProxyNotConfigured) as e:
         logger.error("Error fetching %s: %s", prop_label, e)
         return None
@@ -219,11 +228,20 @@ def fetch_dk_odds():
     for prop_key, cat_id in PLAYER_PROP_CATEGORIES.items():
         time.sleep(random.uniform(0.3, 0.8))
         data = fetch_category(cat_id, prop_key)
+        if data is CIRCUIT_OPEN:
+            # The block is per-host, so the remaining ten categories would each
+            # raise the same thing. Abandon the slate in one line rather than
+            # eleven, and leave the cooldown to decide when to look again.
+            logger.warning(
+                "[SKIP] DraftKings egress is blocked upstream; abandoning the "
+                "remaining categories until the backoff expires"
+            )
+            return []
         props = parse_dk_data(data, prop_key)
-        
+
         # print(f"  Found {len(props)} props for '{prop_key}'")
         all_props.extend(props)
-    
+
     logger.info("[OK] DraftKings odds fetch complete | props=%d", len(all_props))
 
     # --- DEBUG: Show user the formatted output with PLUS SIGNS ---

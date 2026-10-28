@@ -34,6 +34,17 @@ Design notes, each tied to an observed worker behaviour
     can legitimately take ~30s before returning. Client timeouts must exceed
     that or we abort work the worker was about to complete successfully.
 
+  * Re-rolling the UA only helps when the 403 is about the UA. When the 403 is
+    about the egress IP, retrying is worse than useless: on 2026-10-28
+    DraftKings' edge refused the VM and the worker alike (the same URL served
+    200 from a residential IP, and every state site path returned an identical
+    denial), so eleven categories x six attempts became 66 doomed requests per
+    run, each one widening the global pace until FanDuel and nba.com slowed
+    too. `circuit_breaker` bounds that: three consecutive exhausted failures
+    for a host and requests stop for a cooldown. It trips on behaviour, not on
+    response bodies, because cdn.nba.com sits behind the same CDN and an
+    "Access Denied" body there is still often a stale UA worth re-rolling.
+
   * The worker returns its OWN errors as JSON with an "error" key (e.g. 403
     "Target host is not allowed.", 400 "Missing url parameter."). Those are
     configuration faults, not upstream blocks -- retrying them is pointless and
@@ -52,6 +63,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 from dotenv import load_dotenv
+
+from utils.circuit_breaker import CircuitOpen as _CircuitOpen
+from utils import circuit_breaker
 
 # Load backend/.env here rather than relying on the caller. In production
 # master_cron loads it before importing anything, so PBPSTATS_PROXY_URL is
@@ -151,6 +165,16 @@ class WorkerRejected(RuntimeError):
 
 class UpstreamFailed(RuntimeError):
     """Upstream kept failing after every attempt was exhausted."""
+
+
+class CircuitOpen(UpstreamFailed):
+    """The breaker is in cooldown for this host, so no request was attempted.
+
+    Deliberately an UpstreamFailed subclass. Every caller already handles that
+    (the scrapers catch it and return no rows), and a backed-off host really is
+    an upstream that is not serving us -- so backing off needs no caller
+    changes and cannot turn a quiet empty scrape into a crash.
+    """
 
 
 # Hop-by-hop / transport headers. These describe the caller->worker leg, not the
@@ -295,6 +319,19 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
             f"Known-good: {sorted(WORKER_ALLOWED_HOSTS)}"
         )
 
+    # Ask the breaker before spending a request. A host that has already
+    # refused this egress repeatedly is not retried, because request volume is
+    # what sustains an IP-reputation block in the first place.
+    try:
+        half_open = circuit_breaker.check(host)
+    except _CircuitOpen as exc:
+        raise CircuitOpen(f"{tag}: {exc}") from None
+    if half_open:
+        # Cooldown elapsed: spend one cheap attempt to see if we are back,
+        # rather than the full budget on a host that is probably still hostile.
+        max_attempts = 1
+        logger.info("%s: cooldown elapsed, probing once before reopening", tag)
+
     session = _get_session()
     headers = _sanitize_headers(headers)
     # `params` belong to the UPSTREAM request, so they must be encoded into the
@@ -313,6 +350,8 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
                                    timeout=timeout)
         except requests.RequestException as exc:
             if attempt == max_attempts:
+                circuit_breaker.record_failure(
+                    host, f"{tag}: transport error: {type(exc).__name__}")
                 raise UpstreamFailed(
                     f"{tag}: transport error after {max_attempts} attempts: {exc}"
                 ) from exc
@@ -329,6 +368,7 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
 
         if response.ok:
             _note_clean()
+            circuit_breaker.record_success(host)
             if attempt > 1:
                 logger.info("%s: recovered on attempt %d/%d (HTTP %d)",
                             tag, attempt, max_attempts, response.status_code)
@@ -336,6 +376,8 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
 
         last_status = response.status_code
         if response.status_code not in RETRY_STATUSES or attempt == max_attempts:
+            circuit_breaker.record_failure(
+                host, f"{tag}: HTTP {response.status_code} after {attempt} attempt(s)")
             raise UpstreamFailed(
                 f"{tag}: HTTP {response.status_code} after {attempt} attempt(s)"
             )
@@ -351,6 +393,8 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
                        tag, reason, attempt, max_attempts, delay)
         time.sleep(delay)
 
+    circuit_breaker.record_failure(
+        host, f"{tag}: exhausted {max_attempts} attempts (last status {last_status})")
     raise UpstreamFailed(f"{tag}: exhausted {max_attempts} attempts "
                          f"(last status {last_status})")
 
