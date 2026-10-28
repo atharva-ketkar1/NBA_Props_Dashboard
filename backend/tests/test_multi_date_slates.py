@@ -681,6 +681,167 @@ class InjuryProcessingTests(unittest.TestCase):
         )
 
 
+def _graded(player_id, origin, status, *, line=20.5, closing=None):
+    entry = {
+        "recommendation_key": f"{player_id}|{D0}|PTS|over",
+        "player_name": f"Player {player_id}",
+        "stat_type": "PTS",
+        "stat_label": "PTS",
+        "pick": "over",
+        "pick_label": "Over",
+        "line": line,
+        "odds": -110.0,
+        "sportsbook": "dk",
+        "sportsbook_label": "DraftKings",
+        "game_date": D0,
+        "first_alert_kind": origin,
+        "first_logged_at": NOW.isoformat(),
+        "result_status": status,
+        "result_label": status.title(),
+        "final_value": 22.0,
+    }
+    if closing is not None:
+        entry["closing_line"] = closing
+    return entry
+
+
+class ResultsOriginSplitTests(unittest.TestCase):
+    """Each channel's results must reconcile with what that channel stated."""
+
+    def _graded_results(self):
+        return {
+            "ready": True,
+            "unresolved": [],
+            "summary": {"cashed": 3, "lost": 2, "push": 0, "void": 0,
+                        "graded_count": 5, "unresolved_count": 0},
+            "recommendations": [
+                _graded(1, "tracker", "cashed"),
+                _graded(2, "tracker", "cashed"),
+                _graded(3, "tracker", "lost"),
+                _graded(4, "preview", "cashed"),
+                _graded(5, "preview", "lost"),
+            ],
+        }
+
+    def test_picks_and_watches_are_separated(self):
+        split = es._split_graded_results_by_origin(self._graded_results())
+        self.assertEqual(split["tracker"]["summary"]["graded_count"], 3)
+        self.assertEqual(split["preview"]["summary"]["graded_count"], 2)
+
+    def test_the_record_is_per_origin_not_blended(self):
+        """A blended 3-2 reported calls the model made alongside ones it declined."""
+        split = es._split_graded_results_by_origin(self._graded_results())
+        self.assertEqual(es._results_record_text(split["tracker"]["summary"]), "2-1")
+        self.assertEqual(es._results_record_text(split["preview"]["summary"]), "1-1")
+
+    def test_a_tracker_recap_counts_exactly_what_the_tracker_logged(self):
+        """The reconciliation property: 3 logged, 3 graded, in the same channel."""
+        logged = [_recommendation(player_id=i, game_id=f"g{i}", game_date=D0) for i in (1, 2, 3)]
+        split = es._split_graded_results_by_origin(self._graded_results())
+        self.assertEqual(
+            split["tracker"]["summary"]["graded_count"],
+            len(logged),
+            "tracker results must match the tracker ledger",
+        )
+
+    def test_each_origin_posts_to_its_own_channel(self):
+        posted = []
+
+        def _fake_post(url, body):
+            posted.append((url, body))
+            return {"id": f"m{len(posted)}"}
+
+        split = es._split_graded_results_by_origin(self._graded_results())
+        with patch.object(es, "EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL", "https://discord.test/tracker"), \
+             patch.object(es, "EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL", "https://discord.test/preview"), \
+             patch.object(es, "get_et_now", return_value=NOW), \
+             patch.object(es, "_post_discord_webhook", side_effect=_fake_post):
+            for origin in ("tracker", "preview"):
+                es._send_discord_results_recap(
+                    {"game_date": D0}, split[origin], origin=origin
+                )
+
+        urls = [url for url, _ in posted]
+        self.assertEqual(urls, ["https://discord.test/tracker", "https://discord.test/preview"])
+        tracker_body, preview_body = posted[0][1], posted[1][1]
+        self.assertIn("Picks results", tracker_body["content"])
+        self.assertIn("Watches results", preview_body["content"])
+        self.assertEqual(tracker_body["embeds"][0]["title"], "Daily Prop Tracker Results")
+        self.assertEqual(preview_body["embeds"][0]["title"], "Below Threshold Results")
+
+    def test_watch_results_fall_back_to_the_tracker_channel_when_unconfigured(self):
+        with patch.object(es, "EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL", "https://discord.test/tracker"), \
+             patch.object(es, "EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL", ""):
+            self.assertEqual(
+                es._results_recap_webhook_url("preview"), "https://discord.test/tracker"
+            )
+
+    def test_unresolved_picks_are_reported_once_not_twice(self):
+        results = self._graded_results()
+        results["summary"]["unresolved_count"] = 2
+        split = es._split_graded_results_by_origin(results)
+        self.assertEqual(split["tracker"]["summary"]["unresolved_count"], 2)
+        self.assertEqual(split["preview"]["summary"]["unresolved_count"], 0)
+
+
+class ResultsRecapDedupTests(unittest.TestCase):
+    def _state(self, sent_history):
+        return {
+            "pending_result_recaps": {
+                D0: {
+                    "game_date": D0,
+                    "tracked_recommendations": {
+                        "1|2026-10-21|PTS|over": _graded(1, "tracker", "cashed"),
+                        "4|2026-10-21|PTS|over": _graded(4, "preview", "cashed"),
+                    },
+                    "recommendations": [
+                        _graded(1, "tracker", "cashed"),
+                        _graded(4, "preview", "cashed"),
+                    ],
+                }
+            },
+            "sent_result_recaps": sent_history,
+            "discord_tracker_state_by_date": {},
+        }
+
+    def _run(self, state):
+        posted = []
+        later = NOW.replace(day=23)
+        with patch.object(es, "EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL", "https://discord.test/tracker"), \
+             patch.object(es, "EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL", "https://discord.test/preview"), \
+             patch.object(es, "get_et_now", return_value=later), \
+             patch.object(es, "_post_discord_webhook",
+                          side_effect=lambda url, body: posted.append(url) or {"id": "m1"}), \
+             patch.object(es, "_write_results_recap_history", return_value=None), \
+             patch.object(es, "_grade_results_recap", side_effect=lambda payload, feed, allow_partial=False: {
+                 "ready": True,
+                 "unresolved": [],
+                 "summary": {"cashed": 2, "lost": 0, "push": 0, "void": 0,
+                             "graded_count": 2, "unresolved_count": 0},
+                 "recommendations": list(payload.get("recommendations") or []),
+             }):
+            es._process_results_recaps([], state)
+        return posted
+
+    def test_both_origins_post_once(self):
+        state = self._state({})
+        posted = self._run(state)
+        self.assertEqual(sorted(posted), ["https://discord.test/preview", "https://discord.test/tracker"])
+        self.assertEqual(sorted(state["sent_result_recaps"][D0]["origins"]), ["preview", "tracker"])
+
+    def test_a_second_pass_sends_nothing_more(self):
+        state = self._state({})
+        self._run(state)
+        self.assertEqual(self._run(state), [], "a recapped date must not post again")
+
+    def test_a_legacy_entry_is_not_re_posted_after_upgrade(self):
+        """Pre-upgrade history has no `origins` key and describes one blended
+        message; re-sending it would replay yesterday's results into the
+        channel on the first run after deploy."""
+        state = self._state({D0: {"sent_at": NOW.isoformat(), "record": "2-0", "graded_count": 2}})
+        self.assertEqual(self._run(state), [])
+
+
 class EmbedBudgetTests(unittest.TestCase):
     """Discord caps a message at 6000 characters across its embeds."""
 

@@ -557,7 +557,19 @@ def _has_discord_alert_target() -> bool:
     )
 
 
-def _results_recap_webhook_url() -> str:
+def _results_recap_webhook_url(origin: str = "tracker") -> str:
+    """Results go back to the channel that published the picks.
+
+    With no preview webhook configured both fall back to the tracker channel,
+    which is the old behavior -- still one channel, but the two are now labelled
+    and counted separately rather than blended into one record.
+    """
+    if origin == "preview":
+        return (
+            EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL
+            or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+            or EDGE_SCORE_DISCORD_WEBHOOK_URL
+        )
     return EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL or EDGE_SCORE_DISCORD_WEBHOOK_URL
 
 
@@ -6344,6 +6356,74 @@ def _results_recap_grace_elapsed(game_date: str, *, now_et: Optional[datetime] =
     return now.replace(tzinfo=None) >= deadline
 
 
+# A pick's results belong in the channel that published it. One combined recap
+# meant #prop-tracker stated eight picks and then graded ten, and the headline
+# record blended calls the model made with ones it explicitly declined.
+RESULT_ORIGINS = ("tracker", "preview")
+RESULT_ORIGIN_LABELS = {"tracker": "Picks", "preview": "Watches"}
+RESULT_ORIGIN_TITLES = {
+    "tracker": "Daily Prop Tracker Results",
+    "preview": "Below Threshold Results",
+}
+
+
+def _results_summary_for(
+    graded_recommendations: List[Dict[str, Any]],
+    *,
+    unresolved_count: int,
+) -> Dict[str, Any]:
+    def _count(status: str) -> int:
+        return sum(
+            1 for recommendation in graded_recommendations
+            if recommendation.get("result_status") == status
+        )
+
+    return {
+        "cashed": _count("cashed"),
+        "lost": _count("lost"),
+        "push": _count("push"),
+        "void": _count("void"),
+        "graded_count": len(graded_recommendations),
+        "unresolved_count": unresolved_count,
+    }
+
+
+def _result_origin(recommendation: Any) -> str:
+    """Which channel published this pick: the tracker, or the preview log."""
+    if not isinstance(recommendation, dict):
+        return "tracker"
+    return "preview" if recommendation.get("first_alert_kind") == "preview" else "tracker"
+
+
+def _split_graded_results_by_origin(graded_results: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """One graded set per publishing channel, so each reconciles with itself."""
+    recommendations = graded_results.get("recommendations", [])
+    if not isinstance(recommendations, list):
+        recommendations = []
+
+    split: Dict[str, Dict[str, Any]] = {}
+    for origin in RESULT_ORIGINS:
+        subset = [
+            recommendation for recommendation in recommendations
+            if _result_origin(recommendation) == origin
+        ]
+        if not subset:
+            continue
+        split[origin] = {
+            "recommendations": subset,
+            # Unresolved picks are not attributed to an origin, so they are
+            # reported once against the tracker rather than double-counted.
+            "summary": _results_summary_for(
+                subset,
+                unresolved_count=(
+                    graded_results.get("summary", {}).get("unresolved_count", 0)
+                    if origin == "tracker" else 0
+                ),
+            ),
+        }
+    return split
+
+
 def _grade_results_recap(
     recap_payload: Dict[str, Any],
     master_feed: List[Dict[str, Any]],
@@ -6413,14 +6493,7 @@ def _grade_results_recap(
             "result_note": result_note,
         })
 
-    summary = {
-        "cashed": sum(1 for recommendation in graded_recommendations if recommendation["result_status"] == "cashed"),
-        "lost": sum(1 for recommendation in graded_recommendations if recommendation["result_status"] == "lost"),
-        "push": sum(1 for recommendation in graded_recommendations if recommendation["result_status"] == "push"),
-        "void": sum(1 for recommendation in graded_recommendations if recommendation["result_status"] == "void"),
-        "graded_count": len(graded_recommendations),
-        "unresolved_count": len(unresolved),
-    }
+    summary = _results_summary_for(graded_recommendations, unresolved_count=len(unresolved))
 
     # Hold the recap back while a box score might still land, but not forever:
     # one pick that never resolves used to keep the whole slate pending, so a
@@ -6589,10 +6662,16 @@ def _chunk_discord_descriptions(
     return pages
 
 
-def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    webhook_url = _results_recap_webhook_url()
+def _send_discord_results_recap(
+    recap_payload: Dict[str, Any],
+    graded_results: Dict[str, Any],
+    *,
+    origin: str = "tracker",
+) -> Optional[Dict[str, Any]]:
+    webhook_url = _results_recap_webhook_url(origin)
     if not webhook_url:
         return None
+    origin_label = RESULT_ORIGIN_LABELS.get(origin, "Picks")
 
     summary = graded_results.get("summary", {})
     lines = []
@@ -6617,7 +6696,10 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
         )
 
     recap_date = _normalize_game_date(recap_payload.get("game_date"))
-    username = "NBA Dashboard Prop Tracker" if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL else "NBA Dashboard Daily Props"
+    if origin == "preview":
+        username = "NBA Dashboard Preview"
+    else:
+        username = "NBA Dashboard Prop Tracker" if EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL else "NBA Dashboard Daily Props"
     fields = [
         {
             "name": "Slate Date",
@@ -6625,12 +6707,15 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
             "inline": True,
         },
         {
-            "name": "Record",
+            # Named for what it covers. A single blended record reported calls
+            # the model made alongside ones it declined, which understates the
+            # picks and overstates the watches.
+            "name": f"{origin_label} Record",
             "value": _results_record_text(summary),
             "inline": True,
         },
         {
-            "name": "Tracked Picks",
+            "name": f"{origin_label} Graded",
             "value": str(summary.get("graded_count", 0)),
             "inline": True,
         },
@@ -6653,7 +6738,7 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
     if unresolved_count:
         fields.append({
             "name": "Still Unresolved",
-            "value": f"{unresolved_count} pick(s) had no final box score",
+            "value": f"{unresolved_count} {origin_label.lower()} had no final box score",
             "inline": True,
         })
     fields.append({
@@ -6669,10 +6754,13 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
             "color": 0x3B82F6,
         }
         if page_index == 0:
-            embed["title"] = "Daily Prop Tracker Results"
+            embed["title"] = RESULT_ORIGIN_TITLES.get(origin, "Daily Prop Tracker Results")
             embed["fields"] = fields
         else:
-            embed["title"] = f"Daily Prop Tracker Results (cont. {page_index + 1})"
+            embed["title"] = (
+                f"{RESULT_ORIGIN_TITLES.get(origin, 'Daily Prop Tracker Results')}"
+                f" (cont. {page_index + 1})"
+            )
         embeds.append(embed)
 
     if not embeds:
@@ -6686,7 +6774,7 @@ def _send_discord_results_recap(recap_payload: Dict[str, Any], graded_results: D
     for batch_index in range(0, len(embeds), RESULTS_RECAP_EMBEDS_PER_MESSAGE):
         batch = embeds[batch_index:batch_index + RESULTS_RECAP_EMBEDS_PER_MESSAGE]
         headline = (
-            f"Results {recap_date or 'recap'} • {_results_record_text(summary)}"
+            f"{origin_label} results {recap_date or 'recap'} • {_results_record_text(summary)}"
             f" • {summary.get('graded_count', 0)} graded"
         )
         if batch_index:
@@ -7579,8 +7667,17 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             if filtered_recap_payload.get("tracked_recommendations"):
                 remaining_pending[normalized_date] = filtered_recap_payload
             continue
-        if normalized_date in sent_history:
-            continue
+        # Recaps are now one message per publishing channel, so a date is only
+        # finished when every origin it holds has been sent. A legacy entry has
+        # no `origins` key and describes the old single blended message; it is
+        # treated as complete so upgrading never re-posts yesterday's results.
+        sent_entry = sent_history.get(normalized_date)
+        if isinstance(sent_entry, dict):
+            sent_origins = sent_entry.get("origins")
+            if not isinstance(sent_origins, dict):
+                continue
+        else:
+            sent_origins = {}
 
         recap_payload, pruned = _filter_recap_payload_to_supported_books(recap_payload)
         recap_payload, unpublished_pruned = _filter_recap_payload_to_published_picks(
@@ -7601,27 +7698,59 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             remaining_pending[normalized_date] = recap_payload
             continue
 
-        recap_message = _send_discord_results_recap(recap_payload, graded_results)
-        if recap_message:
+        # One message per origin, each to the channel that published it, so a
+        # channel's results reconcile against what that channel actually stated.
+        split_results = _split_graded_results_by_origin(graded_results)
+        any_sent = False
+        all_sent = True
+        for origin in RESULT_ORIGINS:
+            origin_results = split_results.get(origin)
+            if not origin_results:
+                continue
+            if origin in sent_origins:
+                continue
+
+            recap_message = _send_discord_results_recap(
+                recap_payload,
+                origin_results,
+                origin=origin,
+            )
+            if not recap_message:
+                all_sent = False
+                continue
+
             sent_at = get_et_now().isoformat()
-            sent_history[normalized_date] = {
+            origin_summary = origin_results.get("summary", {})
+            sent_origins[origin] = {
                 "sent_at": sent_at,
-                "record": _results_record_text(graded_results.get("summary", {})),
-                "graded_count": graded_results.get("summary", {}).get("graded_count", 0),
+                "record": _results_record_text(origin_summary),
+                "graded_count": origin_summary.get("graded_count", 0),
                 "message_id": str(recap_message.get("id") or "").strip(),
-                "webhook_url": _results_recap_webhook_url(),
+                "webhook_url": _results_recap_webhook_url(origin),
             }
             _write_results_recap_history({
                 "game_date": normalized_date,
                 "sent_at": sent_at,
+                "origin": origin,
                 "source_generated_at": recap_payload.get("source_generated_at"),
                 "refresh_label": recap_payload.get("refresh_label"),
-                "summary": graded_results.get("summary", {}),
-                "recommendations": graded_results.get("recommendations", []),
+                "summary": origin_summary,
+                "recommendations": origin_results.get("recommendations", []),
             })
+            any_sent = True
+
+        if any_sent:
+            combined_summary = graded_results.get("summary", {})
+            sent_history[normalized_date] = {
+                "sent_at": get_et_now().isoformat(),
+                "record": _results_record_text(combined_summary),
+                "graded_count": combined_summary.get("graded_count", 0),
+                "origins": sent_origins,
+            }
             sent_dates.append(normalized_date)
             state_changed = True
-        else:
+        if not all_sent or not any_sent:
+            # Hold the date open so an origin whose send failed is retried.
             remaining_pending[normalized_date] = recap_payload
 
     if list(remaining_pending.keys()) != list(pending.keys()):
