@@ -803,6 +803,128 @@ class ResultsOriginSplitTests(unittest.TestCase):
         self.assertEqual(split["preview"]["summary"]["unresolved_count"], 0)
 
 
+class SeasonResultsChannelTests(unittest.TestCase):
+    """One immutable message per graded slate, with a running season line."""
+
+    def _history(self, rows):
+        return {"recaps": rows}
+
+    def _recap(self, date, cashed, lost, *, origin="tracker", graded=None, recs=()):
+        return {
+            "game_date": date,
+            "origin": origin,
+            "summary": {
+                "cashed": cashed, "lost": lost, "push": 0, "void": 0,
+                "graded_count": graded if graded is not None else cashed + lost,
+                "unresolved_count": 0,
+            },
+            "recommendations": list(recs),
+        }
+
+    def test_totals_accumulate_across_slates(self):
+        history = self._history([
+            self._recap("2026-10-25", 4, 2),
+            self._recap("2026-10-26", 5, 3),
+            self._recap("2026-10-27", 3, 3),
+        ])
+        with patch.object(es, "_load_json", return_value=history):
+            totals = es._season_results_to_date(through_date="2026-10-27")
+        self.assertEqual((totals["cashed"], totals["lost"]), (12, 8))
+        self.assertEqual(totals["slates"], 3)
+
+    def test_watches_never_enter_the_season_record(self):
+        """They were never bets, so they cannot count toward the model's record."""
+        history = self._history([
+            self._recap("2026-10-26", 5, 3),
+            self._recap("2026-10-26", 1, 2, origin="preview"),
+        ])
+        with patch.object(es, "_load_json", return_value=history):
+            totals = es._season_results_to_date(through_date="2026-10-26")
+        self.assertEqual((totals["cashed"], totals["lost"]), (5, 3))
+        self.assertEqual(totals["slates"], 1)
+
+    def test_future_slates_are_excluded(self):
+        history = self._history([
+            self._recap("2026-10-26", 5, 3),
+            self._recap("2026-10-28", 9, 1),
+        ])
+        with patch.object(es, "_load_json", return_value=history):
+            totals = es._season_results_to_date(through_date="2026-10-26")
+        self.assertEqual(totals["slates"], 1)
+
+    def test_a_date_can_be_excluded_so_the_current_slate_is_not_double_counted(self):
+        history = self._history([
+            self._recap("2026-10-26", 5, 3),
+            self._recap("2026-10-27", 3, 3),
+        ])
+        with patch.object(es, "_load_json", return_value=history):
+            totals = es._season_results_to_date(through_date="2026-10-27", include_date=False)
+        self.assertEqual(totals["slates"], 1)
+        self.assertEqual((totals["cashed"], totals["lost"]), (5, 3))
+
+    def test_a_duplicate_date_is_counted_once(self):
+        history = self._history([
+            self._recap("2026-10-26", 5, 3),
+            self._recap("2026-10-26", 5, 3),
+        ])
+        with patch.object(es, "_load_json", return_value=history):
+            totals = es._season_results_to_date(through_date="2026-10-26")
+        self.assertEqual(totals["slates"], 1)
+
+    def test_an_empty_season_renders_nothing(self):
+        self.assertEqual(es._season_results_text({"slates": 0}), "")
+
+    def test_results_route_to_the_results_channel_when_configured(self):
+        with patch.object(es, "EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL", "https://discord.test/results"), \
+             patch.object(es, "EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL", "https://discord.test/tracker"):
+            self.assertEqual(es._results_recap_webhook_url("tracker"), "https://discord.test/results")
+
+    def test_results_fall_back_to_the_tracker_channel(self):
+        with patch.object(es, "EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL", ""), \
+             patch.object(es, "EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL", "https://discord.test/tracker"):
+            self.assertEqual(es._results_recap_webhook_url("tracker"), "https://discord.test/tracker")
+
+    def test_a_result_line_shows_the_scraped_line_and_its_timestamp_only(self):
+        """The number that was gettable, and when we logged it. Where the market
+        closed is a separate claim and belongs in the summary."""
+        graded = _graded(1, "tracker", "cashed", line=25.5, closing=27.5)
+        posted = []
+        with patch.object(es, "EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL", "https://discord.test/results"), \
+             patch.object(es, "get_et_now", return_value=NOW), \
+             patch.object(es, "_post_discord_webhook",
+                          side_effect=lambda url, body: posted.append(body) or {"id": "m1"}):
+            es._send_discord_results_recap(
+                {"game_date": D0},
+                {"recommendations": [graded],
+                 "summary": {"cashed": 1, "lost": 0, "push": 0, "void": 0,
+                             "graded_count": 1, "unresolved_count": 0}},
+                origin="tracker",
+            )
+        body = "\n".join(str(e.get("description") or "") for e in posted[0]["embeds"])
+        self.assertIn("25.5", body, "the line we scraped at must be shown")
+        self.assertIn("Tracked:", body, "each line carries its timestamp")
+        self.assertNotIn("CLV", body, "per-row closing-line commentary is out")
+        self.assertNotIn("27.5", body, "the closing line must not appear on the row")
+
+    def test_each_slate_posts_its_own_message_and_never_edits(self):
+        """One message per day, not one growing message."""
+        calls = []
+        graded = {"recommendations": [_graded(1, "tracker", "cashed")],
+                  "summary": {"cashed": 1, "lost": 0, "push": 0, "void": 0,
+                              "graded_count": 1, "unresolved_count": 0}}
+        with patch.object(es, "EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL", "https://discord.test/results"), \
+             patch.object(es, "get_et_now", return_value=NOW), \
+             patch.object(es, "_edit_discord_webhook_message",
+                          side_effect=AssertionError("results must never be edited")), \
+             patch.object(es, "_post_discord_webhook",
+                          side_effect=lambda url, body: calls.append(body) or {"id": f"m{len(calls)}"}):
+            for slate in (D0, D1):
+                es._send_discord_results_recap({"game_date": slate}, graded, origin="tracker")
+        self.assertEqual(len(calls), 2, "one message per slate date")
+        self.assertIn(D0, calls[0]["content"])
+        self.assertIn(D1, calls[1]["content"])
+
+
 class ResultsRecapDedupTests(unittest.TestCase):
     def _state(self, sent_history):
         return {

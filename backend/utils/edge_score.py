@@ -228,6 +228,9 @@ EDGE_DISCORD_PREVIEW_ENABLED = _env_bool("EDGE_SCORE_DISCORD_PREVIEW_ENABLED", T
 EDGE_DISCORD_PREVIEW_COUNT = max(1, _env_int("EDGE_SCORE_DISCORD_PREVIEW_COUNT", 5))
 # Optional: route previews to their own channel. Defaults to the alert webhook.
 EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL = os.getenv("EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL", "").strip()
+# Season results channel: one immutable message per graded slate. Unset, results
+# stay in the tracker channel as before.
+EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL = os.getenv("EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL", "").strip()
 # 0.0 means "no floor": show the best available even if the scores are poor.
 EDGE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE = max(
     0.0,
@@ -558,11 +561,13 @@ def _has_discord_alert_target() -> bool:
 
 
 def _results_recap_webhook_url(origin: str = "tracker") -> str:
-    """Results go back to the channel that published the picks.
+    """Where a day's graded results are posted.
 
-    With no preview webhook configured both fall back to the tracker channel,
-    which is the old behavior -- still one channel, but the two are now labelled
-    and counted separately rather than blended into one record.
+    Picks go to the results channel when one is configured: one immutable
+    message per slate, never edited, so scrolling the channel is the season.
+    The tracker channel it otherwise falls back to interleaves those results
+    with the live ledger, which is edited all day and shows props still in
+    flight, and the two read as one stream.
     """
     if origin == "preview":
         return (
@@ -570,7 +575,81 @@ def _results_recap_webhook_url(origin: str = "tracker") -> str:
             or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
             or EDGE_SCORE_DISCORD_WEBHOOK_URL
         )
-    return EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL or EDGE_SCORE_DISCORD_WEBHOOK_URL
+    return (
+        EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL
+        or EDGE_SCORE_DISCORD_WEBHOOK_URL
+    )
+
+
+def _season_results_to_date(
+    *,
+    through_date: str,
+    include_date: bool = True,
+) -> Dict[str, Any]:
+    """Running totals across every slate graded so far this season.
+
+    A single day's 3-3 says almost nothing. The cumulative line is what a
+    reader actually needs, and beat-the-close is the steadier of the two
+    because it does not wait on outcome variance to mean something.
+    """
+    history = _load_json(EDGE_SCORE_RESULTS_HISTORY_PATH, {"recaps": []})
+    recaps = history.get("recaps") if isinstance(history, dict) else None
+    if not isinstance(recaps, list):
+        recaps = []
+
+    totals = {"cashed": 0, "lost": 0, "push": 0, "void": 0, "graded": 0, "slates": 0}
+    measured = 0
+    beat = 0
+    seen_dates = set()
+    for recap in recaps:
+        if not isinstance(recap, dict):
+            continue
+        # Watches were never bets, so they never enter the season record.
+        if str(recap.get("origin") or "tracker") != "tracker":
+            continue
+        recap_date = _normalize_game_date(recap.get("game_date"))
+        if not recap_date:
+            continue
+        if through_date and recap_date > through_date:
+            continue
+        if not include_date and recap_date == through_date:
+            continue
+        if recap_date in seen_dates:
+            continue
+        seen_dates.add(recap_date)
+
+        summary = recap.get("summary") if isinstance(recap.get("summary"), dict) else {}
+        for key in ("cashed", "lost", "push", "void"):
+            totals[key] += int(summary.get(key, 0) or 0)
+        totals["graded"] += int(summary.get("graded_count", 0) or 0)
+        totals["slates"] += 1
+
+        clv = _closing_line_value_summary(recap.get("recommendations") or [])
+        measured += int(clv.get("measured", 0) or 0)
+        beat += int(clv.get("beat_close", 0) or 0)
+
+    totals["beat_close"] = beat
+    totals["beat_close_measured"] = measured
+    totals["beat_close_rate"] = round(beat / measured, 3) if measured else None
+    return totals
+
+
+def _season_results_text(totals: Dict[str, Any]) -> str:
+    if not totals.get("slates"):
+        return ""
+    record = _results_record_text({
+        "cashed": totals.get("cashed", 0),
+        "lost": totals.get("lost", 0),
+        "push": totals.get("push", 0),
+        "void": totals.get("void", 0),
+        "graded_count": totals.get("graded", 0),
+    })
+    parts = [f"{record} · {totals.get('graded', 0)} graded across {totals.get('slates', 0)} slates"]
+    rate = totals.get("beat_close_rate")
+    if rate is not None:
+        parts.append(f"beat the close {round(rate * 100)}% ({totals.get('beat_close', 0)}/{totals.get('beat_close_measured', 0)})")
+    return " · ".join(parts)
 
 
 def _webhook_url_with_query(webhook_url: str, extra_query: Optional[Dict[str, str]] = None) -> str:
@@ -6693,15 +6772,15 @@ def _send_discord_results_recap(
         final_text = f"{final_value:.1f}" if isinstance(final_value, (float, int)) else (recommendation.get("result_note") or "Void")
         tracked_at = _format_tracker_time(recommendation.get("first_logged_at") or recommendation.get("first_alerted_at"))
         status_emoji = _result_status_emoji(str(recommendation.get("result_status") or ""))
-        # The result settles against the line we published. Where the market
-        # closed sits beside it, because a pick can win at our number and lose
-        # at the close, or the reverse, and both facts are worth keeping.
-        clv_text = _closing_line_value_text(recommendation)
-        clv_suffix = f" | {clv_text}" if clv_text else ""
+        # Each line carries the time it was logged and the number it was logged
+        # at -- the price that was actually gettable, which is what the result
+        # settles against. Where the market closed afterwards is a separate
+        # claim and lives in the summary, where it has the sample to mean
+        # something; per row it only invited reading a closing line as the bet.
         lines.append(
             f"**#{display_rank} {status_emoji} {recommendation.get('player_name')}** — "
             f"{stat_label} {recommendation.get('pick_label')} {float(recommendation.get('line') or 0.0):.1f}\n"
-            f"Tracked: {tracked_at} | Final: {final_text} | {_discord_book_label(recommendation)}{clv_suffix}"
+            f"Tracked: {tracked_at} | Final: {final_text} | {_discord_book_label(recommendation)}"
         )
 
     recap_date = _normalize_game_date(recap_payload.get("game_date"))
@@ -6750,6 +6829,33 @@ def _send_discord_results_recap(
             "value": f"{unresolved_count} {origin_label.lower()} had no final box score",
             "inline": True,
         })
+    # Season to date, on the picks only. One slate's record says almost nothing;
+    # this is the figure a reader scrolling the channel actually wants. The
+    # current slate is not yet in the history file when this renders, so it is
+    # added in here.
+    if origin == "tracker":
+        totals = _season_results_to_date(through_date=recap_date, include_date=False)
+        for key, summary_key in (
+            ("cashed", "cashed"), ("lost", "lost"), ("push", "push"), ("void", "void"),
+        ):
+            totals[key] = totals.get(key, 0) + int(summary.get(summary_key, 0) or 0)
+        totals["graded"] = totals.get("graded", 0) + int(summary.get("graded_count", 0) or 0)
+        totals["slates"] = totals.get("slates", 0) + 1
+        totals["beat_close"] = totals.get("beat_close", 0) + int(clv_summary.get("beat_close", 0) or 0)
+        totals["beat_close_measured"] = (
+            totals.get("beat_close_measured", 0) + int(clv_summary.get("measured", 0) or 0)
+        )
+        totals["beat_close_rate"] = (
+            round(totals["beat_close"] / totals["beat_close_measured"], 3)
+            if totals["beat_close_measured"] else None
+        )
+        season_text = _season_results_text(totals)
+        if season_text:
+            fields.append({
+                "name": "Season to date",
+                "value": season_text,
+                "inline": False,
+            })
     fields.append({
         "name": "Recapped",
         "value": _format_discord_timestamp(get_et_now().isoformat()),
