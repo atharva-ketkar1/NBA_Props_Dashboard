@@ -842,6 +842,89 @@ class ResultsRecapDedupTests(unittest.TestCase):
         self.assertEqual(self._run(state), [])
 
 
+class OnePropPerPlayerAcrossChannelsTests(unittest.TestCase):
+    """The cap is on the player, not on a channel.
+
+    A prop logged in the tracker, shown in the below-threshold preview or
+    alerted all spend the same single slot, because two props on one player ride
+    the same minutes and the same game pace whichever channel they appear in.
+    """
+
+    def _derozan(self, stat, side, line, score):
+        return {
+            "recommendation_key": f"201942|{D0}|{stat}|{side}",
+            "player_id": 201942, "player_name": "DeMar DeRozan",
+            "stat_type": stat, "stat_label": stat,
+            "pick": side, "pick_label": side.title(),
+            "line": line, "odds": -130.0,
+            "sportsbook": "fd", "sportsbook_label": "FanDuel",
+            "game_id": "g1", "game_date": D0, "game_started": False,
+            "edge_score": score, "display_edge_score": score, "rank": 1,
+        }
+
+    def setUp(self):
+        self.watch = self._derozan("PTS", "over", 12.5, 71.9)
+        self.pick = self._derozan("PTS+AST", "over", 15.5, 73.1)
+
+    def _published(self, state):
+        return es._published_player_props_for_slate(state, D0)
+
+    def test_a_preview_watch_blocks_a_later_tracker_pick(self):
+        state = {"discord_preview_state_by_date": {D0: {
+            "sent_snapshot": es._tracker_state_snapshot_for_recommendations([self.watch])}}}
+        kept = es._drop_second_prop_per_player(
+            [self.pick], published_by_player=self._published(state))
+        self.assertEqual(kept, [], "a watch already spends the player's slot")
+
+    def test_a_tracker_pick_blocks_a_later_preview_watch(self):
+        state = {"discord_tracker_state_by_date": {D0: {
+            "sent_snapshot": es._tracker_state_snapshot_for_recommendations([self.pick])}}}
+        kept = es._drop_second_prop_per_player(
+            [self.watch], published_by_player=self._published(state))
+        self.assertEqual(kept, [], "a published pick blocks a second prop in preview")
+
+    def test_an_alerted_prop_blocks_a_second_one(self):
+        state = {"discord_alert_state_by_date": {D0: {
+            "sent_concept_snapshot": es._discord_concept_snapshot_for_recommendations(
+                [self.pick], sent_at=NOW.isoformat())}}}
+        kept = es._drop_second_prop_per_player(
+            [self.watch], published_by_player=self._published(state))
+        self.assertEqual(kept, [])
+
+    def test_the_grading_queue_also_spends_the_slot(self):
+        state = {"pending_result_recaps": {D0: {"tracked_recommendations": {
+            self.pick["recommendation_key"]: es._serialize_recommendation_for_results(self.pick)}}}}
+        kept = es._drop_second_prop_per_player(
+            [self.watch], published_by_player=self._published(state))
+        self.assertEqual(kept, [])
+
+    def test_only_the_best_survives_when_both_arrive_at_once(self):
+        kept = es._drop_second_prop_per_player(
+            [self.pick, self.watch], published_by_player={})
+        self.assertEqual([r["recommendation_key"] for r in kept], [self.pick["recommendation_key"]])
+
+    def test_re_sending_the_same_prop_is_always_allowed(self):
+        """The cap counts distinct props, not how often one is refreshed as its
+        line or price moves."""
+        state = {"discord_tracker_state_by_date": {D0: {
+            "sent_snapshot": es._tracker_state_snapshot_for_recommendations([self.pick])}}}
+        moved = dict(self.pick, line=16.5, display_edge_score=74.0)
+        kept = es._drop_second_prop_per_player(
+            [moved], published_by_player=self._published(state))
+        self.assertEqual(len(kept), 1)
+
+    def test_a_different_slate_date_gets_its_own_slot(self):
+        """Per-slate, not per-season: the same player on two nights is two
+        separate bets."""
+        state = {"discord_tracker_state_by_date": {D0: {
+            "sent_snapshot": es._tracker_state_snapshot_for_recommendations([self.pick])}}}
+        tomorrow = dict(self.pick,
+                        recommendation_key=f"201942|{D1}|PTS+AST|over", game_date=D1)
+        kept = es._drop_second_prop_per_player(
+            [tomorrow], published_by_player=es._published_player_props_for_slate(state, D1))
+        self.assertEqual(len(kept), 1)
+
+
 class EmbedBudgetTests(unittest.TestCase):
     """Discord caps a message at 6000 characters across its embeds."""
 
