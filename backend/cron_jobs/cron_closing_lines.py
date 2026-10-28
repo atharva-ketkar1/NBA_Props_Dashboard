@@ -245,6 +245,7 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     skipped_schedule_mismatch = 0
     skipped_non_target_game = 0
     skipped_live_game = 0
+    skipped_other_game_date = 0
     # An unresolved player is not dropped here -- it is keyed by normalized name
     # instead of player_id, which then propagates into the snapshot and the
     # historical archive as a non-numeric key (see utils/audit_non_numeric_keys.py
@@ -295,6 +296,20 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         elif is_closing and active_team_game and row_game_date:
             skipped_schedule_mismatch += 1
             continue
+
+        # players_dict holds one entry per player, stamped with the first game
+        # date seen, and props accumulate into it regardless of which date the
+        # row belongs to. A player on a back-to-back has props for two dates in
+        # the same CSV, so the last row read would overwrite the line and leave
+        # it filed under the other night. Keep the date this entry was opened
+        # with; the other night's props still reach the scorer through
+        # master_feed's props_by_date, which is keyed by date.
+        existing_entry = players_dict.get(pid)
+        if existing_entry is not None:
+            existing_game_date = existing_entry.get("game_date")
+            if existing_game_date and row_game_date and row_game_date != existing_game_date:
+                skipped_other_game_date += 1
+                continue
 
         if pid not in players_dict:
             players_dict[pid] = {
@@ -359,6 +374,20 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             skipped_schedule_mismatch += 1
             continue
 
+        # players_dict holds one entry per player, stamped with the first game
+        # date seen, and props accumulate into it regardless of which date the
+        # row belongs to. A player on a back-to-back has props for two dates in
+        # the same CSV, so the last row read would overwrite the line and leave
+        # it filed under the other night. Keep the date this entry was opened
+        # with; the other night's props still reach the scorer through
+        # master_feed's props_by_date, which is keyed by date.
+        existing_entry = players_dict.get(pid)
+        if existing_entry is not None:
+            existing_game_date = existing_entry.get("game_date")
+            if existing_game_date and row_game_date and row_game_date != existing_game_date:
+                skipped_other_game_date += 1
+                continue
+
         if pid not in players_dict:
             players_dict[pid] = {
                 "name": row.get("player", ""),
@@ -418,6 +447,13 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             "SKIP",
             "Skipped live/final odds rows",
             skipped=skipped_live_game,
+        )
+    if skipped_other_game_date:
+        log_status(
+            logger,
+            "SKIP",
+            "Skipped odds rows for a player's other game date",
+            skipped=skipped_other_game_date,
         )
 
     persist_raw_odds_csvs(filtered_dk_data, filtered_fd_data)
