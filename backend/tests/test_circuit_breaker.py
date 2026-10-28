@@ -162,7 +162,10 @@ class TestCallerContract(BreakerTestCase):
             calls.append(kwargs.get("label"))
             raise CircuitOpen("draftkings-points: egress is blocked upstream")
 
-        with patch.object(dk, "proxied_get_json", side_effect=blocked), \
+        # Cadence off: this test is about the breaker, and the gate would
+        # otherwise make it depend on the real schedule file and the clock.
+        with patch.dict(os.environ, {"DK_CADENCE_ENABLED": "false"}), \
+                patch.object(dk, "proxied_get_json", side_effect=blocked), \
                 patch.object(dk, "book_is_paused", return_value=False), \
                 patch.object(dk.time, "sleep", return_value=None):
             rows = dk.fetch_dk_odds()

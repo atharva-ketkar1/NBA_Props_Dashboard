@@ -161,7 +161,11 @@ class DraftKingsScraperPauseTests(unittest.TestCase):
 
     def test_an_unpaused_scraper_still_runs(self):
         from scrapers import fetch_odds_draftkings as dk
-        with patch.dict(os.environ, {}, clear=False):
+        # The cadence gate is switched off here deliberately: this test is
+        # about the pause switch, and leaving cadence on would make it depend
+        # on the real schedule artifact and the wall clock. Cadence has its own
+        # tests in test_scrape_cadence.py.
+        with patch.dict(os.environ, {"DK_CADENCE_ENABLED": "false"}, clear=False):
             os.environ.pop("EDGE_SCORE_PAUSED_BOOKS", None)
             with patch.object(dk, "fetch_category", return_value=None) as fetch_category:
                 dk.fetch_dk_odds()

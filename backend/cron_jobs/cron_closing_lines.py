@@ -208,7 +208,11 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     fd_data = []
     
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        f1 = executor.submit(draftkings.fetch_dk_odds)
+        # The closing capture forces the scrape: its whole value is being the
+        # last line before tip, so it is never deferred by the cadence gate.
+        # The intraday snapshot is throttleable, and is where the volume that
+        # drew DraftKings' block actually accumulated.
+        f1 = executor.submit(draftkings.fetch_dk_odds, force=is_closing)
         f2 = executor.submit(fanduel.fetch_odds)
         
         # --- DraftKings Safeguard ---

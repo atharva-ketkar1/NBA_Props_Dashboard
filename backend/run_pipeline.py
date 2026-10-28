@@ -124,7 +124,9 @@ def _atomic_write_dataframe_csv(df: pd.DataFrame, output_path: str) -> None:
 
 def run_dk():
     logger.info("Starting DraftKings...")
-    data = draftkings.fetch_dk_odds()
+    # The daily refresh is one run and builds the baseline artifact every other
+    # consumer reads, so it is not subject to the intraday cadence gate.
+    data = draftkings.fetch_dk_odds(force=True)
     write_odds_csv(
         DK_PATH,
         data,
