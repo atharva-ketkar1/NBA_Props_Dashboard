@@ -69,3 +69,6 @@ backend/prop_modeling/*test*.py
 nba_dashboard_backup_*.zip
 *.zip
 vm_logs/
+
+.claude
+.agents
