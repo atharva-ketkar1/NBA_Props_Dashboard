@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import os as _hc_os, sys as _hc_sys
 _hc_sys.path.insert(0, _hc_os.path.join(_hc_os.path.dirname(_hc_os.path.abspath(__file__)), ".."))
 from utils.http_client import proxied_get_json, UpstreamFailed, WorkerRejected, ProxyNotConfigured  # noqa: E402  (needs the path insert above)
+from utils.book_toggles import book_is_paused  # noqa: E402
 
 load_dotenv()
 
@@ -201,9 +202,20 @@ def parse_dk_data(data, prop_type_key):
     return parsed
 
 def fetch_dk_odds():
+    # Gated here rather than at each caller so run_pipeline, the intraday
+    # refresh and the pre-tip capture are all covered by the one switch.
+    # Returning empty is what every caller already handles when a scrape
+    # fails, so a paused book costs nothing downstream beyond having no rows.
+    if book_is_paused("dk"):
+        logger.warning(
+            "[SKIP] DraftKings odds fetch paused via EDGE_SCORE_PAUSED_BOOKS; "
+            "returning no rows so stale lines are not refreshed"
+        )
+        return []
+
     logger.info("[RUN] DraftKings odds fetch")
     all_props = []
-    
+
     for prop_key, cat_id in PLAYER_PROP_CATEGORIES.items():
         time.sleep(random.uniform(0.3, 0.8))
         data = fetch_category(cat_id, prop_key)

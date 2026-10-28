@@ -252,6 +252,19 @@ EDGE_DISCORD_PREVIEW_RENDER_LIMIT = max(
 UNDATED_PROP_KEY = "__undated__"
 
 SUPPORTED_BOOKS = {"dk", "fd"}
+
+
+def _scoring_books() -> Set[str]:
+    """Books new candidates may be priced from.
+
+    Deliberately separate from SUPPORTED_BOOKS, which stays whole. Pausing a
+    book stops it producing new picks; it must not retract the ones it already
+    published, or the tracker would lose picks the channel stated and the next
+    day's recap would grade fewer than were posted. Read per call so the pause
+    takes effect on the next refresh without a restart.
+    """
+    from utils.book_toggles import paused_books
+    return {book for book in SUPPORTED_BOOKS if book not in paused_books()}
 BOOK_ALIASES = {
     "dk": "dk",
     "draftkings": "dk",
@@ -2442,7 +2455,7 @@ def _normalize_props_tree_for_game_date(
             continue
         for raw_book, raw_prop in raw_books.items():
             book = _normalize_book_key(raw_book)
-            if book not in SUPPORTED_BOOKS or not isinstance(raw_prop, dict):
+            if book not in _scoring_books() or not isinstance(raw_prop, dict):
                 continue
 
             if any(key in raw_prop for key in ("line", "over", "under", "game_date")):
@@ -2561,7 +2574,7 @@ def _build_overlay_props_index(players_data: Optional[Dict[str, Any]]) -> Dict[s
                 continue
             for raw_book, raw_prop in raw_books.items():
                 book = _normalize_book_key(raw_book)
-                if book not in SUPPORTED_BOOKS or not isinstance(raw_prop, dict):
+                if book not in _scoring_books() or not isinstance(raw_prop, dict):
                     continue
                 line = _safe_float(raw_prop.get("line"))
                 if line is None:
@@ -2610,7 +2623,7 @@ def _build_line_movement_lookup(line_movements_payload: Any) -> Dict[Tuple[str, 
                     continue
                 for raw_book, raw_prop in raw_books.items():
                     book = _normalize_book_key(raw_book)
-                    if book not in SUPPORTED_BOOKS or not isinstance(raw_prop, dict):
+                    if book not in _scoring_books() or not isinstance(raw_prop, dict):
                         continue
                     line = _safe_float(raw_prop.get("line"))
                     if line is None:
@@ -4040,7 +4053,7 @@ def _select_market_for_side(
     books_summary = {}
 
     for book, prop in (book_props or {}).items():
-        if book not in SUPPORTED_BOOKS or not isinstance(prop, dict):
+        if book not in _scoring_books() or not isinstance(prop, dict):
             continue
         line = _safe_float(prop.get("line"))
         if line is None:
