@@ -172,5 +172,91 @@ class DraftKingsScraperPauseTests(unittest.TestCase):
         self.assertTrue(fetch_category.called)
 
 
+
+
+class OddsAgeGateTests(unittest.TestCase):
+    """The automatic half of pausing: a book that goes cold drops out and comes
+    back on its own, so an outage needs no human action in either direction."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env = patch.dict(os.environ, {
+            "EDGE_SCORE_ODDS_DIR": self._tmp.name,
+            "EDGE_SCORE_ODDS_AGE_GATE": "true",
+            "EDGE_SCORE_MAX_ODDS_AGE_MINUTES": "90",
+        })
+        self._env.start()
+        os.environ.pop("EDGE_SCORE_PAUSED_BOOKS", None)
+        self.addCleanup(self._teardown)
+
+    def _teardown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def _age(self, name, minutes):
+        import time
+        path = os.path.join(self._tmp.name, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("player,prop_type\n")
+        stamp = time.time() - minutes * 60
+        os.utime(path, (stamp, stamp))
+
+    def test_fresh_books_are_usable(self):
+        from utils import book_toggles as bt
+        self._age("draftkings.csv", 5)
+        self._age("fanduel.csv", 5)
+        self.assertEqual(bt.unusable_books(), set())
+
+    def test_a_cold_book_drops_out(self):
+        """The live failure: the preserved CSV held 11:46 rows all afternoon
+        with no age bound, and picks were priced off them."""
+        from utils import book_toggles as bt
+        self._age("draftkings.csv", 360)
+        self._age("fanduel.csv", 5)
+        self.assertEqual(bt.unusable_books(), {"dk"})
+
+    def test_a_book_restores_itself_when_rows_land(self):
+        from utils import book_toggles as bt
+        self._age("draftkings.csv", 360)
+        self._age("fanduel.csv", 5)
+        self.assertIn("dk", bt.unusable_books())
+        self._age("draftkings.csv", 1)  # a scrape succeeds
+        self.assertEqual(bt.unusable_books(), set(),
+                         "recovery must need no env change")
+
+    def test_missing_artifact_counts_as_stale(self):
+        from utils import book_toggles as bt
+        self._age("fanduel.csv", 5)
+        self.assertIn("dk", bt.unusable_books())
+
+    def test_manual_pause_is_independent_of_age(self):
+        from utils import book_toggles as bt
+        self._age("draftkings.csv", 5)
+        self._age("fanduel.csv", 5)
+        with _pause("fd"):
+            self.assertEqual(bt.unusable_books(), {"fd"})
+
+    def test_gate_can_be_switched_off(self):
+        from utils import book_toggles as bt
+        self._age("draftkings.csv", 9999)
+        self._age("fanduel.csv", 9999)
+        with patch.dict(os.environ, {"EDGE_SCORE_ODDS_AGE_GATE": "false"}):
+            self.assertEqual(bt.stale_books(), set())
+
+    def test_scoring_books_reflects_a_cold_book(self):
+        from utils import edge_score as es
+        self._age("draftkings.csv", 360)
+        self._age("fanduel.csv", 5)
+        self.assertEqual(es._scoring_books(), {"fd"})
+
+    def test_bad_age_value_falls_back_to_the_default(self):
+        from utils import book_toggles as bt
+        self._age("draftkings.csv", 5)
+        self._age("fanduel.csv", 5)
+        with patch.dict(os.environ, {"EDGE_SCORE_MAX_ODDS_AGE_MINUTES": "soon"}):
+            self.assertEqual(bt.stale_books(), set())
+
+
 if __name__ == "__main__":
     unittest.main()

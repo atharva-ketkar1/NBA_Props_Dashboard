@@ -262,9 +262,14 @@ def _scoring_books() -> Set[str]:
     published, or the tracker would lose picks the channel stated and the next
     day's recap would grade fewer than were posted. Read per call so the pause
     takes effect on the next refresh without a restart.
+
+    A book also drops out on its own once its lines go cold, which is what
+    normally happens when one goes dark upstream -- so the manual pause is for
+    deliberate choices, not for outages, and there is nothing to switch back on
+    afterwards.
     """
-    from utils.book_toggles import paused_books
-    return {book for book in SUPPORTED_BOOKS if book not in paused_books()}
+    from utils.book_toggles import unusable_books
+    return {book for book in SUPPORTED_BOOKS if book not in unusable_books()}
 BOOK_ALIASES = {
     "dk": "dk",
     "draftkings": "dk",
