@@ -16,11 +16,25 @@ if str(BACKEND_DIR) not in sys.path:
 NOW = datetime(2026, 10, 28, 22, 0, tzinfo=timezone.utc)  # 18:00 ET
 
 
-def schedule(*offsets_minutes, live=False, final=False):
-    """A schedule artifact with games at the given offsets from NOW."""
+def _real_now():
+    """The wall clock the scraper itself will read."""
+    return datetime.now(timezone.utc)
+
+
+def schedule(*offsets_minutes, live=False, final=False, anchor=None):
+    """A schedule artifact with games at the given offsets from NOW.
+
+    `anchor` overrides that base. It exists for the tests that drive
+    fetch_dk_odds() rather than should_scrape_dk(now=...): the scraper calls the
+    gate with no `now`, so it reads the real wall clock, and a schedule built
+    off the fixed NOW drifts into (or out of) the pregame window as real time
+    passes. Those tests anchor to the real clock so their offsets mean what they
+    say on any day; everything comparing against NOW stays deterministic.
+    """
+    base = anchor or NOW
     games = []
     for i, off in enumerate(offsets_minutes):
-        tip = NOW + timedelta(minutes=off)
+        tip = base + timedelta(minutes=off)
         games.append({
             "game_id": f"00226001{i:02d}",
             "game_time_utc": tip.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -249,7 +263,18 @@ class TestScraperWiring(CadenceTestCase):
         self.assertIn("fetch_dk_odds(force=True)", pipeline)
 
     def test_scraper_skips_without_requesting_when_gate_refuses(self):
-        self.write_schedule(schedule(20 * 60))  # outside the window
+        # Anchored to the real clock: fetch_dk_odds calls the gate without a
+        # `now`, so an NOW-relative tip would wander into the 8h pregame window
+        # and the run would be allowed -- the test then fails for the date it is
+        # run on rather than for anything the scraper did.
+        self.write_schedule(schedule(20 * 60, anchor=_real_now()))  # outside the window
+        # Checked first so a drifting fixture is distinguishable from a scraper
+        # that ignored a refusal. Refusal returns before _save_state, so asking
+        # costs nothing.
+        self.assertFalse(
+            self.sc.should_scrape_dk().allowed,
+            "fixture must refuse, or the assertions below prove nothing",
+        )
         import scrapers.fetch_odds_draftkings as dk
         dk = importlib.reload(dk)
         calls = []
@@ -266,7 +291,10 @@ class TestScraperWiring(CadenceTestCase):
         self.assertEqual(calls, [], "refused run must spend zero requests")
 
     def test_scraper_forced_run_requests_every_category(self):
-        self.write_schedule(schedule(20 * 60))
+        # Same anchor, for the opposite reason: force=True passes either way, so
+        # a tip that drifted inside the window would leave this asserting
+        # nothing about force overriding a refusal.
+        self.write_schedule(schedule(20 * 60, anchor=_real_now()))
         import scrapers.fetch_odds_draftkings as dk
         dk = importlib.reload(dk)
         calls = []
