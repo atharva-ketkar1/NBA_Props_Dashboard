@@ -211,13 +211,25 @@ def parse_dk_data(data, prop_type_key):
         
     return parsed
 
-def fetch_dk_odds(force=False):
+def fetch_dk_odds(force=False, deadline=None):
     """Scrape DraftKings player props.
 
     `force` skips the cadence gate for the pre-tip closing-line capture and the
     once-a-day pipeline run. A closing line captured late is not a closing
     line, so that path is never delayed or throttled -- only the intraday
     snapshot, which is where the volume actually accumulates.
+
+    `deadline` is a `time.monotonic()` value after which no further category is
+    started, and whatever has been collected is returned. It exists because the
+    caller's `future.result(timeout=...)` cannot stop this function: a Python
+    thread is not killable, so an external timeout abandoned the *result* while
+    the requests carried on. Observed on 2026-10-28 -- the caller logged a
+    timeout at 19:52:10 and the scrape kept asking a refusing host until
+    19:53:57. Only a deadline checked in here can actually stop the traffic.
+
+    Partial rows are returned rather than dropped. Fewer categories means fewer
+    candidates downstream, not wrong prices: every line returned is one the
+    book was quoting just now.
     """
     # Gated here rather than at each caller so run_pipeline, the intraday
     # refresh and the pre-tip capture are all covered by the one switch.
@@ -248,8 +260,20 @@ def fetch_dk_odds(force=False):
                 decision.jitter_seconds)
     all_props = []
     spent_requests = 0
+    failed_categories = 0
 
     for prop_key, cat_id in PLAYER_PROP_CATEGORIES.items():
+        # Checked between categories, so a single in-flight request can still
+        # overshoot by up to its own timeout. The caller's backstop covers that
+        # margin; what matters here is that no NEW request is started.
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.warning(
+                "[PARTIAL] DraftKings odds fetch hit its deadline | props=%d "
+                "categories=%d/%d -- returning what the book already quoted",
+                len(all_props), spent_requests, expected)
+            record_requests(-(expected - spent_requests))
+            return all_props
+
         time.sleep(random.uniform(0.3, 0.8))
         data = fetch_category(cat_id, prop_key)
         if data is CIRCUIT_OPEN:
@@ -265,12 +289,34 @@ def fetch_dk_odds(force=False):
             record_requests(-(expected - spent_requests))
             return []
         spent_requests += 1
+        # fetch_category returns None for a category that errored out, as
+        # opposed to a category that answered with nothing in it.
+        if data is None:
+            failed_categories += 1
         props = parse_dk_data(data, prop_key)
 
         # print(f"  Found {len(props)} props for '{prop_key}'")
         all_props.extend(props)
 
-    logger.info("[OK] DraftKings odds fetch complete | props=%d", len(all_props))
+    if all_props:
+        logger.info("[OK] DraftKings odds fetch complete | props=%d | failed_categories=%d",
+                    len(all_props), failed_categories)
+    elif failed_categories:
+        # Nothing came back and requests were refused: the run is a wash.
+        # Logging that as [OK] is how five hours of outage on 2026-10-28 read
+        # as success in the cron log -- nine consecutive "complete | props=0"
+        # lines. The preserved CSV keeps serving its last real rows, which is
+        # the odds-csv layer's call, not a reason to call this complete.
+        logger.warning(
+            "[EMPTY] DraftKings odds fetch returned no rows | %d/%d categories "
+            "failed -- existing CSV is left in place, so its lines are now older",
+            failed_categories, spent_requests)
+    else:
+        # Every category answered, the board was just empty. A dark slate is
+        # not a failure, so this stays an INFO.
+        logger.info(
+            "[OK] DraftKings odds fetch complete | props=0 | "
+            "every category answered, the board is empty")
 
     # --- DEBUG: Show user the formatted output with PLUS SIGNS ---
     if len(all_props) > 10:

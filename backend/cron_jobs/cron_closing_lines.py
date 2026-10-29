@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import sys
+import time
 import concurrent.futures
 import pandas as pd
 
@@ -200,37 +201,65 @@ def supplement_missing_players_from_snapshots(players_data, snapshot_manager, ga
 
     return added
 
+# How long the DraftKings scrape may spend. Passed INTO the scraper, which is
+# the only place that can stop issuing requests; `result()` then only has to
+# notice if that failed. A healthy eleven-category run is ~65-75s, so 120 is
+# room for a slow one rather than a target.
+DK_SCRAPE_BUDGET_SECONDS = float(os.environ.get("DK_SCRAPE_BUDGET_SECONDS", "120"))
+# Margin for the one request that may already be in flight when the deadline
+# passes. If the backstop fires anyway, the scraper ignored its deadline.
+SCRAPE_BACKSTOP_GRACE_SECONDS = float(
+    os.environ.get("SCRAPE_BACKSTOP_GRACE_SECONDS", "45"))
+
+
 def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
     """Run scrapers, map names to IDs, align data for SnapshotManager."""
     log_status(logger, "RUN", "Odds scrapers")
     
     dk_data = []
     fd_data = []
-    
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+
+    # Not a `with` block: its __exit__ is shutdown(wait=True), which waited for
+    # the very thread the timeout below had just given up on. On 2026-10-28 that
+    # turned a "120s safeguard" into a 227s call that then discarded the rows
+    # the thread went on to produce. shutdown(wait=False) in a finally lets a
+    # stuck scraper finish unobserved instead of pinning the cron tick.
+    executor = concurrent.futures.ThreadPoolExecutor()
+    try:
         # The closing capture forces the scrape: its whole value is being the
         # last line before tip, so it is never deferred by the cadence gate.
         # The intraday snapshot is throttleable, and is where the volume that
         # drew DraftKings' block actually accumulated.
-        f1 = executor.submit(draftkings.fetch_dk_odds, force=is_closing)
+        f1 = executor.submit(draftkings.fetch_dk_odds, force=is_closing,
+                             deadline=time.monotonic() + DK_SCRAPE_BUDGET_SECONDS)
         f2 = executor.submit(fanduel.fetch_odds)
         
         # --- DraftKings Safeguard ---
         try:
-            dk_data = f1.result(timeout=120) 
+            dk_data = f1.result(
+                timeout=DK_SCRAPE_BUDGET_SECONDS + SCRAPE_BACKSTOP_GRACE_SECONDS)
         except concurrent.futures.TimeoutError:
-            log_status(logger, "FAIL", "DraftKings scraper timed out")
+            # The scraper owns a deadline inside the budget, so reaching this is
+            # a bug in that gate, not an ordinary slow upstream. Say so.
+            log_status(logger, "FAIL",
+                       "DraftKings scraper overran its own deadline; backstop fired",
+                       budget_s=DK_SCRAPE_BUDGET_SECONDS)
         except Exception as e:
             log_status(logger, "FAIL", "DraftKings scraper crashed", error=e)
             
         # --- FanDuel Safeguard ---
+        # FanDuel has no cooperative deadline yet, so this is still the old
+        # abandon-the-result shape for that book. It has stayed healthy
+        # throughout the DraftKings block, so it has not needed one.
         try:
             fd_data = f2.result(timeout=120)
         except concurrent.futures.TimeoutError:
             log_status(logger, "FAIL", "FanDuel scraper timed out")
         except Exception as e:
             log_status(logger, "FAIL", "FanDuel scraper crashed", error=e)
-            
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
     if not dk_data: dk_data = []
     if not fd_data: fd_data = []
 
