@@ -121,16 +121,16 @@ If `EDGE_SCORE_DISCORD_WEBHOOK_URL` is configured, the system acts as a highly c
 
 The Discord integration includes full intraday deduplication: it only alerts when lines, odds, scores, or ranks move meaningfully, and it suppresses same-slate repeats of overlapping player/side concepts unless the later move is materially larger. It also handles automated game-finalization cleanup, 429 webhook retry safety, and tracker grading recaps that retry dynamically once prior-day box scores are available.
 
-**Below-threshold preview.** Early in a season the composite rarely reaches 72.5 — the ML term stays dark until a player has 3+ same-season games, so several components score 0 and cap the total in the mid-60s. The alert channel is then correctly silent for days, which leaves no way to judge whether the model's ordering is any good. When *nothing* clears the real threshold, the pipeline instead posts the top 5 grouped by sportsbook, numbered by board rank and carrying each pick's reasoning — one message per slate, edited in place on each refresh so it never spams, and never sent when a genuine alert exists. Previews post under the webhook username `NBA Dashboard Preview`, which is what distinguishes them from a real alert (`NBA Dashboard Daily Props`).
+**Below-threshold preview (off by default).** Early in a season the composite rarely reaches 72.5 — the ML term stays dark until a player has 3+ same-season games, so several components score 0 and cap the total in the mid-60s. The alert channel is then correctly silent for days, which leaves no way to judge whether the model's ordering is any good. When *nothing* clears the real threshold, the pipeline instead posts the top 5 grouped by sportsbook, numbered by board rank and carrying each pick's reasoning — one message per slate, edited in place on each refresh so it never spams, and never sent when a genuine alert exists. Previews post under the webhook username `NBA Dashboard Preview`, which is what distinguishes them from a real alert (`NBA Dashboard Daily Props`).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `EDGE_SCORE_DISCORD_PREVIEW_ENABLED` | `true` | Turn the preview off once real alerts fire regularly. |
+| `EDGE_SCORE_DISCORD_PREVIEW_ENABLED` | `false` | Off by default. Set `true` to grade the model's ordering while the alert channel is quiet. |
 | `EDGE_SCORE_DISCORD_PREVIEW_COUNT` | `5` | How many picks the preview shows. |
 | `EDGE_SCORE_DISCORD_PREVIEW_MIN_SIGNAL_SCORE` | `0` | Optional floor; `0` means show the best available regardless of score. |
 | `EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL` | *(unset)* | Route previews to their own channel; defaults to the alert webhook. |
 
-The preview is diagnostic: these are picks the model itself rates as *not* good enough to alert on, shown so its ordering can be checked against results.
+The preview is diagnostic scaffolding, not a product surface: these are picks the model itself rates as *not* good enough to alert on, shown so its ordering can be checked against results. It defaults to off, because carrying them in the channel alongside real picks invites reading the two as one stream.
 
 To manually verify the tracker webhook target, run `python3 test_tracker_discord.py --message "manual tracker test"` from [backend/](/Users/atharvaketkar/Desktop/NBA_Dashboard/backend). The script posts a one-off test message to the tracker webhook and prints the returned Discord `channel_id`/`message_id`.
 

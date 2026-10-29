@@ -217,14 +217,19 @@ EDGE_DISCORD_RATE_LIMIT_MAX_SLEEP_SECONDS = max(
 )
 _DISCORD_WEBHOOK_RATE_LIMIT_UNTIL: Dict[str, float] = {}
 
-# Below-threshold preview. Early in a season most components score 0 (the ML
-# term stays dark until a player has 3+ same-season games), so the composite
-# rarely reaches EDGE_DISCORD_MIN_SIGNAL_SCORE and the alert channel goes
-# silent for days. That silence is correct but useless: it gives no way to see
-# whether the model's ordering is any good. When nothing clears the real bar,
-# post the top N anyway, clearly marked as below threshold, as a single message
-# per slate that is edited in place so it never spams the channel.
-EDGE_DISCORD_PREVIEW_ENABLED = _env_bool("EDGE_SCORE_DISCORD_PREVIEW_ENABLED", True)
+# Below-threshold preview, off by default. Early in a season most components
+# score 0 (the ML term stays dark until a player has 3+ same-season games), so
+# the composite rarely reaches EDGE_DISCORD_MIN_SIGNAL_SCORE and the alert
+# channel goes silent for days. That silence is correct but useless while the
+# model is being evaluated: it gives no way to see whether the ordering is any
+# good. When nothing clears the real bar, this posts the top N anyway, clearly
+# marked as below threshold, as a single message per slate edited in place.
+#
+# It is diagnostic scaffolding, not a product surface -- these are picks the
+# model itself rates as not worth alerting on -- and shipping them alongside
+# real picks in the same channel invited reading the two as one stream. Default
+# off; set EDGE_SCORE_DISCORD_PREVIEW_ENABLED=true to grade the ordering again.
+EDGE_DISCORD_PREVIEW_ENABLED = _env_bool("EDGE_SCORE_DISCORD_PREVIEW_ENABLED", False)
 EDGE_DISCORD_PREVIEW_COUNT = max(1, _env_int("EDGE_SCORE_DISCORD_PREVIEW_COUNT", 5))
 # Optional: route previews to their own channel. Defaults to the alert webhook.
 EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL = os.getenv("EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL", "").strip()
@@ -841,11 +846,21 @@ def _format_discord_timestamp(raw_value: Any) -> str:
     return f"{month} {dt.day}, {dt.year} • {time_text} ET"
 
 
-def _format_tracker_time(raw_value: Any) -> str:
+def _format_tracker_time(raw_value: Any, game_date: Any = None) -> str:
     dt = _parse_dt(raw_value)
     if dt is None:
         return "Unknown ET"
-    return dt.strftime("%I:%M %p ET").lstrip("0")
+    clock = dt.strftime("%I:%M %p ET").lstrip("0")
+    # Logging a pick the night before its slate is routine -- the late preview
+    # looks ahead at tomorrow's board -- but a bare clock time makes that row
+    # read as though it were logged after the previous slate had already
+    # finished, so its grading looks attached to the wrong night. Date the row
+    # whenever it was logged off its own game date; same-day rows stay bare,
+    # which is the overwhelming majority of them.
+    slate_date = _normalize_game_date(game_date)
+    if slate_date and dt.strftime("%Y-%m-%d") != slate_date:
+        return f"{dt.strftime('%b')} {dt.day}, {clock}"
+    return clock
 
 
 def _sportsbook_logo_url(book: Any) -> Optional[str]:
@@ -6644,6 +6659,57 @@ def _filter_recap_payload_to_supported_books(
     }, changed
 
 
+def _filter_recap_payload_to_enabled_origins(
+    recap_payload: Dict[str, Any],
+) -> Tuple[Dict[str, Any], bool]:
+    """Drop queued preview picks once the preview channel is switched off.
+
+    Turning EDGE_SCORE_DISCORD_PREVIEW_ENABLED off stops new preview logs, but
+    the recap path drains whatever `pending_result_recaps` already holds and
+    posts one message per origin in RESULT_ORIGINS -- with no reference to the
+    flag. So picks queued while the preview was on still surfaced the next
+    morning as a "Watches results" message in a channel that was supposed to be
+    finished: previews were already disabled on the VM when the 2026-10-28
+    watches recap posted.
+
+    Filtering here rather than skipping the origin at send time is deliberate.
+    A date left holding only preview picks fails the `any_sent` check, which
+    holds it open in `remaining_pending` so a failed send is retried -- and with
+    nothing left that may ever send, it would be retried forever. Emptying the
+    payload instead lets the existing "nothing tracked" branch drop the date.
+    """
+    if EDGE_DISCORD_PREVIEW_ENABLED:
+        return recap_payload, False
+
+    tracked = recap_payload.get("tracked_recommendations", {})
+    if not isinstance(tracked, dict):
+        tracked = {}
+    filtered_tracked = {
+        key: recommendation
+        for key, recommendation in tracked.items()
+        if _result_origin(recommendation) != "preview"
+    }
+
+    recommendations = recap_payload.get("recommendations", [])
+    if not isinstance(recommendations, list):
+        recommendations = []
+    filtered_recommendations = [
+        recommendation
+        for recommendation in recommendations
+        if _result_origin(recommendation) != "preview"
+    ]
+
+    changed = (
+        len(filtered_tracked) != len(tracked)
+        or len(filtered_recommendations) != len(recommendations)
+    )
+    return {
+        **recap_payload,
+        "tracked_recommendations": filtered_tracked,
+        "recommendations": filtered_recommendations,
+    }, changed
+
+
 def _filter_recap_payload_to_published_picks(
     recap_payload: Dict[str, Any],
     state: Dict[str, Any],
@@ -6788,7 +6854,10 @@ def _send_discord_results_recap(
         stat_label = _long_stat_label(recommendation.get("stat_type"), recommendation.get("stat_label"))
         final_value = recommendation.get("final_value")
         final_text = f"{final_value:.1f}" if isinstance(final_value, (float, int)) else (recommendation.get("result_note") or "Void")
-        tracked_at = _format_tracker_time(recommendation.get("first_logged_at") or recommendation.get("first_alerted_at"))
+        tracked_at = _format_tracker_time(
+            recommendation.get("first_logged_at") or recommendation.get("first_alerted_at"),
+            recommendation.get("game_date"),
+        )
         status_emoji = _result_status_emoji(str(recommendation.get("result_status") or ""))
         # Each line carries the time it was logged and the number it was logged
         # at -- the price that was actually gettable, which is what the result
@@ -6960,6 +7029,43 @@ def _book_labels_summary(book_keys: List[str]) -> str:
     return ", ".join(labels) or "None"
 
 
+def _slate_label(payload: Dict[str, Any]) -> str:
+    """The slate a message belongs to, for its one line of plain text.
+
+    Discord orders a channel by when a message was *created*, and the tracker
+    and preview logs are created when their slate's first pick lands -- which
+    the late look-ahead routinely makes the night before. So a slate's running
+    log sits above the previous slate's results recap, and reading the channel
+    top to bottom walks the slates out of order. Nothing can reorder an edited
+    message, so every message instead names its own slate on the line that the
+    channel list and the push notification actually show.
+    """
+    game_dates: List[str] = []
+    for value in (payload.get("game_dates") or []):
+        # Validated, not merely truthiness-checked: _normalize_game_date hands
+        # back whatever it was given when the value is not a date, so a None or
+        # a stray blank would otherwise reach the label verbatim.
+        if _parse_date(value) is None:
+            continue
+        normalized = _normalize_game_date(value)
+        if normalized not in game_dates:
+            game_dates.append(normalized)
+    if not game_dates:
+        return ""
+    if len(game_dates) <= 2:
+        return ", ".join(game_dates)
+    # An arrow, not a hyphen: ISO dates are already full of hyphens, and
+    # "2026-10-28-2026-10-30" does not read as a range.
+    return f"{game_dates[0]} \u2192 {game_dates[-1]}"
+
+
+def _slate_headline(prefix: str, payload: Dict[str, Any], suffix: str) -> str:
+    """`prefix • <slate> • suffix`, dropping the slate when there is none."""
+    slate_label = _slate_label(payload)
+    parts = [prefix, f"{slate_label} slate" if slate_label else "", suffix]
+    return " • ".join(part for part in parts if part)
+
+
 def _discord_message_content(
     headline: str,
     recommendations: Optional[List[Dict[str, Any]]] = None,
@@ -7064,7 +7170,10 @@ def _build_discord_book_embed(
         edge_text = f"{edge_score:.1f}" if edge_score is not None else "n/a"
 
         if channel_variant == "tracker":
-            first_logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
+            first_logged_at = _format_tracker_time(
+                recommendation.get("first_logged_at"),
+                recommendation.get("game_date"),
+            )
             stat_token = str(recommendation.get("stat_type") or stat_label or "PROP").strip().upper()
             side_token = "O" if str(recommendation.get("pick") or "").lower() == "over" else "U"
             odds_text = _discord_tracker_odds_label(recommendation)
@@ -7091,7 +7200,10 @@ def _build_discord_book_embed(
         if not why_summary:
             why_summary = _discord_signal_summary(recommendation)
         if channel_variant == "preview":
-            logged_at = _format_tracker_time(recommendation.get("first_logged_at"))
+            logged_at = _format_tracker_time(
+                recommendation.get("first_logged_at"),
+                recommendation.get("game_date"),
+            )
             header = f"**{display_rank}. [{logged_at}] {player_name}**"
         else:
             header = f"**{display_rank}.** {player_name}"
@@ -7176,7 +7288,10 @@ def _build_discord_injury_payload(
         stat_label = _long_stat_label(change.get("stat_type"), change.get("stat_label"))
         pick_label = change.get("pick_label") or _side_name(str(change.get("pick") or "").lower())
         line_text = _format_line(change.get("line"))
-        logged_at = _format_tracker_time(change.get("first_logged_at"))
+        logged_at = _format_tracker_time(
+            change.get("first_logged_at"),
+            change.get("game_date") or slate_date,
+        )
 
         score_bits = []
         logged_score = change.get("logged_edge_score")
@@ -7382,12 +7497,15 @@ def _build_discord_alert_payload(
     embeds[-1].setdefault("timestamp", payload.get("generated_at"))
 
     username = "NBA Dashboard Daily Props"
+    slate_label = _slate_label(payload)
     return {
         # A label, not a summary: the card below carries the picks, and
         # repeating them above it read as a plain-text message with the card
         # as an afterthought. This exists so the notification and the channel
         # list are not blank.
-        "content": _discord_message_content(title_label),
+        "content": _discord_message_content(
+            f"{title_label} • {slate_label} slate" if slate_label else title_label
+        ),
         "username": username,
         "embeds": embeds,
     }
@@ -7471,7 +7589,9 @@ def _build_discord_tracker_payload(
         )
 
     return {
-        "content": _discord_message_content(f"Prop tracker • {len(recommendations)} logged today"),
+        "content": _discord_message_content(
+            _slate_headline("Prop tracker", payload, f"{len(recommendations)} logged")
+        ),
         "username": "NBA Dashboard Prop Tracker",
         "embeds": embeds,
     }
@@ -7518,7 +7638,9 @@ def _build_discord_preview_payload(
         embeds[-1]["timestamp"] = generated_at
 
     return {
-        "content": _discord_message_content(f"Below threshold • {len(preview_recommendations)} logged"),
+        "content": _discord_message_content(
+            _slate_headline("Below threshold", payload, f"{len(preview_recommendations)} logged")
+        ),
         "username": "NBA Dashboard Preview",
         "embeds": embeds,
     }
@@ -7791,12 +7913,15 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             continue
         if normalized_date >= today_str:
             filtered_recap_payload, pruned = _filter_recap_payload_to_supported_books(recap_payload)
+            filtered_recap_payload, origin_pruned = _filter_recap_payload_to_enabled_origins(
+                filtered_recap_payload
+            )
             filtered_recap_payload, unpublished_pruned = _filter_recap_payload_to_published_picks(
                 filtered_recap_payload,
                 state,
                 game_date=normalized_date,
             )
-            state_changed = bool(state_changed or pruned or unpublished_pruned)
+            state_changed = bool(state_changed or pruned or origin_pruned or unpublished_pruned)
             if filtered_recap_payload.get("tracked_recommendations"):
                 remaining_pending[normalized_date] = filtered_recap_payload
             continue
@@ -7813,12 +7938,13 @@ def _process_results_recaps(master_feed: List[Dict[str, Any]], state: Dict[str, 
             sent_origins = {}
 
         recap_payload, pruned = _filter_recap_payload_to_supported_books(recap_payload)
+        recap_payload, origin_pruned = _filter_recap_payload_to_enabled_origins(recap_payload)
         recap_payload, unpublished_pruned = _filter_recap_payload_to_published_picks(
             recap_payload,
             state,
             game_date=normalized_date,
         )
-        state_changed = bool(state_changed or pruned or unpublished_pruned)
+        state_changed = bool(state_changed or pruned or origin_pruned or unpublished_pruned)
         if not recap_payload.get("tracked_recommendations"):
             continue
 

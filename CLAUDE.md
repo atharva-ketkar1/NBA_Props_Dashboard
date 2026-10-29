@@ -87,7 +87,9 @@ Coverage is reported separately as `confidence`.
 ### Three Discord channels, one of them a log
 
 Alerts (≥ `EDGE_SCORE_DISCORD_MIN_SIGNAL_SCORE`) post as new messages, capped at one pick per
-game. The tracker and the below-threshold preview are each a single message per slate, edited
+game. The below-threshold preview is **off by default** (`EDGE_SCORE_DISCORD_PREVIEW_ENABLED`)
+— it was diagnostic scaffolding for grading the model's ordering while the alert channel was
+quiet. The tracker and, when enabled, the preview are each a single message per slate, edited
 in place, holding a running log of what was published — so a pick stays visible after its game
 tips rather than being rewritten away. Everything either one logs is queued into
 `pending_result_recaps` and graded the next day; the recap waits for missing box scores for

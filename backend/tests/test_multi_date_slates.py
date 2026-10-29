@@ -328,9 +328,15 @@ class PerDatePublishTests(unittest.TestCase):
         self.assertTrue(published[D0], "player should be recorded for the first night")
         self.assertTrue(published[D1], "player should be recorded for the second night")
 
+    @patch.object(es, "EDGE_DISCORD_PREVIEW_ENABLED", True)
     def test_an_alert_on_one_date_does_not_mute_the_other_dates_preview(self):
         """The preview trigger used to be a global `not official_recommendations`,
-        so any alert anywhere suppressed every preview."""
+        so any alert anywhere suppressed every preview.
+
+        The preview now defaults to off, so this turns it on explicitly: the
+        per-date trigger is still what it pins down, and inheriting the default
+        would make the test silently vacuous rather than fail.
+        """
         below_bar = es.EDGE_DISCORD_MIN_SIGNAL_SCORE - 20.0
         board = [
             _recommendation(player_id=1, game_id="g0", game_date=D0, score=95.0),
@@ -964,7 +970,10 @@ class ResultsRecapDedupTests(unittest.TestCase):
             es._process_results_recaps([], state)
         return posted
 
+    @patch.object(es, "EDGE_DISCORD_PREVIEW_ENABLED", True)
     def test_both_origins_post_once(self):
+        # The preview defaults to off, and a disabled preview is filtered out of
+        # the recap entirely, so the two-origin case has to ask for it.
         state = self._state({})
         posted = self._run(state)
         self.assertEqual(sorted(posted), ["https://discord.test/preview", "https://discord.test/tracker"])
