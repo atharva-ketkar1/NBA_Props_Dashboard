@@ -34,6 +34,14 @@ Design notes, each tied to an observed worker behaviour
     can legitimately take ~30s before returning. Client timeouts must exceed
     that or we abort work the worker was about to complete successfully.
 
+  * The UA pool has FOUR entries, which bounds how deep the re-roll is worth
+    pursuing. If one UA is stale, a 403 recurs with p ~ 0.25, so three
+    consecutive 403s already put the stale-UA explanation at ~1.6% and six put
+    it at ~0.02%. Attempts 4-6 therefore decide nothing a stale UA could
+    explain, while costing the most: `_sleep_for` is exponential, so they were
+    ~37s of the ~48s an exhausted 403 ladder spent sleeping. 403 gets a
+    shallower budget than the genuinely transient statuses for that reason.
+
   * Re-rolling the UA only helps when the 403 is about the UA. When the 403 is
     about the egress IP, retrying is worse than useless: on 2026-10-28
     DraftKings' edge refused the VM and the worker alike (the same URL served
@@ -101,6 +109,10 @@ RETRY_STATUSES = frozenset({403, 408, 425, 429, 500, 502, 503, 504,
 # and we cancel work that was about to succeed.
 DEFAULT_TIMEOUT = float(os.environ.get("PROXY_REQUEST_TIMEOUT", "60"))
 DEFAULT_MAX_ATTEMPTS = int(os.environ.get("PROXY_MAX_ATTEMPTS", "6"))
+# 403 alone is capped shorter: past three, the stale-UA theory the retry exists
+# to exploit is down to ~1.6% and the remaining attempts are nearly pure cost.
+# Read on use, not captured, so it can be widened during an incident.
+MAX_ATTEMPTS_403 = "PROXY_MAX_ATTEMPTS_403"
 
 # Worker limit is 60/60s. 1.1s spacing => ~54/min, leaving headroom for the
 # retries this module issues on top of the baseline request rate.
@@ -286,6 +298,15 @@ def _worker_error(response):
     return None
 
 
+def _max_attempts_403():
+    raw = (os.environ.get(MAX_ATTEMPTS_403) or "").strip()
+    try:
+        return max(1, int(raw)) if raw else 3
+    except ValueError:
+        logger.warning("%s=%r is not a number, using 3", MAX_ATTEMPTS_403, raw)
+        return 3
+
+
 def _sleep_for(attempt, response):
     """Retry-After when the server states it, else exponential full jitter."""
     if response is not None:
@@ -351,7 +372,8 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
         except requests.RequestException as exc:
             if attempt == max_attempts:
                 circuit_breaker.record_failure(
-                    host, f"{tag}: transport error: {type(exc).__name__}")
+                    host, f"{tag}: transport error: {type(exc).__name__}",
+                    weight=attempt)
                 raise UpstreamFailed(
                     f"{tag}: transport error after {max_attempts} attempts: {exc}"
                 ) from exc
@@ -375,9 +397,16 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
             return response
 
         last_status = response.status_code
-        if response.status_code not in RETRY_STATUSES or attempt == max_attempts:
+        # A 403 stops earlier than the transient statuses do -- see the module
+        # docstring. The half-open probe already narrowed max_attempts to 1, so
+        # taking the minimum keeps that intact.
+        ceiling = max_attempts
+        if response.status_code == 403:
+            ceiling = min(max_attempts, _max_attempts_403())
+        if response.status_code not in RETRY_STATUSES or attempt >= ceiling:
             circuit_breaker.record_failure(
-                host, f"{tag}: HTTP {response.status_code} after {attempt} attempt(s)")
+                host, f"{tag}: HTTP {response.status_code} after {attempt} attempt(s)",
+                weight=attempt)
             raise UpstreamFailed(
                 f"{tag}: HTTP {response.status_code} after {attempt} attempt(s)"
             )
@@ -394,7 +423,8 @@ def proxied_get(url, *, headers=None, params=None, timeout=None,
         time.sleep(delay)
 
     circuit_breaker.record_failure(
-        host, f"{tag}: exhausted {max_attempts} attempts (last status {last_status})")
+        host, f"{tag}: exhausted {max_attempts} attempts (last status {last_status})",
+        weight=max_attempts)
     raise UpstreamFailed(f"{tag}: exhausted {max_attempts} attempts "
                          f"(last status {last_status})")
 

@@ -27,7 +27,29 @@ It does not sniff response bodies to classify a 403 as "permanent". cdn.nba.com
 and stats.nba.com sit behind Akamai too, so an "Access Denied" body is not
 evidence that re-rolling the UA would fail -- body-matching would disable the
 one retry that module depends on. This trips on *behaviour* instead: a host that
-has exhausted every attempt N times in a row is blocking us, whatever it says.
+refuses N requests in a row is blocking us, whatever it says.
+
+Why a success does not forget the trips
+---------------------------------------
+It used to. `record_success` dropped the host's whole entry, so one 200 reset
+`trips` to zero and the next block started again at the shortest cooldown.
+Measured on 2026-10-28, that is exactly what a flapping host does with it:
+
+    18:00  OPEN for 66 min (trip 3)
+    19:20  one probe succeeds -> "cleared 3 trip(s)"
+    19:53  OPEN for 16 min (trip 1)
+
+Four hours of escalation discarded by a single request, so DraftKings kept
+paying trip-1 prices to re-enter the same block. A success now clears
+`failures` and the cooldown immediately -- a host that is answering must never
+be held back -- but `trips` is only forgiven for *demonstrated* clean time, one
+per PROXY_BREAKER_TRIP_DECAY seconds since the clean streak began. Same
+additive-increase/multiplicative-decrease shape as the pacing in `http_client`:
+back off fast, recover slowly.
+
+A failed half-open probe re-opens the breaker on that one request rather than
+starting a fresh budget. The probe *was* the test; spending the threshold again
+to re-confirm what it just told us is the volume this module exists to stop.
 
 State lives on disk because each cron tick is a fresh process. An in-memory
 breaker would reset every five minutes and never actually hold a cooldown.
@@ -49,15 +71,33 @@ logger = logging.getLogger("http_client")
 # want to shorten during an incident without restarting the scheduler.
 
 DEFAULTS = {
-    # Three consecutive exhaustions, not one: a single category dying is
-    # ordinary upstream flakiness, three in a row is the host refusing us.
-    "PROXY_BREAKER_TRIP_AFTER": "3",
+    # Counted in failed *requests*, not failed calls. A call can spend several
+    # attempts (http_client re-rolls the worker's UA on 403), so counting calls
+    # made the real cost of a trip the threshold times the retry budget -- 18
+    # requests into a host that refused the first one. Six is two full 403
+    # ladders: enough that one flaky category cannot trip it, few enough that a
+    # blocked host is dropped before it has been asked a dozen times.
+    "PROXY_BREAKER_TRIP_AFTER": "6",
+    # Clean seconds that forgive one trip. Only time since the current clean
+    # streak started counts, so a host has to actually stay healthy to shed the
+    # escalation -- going quiet does not earn it.
+    "PROXY_BREAKER_TRIP_DECAY": "3600",
     # First cooldown. Long enough to stop feeding the reputation score, short
     # enough that a slate is not written off over a brief edge wobble.
     "PROXY_BREAKER_COOLDOWN": "900",
     # Each further trip doubles the wait, so a host that stays hostile is asked
     # about progressively less often rather than every tick forever.
-    "PROXY_BREAKER_COOLDOWN_CAP": "7200",
+    #
+    # The cap is really a bound on how late we can notice a recovery, because
+    # during a cooldown nothing asks. It was 7200 when a trip cost three
+    # exhausted calls and `trips` reset on any success, so the far end was
+    # rarely reached. Now that a failed probe escalates on one request, trips
+    # climb once per cooldown and the cap IS the steady state -- at 7200 a
+    # block that lifts at 19:20 might go unseen until 21:00, losing a slate's
+    # worth of lines to save requests nobody needed saved. 2700 costs one
+    # request per 45 min while blocked (~7 across the 2026-10-28 outage, against
+    # the ~385 that drew it) and still catches a 9:00 tip.
+    "PROXY_BREAKER_COOLDOWN_CAP": "2700",
 }
 
 
@@ -140,6 +180,26 @@ def _save(state):
         logger.warning("circuit breaker: could not persist state: %s", exc)
 
 
+def _decayed_trips(entry):
+    """Trips this host still owes, after forgiving its clean time.
+
+    Decay runs from `clean_since` -- the first success of the current streak,
+    never the latest -- because a host serving steadily would otherwise push
+    the clock forward with every request and never shed anything.
+    """
+    trips = int(entry.get("trips", 0))
+    if trips <= 0:
+        return 0
+    clean_since = float(entry.get("clean_since") or 0)
+    if not clean_since:
+        return trips
+    per_trip = _num("PROXY_BREAKER_TRIP_DECAY")
+    if per_trip <= 0:
+        return trips
+    forgiven = int(max(0.0, _now() - clean_since) / per_trip)
+    return max(0, trips - forgiven)
+
+
 def _cooldown_for(trips):
     """Exponential in the number of consecutive trips, capped, with jitter so
     a fleet of callers does not re-probe in lockstep."""
@@ -172,40 +232,73 @@ def check(host):
         )
 
 
-def record_failure(host, detail=""):
-    """Count one *exhausted* failure. Trips the breaker on the Nth in a row."""
+def record_failure(host, detail="", weight=1):
+    """Count `weight` refused requests. Trips the breaker on the Nth in a row.
+
+    `weight` is how many requests the failing call actually spent, so a caller
+    that burned its whole retry ladder is charged for the ladder rather than
+    for one "failure". Without that the threshold undercounted the real traffic
+    by the retry budget.
+    """
     if not _enabled():
         return
     with _lock:
         state = _load()
         entry = state.get(host) or {}
-        failures = int(entry.get("failures", 0)) + 1
+
+        # Forgive clean time before counting this failure against the host,
+        # then drop the marker: the streak is over.
+        trips = _decayed_trips(entry)
+        before = int(entry.get("trips", 0))
+        if trips < before:
+            logger.info("circuit breaker: %s shed %d trip(s) after staying "
+                        "clean, now at %d", host, before - trips, trips)
+        entry.pop("clean_since", None)
+
+        # A cooldown still on record but already elapsed means `check` handed
+        # out a half-open probe, and this is that probe failing. One request
+        # was the whole test -- re-open now instead of buying the threshold
+        # again to re-learn what it just said.
+        open_until = float(entry.get("open_until") or 0)
+        half_open = bool(entry.get("open_until")) and open_until <= _now()
+
+        failures = int(entry.get("failures", 0)) + max(1, int(weight))
         entry["failures"] = failures
         entry["last_failure_at"] = _now()
         if detail:
             entry["last_detail"] = detail[:300]
 
         trip_after = _trip_after()
-        if failures >= trip_after:
-            trips = int(entry.get("trips", 0)) + 1
+        if half_open or failures >= trip_after:
+            trips += 1
             cooldown = _cooldown_for(trips)
             entry["trips"] = trips
             entry["open_until"] = _now() + cooldown
             entry["failures"] = 0
             logger.error(
-                "circuit breaker OPEN for %s after %d consecutive failures: "
-                "pausing all requests for %.0f min (trip %d). %s",
-                host, failures, cooldown / 60, trips, detail or "")
+                "circuit breaker OPEN for %s after %s: pausing all requests "
+                "for %.0f min (trip %d). %s",
+                host,
+                "a failed half-open probe" if half_open
+                else f"{failures} consecutive failed requests",
+                cooldown / 60, trips, detail or "")
         else:
+            entry["trips"] = trips
             logger.warning(
-                "circuit breaker: %s failure %d/%d before backing off",
+                "circuit breaker: %s failed request %d/%d before backing off",
                 host, failures, trip_after)
         state[host] = entry
         _save(state)
 
 
 def record_success(host):
-    """A success clears everything: the host is serving this egress again."""
+    """Resume requests to `host`, but hold its trip count until it earns relief.
+
+    The cooldown and the failure streak go immediately -- a host that answers
+    must not be throttled. `trips` stays, so if the host blocks us again this
+    hour it backs off for longer rather than restarting at the shortest
+    cooldown. See "Why a success does not forget the trips" above.
+    """
     if not _enabled():
         return
     with _lock:
@@ -213,11 +306,28 @@ def record_success(host):
         entry = state.get(host)
         if not entry:
             return
+
         was_open = bool(entry.get("open_until"))
-        if was_open or entry.get("failures") or entry.get("trips"):
-            logger.info("circuit breaker CLOSED for %s: upstream is answering "
-                        "again, cleared %d trip(s)", host, int(entry.get("trips", 0)))
-        state.pop(host, None)
+        # The first success of a streak starts the decay clock; later ones must
+        # leave it alone or the host would never finish shedding its trips.
+        entry.setdefault("clean_since", _now())
+        entry["failures"] = 0
+        entry.pop("open_until", None)
+
+        trips = _decayed_trips(entry)
+        if trips <= 0:
+            if was_open or entry.get("trips"):
+                logger.info("circuit breaker CLOSED for %s: upstream is "
+                            "answering again, cleared %d trip(s)",
+                            host, int(entry.get("trips", 0)))
+            state.pop(host, None)
+        else:
+            entry["trips"] = trips
+            if was_open:
+                logger.info("circuit breaker CLOSED for %s: upstream is "
+                            "answering again, holding %d trip(s) until it has "
+                            "stayed clean", host, trips)
+            state[host] = entry
         _save(state)
 
 
@@ -229,7 +339,7 @@ def status():
         out[host] = {
             "open": remaining > 0,
             "minutes_remaining": round(max(0.0, remaining) / 60, 1),
-            "trips": int(entry.get("trips", 0)),
+            "trips": _decayed_trips(entry),
             "consecutive_failures": int(entry.get("failures", 0)),
             "last_detail": entry.get("last_detail", ""),
         }
