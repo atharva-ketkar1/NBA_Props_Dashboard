@@ -52,6 +52,16 @@ HEADERS = {
 
 PT_MEASURE_TYPES = ["Passing", "Rebounding", "Drives"]
 
+# Player-tracking columns sourced from leaguedashptstats (PT_MEASURE_TYPES).
+# These publish hours after the box scores, so a run in the early-morning ET
+# window can legitimately find them missing -- but they must never go missing
+# *silently*, because six downstream ML features are derived from them and a
+# narrowed feed degrades predictions without any error surfacing.
+TRACKING_COLS = [
+    'POTENTIAL_AST', 'PASSES_MADE', 'AST_POINTS_CREATED',
+    'REB_CHANCES', 'REB_CONTEST_PCT', 'DRIVES', 'DRIVE_PTS', 'DRIVE_PASSES',
+]
+
 # Core box score columns that should be filled with 0 if missing.
 # Tracking/advanced columns are intentionally left as NaN to signal missing data vs. true zero.
 CORE_FILL_ZERO_COLS = [
@@ -262,6 +272,10 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
 
     daily_merged = None
     failed_endpoints = []
+    # Endpoints that answered 200 with zero rows. Kept separate from
+    # failed_endpoints so the caller can tell "upstream not ready" apart from
+    # "request failed", then merged into the returned list -- both need a retry.
+    empty_endpoints = []
     encoded_date = urllib.parse.quote(date_str, safe='')
 
     base_sleep = (4.0 + random.uniform(0.5, 2.0)) if is_full_refresh else 1.0
@@ -295,6 +309,14 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                 api_headers = r['resultSets'][0].get('headers', [])
 
                 if not row_set:
+                    # HTTP 200 with no rows means the tracking aggregates have not
+                    # published yet -- they lag the box scores by hours and the daily
+                    # pipeline runs in the early-morning ET window. Every date that
+                    # reaches here already has base game logs (valid_dates is derived
+                    # from them), so an empty payload is never a legitimate off-day.
+                    # Record it so the date is retried and lands in the failed manifest
+                    # instead of being written off as complete.
+                    empty_endpoints.append(PT)
                     break
 
                 df_pt = pd.DataFrame(row_set, columns=api_headers)
@@ -361,6 +383,8 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                     daily_merged = df_1q
                 else:
                     daily_merged = pd.merge(daily_merged, df_1q, on='PLAYER_ID', how='outer')
+            else:
+                empty_endpoints.append('1Q')
             break
 
         except Exception as e:
@@ -414,6 +438,8 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                     daily_merged = df_1h
                 else:
                     daily_merged = pd.merge(daily_merged, df_1h, on='PLAYER_ID', how='outer')
+            else:
+                empty_endpoints.append('1H')
             break
 
         except Exception as e:
@@ -469,6 +495,8 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
                     daily_merged = df_adv
                 else:
                     daily_merged = pd.merge(daily_merged, df_adv, on='PLAYER_ID', how='outer')
+            else:
+                empty_endpoints.append('Advanced')
             break
 
         except Exception as e:
@@ -486,7 +514,11 @@ def fetch_tracking_data_for_date(date_str, is_full_refresh=False, season=None):
     if daily_merged is not None:
         daily_merged['DATE_STR'] = date_str
 
-    return daily_merged, failed_endpoints
+    if empty_endpoints:
+        print(f"      No rows yet for {date_str} from: {empty_endpoints} "
+              f"(upstream aggregates likely not published)")
+
+    return daily_merged, failed_endpoints + empty_endpoints
 
 
 def run_scrape(output_path=None, season=None):
@@ -753,6 +785,7 @@ def run_scrape(output_path=None, season=None):
     else:
         final_df = existing_df
 
+    tracking_warning = None
     if not final_df.empty:
         final_df['GAME_DATE'] = pd.to_datetime(final_df['GAME_DATE'])
         final_df = final_df.sort_values(by=['PLAYER_ID', 'GAME_DATE'], ascending=[True, False])
@@ -760,6 +793,23 @@ def run_scrape(output_path=None, season=None):
 
         cols_to_drop = ['SEASON_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_NAME', 'VIDEO_AVAILABLE']
         final_df = final_df.drop(columns=[c for c in cols_to_drop if c in final_df.columns])
+
+        # Schema guard: the tracking block is the one group that can vanish
+        # without raising (200 + empty rowSet), and it stayed missing for the
+        # whole 2026-27 season before anyone noticed. Say so loudly at write
+        # time rather than letting a narrowed feed pass as a clean run.
+        missing_tracking = [c for c in TRACKING_COLS if c not in final_df.columns]
+        empty_tracking = [
+            c for c in TRACKING_COLS
+            if c in final_df.columns and final_df[c].notna().sum() == 0
+        ]
+        if missing_tracking or empty_tracking:
+            tracking_warning = (
+                f"Tracking columns absent from the written feed: {missing_tracking or empty_tracking}. "
+                "Six ML features derive from these and will be NaN at serve time. "
+                "Re-run once leaguedashptstats has published."
+            )
+            print(f"   WARNING: {tracking_warning}")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         final_df.to_csv(output_path, index=False)
@@ -779,9 +829,20 @@ def run_scrape(output_path=None, season=None):
             )
         return _result(
             "partial",
-            f"Game logs updated with partial coverage: {len(dates_with_any_data)}/{len(target_dates)} dates have data and {len(permanently_failed)} dates still have gaps.",
+            f"Game logs updated with partial coverage: {len(dates_with_any_data)}/{len(target_dates)} dates have data and {len(permanently_failed)} dates still have gaps."
+            + (f" {tracking_warning}" if tracking_warning else ""),
             failed_dates=permanently_failed,
             target_dates=target_dates,
+            tracking_warning=tracking_warning,
+        )
+
+    if tracking_warning:
+        return _result(
+            "partial",
+            f"Game Logs Updated ({len(dates_with_any_data)}/{len(target_dates)} target dates) "
+            f"but tracking columns are missing. {tracking_warning}",
+            target_dates=target_dates,
+            tracking_warning=tracking_warning,
         )
 
     return _result(
