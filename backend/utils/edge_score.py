@@ -6421,6 +6421,30 @@ def _find_boxscore_player_game_log(
     return None
 
 
+def _boxscore_roster_is_settled(
+    recommendation: Dict[str, Any],
+    boxscore_cache: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
+) -> bool:
+    """Do we hold a final box score for this pick's game?
+
+    A populated roster is the signal. `_boxscore_cache_for_game` returns before
+    filling either index unless the CDN answered and reported gameStatus 3, so
+    a non-empty `by_player_id` means the game is final and we know who dressed.
+    Empty covers the three cases that are not evidence of anything -- no game
+    id, the fetch failed, or the game is still in progress.
+
+    Read the cache only; never fetch. The caller reaches here having already
+    missed on `_find_boxscore_player_game_log`, which populated this entry.
+    """
+    game_id = str(recommendation.get("game_id") or "").strip()
+    if not game_id:
+        return False
+    cache_entry = boxscore_cache.get(game_id)
+    if not isinstance(cache_entry, dict):
+        return False
+    return bool(cache_entry.get("by_player_id"))
+
+
 def _build_dnp_lookup(master_feed: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, set]]:
     lookup: Dict[Tuple[str, str], Dict[str, set]] = {}
     for player in master_feed:
@@ -6602,6 +6626,20 @@ def _grade_results_recap(
                 status = "void"
                 final_value = None
                 result_note = "Listed as DNP"
+            elif _boxscore_roster_is_settled(recommendation, boxscore_cache):
+                # Absent from a final box score entirely, which the DNP list
+                # above does not cover: that list holds players who dressed and
+                # did not play, while a player ruled out is inactive and so is
+                # omitted from the box score altogether. Without this he has no
+                # resolution path at all and stays unresolved until the grace
+                # window expires, holding the whole slate's recap behind him --
+                # Rui Hachimura (LAC, 2026-11-02) cost 25 graded picks their
+                # overnight recap after a scratch that never hit the injury
+                # report. The game is final and he is not in it, so the pick
+                # never had action.
+                status = "void"
+                final_value = None
+                result_note = "Did not dress"
             else:
                 unresolved.append(recommendation.get("recommendation_key"))
                 continue

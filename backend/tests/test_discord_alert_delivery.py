@@ -260,6 +260,159 @@ class PartialGradingTests(unittest.TestCase):
         self.assertEqual(graded["summary"]["unresolved_count"], 1)
 
 
+class ScratchedPlayerGradingTests(unittest.TestCase):
+    """A pick on a player who never dressed has to resolve, not hang.
+
+    The DNP list in `_build_dnp_lookup` comes off the box score and holds only
+    players who dressed and sat. A player ruled out is inactive, so he is absent
+    from the box score altogether and matches neither that list nor a game log.
+    Before this he stayed unresolved, and because readiness demands
+    `unresolved == 0` inside the grace window, one scratch held back every other
+    pick on the slate: Rui Hachimura (LAC, 2026-11-02) delayed 25 graded picks
+    (14-10, 1 void) from their usual ~00:30 ET recap to the 18:00 ET grace
+    deadline, having been scratched without ever reaching the injury report.
+    """
+
+    GAME_DATE = "2026-10-24"
+
+    def _scratched_pick(self):
+        return _recommendation(
+            player_id=200,
+            game_id="G2",
+            score=79.0,
+            rank=2,
+            stat_type="PTS+REB",
+            side="under",
+            line=23.5,
+            game_date=self.GAME_DATE,
+        )
+
+    def _played_pick(self):
+        return _recommendation(
+            player_id=100,
+            game_id="G1",
+            score=80.0,
+            rank=1,
+            line=20.5,
+            game_date=self.GAME_DATE,
+        )
+
+    def _payload(self, *picks):
+        return {
+            "game_date": self.GAME_DATE,
+            "recommendations": list(picks),
+            "tracked_recommendations": {
+                pick["recommendation_key"]: pick for pick in picks
+            },
+        }
+
+    def _master_feed(self):
+        return [
+            {
+                "id": 100,
+                "name": "Player 100",
+                "team": "DET",
+                "game_log": [
+                    {"GAME_DATE": self.GAME_DATE, "MIN": 30.0, "PTS": 25.0},
+                ],
+            },
+        ]
+
+    def _boxscore(self, *, roster):
+        """Stand in for the CDN fetch, which only indexes a final game.
+
+        `roster` is who dressed. An empty one is the real shape for a game that
+        is not final yet or whose fetch failed, since the builder returns before
+        filling either index in both cases.
+        """
+        def _fake(game_id, cache):
+            cached = cache.get(game_id)
+            if isinstance(cached, dict):
+                return cached
+            entry = {
+                "by_player_id": {
+                    str(pid): {"MIN": 28.0, "PTS": 12.0, "REB": 5.0}
+                    for pid in roster
+                },
+                "by_name": {},
+            }
+            cache[game_id] = entry
+            return entry
+
+        return patch.object(es, "_boxscore_cache_for_game", side_effect=_fake)
+
+    def test_a_scratch_is_voided_rather_than_left_unresolved(self):
+        with self._boxscore(roster=[300, 301]):
+            graded = es._grade_results_recap(
+                self._payload(self._scratched_pick()),
+                self._master_feed(),
+            )
+
+        self.assertTrue(graded["ready"])
+        self.assertEqual(graded["summary"]["unresolved_count"], 0)
+        self.assertEqual(graded["summary"]["void"], 1)
+        self.assertEqual(graded["recommendations"][0]["result_status"], "void")
+        self.assertEqual(graded["recommendations"][0]["result_note"], "Did not dress")
+
+    def test_a_scratch_no_longer_holds_back_the_rest_of_the_slate(self):
+        with self._boxscore(roster=[300, 301]):
+            graded = es._grade_results_recap(
+                self._payload(self._played_pick(), self._scratched_pick()),
+                self._master_feed(),
+            )
+
+        self.assertTrue(graded["ready"])
+        self.assertEqual(graded["summary"]["cashed"], 1)
+        self.assertEqual(graded["summary"]["void"], 1)
+        self.assertEqual(graded["summary"]["unresolved_count"], 0)
+
+    def test_a_game_still_in_flight_keeps_waiting(self):
+        with self._boxscore(roster=[]):
+            graded = es._grade_results_recap(
+                self._payload(self._scratched_pick()),
+                self._master_feed(),
+            )
+
+        self.assertFalse(graded["ready"])
+        self.assertEqual(graded["summary"]["unresolved_count"], 1)
+        self.assertEqual(graded["summary"]["graded_count"], 0)
+
+    def test_a_pick_with_no_game_id_keeps_waiting(self):
+        pick = self._scratched_pick()
+        pick["game_id"] = ""
+
+        with self._boxscore(roster=[300, 301]):
+            graded = es._grade_results_recap(self._payload(pick), self._master_feed())
+
+        self.assertFalse(graded["ready"])
+        self.assertEqual(graded["summary"]["unresolved_count"], 1)
+
+    def test_a_listed_dnp_is_still_reported_as_a_dnp(self):
+        pick = self._scratched_pick()
+        feed = self._master_feed() + [
+            {
+                "id": 300,
+                "name": "Player 300",
+                "team": "DET",
+                "game_log": [
+                    {
+                        "GAME_DATE": self.GAME_DATE,
+                        "MIN": 28.0,
+                        "PTS": 12.0,
+                        "dnps": [{"id": 200, "name": "Player 200", "reason": "DNP"}],
+                    },
+                ],
+            },
+        ]
+
+        with self._boxscore(roster=[300, 301]):
+            graded = es._grade_results_recap(self._payload(pick), feed)
+
+        self.assertTrue(graded["ready"])
+        self.assertEqual(graded["recommendations"][0]["result_status"], "void")
+        self.assertEqual(graded["recommendations"][0]["result_note"], "Listed as DNP")
+
+
 class AlertVolumeTests(unittest.TestCase):
     """One slate should not produce a message per line wobble."""
 
