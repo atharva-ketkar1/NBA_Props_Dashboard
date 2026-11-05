@@ -69,6 +69,23 @@ NON_ACTIONABLE_LIVE_INJURY_REASON_MARKERS = (
 ET_ZONE = ZoneInfo("America/New_York")
 
 
+def _sanitize_quantiles(low: float, mid: float, high: float) -> tuple:
+    """Order a quantile triple, then floor it at zero.
+
+    CatBoost's MultiQuantile heads are fit jointly but with no monotonicity or
+    non-negativity constraint, so on the low-signal count markets they cross and
+    go negative -- BLK carried a negative quantile in 38% of rows, STL in 17%.
+    A negative q25 widens the IQR, which drags `frac` down in edge_score's
+    p_over interpolation and biases those markets toward the over.
+
+    Sort before clamping, not after: clamping (-0.3, 0.1, -0.1) first gives
+    (0, 0.1, 0), and sorting that moves the median to 0.1's position. Sorting
+    first gives (-0.3, -0.1, 0.1), and clamping preserves the median's rank.
+    """
+    low, mid, high = sorted((low, mid, high))
+    return max(0.0, low), max(0.0, mid), max(0.0, high)
+
+
 def _live_injury_reason_text(report_row: Dict[str, Any]) -> str:
     parts = []
     for key in ("reason", "status_reason", "comment", "note", "player_reason"):
@@ -109,6 +126,9 @@ class MLPredictor:
         self.minutes_cat_cols: List[str] = []
         self.minutes_cat_idx: List[int] = []
         self._drift_feature_high_water: Dict[str, float] = {}
+        self._drift_seen_counter: Counter = Counter()
+        self._drift_null_counter: Counter = Counter()
+        self._drift_value_seen: Dict[str, set] = {}
         self._drift_event_count = 0
         self._drift_feature_counter: Counter[str] = Counter()
         self._drift_stat_counter: Counter[str] = Counter()
@@ -208,19 +228,53 @@ class MLPredictor:
                     new_minutes_q_stats = json.load(handle)
 
             new_models: Dict[str, CatBoostRegressor] = {}
-            for stat_type, filename in (new_meta.get("model_files", {}) or {}).items():
+            declared_models = (new_meta.get("model_files", {}) or {})
+            missing_models: List[str] = []
+            for stat_type, filename in declared_models.items():
                 cbm_path = ML_MODEL_DIR / str(filename)
                 if not cbm_path.exists():
-                    logger.warning("MLPredictor: Missing model file %s for %s", filename, stat_type)
+                    missing_models.append(str(stat_type))
                     continue
                 model = CatBoostRegressor()
                 model.load_model(str(cbm_path))
                 new_models[stat_type] = model
 
+            if missing_models:
+                # A per-market outage used to be one warning at load and then
+                # silence: predict() returns None forever for that stat while
+                # `ready` stays True, and edge_score renders that identically to
+                # "this player has no logs". Six of eleven models could vanish
+                # and the board would look healthy.
+                logger.error(
+                    "MLPredictor: %d of %d per-stat models missing, those markets "
+                    "will produce no ML signal: %s",
+                    len(missing_models), len(declared_models), ", ".join(sorted(missing_models)),
+                )
+
+            # Never let a bundle whose files have all vanished replace a working
+            # in-memory set. _load_model_bundle runs on every predict() as a
+            # hot-reload check, and a retrain that writes model_metadata.json
+            # before its .cbm files is exactly the race that triggers it.
+            if declared_models and not new_models:
+                logger.error(
+                    "MLPredictor: bundle declares %d models but none loaded; "
+                    "keeping the previously loaded models.",
+                    len(declared_models),
+                )
+                return False
+
             new_minutes_model: Optional[CatBoostRegressor] = None
             if minutes_model_path.exists():
                 new_minutes_model = CatBoostRegressor()
                 new_minutes_model.load_model(str(minutes_model_path))
+            elif new_minutes_meta:
+                # Previously silent, which would make the minutes-gate fix look
+                # like a no-op with no indication why.
+                logger.error(
+                    "MLPredictor: minutes metadata present but %s is missing; "
+                    "every player falls back to the minutes heuristic.",
+                    minutes_model_path.name,
+                )
 
             new_feat_cols = list(new_meta.get("feature_columns", []) or [])
             new_cat_cols = list(new_meta.get("cat_features", []) or [])
@@ -250,6 +304,7 @@ class MLPredictor:
         self._model_meta_mtime_ns = model_meta_mtime_ns
         self._minutes_meta_mtime_ns = minutes_meta_mtime_ns
         self.runtime_model_artifact_updated_at = self._path_updated_at(meta_path)
+        self.unavailable_stat_types = sorted(missing_models)
         self.ready = bool(self.models)
         return True
 
@@ -281,6 +336,13 @@ class MLPredictor:
             self.live_team_matchup_dates = {}
             self.live_injury_report_meta = {}
             self.live_position_resolution_summary = {}
+            # Ratchets monotonically for the process lifetime otherwise, so a
+            # feature that spikes early permanently silences everything below
+            # it -- and a constant-valued defect reports exactly once.
+            self._drift_feature_high_water = {}
+            self._drift_seen_counter = Counter()
+            self._drift_null_counter = Counter()
+            self._drift_value_seen = {}
             self._master_feed_mtime_ns = None
             self._injury_report_mtime_ns = None
             self._load_live_player_histories()
@@ -698,13 +760,22 @@ class MLPredictor:
     def _check_drift(self, features: Dict[str, Any], z_threshold: float = 3.0) -> List[Dict[str, float]]:
         alerts = []
         for col, stats in self.drift_b.items():
+            self._drift_seen_counter[col] += 1
             val = features.get(col)
             if val is None:
+                # A z-score monitor is structurally blind to the two failure
+                # modes that actually bit us: an always-NaN feature is skipped
+                # here, and a hardwired 0.0 against mean 20.28 / std 25.12 is
+                # z=0.81, nowhere near the threshold. Tally both so coverage
+                # loss is visible without touching the alert path.
+                self._drift_null_counter[col] += 1
                 continue
             try:
                 fval = float(val)
             except (TypeError, ValueError):
+                self._drift_null_counter[col] += 1
                 continue
+            self._drift_value_seen.setdefault(col, set()).add(round(fval, 6))
             std = stats.get("std", 0.0)
             if std < 1e-9:
                 continue
@@ -812,6 +883,25 @@ class MLPredictor:
             top_feature_summary,
             top_summary,
         )
+
+        # Coverage, not drift: which trained features never arrive, and which
+        # arrive frozen at a single value. Neither can trip a z-threshold.
+        always_null = sorted(
+            col for col, seen in self._drift_seen_counter.items()
+            if seen >= 20 and self._drift_null_counter.get(col, 0) == seen
+        )
+        frozen = sorted(
+            col for col, seen in self._drift_seen_counter.items()
+            if seen >= 20
+            and len(self._drift_value_seen.get(col, ())) == 1
+            and self._drift_null_counter.get(col, 0) == 0
+        )
+        if always_null or frozen:
+            logger.warning(
+                "Feature coverage | always_null=%s frozen_single_value=%s",
+                ", ".join(always_null[:8]) or "none",
+                ", ".join(frozen[:8]) or "none",
+            )
         self._drift_last_summary_at = now
 
     @staticmethod
@@ -963,13 +1053,13 @@ class MLPredictor:
         minutes_pool = Pool(minutes_frame, cat_features=self.minutes_cat_idx)
         preds = self.minutes_model.predict(minutes_pool)
         if getattr(preds, "shape", None) == (1, 3):
-            q25 = float(preds[0, 0])
-            q50 = float(preds[0, 1])
-            q75 = float(preds[0, 2])
+            q25, q50, q75 = _sanitize_quantiles(
+                float(preds[0, 0]), float(preds[0, 1]), float(preds[0, 2])
+            )
             apply_modeled_minutes_features(
                 row_obj,
                 modeled_minutes_q50=q50,
-                modeled_minutes_iqr=max(0.0, q75 - q25),
+                modeled_minutes_iqr=q75 - q25,
             )
             return {"q25": q25, "q50": q50, "q75": q75}
 
@@ -1037,6 +1127,15 @@ class MLPredictor:
         player_id = history_context["player_id"]
         target_date = history_context["target_date"]
 
+        # `is_home` is only knowable from game_context. When it cannot be
+        # resolved, the dummy matchup built in
+        # _build_live_player_history_context falls through to " vs. ", which
+        # _parse_matchup reads as home=1 -- so every thin-context row claimed
+        # HOME against a training mean of 0.4987, i.e. wrong half the time.
+        # Carry the unresolved state and null the feature instead: CatBoost
+        # handles NaN, and a coin flip is not something to assert.
+        is_home_resolved = self._game_context_is_home(team_abbr, game_context)
+
         row_obj = _build_regression_row(
             game_idx=len(player_history)-1,
             player_history=player_history,
@@ -1054,6 +1153,9 @@ class MLPredictor:
 
         if not row_obj:
             return None
+
+        if is_home_resolved is None:
+            row_obj["is_home"] = None
 
         # Engineer the fast, real-time features before prediction
         r5_stat = row_obj.get("recent5_stat_avg")
@@ -1126,6 +1228,11 @@ class MLPredictor:
             team_presence_index=self.live_team_presence_index,
             team_game_dates_by_season=self.live_team_game_dates_by_season,
         )
+        # The minutes model trains on is_home as well, and it runs before
+        # _apply_live_game_context_features, so without this it would inherit
+        # the same defaulted HOME that row_obj just shed.
+        if minutes_row and is_home_resolved is None:
+            minutes_row["is_home"] = None
         minutes_preds = self._predict_modeled_minutes(row_obj, minutes_row)
         if minutes_row:
             row_obj["same_team_current_season_games"] = minutes_row.get("same_team_current_season_games")
@@ -1228,12 +1335,16 @@ class MLPredictor:
                 "model_artifact_updated_at": self.runtime_model_artifact_updated_at,
                 "season_stats_updated_at": self.runtime_season_stats_updated_at,
                 "position_resolution_summary": dict(self.live_position_resolution_summary),
+                "unavailable_stat_types": list(getattr(self, "unavailable_stat_types", [])),
             }
             if preds.shape == (1, 3):
+                s_q25, s_q50, s_q75 = _sanitize_quantiles(
+                    float(preds[0, 0]), float(preds[0, 1]), float(preds[0, 2])
+                )
                 result = {
-                    "q25": float(preds[0, 0]),
-                    "q50": float(preds[0, 1]),
-                    "q75": float(preds[0, 2]),
+                    "q25": s_q25,
+                    "q50": s_q50,
+                    "q75": s_q75,
                     "injury_report_freshness": injury_freshness,
                     "runtime_context": runtime_context,
                 }

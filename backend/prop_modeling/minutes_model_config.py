@@ -71,7 +71,13 @@ MODELED_MINUTES_FEATURE_COLUMNS = [
 
 MINUTES_OOF_BLOCK_DATES = 10
 MINUTES_OOF_MIN_TRAIN_DATES = 30
-MINUTES_LIVE_MIN_SAME_TEAM_GAMES = 6
+# Must match the minutes dataset's --minutes-min-prior-games (default 3). At 6 this
+# gate excluded every player with 3-5 games of same-team history -- 118 of 448 on
+# the 2026-27 board -- and sent them to build_fallback_modeled_minutes, which with
+# a history that thin collapses to exactly recent5_minutes_avg. The model was
+# trained on that regime (3,636 rows at 3-5 games), so the gate was discarding
+# precisely the rows it had learned.
+MINUTES_LIVE_MIN_SAME_TEAM_GAMES = 3
 
 
 def _safe_float(value: Any) -> Optional[float]:

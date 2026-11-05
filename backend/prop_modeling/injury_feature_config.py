@@ -325,4 +325,25 @@ def apply_injury_feature_values(
     row_obj["missing_high_usage_usage_pct_x_player_usage_rate"] = row_obj[
         "usage_vacuum_x_player_usage_pct"
     ]
+
+    # The three *_x_player_target_per_min products were built only in
+    # _build_regression_row's dict literal, from vacancy dicts that the serve
+    # path passes empty -- so at inference they were hardwired to 0.0 against a
+    # training mean of 20.28 for the same-position one. Owning them here instead
+    # makes them train/serve symmetric by construction: the training path calls
+    # this function last, with the same vacancy dicts the literal used, so these
+    # writes simply become the single definition.
+    #
+    # Note these use recent10_target_per_min directly rather than
+    # choose_recent_over_season, matching the training formula exactly.
+    target_per_min = _coerce_float(row_obj.get("recent10_target_per_min")) or 0.0
+    row_obj["missing_same_pos_minutes_x_player_target_per_min"] = _rounded_or_zero(
+        (resolved_same_pos["missing_same_pos_minutes"] or 0.0) * target_per_min
+    )
+    row_obj["missing_playmaker_potential_ast_pg_x_player_target_per_min"] = _rounded_or_zero(
+        (resolved_team["missing_playmaker_potential_ast_pg"] or 0.0) * target_per_min
+    )
+    row_obj["missing_onball_drives_pg_x_player_target_per_min"] = _rounded_or_zero(
+        (resolved_team["missing_onball_drives_pg"] or 0.0) * target_per_min
+    )
     return row_obj
