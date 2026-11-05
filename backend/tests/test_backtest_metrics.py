@@ -22,6 +22,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from prop_modeling.backtest import (
+    _p_over_from_quantiles,
     brier_score,
     build_rows,
     interval_coverage,
@@ -165,6 +166,66 @@ class Reliability(unittest.TestCase):
         self.assertEqual(len(table), 2)
         self.assertAlmostEqual(table[0]["hit_rate"], 0.0)
         self.assertAlmostEqual(table[1]["hit_rate"], 1.0)
+
+
+class IncompleteFeatureSetIsRefused(unittest.TestCase):
+    """Scoring a dataset that lacks trained features must fail, not guess.
+
+    build_regression_dataset.py does not emit every trained feature: the four
+    momentum/possession terms are hand-engineered inside ml_inference after
+    _build_regression_row returns, and the four modeled_minutes_* columns come
+    from a separate minutes model attached by the training notebook. Scoring
+    without them silently fills NaN and the model collapses toward a flat prior
+    -- measured once at sd(q50)=3.04 against sd(actual)=8.46, which reads
+    exactly like "this model has no signal" and is instead a harness bug.
+    """
+
+    def test_a_dataset_missing_trained_features_raises(self):
+        import csv as _csv
+        import tempfile
+
+        from prop_modeling.backtest import score_dataset
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "tiny.csv"
+            with path.open("w", newline="") as fh:
+                w = _csv.writer(fh)
+                w.writerow(["player_id", "game_date", "stat_type", "actual_value"])
+                w.writerow(["1", "2026-10-20", "PTS", "25"])
+            with self.assertRaises(RuntimeError) as ctx:
+                score_dataset(path)
+        message = str(ctx.exception)
+        self.assertIn("missing", message)
+        self.assertIn("modeled_minutes_q50", message)
+
+
+class ShippedPOverMap(unittest.TestCase):
+    """Pins the map the live scorer actually uses, including its flaw.
+
+    The harness has to measure what ships, not an improved version, or the fix
+    has no before. This map saturates: past q75 it pins at 0.25 and stops
+    responding to how far past it got.
+    """
+
+    def test_a_line_at_the_median_is_a_coin_flip(self):
+        self.assertAlmostEqual(_p_over_from_quantiles(10.0, 20.0, 30.0, 20.0), 0.50)
+
+    def test_a_line_at_q25_leans_over(self):
+        self.assertAlmostEqual(_p_over_from_quantiles(10.0, 20.0, 30.0, 10.0), 0.75)
+
+    def test_a_line_at_q75_leans_under(self):
+        self.assertAlmostEqual(_p_over_from_quantiles(10.0, 20.0, 30.0, 30.0), 0.25)
+
+    def test_it_saturates_past_q75_which_is_the_defect(self):
+        """0.04 past q75 and 20 past q75 score identically."""
+        just_past = _p_over_from_quantiles(10.0, 20.0, 30.0, 30.04)
+        far_past = _p_over_from_quantiles(10.0, 20.0, 30.0, 50.0)
+        self.assertAlmostEqual(just_past, far_past)
+        self.assertAlmostEqual(just_past, 0.25)
+
+    def test_a_degenerate_interval_falls_back_to_the_median(self):
+        self.assertAlmostEqual(_p_over_from_quantiles(5.0, 5.0, 5.0, 4.0), 0.60)
+        self.assertAlmostEqual(_p_over_from_quantiles(5.0, 5.0, 5.0, 6.0), 0.40)
 
 
 if __name__ == "__main__":

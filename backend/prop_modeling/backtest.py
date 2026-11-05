@@ -357,6 +357,202 @@ def summarise(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Model scoring
+#
+# The live predictor cannot be driven at a historical as-of date: it resolves
+# the target date from live matchup maps, loads current-season enrichment, and
+# is a singleton. So we score the offline dataset instead -- which is what
+# build_regression_dataset.py exists to produce, with real vacancy dicts rather
+# than the empty ones the serve path passes.
+#
+# Two honesty caveats that the report must carry, because they both inflate the
+# model's apparent skill:
+#
+#   1. The exported bundle was trained on data ending 2026-04-09, so every row
+#      at or before that date is IN-SAMPLE. Only 2026-27 rows are a real test.
+#      --train-cutoff splits the report on this and it is not optional.
+#   2. ~16 enrichment features (opponent ranks, play-type volumes, team pace)
+#      come from a single undated current-season snapshot stamped onto every
+#      historical row, so they leak. That is a Phase C fix; until then even the
+#      out-of-sample numbers are optimistic.
+# ---------------------------------------------------------------------------
+
+TRAIN_CUTOFF_DEFAULT = "2026-04-09"
+
+
+def _p_over_from_quantiles(q25: float, q50: float, q75: float, line: float) -> float:
+    """Mirror edge_score's interpolation so the harness measures what ships.
+
+    Note this map saturates: once the line reaches q75 it pins at 0.25 and stops
+    responding, which is itself one of the things to fix. Measuring the shipped
+    behaviour first means the fix has a before.
+    """
+    iqr = q75 - q25
+    if iqr > 1e-6:
+        frac = min(max((line - q25) / iqr, 0.0), 1.0)
+        return min(max(0.75 - frac * 0.50, 0.10), 0.90)
+    return 0.60 if q50 > line else 0.40
+
+
+def score_dataset(
+    dataset_csv: Path,
+    *,
+    stat_types: Optional[Sequence[str]] = None,
+    keys: Optional[set] = None,
+    batch: int = 8192,
+) -> Dict[Tuple[str, str, str], Tuple[float, float, float]]:
+    """(player_id, game_date, stat_type) -> sanitized (q25, q50, q75).
+
+    `keys` restricts scoring to rows we can actually grade. The dataset is
+    ~488k rows while only the ~60k with a matching closing line are useful, so
+    without it nine rows in ten are scored and thrown away.
+    """
+    import numpy as np
+    import pandas as pd
+    from catboost import CatBoostRegressor, Pool
+
+    model_dir = PROP_MODELING_DIR / "exported_regression_model"
+    meta = json.loads((model_dir / "model_metadata.json").read_text())
+    feat_cols: List[str] = list(meta["feature_columns"])
+    cat_cols: List[str] = list(meta["cat_features"])
+    alphas = list(meta.get("quantile_alphas") or [])
+    if alphas and alphas != sorted(alphas):
+        raise RuntimeError(
+            "quantile_alphas %s are not ascending; column order would be "
+            "mislabelled." % alphas
+        )
+    cat_idx = [feat_cols.index(c) for c in cat_cols if c in feat_cols]
+
+    df = pd.read_csv(dataset_csv, low_memory=False)
+
+    # Guard against the exact failure this harness exists to prevent.
+    # build_regression_dataset.py does NOT emit every trained feature: the four
+    # momentum/possession terms are hand-engineered in ml_inference after
+    # _build_regression_row returns, and the four modeled_minutes_* columns are
+    # attached by the training notebook from a separate minutes model. Without
+    # them, reindex() silently fills NaN and the model collapses toward a flat
+    # prior -- measured once at sd(q50)=3.04 against sd(actual)=8.46, which
+    # looks exactly like "the model has no signal" and is not.
+    missing_feats = [c for c in feat_cols if c not in df.columns]
+    if missing_feats:
+        raise RuntimeError(
+            "The dataset is missing %d trained features, so scoring it would "
+            "measure the gap rather than the model: %s. These have to be "
+            "attached first (the minutes model's outputs, plus the engineered "
+            "terms ml_inference builds after _build_regression_row)."
+            % (len(missing_feats), ", ".join(sorted(missing_feats)))
+        )
+
+    df["_pid"] = df["player_id"].astype(str)
+    df["_gd"] = df["game_date"].astype(str).str.slice(0, 10)
+    if keys:
+        wanted_pairs = {(k[0], k[1]) for k in keys}
+        before = len(df)
+        df = df[[(a, b) in wanted_pairs for a, b in zip(df["_pid"], df["_gd"])]]
+        print("  narrowed dataset %d -> %d rows with a gradeable line" % (before, len(df)))
+    out: Dict[Tuple[str, str, str], Tuple[float, float, float]] = {}
+    wanted = set(stat_types) if stat_types else None
+
+    for stat_type, filename in sorted(meta["model_files"].items()):
+        if wanted and stat_type not in wanted:
+            continue
+        cbm = model_dir / str(filename)
+        if not cbm.exists():
+            print("  skip %s (missing %s)" % (stat_type, filename))
+            continue
+        sub = df[df["stat_type"] == stat_type]
+        if sub.empty:
+            continue
+        model = CatBoostRegressor()
+        model.load_model(str(cbm))
+
+        X = sub.reindex(columns=feat_cols).copy()
+        for c in feat_cols:
+            if c in cat_cols:
+                X[c] = X[c].fillna("UNKNOWN").astype(str)
+            else:
+                X[c] = pd.to_numeric(X[c], errors="coerce")
+
+        preds_all = []
+        for start in range(0, len(X), batch):
+            chunk = X.iloc[start:start + batch]
+            preds_all.append(model.predict(Pool(chunk, cat_features=cat_idx)))
+        preds = np.vstack(preds_all)
+        if preds.shape[1] != 3:
+            raise RuntimeError(
+                "%s returned %d outputs, expected 3 quantiles" % (stat_type, preds.shape[1])
+            )
+        # Same contract as the serve path: order first, then floor at zero.
+        preds = np.clip(np.sort(preds, axis=1), 0.0, None)
+
+        pids = sub["_pid"].to_numpy()
+        dates = sub["_gd"].to_numpy()
+        for i in range(len(sub)):
+            out[(pids[i], dates[i], stat_type)] = (
+                float(preds[i, 0]), float(preds[i, 1]), float(preds[i, 2])
+            )
+        print("  scored %-12s %6d rows" % (stat_type, len(sub)))
+    return out
+
+
+def model_report(
+    rows: Sequence[Dict[str, Any]],
+    scores: Dict[Tuple[str, str, str], Tuple[float, float, float]],
+    *,
+    train_cutoff: str = TRAIN_CUTOFF_DEFAULT,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-stat model vs market log-loss, split in-sample / out-of-sample."""
+    regimes: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
+        "in_sample (trained on)": defaultdict(list),
+        "out_of_sample": defaultdict(list),
+    }
+    for r in rows:
+        if r["result"] == "push":
+            continue
+        key = (r["player_id"], r["game_date"], r["stat_type"])
+        trip = scores.get(key)
+        if trip is None:
+            continue
+        q25, q50, q75 = trip
+        bucket = "in_sample (trained on)" if r["game_date"] <= train_cutoff else "out_of_sample"
+        regimes[bucket][r["stat_type"]].append({
+            "model_p_over": _p_over_from_quantiles(q25, q50, q75, r["line"]),
+            "market_p_over": r["market_prob_over"],
+            "y": 1 if r["result"] == "over" else 0,
+            "q50": q50, "actual": r["actual"], "line": r["line"],
+            "q25": q25, "q75": q75,
+        })
+
+    report: Dict[str, List[Dict[str, Any]]] = {}
+    for regime, by_stat in regimes.items():
+        out = []
+        for stat in sorted(by_stat, key=lambda s: -len(by_stat[s])):
+            v = by_stat[stat]
+            y = [x["y"] for x in v]
+            mll = log_loss([x["model_p_over"] for x in v], y)
+            kll = log_loss([x["market_p_over"] for x in v], y)
+            out.append({
+                "stat_type": stat,
+                "n": len(v),
+                "model_log_loss": mll,
+                "market_log_loss": kll,
+                "delta": (mll - kll) if (mll is not None and kll is not None) else None,
+                "model_brier": brier_score([x["model_p_over"] for x in v], y),
+                "q50_minus_actual": sum(x["q50"] - x["actual"] for x in v) / len(v),
+                "coverage_discrete": interval_coverage(
+                    [x["actual"] for x in v], [x["q25"] for x in v], [x["q75"] for x in v],
+                    discrete=True,
+                ),
+                "coverage_raw": interval_coverage(
+                    [x["actual"] for x in v], [x["q25"] for x in v], [x["q75"] for x in v],
+                    discrete=False,
+                ),
+            })
+        report[regime] = out
+    return report
+
+
 def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", choices=("supabase", "local"), default="supabase")
@@ -367,6 +563,13 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--output-csv", default=None, help="Write the joined rows here.")
     ap.add_argument("--reliability", action="store_true",
                     help="Print the market's reliability table.")
+    ap.add_argument("--model", action="store_true",
+                    help="Also score the exported models against these lines.")
+    ap.add_argument("--dataset-csv",
+                    default=str(PROP_MODELING_DIR / "generated" / "regression_training_dataset.csv"),
+                    help="Historical feature rows from build_regression_dataset.py.")
+    ap.add_argument("--train-cutoff", default=TRAIN_CUTOFF_DEFAULT,
+                    help="Rows at or before this date are in-sample for the exported bundle.")
     return ap.parse_args()
 
 
@@ -429,6 +632,41 @@ def main() -> int:
         print("  %-12s %7s %10s %10s" % ("bucket", "n", "mean_pred", "hit_rate"))
         for b in reliability_table(mkt, y):
             print("  %-12s %7d %10.3f %10.3f" % (b["bucket"], b["n"], b["mean_pred"], b["hit_rate"]))
+
+    if args.model:
+        ds = Path(args.dataset_csv)
+        if not ds.exists():
+            print()
+            print("no dataset at %s -- run build_regression_dataset.py first" % ds)
+        else:
+            print()
+            print("scoring exported models over %s" % ds.name)
+            needed = {
+                (r["player_id"], r["game_date"], r["stat_type"])
+                for r in rows if r["result"] != "push"
+            }
+            scores = score_dataset(ds, keys=needed)
+            rep = model_report(rows, scores, train_cutoff=args.train_cutoff)
+            for regime in ("in_sample (trained on)", "out_of_sample"):
+                stats = rep.get(regime) or []
+                print()
+                print("%s  (cutoff %s)" % (regime.upper(), args.train_cutoff))
+                if not stats:
+                    print("  no rows")
+                    continue
+                print("  %-14s %7s %10s %10s %8s %10s %9s %9s" % (
+                    "stat", "n", "model_ll", "mkt_ll", "delta", "q50-act", "cov_disc", "cov_raw"))
+                for st in stats:
+                    print("  %-14s %7d %10s %10s %8s %10s %9s %9s" % (
+                        st["stat_type"], st["n"],
+                        "%.4f" % st["model_log_loss"] if st["model_log_loss"] is not None else "-",
+                        "%.4f" % st["market_log_loss"] if st["market_log_loss"] is not None else "-",
+                        "%+.4f" % st["delta"] if st["delta"] is not None else "-",
+                        "%+.2f" % st["q50_minus_actual"],
+                        "%.3f" % st["coverage_discrete"] if st["coverage_discrete"] is not None else "-",
+                        "%.3f" % st["coverage_raw"] if st["coverage_raw"] is not None else "-",
+                    ))
+                print("  (delta < 0 means the model beat the market on log-loss)")
 
     if args.output_csv:
         out = Path(args.output_csv)
