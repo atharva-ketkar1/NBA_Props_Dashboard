@@ -64,6 +64,9 @@ backend/prop_modeling/generated/
 catboost_info/
 backend/prop_modeling/*.ipynb
 backend/prop_modeling/*test*.py
+# ...but backtest.py is a real module, not a notebook; the glob above is
+# aimed at model_test_nb.py.
+!backend/prop_modeling/backtest.py
 
 # data archives built by backend/scripts/snapshot.py (never commit: public repo)
 nba_dashboard_backup_*.zip
