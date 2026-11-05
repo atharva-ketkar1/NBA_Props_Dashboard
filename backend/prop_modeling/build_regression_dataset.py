@@ -665,9 +665,17 @@ def _build_history(
     include_zero_minutes: bool = False,
 ) -> List[Tuple[date, str, Dict[str, Any]]]:
     rows: List[Tuple[date, str, Dict[str, Any]]] = []
+    missing = [str(p) for p in gamelog_paths if not Path(p).exists()]
+    if missing:
+        # Skipping these silently is how a stale DEFAULT_GAMELOG_PATHS could
+        # produce a single-season training set that looked completely normal.
+        raise FileNotFoundError(
+            "Game log files are missing, so the dataset would silently cover "
+            "fewer seasons than intended: " + ", ".join(missing)
+        )
+    if not list(gamelog_paths):
+        raise ValueError("No game log paths supplied; nothing to build from.")
     for path in gamelog_paths:
-        if not path.exists():
-            continue
         with path.open(newline="") as f:
             for row in csv.DictReader(f):
                 pid = str(row.get("PLAYER_ID") or "").strip()

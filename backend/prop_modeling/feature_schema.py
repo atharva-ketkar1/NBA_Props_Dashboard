@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import List
 
 
 PROP_MODELING_DIR = Path(__file__).resolve().parent
@@ -12,10 +14,39 @@ DEFAULT_DATASET_PATH = GENERATED_DIR / "prop_training_dataset.csv"
 DEFAULT_MODEL_DIR = GENERATED_DIR / "catboost_models"
 DEFAULT_MINUTES_DATASET_PATH = GENERATED_DIR / "minutes_training_dataset.csv"
 
-DEFAULT_GAMELOG_PATHS = [
-    BACKEND_DIR / "data" / "archive" / "gamelogs_2024-25.csv",
-    BACKEND_DIR / "data" / "current" / "gamelogs_2025-26.csv",
-]
+_GAMELOG_SEASON_RE = re.compile(r"^gamelogs_(\d{4}-\d{2})$")
+
+
+def discover_gamelog_paths() -> List[Path]:
+    """Every season's game logs: prior seasons from archive/, current from current/.
+
+    This used to be a hardcoded pair pointing at
+    data/current/gamelogs_2025-26.csv. That file has since rotated into
+    data/archive/ and the current season is 2026-27, so the list silently went
+    stale -- and because _build_history skipped absent paths without comment, a
+    rebuild would have emitted a 2024-25-only training set with no warning at
+    all. Discovering the files means the list cannot rot at the next season
+    rollover either.
+
+    Backup copies (gamelogs_2025-26.backup.<ts>.csv) are excluded by requiring
+    the stem to be exactly gamelogs_<season>; current/ wins over archive/ for a
+    season present in both.
+    """
+    by_season: dict = {}
+    for directory in (
+        BACKEND_DIR / "data" / "archive",
+        BACKEND_DIR / "data" / "current",  # last, so it wins on a tie
+    ):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("gamelogs_*.csv")):
+            match = _GAMELOG_SEASON_RE.match(path.stem)
+            if match:
+                by_season[match.group(1)] = path
+    return [by_season[season] for season in sorted(by_season)]
+
+
+DEFAULT_GAMELOG_PATHS = discover_gamelog_paths()
 DEFAULT_HISTORICAL_ODDS_PATH = BACKEND_DIR / "data" / "archive" / "historical_odds.json"
 DEFAULT_PRIZEPICKS_ARCHIVE_DIR = BACKEND_DIR / "data" / "archive" / "prizepicks"
 DEFAULT_ACTION_NETWORK_ARCHIVE_DIR = BACKEND_DIR / "data" / "archive" / "action_network_odds"
