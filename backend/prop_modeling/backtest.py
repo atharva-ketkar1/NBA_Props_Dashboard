@@ -400,6 +400,7 @@ def score_dataset(
     *,
     stat_types: Optional[Sequence[str]] = None,
     keys: Optional[set] = None,
+    minutes_csv: Optional[Path] = None,
     batch: int = 8192,
 ) -> Dict[Tuple[str, str, str], Tuple[float, float, float]]:
     """(player_id, game_date, stat_type) -> sanitized (q25, q50, q75).
@@ -434,7 +435,23 @@ def score_dataset(
     # them, reindex() silently fills NaN and the model collapses toward a flat
     # prior -- measured once at sd(q50)=3.04 against sd(actual)=8.46, which
     # looks exactly like "the model has no signal" and is not.
+    df["_pid"] = df["player_id"].astype(str)
+    df["_gd"] = df["game_date"].astype(str).str.slice(0, 10)
+    if keys:
+        wanted_pairs = {(k[0], k[1]) for k in keys}
+        before = len(df)
+        df = df[[(a, b) in wanted_pairs for a, b in zip(df["_pid"], df["_gd"])]].copy()
+        print("  narrowed dataset %d -> %d rows with a gradeable line" % (before, len(df)))
+
     missing_feats = [c for c in feat_cols if c not in df.columns]
+    if missing_feats and minutes_csv and Path(minutes_csv).exists():
+        print("  completing %d post-build features from %s"
+              % (len(missing_feats), Path(minutes_csv).name))
+        from engineered_features import complete_trained_features
+        minutes_df = pd.read_csv(minutes_csv, low_memory=False)
+        df = complete_trained_features(df, minutes_df)
+        missing_feats = [c for c in feat_cols if c not in df.columns]
+
     if missing_feats:
         raise RuntimeError(
             "The dataset is missing %d trained features, so scoring it would "
@@ -444,13 +461,6 @@ def score_dataset(
             % (len(missing_feats), ", ".join(sorted(missing_feats)))
         )
 
-    df["_pid"] = df["player_id"].astype(str)
-    df["_gd"] = df["game_date"].astype(str).str.slice(0, 10)
-    if keys:
-        wanted_pairs = {(k[0], k[1]) for k in keys}
-        before = len(df)
-        df = df[[(a, b) in wanted_pairs for a, b in zip(df["_pid"], df["_gd"])]]
-        print("  narrowed dataset %d -> %d rows with a gradeable line" % (before, len(df)))
     out: Dict[Tuple[str, str, str], Tuple[float, float, float]] = {}
     wanted = set(stat_types) if stat_types else None
 
@@ -568,6 +578,9 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--dataset-csv",
                     default=str(PROP_MODELING_DIR / "generated" / "regression_training_dataset.csv"),
                     help="Historical feature rows from build_regression_dataset.py.")
+    ap.add_argument("--minutes-csv",
+                    default=str(PROP_MODELING_DIR / "generated" / "minutes_training_dataset.csv"),
+                    help="Minutes dataset, needed to attach the modeled_minutes_* features.")
     ap.add_argument("--train-cutoff", default=TRAIN_CUTOFF_DEFAULT,
                     help="Rows at or before this date are in-sample for the exported bundle.")
     return ap.parse_args()
@@ -645,7 +658,7 @@ def main() -> int:
                 (r["player_id"], r["game_date"], r["stat_type"])
                 for r in rows if r["result"] != "push"
             }
-            scores = score_dataset(ds, keys=needed)
+            scores = score_dataset(ds, keys=needed, minutes_csv=Path(args.minutes_csv))
             rep = model_report(rows, scores, train_cutoff=args.train_cutoff)
             for regime in ("in_sample (trained on)", "out_of_sample"):
                 stats = rep.get(regime) or []
