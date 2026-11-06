@@ -51,6 +51,7 @@ for _p in (str(BACKEND_DIR), str(PROP_MODELING_DIR)):
         sys.path.insert(0, _p)
 
 from feature_schema import STAT_COLUMNS  # noqa: E402
+from p_over_calibration import legacy_p_over as _p_over_from_quantiles  # noqa: E402
 from build_prop_dataset import (  # noqa: E402
     _american_to_implied,
     _american_to_payout_decimal,
@@ -379,20 +380,6 @@ def summarise(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 TRAIN_CUTOFF_DEFAULT = "2026-04-09"
-
-
-def _p_over_from_quantiles(q25: float, q50: float, q75: float, line: float) -> float:
-    """Mirror edge_score's interpolation so the harness measures what ships.
-
-    Note this map saturates: once the line reaches q75 it pins at 0.25 and stops
-    responding, which is itself one of the things to fix. Measuring the shipped
-    behaviour first means the fix has a before.
-    """
-    iqr = q75 - q25
-    if iqr > 1e-6:
-        frac = min(max((line - q25) / iqr, 0.0), 1.0)
-        return min(max(0.75 - frac * 0.50, 0.10), 0.90)
-    return 0.60 if q50 > line else 0.40
 
 
 def score_dataset(

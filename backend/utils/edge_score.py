@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 
+from prop_modeling.p_over_calibration import legacy_p_over
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
     INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
@@ -3606,20 +3607,7 @@ def _compute_ml_regression_context(
                 player.get("name"), stat_type, mult, adjustment.get("reason"),
             )
             
-        # Linear interpolation across [q25, q75] to estimate p_over.
-        # - line <= q25  → ~75% of outcomes are above  → p_over ≈ 0.75
-        # - line == q50  → 50% of outcomes are above   → p_over = 0.50
-        # - line >= q75  → ~25% of outcomes are above  → p_over ≈ 0.25
-        # We clamp to [0.10, 0.90] to avoid extreme scores from extrapolation.
-        iqr = q75 - q25
-        if iqr > 1e-6:
-            # Fraction of the IQR that the line sits above q25
-            frac = _clamp((line - q25) / iqr, 0.0, 1.0)
-            # frac=0 → line is at/below q25 → p_over=0.75; frac=1 → p_over=0.25
-            p_over = _clamp(0.75 - frac * 0.50, 0.10, 0.90)
-        else:
-            # Zero-width IQR (degenerate prediction) — fall back to median comparison
-            p_over = 0.60 if q50 > line else 0.40
+        p_over = legacy_p_over(q25, q50, q75, line)
 
         prediction_val = q50
         spread = round(q75 - q25, 2)
