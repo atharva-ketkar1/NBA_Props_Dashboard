@@ -3,7 +3,7 @@ import hashlib
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from dotenv import load_dotenv
 from utils.historical_player_props import (
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 UPSERT_BATCH_SIZE = max(1, int(os.getenv("SUPABASE_UPSERT_BATCH_SIZE", "50")))
 UPSERT_MAX_RETRIES = max(1, int(os.getenv("SUPABASE_UPSERT_MAX_RETRIES", "4")))
 LINE_MOVEMENT_MAX_SNAPSHOTS = max(0, int(os.getenv("SUPABASE_LINE_MOVEMENT_MAX_SNAPSHOTS", "32")))
+# The rolling window master_cron purges line_movements on. Imported there so the
+# DELETE cutoff and the sync-state prune below are the same number.
+LINE_MOVEMENT_RETENTION_DAYS = max(1, int(os.getenv("SUPABASE_LINE_MOVEMENT_RETENTION_DAYS", "3")))
 CURRENT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "data",
@@ -101,6 +104,29 @@ def _save_sync_state(path: str, state):
 def _fingerprint_payload(payload) -> str:
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+
+
+def _prune_line_movement_sync_state(state, today=None):
+    """Forget the dates the rolling purge has already deleted from Supabase.
+
+    This state file used to carry every date it had ever synced, while
+    `master_cron` deletes `line_movements` rows older than
+    `LINE_MOVEMENT_RETENTION_DAYS`. A retained fingerprint for a deleted row
+    claims that row is present, so the date could never be rewritten -- the
+    state and the table disagreed about what existed. Pruning on the same
+    window keeps the pair coherent; a date whose fingerprint is dropped simply
+    gets re-upserted, which is the safe direction to fail.
+    """
+    cutoff = (today or date.today()) - timedelta(days=LINE_MOVEMENT_RETENTION_DAYS)
+    pruned = {}
+    for game_date, fingerprint in state.items():
+        try:
+            parsed = date.fromisoformat(str(game_date))
+        except ValueError:
+            continue
+        if parsed >= cutoff:
+            pruned[game_date] = fingerprint
+    return pruned
 
 
 def _compact_snapshots_for_supabase(snapshots):
@@ -253,6 +279,8 @@ def upsert_line_movements_from_file(line_movements_path: str):
         next_sync_state[game_date] = fingerprint
         if sync_state.get(game_date) != fingerprint:
             changed_rows.append(row)
+
+    next_sync_state = _prune_line_movement_sync_state(next_sync_state)
 
     if not changed_rows:
         log_status(logger, "SKIP", "line_movements sync unchanged", dates=len(rows))

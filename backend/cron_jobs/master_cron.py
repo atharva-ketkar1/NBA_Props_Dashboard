@@ -229,12 +229,19 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                     log_status(logger, "FAIL", "Pipeline failed", error=e)
                     pipeline_ok = False
 
-                # Purge stale player_props and line_movements rows (rolling 3-day window)
-                # historical_odds is intentionally NOT purged — it's our full-season archive
+                # Purge stale player_props and line_movements rows (rolling window)
+                # historical_odds is intentionally NOT purged — it's our full-season archive.
+                # line_movements_sync_state.json is pruned on the same window by
+                # _prune_line_movement_sync_state, so the state never claims a deleted
+                # row is still synced. The durable copy of the series is the disk
+                # archive written by SnapshotManager._archive_snapshot.
                 if pipeline_ok:
                     try:
                         from utils.supabase_client import get_supabase_client
-                        cutoff = (datetime.today().date() - timedelta(days=3)).isoformat()
+                        from utils.upsert_market_history import LINE_MOVEMENT_RETENTION_DAYS
+                        cutoff = (
+                            datetime.today().date() - timedelta(days=LINE_MOVEMENT_RETENTION_DAYS)
+                        ).isoformat()
                         sb = get_supabase_client()
                         sb.table("player_props").delete().lt("game_date", cutoff).execute()
                         sb.table("line_movements").delete().lt("game_date", cutoff).execute()

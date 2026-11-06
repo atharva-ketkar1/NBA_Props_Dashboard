@@ -9,6 +9,8 @@ from utils.intraday_schedule import get_schedule_aware_intraday_interval_seconds
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
+logger = logging.getLogger(__name__)
+
 def get_et_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
@@ -31,6 +33,7 @@ class SnapshotManager:
         os.makedirs(logs_dir, exist_ok=True)
 
         self.line_movements_path = os.path.join(self.current_dir, "line_movements_today.json")
+        self.line_movements_archive_dir = os.path.join(self.archive_dir, "line_movements")
         self.historical_odds_path = os.path.join(self.archive_dir, "historical_odds.json")
         self.skips_log_path = os.path.join(logs_dir, "closing_line_skips.log")
         self.schedule_path = os.path.join(self.current_dir, "today_schedule.json")
@@ -140,6 +143,47 @@ class SnapshotManager:
                 })
         return carried
 
+    def _archive_snapshot(self, game_date, snapshot):
+        """Append one snapshot to a dated, append-only file on disk.
+
+        `line_movements_today.json` is destructively rolled: the date flips at
+        midnight and `_carry_forward_snapshots` drops every player no longer on
+        the active schedule. Supabase is no safety net either, because
+        `master_cron` purges `line_movements` on a rolling window
+        (`LINE_MOVEMENT_RETENTION_DAYS`). So the full intraday series used to be
+        gone within days, which is why CLV is unmeasurable for every date
+        before this.
+
+        Mirrors `fetch_action_network_odds.write_current_and_archive`: one file
+        per date, snapshots appended, a fingerprint on each entry so an
+        identical re-capture is not stored twice. The file keeps the same
+        `{"date", "snapshots"}` shape as the live one, so existing readers work
+        on it unchanged.
+        """
+        os.makedirs(self.line_movements_archive_dir, exist_ok=True)
+        archive_path = os.path.join(self.line_movements_archive_dir, f"{game_date}.json")
+
+        existing = self._read_json(archive_path, default={})
+        if not isinstance(existing, dict):
+            existing = {}
+        snapshots = existing.get("snapshots")
+        if not isinstance(snapshots, list):
+            snapshots = []
+
+        fingerprint = self._players_fingerprint(snapshot.get("players", {}))
+        last_snapshot = snapshots[-1] if snapshots and isinstance(snapshots[-1], dict) else None
+        if last_snapshot and last_snapshot.get("fingerprint") == fingerprint:
+            return False
+
+        snapshots.append({
+            "timestamp": snapshot.get("timestamp"),
+            "label": snapshot.get("label"),
+            "fingerprint": fingerprint,
+            "players": snapshot.get("players", {}),
+        })
+        self._write_json(archive_path, {"date": game_date, "snapshots": snapshots})
+        return True
+
     def write_snapshot(self, label, players_data, bypass_dedupe=False, filter_to_active_schedule=False):
         """Append an intraday snapshot with optional deduplication and schedule filtering."""
         now = get_et_now()
@@ -200,6 +244,14 @@ class SnapshotManager:
         }
         data["snapshots"].append(new_snapshot)
         self._write_json(self.line_movements_path, data)
+
+        # The archive must never break the live write -- the current file is
+        # what tonight's board and the closing-line fallbacks read.
+        try:
+            self._archive_snapshot(data["date"], new_snapshot)
+        except Exception as exc:
+            logger.warning("Could not archive line movement snapshot: %s", exc)
+
         return True
 
     def _get_fallback_snapshot_data(self, player_id, game_id=None, game_date=None):

@@ -117,6 +117,16 @@ Supabase `cron_state` table as the source of truth and the local JSON as a cache
 disposable and one has already been lost. Missing table or missing credentials degrades to
 file-only, so deploying before the migration is safe.
 
+The intraday odds series has two homes with different jobs. `line_movements_today.json` and the
+Supabase `line_movements` table are both **ephemeral** — the local file's date flips at midnight
+and `_carry_forward_snapshots` drops players off the active schedule, and `master_cron` purges the
+table on a rolling `LINE_MOVEMENT_RETENTION_DAYS` window. The durable copy is
+`backend/data/archive/line_movements/<date>.json`, appended by
+`SnapshotManager._archive_snapshot` on every snapshot write and never purged; it is what closing-line
+value is computed from. `line_movements_sync_state.json` is pruned on the same window as the table,
+so a fingerprint can never claim a deleted row is still synced. `backend/data` is gitignored, so the
+archive lives on the VM — `backend/scripts/pull_vm_data.sh` already rsyncs it down.
+
 ### Two delivery modes
 
 The frontend switches on `VITE_USE_DB`:
