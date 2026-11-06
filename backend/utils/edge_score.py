@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 
-from prop_modeling.p_over_calibration import legacy_p_over
+from prop_modeling.p_over_calibration import honest_p_over, ranking_signal
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
     INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
@@ -3534,12 +3534,22 @@ def _compute_ml_regression_context(
     falling back to the legacy (prediction + std_dev) interface if the predictor
     has not yet been updated to emit quantiles.
 
-    The quantile spread is used to derive p_over via a simple linear interpolation
-    across the [q25, q75] interval, which avoids the Gaussian assumption of the old
-    norm.cdf approach and is robust to skewed distributions.
+    The probability and the ranking signal are produced separately, because they
+    are different jobs and conflating them was the original defect. `p_over`
+    comes from `honest_p_over` -- calibrated, and so nearly constant, since no
+    fitted probability beats the base rate on this signal. The component
+    `score` comes from `ranking_signal`, the IQR-standardized gap, which is
+    where the measurable information is (AUC 0.5299 on the current season,
+    z=5.3). Feeding the honest probability into the score instead would hand
+    the composite a ~0 numerator while keeping ml_regression's full 0.25 in the
+    renormalization denominator, diluting every other component.
 
-    p_over is exposed in the returned details dict so it flows through to the
-    candidate output and can be used by the edge score boost logic.
+    A single-output model has no IQR and therefore no comparable ranking scale,
+    so that path returns `available: False` rather than ranking a Gaussian
+    probability against tanh signals on the same board.
+
+    p_over is still exposed in the returned details dict so it flows through to
+    the candidate output and the edge score boost logic.
     """
     global _ml_predictor
     if _ml_predictor is None:
@@ -3607,7 +3617,7 @@ def _compute_ml_regression_context(
                 player.get("name"), stat_type, mult, adjustment.get("reason"),
             )
             
-        p_over = legacy_p_over(q25, q50, q75, line)
+        p_over = honest_p_over(q25, q50, q75, line)
 
         prediction_val = q50
         spread = round(q75 - q25, 2)
@@ -3619,7 +3629,7 @@ def _compute_ml_regression_context(
             "quantile_spread": spread,
             "hit_probability": round(p_over * 100.0, 1),
             "p_over": round(p_over, 4),
-            "calibration": "quantile_iqr",
+            "calibration": "pooled_gap_logistic",
             "ml_lineup_adjustment": adjustment,
             "injury_report_freshness": injury_report_freshness,
             "position_resolution_summary": position_resolution_summary,
@@ -3702,34 +3712,52 @@ def _compute_ml_regression_context(
         if prediction_val is None:
             return {"available": False, "score": 0.0, "p_over": None, "details": {}}
 
+        # Dark on purpose. This branch only runs for a single-output model,
+        # which the shipped per_stat_multiquantile bundle never produces -- and
+        # its erf-Gaussian probability has no IQR, so it cannot produce a
+        # ranking signal on the same scale as the quantile path. Ranking two
+        # scales against each other on one board is the defect this avoids, and
+        # going dark drops the weight from the renormalization denominator
+        # rather than diluting every other component with a ~0 score.
+        logger.warning(
+            "ml_regression dark: single-output model has no quantiles to rank with "
+            "| stat=%s player=%s",
+            stat_type, player.get("name"),
+        )
         p_over = _ml_predictor.hit_probability(prediction_val, std_dev, line, "over")
         p_over = _clamp(p_over, 0.10, 0.90)
-        details = {
-            "prediction_val": round(prediction_val, 2),
-            "hit_probability": round(p_over * 100.0, 1),
+        return {
+            "available": False,
+            "score": 0.0,
             "p_over": round(p_over, 4),
-            "std_dev": round(std_dev, 2) if std_dev is not None else None,
-            "calibration": "gaussian_legacy",
-            "injury_report_freshness": injury_report_freshness,
-            "position_resolution_summary": position_resolution_summary,
-            "runtime_context": runtime_context,
-            "vegas_total": _safe_float(resolved_game_context.get("vegas_total")),
-            "vegas_spread": _safe_float(resolved_game_context.get("vegas_spread")),
-            "team_implied_total": _safe_float(resolved_game_context.get("team_implied_total")),
-            "team_spread_line": _safe_float(resolved_game_context.get("team_spread_line")),
-            "spread_abs": _safe_float(resolved_game_context.get("spread_abs")),
+            "details": {
+                "prediction_val": round(prediction_val, 2),
+                "hit_probability": round(p_over * 100.0, 1),
+                "p_over": round(p_over, 4),
+                "std_dev": round(std_dev, 2) if std_dev is not None else None,
+                "calibration": "gaussian_legacy",
+                "injury_report_freshness": injury_report_freshness,
+                "position_resolution_summary": position_resolution_summary,
+                "runtime_context": runtime_context,
+                "vegas_total": _safe_float(resolved_game_context.get("vegas_total")),
+                "vegas_spread": _safe_float(resolved_game_context.get("vegas_spread")),
+                "team_implied_total": _safe_float(resolved_game_context.get("team_implied_total")),
+                "team_spread_line": _safe_float(resolved_game_context.get("team_spread_line")),
+                "spread_abs": _safe_float(resolved_game_context.get("spread_abs")),
+            },
         }
 
-    # ── Score mapping: p_over → [-1, 1] ─────────────────────────────────────
-    # p_over > 0.5 leans towards +1.0 (over signal)
-    # p_over < 0.5 leans towards -1.0 (under signal)
-    # We use the requested side to orient the score correctly.
-    if side == "over":
-        prob_for_side = p_over
-    else:
-        prob_for_side = 1.0 - p_over
-
-    score = _clamp((prob_for_side - 0.5) * 2.0, -1.0, 1.0)
+    # Ranking signal, which is not the probability. Conflating the two was
+    # the original defect. An honest p_over here is nearly constant -- it is
+    # statistically indistinguishable from the base rate -- so mapping it
+    # through (p - 0.5) * 2 would hand the composite a ~0 score while
+    # _component_available_weight kept ml_regression's full 0.25 in the
+    # renormalization denominator, diluting every other component by ~4.3
+    # points. The ordering comes from the IQR-standardized gap instead, which
+    # is where the measurable signal is (AUC 0.5299, z=5.3), scaled to
+    # reproduce this component's existing magnitude so no threshold moves.
+    signal = ranking_signal(q25, q50, q75, line)
+    score = _clamp(signal if side == "over" else -signal, -1.0, 1.0)
 
     return {
         "available": True,

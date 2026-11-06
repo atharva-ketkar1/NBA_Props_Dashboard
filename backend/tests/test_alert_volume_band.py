@@ -154,6 +154,54 @@ class MlComponentSwingIsBounded(unittest.TestCase):
         self.assertGreaterEqual(disagreeing["ml_boost"], -0.03)
 
 
+class MlBoostUnderAnHonestProbability(unittest.TestCase):
+    """What the narrowed probability range does to the boost, stated not hidden.
+
+    `ml_boost` fires on `p_over >= 0.60` and penalises on `<= 0.40`, thresholds
+    set when p_over ranged over [0.25, 0.75]. An honest p_over spans roughly
+    [0.30, 0.59], so the boost branch is unreachable for an over pick and the
+    penalty branch is unreachable for an under -- the boost is now one-sided
+    per side, and near-inert overall.
+
+    That is the correct outcome for a signal whose AUC is 0.53: it should not
+    be amplifying anything. What matters is that it does not become a standing
+    tilt toward one side of every bet, because blind unders are measured at
+    -3.07% ROI and that is the expensive tilt to acquire by accident. The
+    guarantee is the symmetry below; the magnitude on real data is -0.0000 for
+    overs against +0.0001 for unders.
+    """
+
+    @staticmethod
+    def _boost(p_over, side):
+        return es._composite_edge_score(_components(0.0, p_over=p_over), side)["ml_boost"]
+
+    def test_the_boost_is_symmetric_under_flipping_side_and_probability(self):
+        """boost(p, over) == boost(1 - p, under).
+
+        This is what rules out a structural tilt. Any net lean therefore comes
+        from the *distribution* of p_over, not from the function -- which is
+        exactly where the legacy map's lean came from: its median p_over was
+        0.405, well below even money, so the penalty branch fired on 48% of
+        over picks and the boost branch on 48% of unders.
+        """
+        for i in range(0, 101):
+            p = i / 100.0
+            self.assertAlmostEqual(self._boost(p, "over"), self._boost(1.0 - p, "under"))
+
+    def test_an_honest_probability_never_reaches_the_boost_branch(self):
+        # Across the honest range, an over pick can only be penalised.
+        boosts = [self._boost(0.30 + 0.01 * i, "over") for i in range(30)]
+        self.assertLessEqual(max(boosts), 0.0)
+
+    def test_the_boost_branch_still_exists_for_a_confident_probability(self):
+        # Not dead code -- it fires if a future model earns it.
+        self.assertGreater(self._boost(0.85, "over"), 0.0)
+
+    def test_the_penalty_stays_inside_its_documented_bound(self):
+        worst = min(self._boost(0.30 + 0.01 * i, "over") for i in range(30))
+        self.assertGreaterEqual(worst, -0.03)
+
+
 class AlertVolumeStaysInABand(unittest.TestCase):
     """Upper bounds on how many picks one snapshot can publish."""
 
