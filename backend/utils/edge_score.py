@@ -4346,6 +4346,69 @@ def _normalized_weighted_score(weighted_score: float, available_weight: float) -
     return weighted_score / max(available_weight, MIN_RENORMALIZED_COMPONENT_WEIGHT)
 
 
+def _composite_edge_score(components: Dict[str, Dict[str, Any]], side: str) -> Dict[str, Any]:
+    """Collapse the scored components into the composite.
+
+    Lifted verbatim out of `_build_candidate`, which needs a full board
+    fixture to call, so nothing could exercise the composite on its own.
+    Every Discord threshold is a number on this scale, which means any
+    change to a component's magnitude moves alert volume -- and being able
+    to call this directly is the only way to see that before it ships.
+    """
+    weighted_score = 0.0
+    for component_name, component in components.items():
+        weighted_score += COMPONENT_WEIGHTS.get(component_name, 0.0) * component.get("score", 0.0)
+
+    available_weight = _component_available_weight(components)
+    confidence = round((available_weight / TOTAL_COMPONENT_WEIGHT) * 100.0, 1) if TOTAL_COMPONENT_WEIGHT else 0.0
+
+    # Score over the weight that actually scored, not the whole book. A dark
+    # component contributes 0 to the numerator, so leaving the full weight in
+    # the denominator quietly compresses the scale instead of widening the
+    # error bars: early in a season ml_regression (0.25) and line_movement
+    # (0.06) are both unavailable, which costs ~11 points off the top of the
+    # range and holds every pick under a fixed alert threshold for the first
+    # week — the 2026-27 opening week peaked at 71.5 against a 72.5 bar and the
+    # alert channel never fired once. Coverage is reported separately as
+    # `confidence` and still discounts the score through
+    # confidence_multiplier, so this is not double-counting it.
+    weighted_score = _normalized_weighted_score(weighted_score, available_weight)
+
+    # ── ML p_over soft boost ─────────────────────────────────────────────────
+    # When the ML model has high directional conviction (p_over >= 0.60 for an
+    # over pick, or p_over <= 0.40 for an under pick) we apply a small additive
+    # boost to the weighted score before it is converted to an edge_score.
+    # The boost is intentionally modest (+0.04 max) so it cannot override weak
+    # signals from other components — it only amplifies already-strong edges.
+    # We also apply a soft penalty (-0.03) when the ML model disagrees with
+    # the pick direction, to discount edges where the ML and other signals diverge.
+    p_over = _safe_float(components["ml_regression"].get("p_over"))
+    ml_boost = 0.0
+    if p_over is not None and components["ml_regression"].get("available"):
+        if side == "over":
+            if p_over >= 0.60:
+                ml_boost = _clamp((p_over - 0.60) / 0.30 * 0.04, 0.0, 0.04)
+            elif p_over <= 0.40:
+                ml_boost = _clamp((p_over - 0.40) / 0.30 * 0.03, -0.03, 0.0)
+        else:  # under
+            p_under = 1.0 - p_over
+            if p_under >= 0.60:
+                ml_boost = _clamp((p_under - 0.60) / 0.30 * 0.04, 0.0, 0.04)
+            elif p_under <= 0.40:
+                ml_boost = _clamp((p_under - 0.40) / 0.30 * 0.03, -0.03, 0.0)
+    weighted_score = _clamp(weighted_score + ml_boost, -1.0, 1.0)
+    confidence_multiplier = 0.85 + (min(confidence, 100.0) / 100.0) * 0.15
+    edge_score = round(_clamp(50.0 + (weighted_score * 45.0 * confidence_multiplier), 1.0, 99.0), 1)
+    return {
+        "edge_score": edge_score,
+        "confidence": confidence,
+        "weighted_score": weighted_score,
+        "available_weight": available_weight,
+        "ml_boost": ml_boost,
+        "p_over": p_over,
+    }
+
+
 def _build_reason_strings(
     side: str,
     line: float,
@@ -4513,50 +4576,13 @@ def _build_candidate(
         "back_to_back": _compute_back_to_back_context(player, stat_type, game_date, side),
     }
 
-    weighted_score = 0.0
-    for component_name, component in components.items():
-        weighted_score += COMPONENT_WEIGHTS.get(component_name, 0.0) * component.get("score", 0.0)
-
-    available_weight = _component_available_weight(components)
-    confidence = round((available_weight / TOTAL_COMPONENT_WEIGHT) * 100.0, 1) if TOTAL_COMPONENT_WEIGHT else 0.0
-
-    # Score over the weight that actually scored, not the whole book. A dark
-    # component contributes 0 to the numerator, so leaving the full weight in
-    # the denominator quietly compresses the scale instead of widening the
-    # error bars: early in a season ml_regression (0.25) and line_movement
-    # (0.06) are both unavailable, which costs ~11 points off the top of the
-    # range and holds every pick under a fixed alert threshold for the first
-    # week — the 2026-27 opening week peaked at 71.5 against a 72.5 bar and the
-    # alert channel never fired once. Coverage is reported separately as
-    # `confidence` and still discounts the score through
-    # confidence_multiplier, so this is not double-counting it.
-    weighted_score = _normalized_weighted_score(weighted_score, available_weight)
-
-    # ── ML p_over soft boost ─────────────────────────────────────────────────
-    # When the ML model has high directional conviction (p_over >= 0.60 for an
-    # over pick, or p_over <= 0.40 for an under pick) we apply a small additive
-    # boost to the weighted score before it is converted to an edge_score.
-    # The boost is intentionally modest (+0.04 max) so it cannot override weak
-    # signals from other components — it only amplifies already-strong edges.
-    # We also apply a soft penalty (-0.03) when the ML model disagrees with
-    # the pick direction, to discount edges where the ML and other signals diverge.
-    p_over = _safe_float(components["ml_regression"].get("p_over"))
-    ml_boost = 0.0
-    if p_over is not None and components["ml_regression"].get("available"):
-        if side == "over":
-            if p_over >= 0.60:
-                ml_boost = _clamp((p_over - 0.60) / 0.30 * 0.04, 0.0, 0.04)
-            elif p_over <= 0.40:
-                ml_boost = _clamp((p_over - 0.40) / 0.30 * 0.03, -0.03, 0.0)
-        else:  # under
-            p_under = 1.0 - p_over
-            if p_under >= 0.60:
-                ml_boost = _clamp((p_under - 0.60) / 0.30 * 0.04, 0.0, 0.04)
-            elif p_under <= 0.40:
-                ml_boost = _clamp((p_under - 0.40) / 0.30 * 0.03, -0.03, 0.0)
-    weighted_score = _clamp(weighted_score + ml_boost, -1.0, 1.0)
-    confidence_multiplier = 0.85 + (min(confidence, 100.0) / 100.0) * 0.15
-    edge_score = round(_clamp(50.0 + (weighted_score * 45.0 * confidence_multiplier), 1.0, 99.0), 1)
+    composite = _composite_edge_score(components, side)
+    weighted_score = composite["weighted_score"]
+    available_weight = composite["available_weight"]
+    confidence = composite["confidence"]
+    ml_boost = composite["ml_boost"]
+    edge_score = composite["edge_score"]
+    p_over = composite["p_over"]
     promotion_guardrail = _compute_promotion_guardrail(
         player=player,
         stat_type=stat_type,
