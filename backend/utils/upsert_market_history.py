@@ -106,6 +106,37 @@ def _fingerprint_payload(payload) -> str:
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
 
 
+def line_movement_purge_cutoff(today=None) -> str:
+    """The ISO date `line_movements` rows are deleted below.
+
+    One callable rather than two copies of `today - RETENTION_DAYS`, because a
+    test asserting the two agree can only do so by calling this. The previous
+    guard grepped master_cron.py for the constant's name, which a literal date
+    in the DELETE would satisfy while deleting nothing.
+    """
+    return ((today or date.today()) - timedelta(days=LINE_MOVEMENT_RETENTION_DAYS)).isoformat()
+
+
+def purge_stale_props_history(today=None):
+    """Delete player_props and line_movements rows outside the rolling window.
+
+    Lifted out of master_cron so it can be tested. As six inline lines in the
+    scheduler, the only available guard was grepping the source for the
+    constant's name -- which a hardcoded date in the DELETE satisfied while
+    deleting nothing, leaving the stated "one number" invariant silently false.
+
+    `historical_odds` is deliberately NOT purged; it is the full-season archive.
+    The durable copy of the intraday series is the disk archive written by
+    SnapshotManager._archive_snapshot, which is why these two tables can be
+    treated as an ephemeral cache at all.
+    """
+    cutoff = line_movement_purge_cutoff(today)
+    client = get_supabase_client()
+    for table in ("player_props", "line_movements"):
+        client.table(table).delete().lt("game_date", cutoff).execute()
+    return cutoff
+
+
 def _prune_line_movement_sync_state(state, today=None):
     """Forget the dates the rolling purge has already deleted from Supabase.
 
@@ -117,7 +148,7 @@ def _prune_line_movement_sync_state(state, today=None):
     window keeps the pair coherent; a date whose fingerprint is dropped simply
     gets re-upserted, which is the safe direction to fail.
     """
-    cutoff = (today or date.today()) - timedelta(days=LINE_MOVEMENT_RETENTION_DAYS)
+    cutoff = date.fromisoformat(line_movement_purge_cutoff(today))
     pruned = {}
     for game_date, fingerprint in state.items():
         try:

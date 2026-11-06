@@ -105,6 +105,41 @@ class AvailableButScorelessIsWorseThanDark(unittest.TestCase):
         self.assertGreater(gap, 3.0)
         self.assertLess(gap, 6.0)
 
+    def test_the_confidence_multiplier_discounts_a_thin_book(self):
+        # At full coverage the multiplier is exactly 1.0, so fixtures at 100%
+        # and 75% hid it entirely: hardcoding it to 1.0 left the suite green.
+        full = {name: {"score": 0.44, "available": True, "details": {}}
+                for name in es.COMPONENT_WEIGHTS}
+        thin = {name: {"score": 0.44, "available": name in ("projection", "ml_regression",
+                                                            "recent_form", "matchup"),
+                       "details": {}}
+                for name in es.COMPONENT_WEIGHTS}
+        for book in (full, thin):
+            book["ml_regression"] = {**book["ml_regression"], "p_over": 0.50}
+
+        full_result = es._composite_edge_score(full, "over")
+        thin_result = es._composite_edge_score(thin, "over")
+
+        self.assertEqual(full_result["confidence"], 100.0)
+        self.assertLess(thin_result["confidence"], 80.0)
+
+        # And the composite goes UP, not down. I assumed the opposite and the
+        # test caught it. Renormalizing over 0.72 of available weight is a
+        # 1.39x amplification, while the confidence multiplier only discounts
+        # by 0.958 -- so at equal component scores, losing coverage *raises*
+        # the score by about a third. That is the documented design (a dark
+        # component widens the error bars rather than capping the scale), but
+        # it means darkening a component is not free, and it is why the
+        # available-but-scoreless case above is the bad one: it pays the
+        # denominator without the numerator.
+        self.assertGreater(thin_result["edge_score"], full_result["edge_score"])
+
+        # Pinned as literals. A ratio band absorbed the multiplier entirely:
+        # hardcoding it to 1.0 moves the thin score 76.3 -> 77.5, which any
+        # band loose enough to be robust will swallow.
+        self.assertAlmostEqual(full_result["edge_score"], 69.8, places=1)
+        self.assertAlmostEqual(thin_result["edge_score"], 76.3, places=1)
+
     def test_coverage_is_reported_separately_from_the_score(self):
         available = es._composite_edge_score(_components(0.0, p_over=0.50), "over")
         dark = es._composite_edge_score(_components(0.0, ml_available=False), "over")
@@ -115,15 +150,32 @@ class AvailableButScorelessIsWorseThanDark(unittest.TestCase):
 
 class MlComponentSwingIsBounded(unittest.TestCase):
     def test_the_full_ml_swing_is_bounded_above_and_below(self):
-        # 13.1 points measured: the 0.25 weight across the 45-point range plus
-        # the 0.04 ml_boost. Upper bound is the guard -- it is what fails if a
-        # future calibration widens the component's effective range.
+        # The theoretical ceiling: score 1.0 and a saturating p_over. Neither is
+        # emittable now (_RANKING_CAP is 0.5 and honest p_over stops at 0.66),
+        # so this bounds the component's *definition*, and
+        # test_the_reachable_swing_is_half_of_that bounds what ships.
         low = es._composite_edge_score(_components(0.0, p_over=0.50), "over")
         high = es._composite_edge_score(_components(1.0, p_over=0.90), "over")
         swing = high["edge_score"] - low["edge_score"]
 
         self.assertGreater(swing, 10.0)
         self.assertLess(swing, 16.0)
+
+    def test_the_reachable_swing_is_half_of_that(self):
+        """What the serve path can actually produce, which is the real ceiling.
+
+        ranking_signal is capped at 0.5, so the component's reach is half its
+        definition. Pinning only the theoretical ceiling left ~2x of slack in
+        the guard this file exists to provide.
+        """
+        from prop_modeling.p_over_calibration import ranking_signal
+        reachable = max(abs(ranking_signal(10.0, 20.0, 30.0, line))
+                        for line in (-200.0, 0.0, 10.0, 20.0, 30.0, 200.0))
+        low = es._composite_edge_score(_components(-reachable, p_over=0.50), "over")
+        high = es._composite_edge_score(_components(reachable, p_over=0.50), "over")
+
+        self.assertLessEqual(reachable, 0.5)
+        self.assertLess(high["edge_score"] - low["edge_score"], 12.0)
 
     def test_the_swing_does_not_depend_on_the_other_components(self):
         swings = []
@@ -188,18 +240,86 @@ class MlBoostUnderAnHonestProbability(unittest.TestCase):
             p = i / 100.0
             self.assertAlmostEqual(self._boost(p, "over"), self._boost(1.0 - p, "under"))
 
-    def test_an_honest_probability_never_reaches_the_boost_branch(self):
-        # Across the honest range, an over pick can only be penalised.
-        boosts = [self._boost(0.30 + 0.01 * i, "over") for i in range(30)]
-        self.assertLessEqual(max(boosts), 0.0)
+    def test_the_boost_branch_is_out_of_reach_on_a_typical_board(self):
+        """Typical, not impossible -- the distinction I got wrong.
+
+        I first asserted the boost branch was unreachable for an over pick.
+        That is false of the function: honest_p_over tops out at 0.660 and so
+        fires the branch once the gap exceeds ~7.5. It is true of the observed
+        board, where 0 of 10,625 rows reached 0.60 and |gap| is 5.3 at the 95th
+        percentile.
+        """
+        typical = [self._boost(0.30 + 0.01 * i, "over") for i in range(30)]
+        self.assertLessEqual(max(typical), 0.0)
+
+    def test_a_large_enough_gap_does_reach_it(self):
+        from prop_modeling.p_over_calibration import honest_p_over
+        self.assertGreater(honest_p_over(10.0, 20.0, 30.0, 20.0 - 12.0), 0.60)
 
     def test_the_boost_branch_still_exists_for_a_confident_probability(self):
         # Not dead code -- it fires if a future model earns it.
         self.assertGreater(self._boost(0.85, "over"), 0.0)
 
+    def test_a_dark_component_gets_no_boost_even_with_a_confident_probability(self):
+        # `if p_over is not None and components["ml_regression"].get("available")`
+        # -- the second half was untested, because the dark fixture also left
+        # p_over None. The real dark path returns a gaussian_legacy p_over, so a
+        # boost could leak onto a component that is not ranking at all.
+        dark = _components(0.0, p_over=0.95, ml_available=False)
+        self.assertEqual(es._composite_edge_score(dark, "over")["ml_boost"], 0.0)
+
     def test_the_penalty_stays_inside_its_documented_bound(self):
         worst = min(self._boost(0.30 + 0.01 * i, "over") for i in range(30))
         self.assertGreaterEqual(worst, -0.03)
+
+
+class TheHonestMapRemovesTheLegacyLean(unittest.TestCase):
+    """The distribution of p_over is what tilts the board, not the function.
+
+    `boost(p, over) == boost(1 - p, under)` always held, so pinning that
+    symmetry proved nothing. What changed is the distribution fed through it:
+    the legacy map sends a symmetric spread of gaps to an asymmetric spread of
+    probabilities, because it centres on the IQR midpoint rather than the
+    median and then saturates. The honest map does not.
+
+    This matters because the board publishes one pick per game and one prop per
+    player, so a relative shift between the two sides of the same prop changes
+    which side publishes, not just its score.
+    """
+
+    # Skewed quantiles: q50=20 sits below the (18, 30) midpoint of 24, which is
+    # the ordinary shape of a count distribution.
+    SKEWED = (18.0, 20.0, 30.0)
+
+    @staticmethod
+    def _net_lean(probability_fn, quantiles):
+        """mean(boost | under) - mean(boost | over) over a symmetric gap sweep."""
+        q25, q50, q75 = quantiles
+        gaps = [g * 0.5 for g in range(-12, 13)]
+        probs = [probability_fn(q25, q50, q75, q50 - gap) for gap in gaps]
+        over = sum(es._composite_edge_score(_components(0.0, p_over=p), "over")["ml_boost"]
+                   for p in probs) / len(probs)
+        under = sum(es._composite_edge_score(_components(0.0, p_over=p), "under")["ml_boost"]
+                    for p in probs) / len(probs)
+        return under - over
+
+    def test_the_honest_map_has_no_net_lean(self):
+        from prop_modeling.p_over_calibration import honest_p_over
+        lean = self._net_lean(honest_p_over, self.SKEWED)
+        self.assertLess(abs(lean), 0.001)
+
+    def test_the_legacy_map_did_have_one(self):
+        from prop_modeling.p_over_calibration import legacy_p_over
+        lean = self._net_lean(legacy_p_over, self.SKEWED)
+        self.assertGreater(abs(lean), 0.005)
+
+    def test_the_lean_was_worth_a_fraction_of_an_edge_point(self):
+        # 0.019 of weighted score -> ~0.19 composite points of relative shift
+        # between the two sides of one prop. Small, but the board is rank-capped.
+        from prop_modeling.p_over_calibration import legacy_p_over
+        points = abs(self._net_lean(legacy_p_over, self.SKEWED)) * es.COMPONENT_WEIGHTS["ml_regression"] * 45.0
+        self.assertGreater(points, 0.05)
+        self.assertLess(points, 1.0)
 
 
 class AlertVolumeStaysInABand(unittest.TestCase):
@@ -272,15 +392,40 @@ class AlertVolumeStaysInABand(unittest.TestCase):
         self.assertEqual(len(selected), es.EDGE_DISCORD_PER_GAME_LIMIT)
 
     def test_one_player_cannot_be_stacked_across_stats(self):
-        # Correlated legs on the same player are never published together.
+        """Correlated legs on one player are never published together.
+
+        Each stat gets its OWN game id. An earlier version put all four in one
+        game, so the per-game cap of 1 returned 1 on its own and deleting both
+        the per-player cap and the correlated-leg dedupe changed nothing
+        observable -- the same blindness as the rank-cap test before it. A
+        player cannot really appear in four games at once; the fixture is
+        contrived precisely so that only the per-player cap can bind.
+        """
         board = [
-            _recommendation(player_id=7, game_id="G1", score=95.0, rank=i, stat_type=stat)
+            _recommendation(player_id=7, game_id=f"G{i}", score=95.0, rank=i, stat_type=stat)
             for i, stat in enumerate(["PTS", "REB", "AST", "PTS+REB+AST"], start=1)
         ]
 
         selected = es._filter_official_alert_recommendations(board)
 
-        self.assertEqual(len(selected), 1)
+        self.assertEqual(len(selected), es.EDGE_DISCORD_PER_PLAYER_LIMIT)
+
+    def test_a_candidate_exactly_on_the_bar_is_selected(self):
+        # The gate is `signal_score < min_signal_score`. Nothing sat exactly on
+        # 72.5, so flipping it to `<=` silenced a board at the bar undetected.
+        board = [_recommendation(player_id=1, game_id="G1",
+                                 score=es.EDGE_DISCORD_MIN_SIGNAL_SCORE, rank=1)]
+
+        self.assertEqual(len(es._filter_official_alert_recommendations(board)), 1)
+
+    def test_the_board_ranks_on_the_displayed_score_when_they_differ(self):
+        # Every other fixture sets edge_score == display_edge_score, so which
+        # one the filter reads was unpinned. The guardrail can lower the
+        # displayed score below the bar, and that is the one that must gate.
+        below = _recommendation(player_id=1, game_id="G1", score=95.0, rank=1)
+        below["display_edge_score"] = es.EDGE_DISCORD_MIN_SIGNAL_SCORE - 1.0
+
+        self.assertEqual(es._filter_official_alert_recommendations([below]), [])
 
 
 class RepeatAlertsNeedAMaterialChange(unittest.TestCase):
@@ -308,6 +453,25 @@ class RepeatAlertsNeedAMaterialChange(unittest.TestCase):
         jumped["display_edge_score"] = 80.0 + es.EDGE_DISCORD_REPEAT_SCORE_DELTA
 
         self.assertTrue(es._discord_repeat_change_is_major(jumped, sent))
+
+    def test_the_delta_is_large_enough_to_stop_refresh_spam(self):
+        """Pins the magnitude, not just the boundary.
+
+        Every other test here derives its fixture from
+        EDGE_DISCORD_REPEAT_SCORE_DELTA itself, so they pin the operator and
+        say nothing about the value: dropping it to 1.0 or raising it to 40.0
+        both left the suite green. At 1.0 a one-point drift re-publishes a pick
+        on a five-minute refresh loop; at 40.0 repeat alerts never fire at all.
+        """
+        # Above 6.0, which is the floor EDGE_DISCORD_SCORE_DELTA imposes via
+        # max() -- so this pins the 8.0 default rather than the floor.
+        self.assertGreater(es.EDGE_DISCORD_REPEAT_SCORE_DELTA, 6.0)
+        self.assertLessEqual(es.EDGE_DISCORD_REPEAT_SCORE_DELTA, 15.0)
+
+        sent = self._sent(80.0)
+        small = _recommendation(player_id=1, game_id="G1", score=80.0, rank=1)
+        small["display_edge_score"] = 85.0          # a 5-point drift, absolute
+        self.assertFalse(es._discord_repeat_change_is_major(small, sent))
 
     def test_a_score_drop_never_re_alerts(self):
         # The gate is one-directional by design: a pick getting worse is not

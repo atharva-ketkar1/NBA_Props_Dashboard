@@ -22,6 +22,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from utils import edge_score as es
+from prop_modeling import p_over_calibration as calibration
 from prop_modeling.p_over_calibration import honest_p_over, ranking_signal
 
 PLAYER = {"id": 1, "name": "Test Player", "team": "DET", "position": "G"}
@@ -57,6 +58,16 @@ class TheScoreIsTheRankingSignal(unittest.TestCase):
     def test_the_score_is_exactly_the_ranking_signal(self):
         context = _context(_QuantileStub())
         self.assertAlmostEqual(context["score"], ranking_signal(Q25, Q50, Q75, LINE))
+
+    def test_the_score_has_the_magnitude_it_is_supposed_to(self):
+        """One literal, because the test above is production-vs-production.
+
+        Comparing the wiring to `ranking_signal` agrees with any scale, so
+        inside this file the component's reach was unpinned: _RANKING_SCALE
+        0.485 -> 0.90 left all of it green. LINE is half an IQR below the
+        median, which is 0.5 * tanh(0.5 / 0.485).
+        """
+        self.assertAlmostEqual(_context(_QuantileStub())["score"], 0.3874, places=3)
 
     def test_the_score_is_not_derived_from_the_probability(self):
         """The reverted mapping, pinned so it cannot come back unnoticed."""
@@ -96,14 +107,56 @@ class TheProbabilityIsTheHonestOne(unittest.TestCase):
         """
         for line in (Q50 - 400.0, Q50 - 40.0, Q50 - 10.0, Q50, Q50 + 10.0, Q50 + 400.0):
             probability = _context(_QuantileStub(), line=line)["p_over"]
-            self.assertGreaterEqual(probability, 0.33)
+            # Floor is 0.3302, not the 0.340 an earlier comment claimed; the
+            # band is asymmetric about 0.5 because the intercept carries the
+            # base rate. Asserted with room so a re-fit moving the intercept
+            # does not fail this for an unrelated reason.
+            self.assertGreaterEqual(probability, 0.32)
             self.assertLessEqual(probability, 0.67)
 
-    def test_the_clamp_binds_rather_than_the_pathology_guard(self):
-        # PROB_FLOOR/PROB_CEIL are 0.02/0.98 and must never be what shapes a
-        # real answer -- the fit support is.
-        extreme = _context(_QuantileStub(), line=Q50 - 10_000.0)["p_over"]
-        self.assertLess(extreme, 0.70)
+    def test_it_is_the_fit_clamp_that_binds_not_the_pathology_guard(self):
+        """Asserts WHICH mechanism produced the number, not just its range.
+
+        Asserting only `extreme < 0.70` was satisfiable by either clamp:
+        deleting the gap clamp and moving PROB_FLOOR/PROB_CEIL into [0.34, 0.66]
+        left the whole suite green, because nothing asked where the bound came
+        from. The gap clamp's signature is that the output stops changing at
+        the support edge; the pathology guard's is that it equals PROB_CEIL.
+        """
+        at_edge = honest_p_over(Q25, Q50, Q75, Q50 - calibration._MAX_FIT_GAP)
+        far_past = honest_p_over(Q25, Q50, Q75, Q50 - 10_000.0)
+
+        self.assertAlmostEqual(at_edge, far_past)
+        self.assertNotAlmostEqual(far_past, calibration.PROB_CEIL)
+        self.assertLess(far_past, 0.67)
+
+
+class TheDegenerateQuantilePathIsAlsoDark(unittest.TestCase):
+    """A zero-width IQR has no spread to rank with, same as no quantiles at all.
+
+    This path used to return `score: 0.0` with `available: True` -- precisely
+    the dilution the single-output path is dark to avoid, since an available
+    component with a 0 numerator still holds its 0.25 of the denominator. It is
+    latent (0 of 2,624 real predictions), but `_sanitize_quantiles` clamps
+    negative quantiles to 0 and its docstring records BLK producing negatives
+    on 38% of rows before that fix, so a retrain can reach it.
+    """
+
+    class _DegenerateStub:
+        def predict(self, *args, **kwargs):
+            return {"q25": 0.0, "q50": 0.0, "q75": 0.0}
+
+        def hit_probability(self, *args, **kwargs):      # pragma: no cover
+            raise AssertionError("the quantile path must not call hit_probability")
+
+    def test_a_zero_width_interval_goes_dark(self):
+        context = _context(self._DegenerateStub(), line=20.0)
+
+        self.assertFalse(context["available"])
+        self.assertEqual(context["score"], 0.0)
+
+    def test_a_usable_interval_stays_available(self):
+        self.assertTrue(_context(_QuantileStub())["available"])
 
 
 class TheSingleOutputPathIsDark(unittest.TestCase):
@@ -114,11 +167,21 @@ class TheSingleOutputPathIsDark(unittest.TestCase):
         self.assertEqual(context["score"], 0.0)
 
     def test_it_still_reports_its_probability_for_the_record(self):
-        # Dark means "do not rank with this", not "discard it".
+        # Dark means "do not rank with this", not "discard it". Pinned to the
+        # stub's value, because assertIsNotNone passed for anything at all.
         context = _context(_SingleOutputStub())
 
-        self.assertIsNotNone(context["p_over"])
+        self.assertAlmostEqual(context["p_over"], 0.55)
         self.assertEqual(context["details"]["calibration"], "gaussian_legacy")
+
+    def test_the_legacy_probability_is_still_clamped(self):
+        # 0.55 sits inside [0.10, 0.90], so the clamp was never exercised:
+        # widening it to [0.0, 1.0] left the suite green.
+        class _Overconfident(_SingleOutputStub):
+            def hit_probability(self, *args, **kwargs):
+                return 0.999
+
+        self.assertAlmostEqual(_context(_Overconfident())["p_over"], 0.90)
 
     def test_going_dark_beats_scoring_zero_while_available(self):
         """Why dark rather than available-with-0, measured through the scorer."""

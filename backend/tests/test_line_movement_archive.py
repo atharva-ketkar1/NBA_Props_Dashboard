@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -29,6 +29,8 @@ from utils.snapshot_manager import SnapshotManager
 from utils.upsert_market_history import (
     LINE_MOVEMENT_RETENTION_DAYS,
     _prune_line_movement_sync_state,
+    line_movement_purge_cutoff,
+    purge_stale_props_history,
 )
 
 
@@ -145,10 +147,61 @@ class LineMovementArchive(unittest.TestCase):
 class SyncStatePruneMatchesThePurge(unittest.TestCase):
     """The prune window and master_cron's DELETE cutoff must be one number."""
 
-    def test_master_cron_purges_on_the_shared_constant(self):
+    def test_the_purge_cutoff_and_the_prune_window_are_one_number(self):
+        """Asserted by calling the shared function, not by grepping for it.
+
+        The previous version checked that master_cron's source *mentioned*
+        LINE_MOVEMENT_RETENTION_DAYS. Replacing the DELETE bound with a literal
+        "1900-01-01" left both strings in place and the suite green, while the
+        purge deleted nothing and the stated invariant was silently false.
+        """
+        today = date(2026, 11, 5)
+        cutoff = line_movement_purge_cutoff(today)
+
+        # A date before the cutoff is purged from the table, so its fingerprint
+        # must also be gone from the state.
+        purged = (date.fromisoformat(cutoff) - timedelta(days=1)).isoformat()
+        kept = cutoff
+        pruned = _prune_line_movement_sync_state({purged: "a", kept: "b"}, today=today)
+
+        self.assertEqual(pruned, {kept: "b"})
+
+    def test_the_delete_really_uses_that_cutoff(self):
+        """Observes the DELETE, rather than grepping for the constant's name.
+
+        The previous guard asserted master_cron's source mentioned the shared
+        function. Replacing the DELETE bound with a literal "1900-01-01" left
+        that mention in place and the suite green while the purge deleted
+        nothing -- so the purge is now a function whose calls can be recorded.
+        """
+        client = MagicMock()
+        with patch("utils.upsert_market_history.get_supabase_client", return_value=client):
+            cutoff = purge_stale_props_history(today=date(2026, 11, 5))
+
+        self.assertEqual(cutoff, "2026-11-02")
+        deleted = {c.args[0] for c in client.table.call_args_list}
+        self.assertEqual(deleted, {"player_props", "line_movements"})
+        bounds = {c.args for c in client.table.return_value.delete.return_value.lt.call_args_list}
+        self.assertEqual(bounds, {("game_date", "2026-11-02")})
+
+    def test_the_archive_is_never_purged(self):
+        client = MagicMock()
+        with patch("utils.upsert_market_history.get_supabase_client", return_value=client):
+            purge_stale_props_history(today=date(2026, 11, 5))
+
+        self.assertNotIn("historical_player_props", {c.args[0] for c in client.table.call_args_list})
+
+    def test_master_cron_delegates_to_it(self):
         source = (BACKEND_DIR / "cron_jobs" / "master_cron.py").read_text()
-        self.assertIn("from utils.upsert_market_history import LINE_MOVEMENT_RETENTION_DAYS", source)
-        self.assertIn("timedelta(days=LINE_MOVEMENT_RETENTION_DAYS)", source)
+        self.assertIn("purge_stale_props_history", source)
+        self.assertNotIn('delete().lt("game_date"', source)
+
+    def test_the_retention_window_is_three_days(self):
+        # Pinned as a value. Every other test here derives its dates FROM the
+        # constant, so changing it to 10 left the suite green and the 3-day
+        # window existed nowhere in the suite as a fact.
+        self.assertEqual(LINE_MOVEMENT_RETENTION_DAYS, 3)
+        self.assertEqual(line_movement_purge_cutoff(date(2026, 11, 5)), "2026-11-02")
 
     def test_purged_dates_lose_their_fingerprint(self):
         today = date(2026, 11, 5)

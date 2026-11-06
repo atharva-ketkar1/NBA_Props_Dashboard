@@ -51,7 +51,10 @@ for _p in (str(BACKEND_DIR), str(PROP_MODELING_DIR)):
         sys.path.insert(0, _p)
 
 from feature_schema import STAT_COLUMNS  # noqa: E402
-from p_over_calibration import legacy_p_over as _p_over_from_quantiles  # noqa: E402
+from prop_modeling.p_over_calibration import (  # noqa: E402
+    honest_p_over,
+    legacy_p_over as _p_over_from_quantiles,
+)
 from build_prop_dataset import (  # noqa: E402
     _american_to_implied,
     _american_to_payout_decimal,
@@ -514,7 +517,8 @@ def model_report(
         q25, q50, q75 = trip
         bucket = "in_sample (trained on)" if r["game_date"] <= train_cutoff else "out_of_sample"
         regimes[bucket][r["stat_type"]].append({
-            "model_p_over": _p_over_from_quantiles(q25, q50, q75, r["line"]),
+            "model_p_over": honest_p_over(q25, q50, q75, r["line"]),
+            "legacy_p_over": _p_over_from_quantiles(q25, q50, q75, r["line"]),
             "market_p_over": r["market_prob_over"],
             "y": 1 if r["result"] == "over" else 0,
             "q50": q50, "actual": r["actual"], "line": r["line"],
@@ -528,11 +532,13 @@ def model_report(
             v = by_stat[stat]
             y = [x["y"] for x in v]
             mll = log_loss([x["model_p_over"] for x in v], y)
+            lll = log_loss([x["legacy_p_over"] for x in v], y)
             kll = log_loss([x["market_p_over"] for x in v], y)
             out.append({
                 "stat_type": stat,
                 "n": len(v),
                 "model_log_loss": mll,
+                "legacy_log_loss": lll,
                 "market_log_loss": kll,
                 "delta": (mll - kll) if (mll is not None and kll is not None) else None,
                 "model_brier": brier_score([x["model_p_over"] for x in v], y),
@@ -654,19 +660,22 @@ def main() -> int:
                 if not stats:
                     print("  no rows")
                     continue
-                print("  %-14s %7s %10s %10s %8s %10s %9s %9s" % (
-                    "stat", "n", "model_ll", "mkt_ll", "delta", "q50-act", "cov_disc", "cov_raw"))
+                print("  %-14s %7s %10s %10s %10s %8s %10s %9s %9s" % (
+                    "stat", "n", "model_ll", "legacy_ll", "mkt_ll", "delta", "q50-act",
+                    "cov_disc", "cov_raw"))
                 for st in stats:
-                    print("  %-14s %7d %10s %10s %8s %10s %9s %9s" % (
+                    print("  %-14s %7d %10s %10s %10s %8s %10s %9s %9s" % (
                         st["stat_type"], st["n"],
                         "%.4f" % st["model_log_loss"] if st["model_log_loss"] is not None else "-",
+                        "%.4f" % st["legacy_log_loss"] if st["legacy_log_loss"] is not None else "-",
                         "%.4f" % st["market_log_loss"] if st["market_log_loss"] is not None else "-",
                         "%+.4f" % st["delta"] if st["delta"] is not None else "-",
                         "%+.2f" % st["q50_minus_actual"],
                         "%.3f" % st["coverage_discrete"] if st["coverage_discrete"] is not None else "-",
                         "%.3f" % st["coverage_raw"] if st["coverage_raw"] is not None else "-",
                     ))
-                print("  (delta < 0 means the model beat the market on log-loss)")
+                print("  (delta < 0 means the model beat the market on log-loss;")
+                print("   model_ll is what ships, legacy_ll the map it replaced)")
 
     if args.output_csv:
         out = Path(args.output_csv)

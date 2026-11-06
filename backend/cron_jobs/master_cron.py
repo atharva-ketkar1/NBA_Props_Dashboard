@@ -237,14 +237,8 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                 # archive written by SnapshotManager._archive_snapshot.
                 if pipeline_ok:
                     try:
-                        from utils.supabase_client import get_supabase_client
-                        from utils.upsert_market_history import LINE_MOVEMENT_RETENTION_DAYS
-                        cutoff = (
-                            datetime.today().date() - timedelta(days=LINE_MOVEMENT_RETENTION_DAYS)
-                        ).isoformat()
-                        sb = get_supabase_client()
-                        sb.table("player_props").delete().lt("game_date", cutoff).execute()
-                        sb.table("line_movements").delete().lt("game_date", cutoff).execute()
+                        from utils.upsert_market_history import purge_stale_props_history
+                        cutoff = purge_stale_props_history()
                         log_status(logger, "OK", "Pruned stale props history", cutoff=cutoff)
                     except Exception as e:
                         log_status(logger, "WARN", "Stale DB cleanup failed", error=e)

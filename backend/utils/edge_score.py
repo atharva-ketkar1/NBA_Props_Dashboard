@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 
-from prop_modeling.p_over_calibration import honest_p_over, ranking_signal
+from prop_modeling.p_over_calibration import has_usable_spread, honest_p_over, ranking_signal
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
     INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
@@ -3516,6 +3516,9 @@ def _compute_promotion_guardrail(
 
 _ml_predictor = None
 
+_SINGLE_OUTPUT_MODEL_WARNED = False
+
+
 def _compute_ml_regression_context(
     player: Dict[str, Any],
     opponent: str,
@@ -3719,11 +3722,16 @@ def _compute_ml_regression_context(
         # scales against each other on one board is the defect this avoids, and
         # going dark drops the weight from the renormalization denominator
         # rather than diluting every other component with a ~0 score.
-        logger.warning(
-            "ml_regression dark: single-output model has no quantiles to rank with "
-            "| stat=%s player=%s",
-            stat_type, player.get("name"),
-        )
+        global _SINGLE_OUTPUT_MODEL_WARNED
+        if not _SINGLE_OUTPUT_MODEL_WARNED:
+            # Once per process: this fires per candidate per side, which on a
+            # full slate is thousands of identical lines into the VM log.
+            _SINGLE_OUTPUT_MODEL_WARNED = True
+            logger.warning(
+                "ml_regression dark for this run: the loaded model emits a single "
+                "value, not quantiles, so it has no spread to rank with | stat=%s",
+                stat_type,
+            )
         p_over = _ml_predictor.hit_probability(prediction_val, std_dev, line, "over")
         p_over = _clamp(p_over, 0.10, 0.90)
         return {
@@ -3759,8 +3767,12 @@ def _compute_ml_regression_context(
     signal = ranking_signal(q25, q50, q75, line)
     score = _clamp(signal if side == "over" else -signal, -1.0, 1.0)
 
+    # A degenerate IQR has no scale to standardize the gap by, so `signal` is a
+    # neutral 0.0 -- and a 0.0 score on an *available* component is the dilution
+    # trap this change exists to avoid, worth ~4.3 composite points. The
+    # single-output path is dark for the same reason; so is this one.
     return {
-        "available": True,
+        "available": has_usable_spread(q25, q75),
         "raw_score": score,
         "score": score,
         "p_over": round(p_over, 4),
