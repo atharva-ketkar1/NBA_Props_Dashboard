@@ -18,6 +18,7 @@ is *upstream* of `_serialize_recommendation_for_results` via
 added only to the second never arrives, and nothing would have failed.
 """
 
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -75,13 +76,43 @@ class ABalancedMarket(unittest.TestCase):
 
         Only one side of a prop survives the board's max(), so an
         over-oriented probability is the only form in which an over pick and an
-        under pick can be compared to each other afterwards.
+        under pick can be compared afterwards.
+
+        Pinned to literals, and the under fixture is deliberately NOT the over
+        fixture's mirror. An earlier version used mirrored prices (-130/+110
+        against +110/-130) and asserted only that the two were equal -- which
+        holds under an inverted orientation as readily as the correct one
+        (0.5427/0.5427 correct, 0.4573/0.4573 inverted). The assertion was
+        satisfied by the fixture's symmetry, not by over-orientation, and an
+        inverted implementation would have recorded every ledger row as the
+        other side's probability. The sum-to-one check below is likewise an
+        algebraic identity of no_vig_probability, not a fact about orientation.
         """
+        # -130 is the OVER price in both cases, so market_p_over must be the
+        # same number on both rows -- and specifically the larger one.
         over = _diag(side="over", odds=-130, opposite_odds=110)
         under = _diag(side="under", odds=110, opposite_odds=-130)
 
-        self.assertAlmostEqual(over["market_p_over"], under["market_p_over"])
-        self.assertAlmostEqual(over["market_prob_pick"] + under["market_prob_pick"], 1.0)
+        self.assertAlmostEqual(over["market_p_over"], 0.5427, places=4)
+        self.assertAlmostEqual(under["market_p_over"], 0.5427, places=4)
+        self.assertAlmostEqual(over["market_prob_pick"], 0.5427, places=4)
+        self.assertAlmostEqual(under["market_prob_pick"], 0.4573, places=4)
+
+    def test_an_asymmetric_pair_also_stays_over_oriented(self):
+        # Prices that are not each other's mirror, so no coincidence of the
+        # fixture can align the two rows.
+        over = _diag(side="over", odds=-140, opposite_odds=120)
+        under = _diag(side="under", odds=-105, opposite_odds=-115)
+
+        # Case 1's over price is -140 (implied 0.5833); case 2's over price is
+        # the *opposite* side, -115 (implied 0.5349). Different numbers, which
+        # is the point: an inverted implementation would report 0.4380 and
+        # 0.4892 here, and no symmetry of the fixture can disguise it.
+        self.assertAlmostEqual(over["market_p_over"], 0.5620, places=4)
+        self.assertAlmostEqual(under["market_p_over"], 0.5108, places=4)
+        self.assertAlmostEqual(under["market_prob_pick"], 0.4892, places=4)
+        self.assertGreater(over["market_p_over"], 0.5)
+        self.assertGreater(under["market_p_over"], 0.5)
 
     def test_the_edge_is_the_difference_of_the_two_probabilities(self):
         result = _diag(odds=-110, opposite_odds=-110, model_p_over=0.58)
@@ -110,13 +141,20 @@ class ADarkModelRecordsNoOpinion(unittest.TestCase):
         self.assertAlmostEqual(result["market_prob_pick"], 0.5)
         self.assertAlmostEqual(result["hold"], 0.0476, places=4)
 
-    def test_the_obvious_wrong_implementation_fails_this(self):
+    def test_the_obvious_wrong_implementation_is_not_merely_unequal(self):
         """`1 - p_over` unconditionally would return 0.5 here, not None.
 
-        Written as its own case so the must-fail property is explicit rather
-        than incidental to the case above.
+        An earlier version of this used `assertIsNot(..., 0.5)`, which compares
+        *identity*: `_round` returns a fresh float, so it passed for every
+        possible implementation -- including one that hardcoded 0.5 on the dark
+        path. Whether it passed at all depended on CPython constant folding,
+        not on the code. Asserted both ways now, so neither the value nor the
+        absence can drift.
         """
-        self.assertIsNot(_diag(model_p_over=0.5, ml_available=False)["model_prob_pick"], 0.5)
+        value = _diag(model_p_over=0.5, ml_available=False)["model_prob_pick"]
+
+        self.assertIsNone(value)
+        self.assertNotEqual(value, 0.5)
 
     def test_a_missing_model_probability_is_also_none(self):
         result = _diag(model_p_over=None, ml_available=True)
@@ -188,6 +226,45 @@ class ItSurvivesThePersistenceChain(unittest.TestCase):
     }
     CARRIED = ("opposite_odds", "market_prob_pick", "model_prob_pick", "model_minus_market")
 
+    def test_the_candidate_publishes_them_in_the_first_place(self):
+        """The head of the chain, which the fixture below silently assumes.
+
+        Every other test here starts from a hand-written recommendation that
+        already contains the four keys, so the stage that puts them there --
+        `_build_candidate` -- was never exercised. Deleting its three lines
+        left all 523 tests passing while the ledger would have recorded None
+        forever. That is verbatim the failure this class's docstring warns
+        about, one stage upstream of where it was guarded.
+
+        A source assertion is weak, and it is used because `_build_candidate`
+        needs a full board fixture (entry, market_selection, active_entries,
+        style_cache, line_lookup) that no test in this suite builds. It still
+        fails if the publication is removed or renamed, which is the gap.
+        """
+        source = inspect.getsource(es._build_candidate)
+
+        self.assertIn("_market_edge_diagnostic(", source)
+        for key in ("market_prob_pick", "model_prob_pick", "model_minus_market"):
+            self.assertIn('"%s": market_edge["%s"]' % (key, key), source, msg=key)
+        self.assertIn('"market_edge": market_edge', source)
+
+    def test_every_diagnostic_key_is_either_published_or_deliberately_not(self):
+        """No key quietly stops existing.
+
+        market_p_over, hold and priced_both_sides live only under
+        inputs.market_edge by design -- they are context for the two
+        probabilities, not fields the ledger diffs. This pins that split so a
+        key cannot vanish from both places at once.
+        """
+        diagnostic = _diag()
+        top_level = {"market_prob_pick", "model_prob_pick", "model_minus_market"}
+        inputs_only = {"market_p_over", "hold", "priced_both_sides"}
+
+        self.assertEqual(top_level | inputs_only, set(diagnostic))
+        source = inspect.getsource(es._build_candidate)
+        for key in top_level:
+            self.assertIn('"%s": market_edge' % key, source, msg=key)
+
     def test_the_tracker_snapshot_carries_them(self):
         snapshot = es._tracker_state_snapshot_for_recommendations([self.RECOMMENDATION])
         entry = snapshot[self.RECOMMENDATION["recommendation_key"]]
@@ -218,11 +295,19 @@ class ItSurvivesThePersistenceChain(unittest.TestCase):
             self.assertAlmostEqual(serialized[key], self.RECOMMENDATION[key], msg=key)
 
     def test_the_resend_fingerprint_does_not_carry_them(self):
-        """Deliberately excluded.
+        """Deliberately excluded -- for state hygiene, not to prevent spam.
 
-        `_state_snapshot_for_recommendations` decides whether a pick is
-        re-published. A probability that moves on every five-minute refresh has
-        no business in that comparison.
+        I first justified this as a spam guard. That reason is wrong:
+        `_compute_notification_delta` diffs four *named* fields (line, odds,
+        display_edge_score, rank) plus key presence, and nothing in the module
+        compares whole snapshots or hashes them, so adding keys here would not
+        trigger a resend. Verified by seeding a snapshot with different
+        diagnostic values and confirming `should_send` stays False.
+
+        The exclusion stands on the narrower ground: this snapshot exists to
+        answer "has this pick materially changed", nothing reads these fields
+        from it, and a float that moves every five minutes would bloat the
+        state file for no reader.
         """
         snapshot = es._state_snapshot_for_recommendations([self.RECOMMENDATION])
         entry = snapshot[self.RECOMMENDATION["recommendation_key"]]

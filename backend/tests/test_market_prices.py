@@ -216,18 +216,45 @@ class TheHarnessRefusesToGradeAnUnpricedRow(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["payout_over"], 0.909091, places=6)
         self.assertEqual(skips.get("no_price", 0), 0)
 
-    def test_a_row_missing_one_price_is_skipped(self):
-        for missing in ({"over_odds": None}, {"under_odds": None}, {"over_odds": 0}):
-            rows, skips = self._build(**missing)
-            self.assertEqual(rows, [], msg=repr(missing))
-            self.assertEqual(skips["no_price"], 1, msg=repr(missing))
+    def test_a_row_missing_one_price_keeps_the_side_that_is_priced(self):
+        """Refusal is per side, not per row.
 
-    def test_no_row_is_ever_graded_at_a_fabricated_even_money(self):
+        An earlier version dropped the whole row when either price was
+        missing. That was stricter than the thing it protected: `build_rows` is
+        the single join behind every metric here, and a book pulling one side
+        would have removed the row from the blind-under ROI and the market
+        calibration tables, neither of which needs the other price.
+        """
+        import prop_modeling.backtest as bt
+
+        rows, skips = self._build(over_odds=None)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(skips.get("no_price", 0), 0)
+        self.assertIsNone(rows[0]["payout_over"])
+        self.assertAlmostEqual(rows[0]["payout_under"], 0.909091, places=6)
+
+        # The unpriced side is still never graded.
+        self.assertIsNone(bt.profit_for_side(rows[0], "over"))
+        self.assertAlmostEqual(bt.profit_for_side(rows[0], "under"), -1.0)
+
+    def test_a_row_with_neither_price_is_skipped(self):
+        rows, skips = self._build(over_odds=None, under_odds=None)
+
+        self.assertEqual(rows, [])
+        self.assertEqual(skips["no_price"], 1)
+
+    def test_no_side_is_ever_graded_at_a_fabricated_even_money(self):
         # The specific failure: payout exactly 1.0 from a missing price. A
         # genuine +100 also pays 1.0, so this asserts on the input, not the
-        # output.
-        rows, _ = self._build(over_odds=None, under_odds=None)
-        self.assertEqual(rows, [])
+        # output -- and it now asserts per side, which is where the refusal is.
+        import prop_modeling.backtest as bt
+
+        for missing, unbettable in (({"over_odds": None}, "over"),
+                                    ({"under_odds": None}, "under"),
+                                    ({"over_odds": 0}, "over")):
+            rows, _ = self._build(**missing)
+            self.assertEqual(len(rows), 1, msg=repr(missing))
+            self.assertIsNone(bt.profit_for_side(rows[0], unbettable), msg=repr(missing))
 
 
 class ItStaysImportableFromTheServePath(unittest.TestCase):

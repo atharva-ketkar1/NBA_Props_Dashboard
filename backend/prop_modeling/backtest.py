@@ -297,16 +297,16 @@ def build_rows(
         under_odds = ln.get("under_odds")
         payout_over = american_to_payout_decimal(over_odds)
         payout_under = american_to_payout_decimal(under_odds)
-        if payout_over is None or payout_under is None:
-            # No price, no grade. even_money_payout_decimal would substitute a
-            # +100 here, which is right for the dataset builder's training
-            # column and wrong for anything being graded: a selection that
-            # maximises payout would pick the fabricated price and manufacture
-            # a positive return. PrizePicks rows are the known source -- they
-            # carry no single-leg American odds -- and there are none in
-            # historical_player_props today, so this is a guard rather than a
-            # filter. It is here because price_shopping.py does exactly that
-            # max() over payouts.
+        if payout_over is None and payout_under is None:
+            # Neither side priced: nothing here can be graded or de-vigged.
+            # Note the `and`. An earlier version required BOTH prices and
+            # dropped the row, which was stricter than the thing it protected:
+            # build_rows is the single join behind every metric in this module,
+            # and profit_for_side reads only the side it is asked for. A book
+            # pulling one side would have silently removed the row from the
+            # blind-under ROI and the market calibration tables, neither of
+            # which needs the other price. The per-side refusal lives in
+            # profit_for_side instead.
             skips["no_price"] += 1
             continue
         imp_over = american_to_implied(over_odds)
@@ -333,11 +333,20 @@ def build_rows(
 
 
 def profit_for_side(row: Dict[str, Any], side: str) -> Optional[float]:
-    """Net profit per 1u staked. A push is a stake return, not a bet."""
+    """Net profit per 1u staked. A push is a stake return, not a bet.
+
+    An unpriced side is also not a bet. Returning None rather than valuing it
+    at even money is what stops a fabricated +100 winning a `max(payout)`
+    comparison and manufacturing a positive return -- but the refusal is per
+    side, so a row quoted on the under still contributes to under-side metrics.
+    Callers already filter None for pushes, so this composes with no change.
+    """
     if row["result"] == "push":
         return None
-    won = row["result"] == side
-    return row["payout_over" if side == "over" else "payout_under"] if won else -1.0
+    payout = row["payout_over" if side == "over" else "payout_under"]
+    if payout is None:
+        return None
+    return payout if row["result"] == side else -1.0
 
 
 # ---------------------------------------------------------------------------

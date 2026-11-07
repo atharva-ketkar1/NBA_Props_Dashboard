@@ -11,9 +11,12 @@ the real function and asserting both pick the same book, not by restating its
 rules.
 """
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROP_MODELING_DIR = BACKEND_DIR / "prop_modeling"
@@ -38,7 +41,36 @@ def _row(book, line, over_odds, under_odds, *, q=(15.0, 20.0, 25.0), result="ove
 
 
 class TheReplicaMatchesTheServePath(unittest.TestCase):
-    """Pinned against the real selector, over cases where the rules disagree."""
+    """Pinned against the real selector, over cases where the rules disagree.
+
+    The book-toggle gate has to be neutralised first. `_select_market_for_side`
+    filters on `_scoring_books()`, which subtracts `book_toggles.stale_books()`
+    -- and that stats the mtime of `data/current/draftkings.csv` and
+    `fanduel.csv`, treating missing or >90-minute-old files as stale. That
+    directory is NOT git-tracked, so on a fresh clone both books are stale,
+    `_scoring_books()` is empty, the real selector returns None and this test
+    failed 12 subtests. It also failed 90 minutes after the last pipeline run
+    on a warm copy, and 7 subtests with `EDGE_SCORE_PAUSED_BOOKS=dk`.
+
+    Disabling the gate is correct here rather than merely convenient: this is a
+    harness grading history, and whether a book's *current* CSV is fresh has no
+    bearing on which book offered the better price last April. Mirrors the
+    setUp in test_book_pause.py.
+    """
+
+    def setUp(self):
+        self._env = patch.dict(os.environ, {"EDGE_SCORE_ODDS_AGE_GATE": "false"})
+        self._env.start()
+        os.environ.pop("EDGE_SCORE_PAUSED_BOOKS", None)
+        self.addCleanup(self._env.stop)
+
+    def test_the_real_selector_can_actually_see_both_books(self):
+        """Guards the guard: if this fails, every subtest below is vacuous.
+
+        A selector that returns None for both books would make
+        assertEqual(mine, theirs) unreachable rather than true.
+        """
+        self.assertEqual(es._scoring_books(), {"dk", "fd"})
 
     CASES = [
         # (description, dk line/odds, fd line/odds)
@@ -204,8 +236,27 @@ class TheMlSideIsTheComponentsSide(unittest.TestCase):
     def test_the_magnitude_is_never_negative(self):
         # It is the component's score for its own preferred side, so the sign
         # lives in the side, not the number. serve_pairs relies on this.
-        for line in (0.0, 10.0, 20.0, 30.0, 100.0):
-            self.assertGreaterEqual(ps.ml_side_at(_row("dk", line, -110, -110), line)[1], 0.0)
+        for line in (0.0, 10.0, 30.0, 100.0):
+            opinion = ps.ml_side_at(_row("dk", line, -110, -110), line)
+            self.assertIsNotNone(opinion, msg=line)
+            self.assertGreater(opinion[1], 0.0, msg=line)
+
+    def test_no_opinion_is_none_rather_than_a_default_over(self):
+        """A degenerate interval must not become a real wager.
+
+        `ranking_signal` returns exactly 0.0 for a crossed or zero-width
+        interval, and `signal >= 0` previously mapped that to an over bet --
+        scoring a bet the serve path would never place, since the ml component
+        goes dark there via `has_usable_spread`.
+        """
+        zero_width = _row("dk", 20.0, -110, -110, q=(20.0, 20.0, 20.0))
+        crossed = _row("dk", 20.0, -110, -110, q=(25.0, 20.0, 15.0))
+        on_the_median = _row("dk", 20.0, -110, -110, q=(15.0, 20.0, 25.0))
+
+        self.assertIsNone(ps.ml_side_at(zero_width, 20.0))
+        self.assertIsNone(ps.ml_side_at(crossed, 20.0))
+        # A line exactly on the median is also no opinion, not an over.
+        self.assertIsNone(ps.ml_side_at(on_the_median, 20.0))
 
 
 class BandsAccountForClustering(unittest.TestCase):
@@ -227,6 +278,49 @@ class BandsAccountForClustering(unittest.TestCase):
 
     def test_only_shoppable_books_are_ever_compared(self):
         self.assertEqual(set(ps.SHOPPABLE_BOOKS), {"dk", "fd"})
+
+    def test_an_unshoppable_book_in_the_cache_is_refused(self):
+        """Exercises the guard rather than restating the constant.
+
+        The assertion above is satisfied by the tuple's value whether or not
+        any code filters on it -- deleting the restriction in build_cache and
+        deleting load_cache's raise both survived it. PrizePicks rows carry no
+        single-leg price, so one reaching a max(payout) comparison is the one
+        way this measurement could come back falsely positive.
+        """
+        header = ",".join(ps.CACHE_COLUMNS)
+        row = "2026-11-01,PTS,1,prizepicks,20.5,,,,,0.5,25.0,over,15.0,20.0,25.0"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.csv"
+            path.write_text(header + "\n" + row + "\n")
+
+            with self.assertRaises(AssertionError):
+                ps.load_cache(path, since=None)
+
+    def test_a_shoppable_book_loads_normally(self):
+        # So the test above fails for the book, not for a malformed row.
+        header = ",".join(ps.CACHE_COLUMNS)
+        row = "2026-11-01,PTS,1,dk,20.5,-110,-110,0.909091,0.909091,0.5,25.0,over,15.0,20.0,25.0"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.csv"
+            path.write_text(header + "\n" + row + "\n")
+
+            self.assertEqual(len(ps.load_cache(path, since=None)), 1)
+
+    def test_the_roi_itself_is_pinned_not_only_its_bands(self):
+        """`sum(pnl) / (n + 1)` survived the whole file before this.
+
+        Every band comparison holds under any shared denominator, so the
+        headline number each variant reports was unguarded.
+        """
+        pnl = [0.909091, -1.0, 0.909091, -1.0]
+        result = ps.roi_with_bands(pnl, [0, 1, 2, 3], draws=200)
+
+        self.assertEqual(result["n"], 4)
+        self.assertAlmostEqual(result["roi"], -0.0454545, places=6)
+        # Pins the 2.0 multiplier and the Bessel correction, not just the sign:
+        # var(ddof=1) = 1.214876, so 2 * sqrt(var / 4) = 1.102214.
+        self.assertAlmostEqual(result["iid_2sd"], 1.102214, places=5)
 
 
 if __name__ == "__main__":
