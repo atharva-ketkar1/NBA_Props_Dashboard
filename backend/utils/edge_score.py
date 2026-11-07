@@ -13,7 +13,7 @@ import requests
 from dotenv import load_dotenv
 
 from prop_modeling.p_over_calibration import has_usable_spread, honest_p_over, ranking_signal
-from prop_modeling.market_prices import american_to_implied
+from prop_modeling.market_prices import american_to_implied, hold, no_vig_from_american
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
     INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
@@ -4202,6 +4202,73 @@ def _compute_market_context(market_selection: Dict[str, Any], side: str) -> Dict
     }
 
 
+def _market_edge_diagnostic(
+    chosen: Dict[str, Any],
+    *,
+    side: str,
+    model_p_over: Optional[float],
+    ml_available: bool,
+) -> Dict[str, Any]:
+    """Record the price we took against fair value, per published pick.
+
+    Not a scoring input and not an alert gate. Measured, gating on
+    model-minus-market loses 3.8-4.5% ROI, and it is *worse* than simply
+    trusting the ml component's direction, which grades at -0.80% on the shipped
+    book selection. This records the number so it can be graded later; it does
+    not act on it.
+
+    What earns its place is the price itself. `opposite_odds` reaches the
+    candidate today but not the ledger, so a published pick cannot be re-priced
+    after the fact at all -- and the hold is the denominator of the whole
+    question, since a +2% edge over fair value loses into a 4.76% hold. With the
+    raw opposite price persisted, the ledger can also be re-de-vigged later
+    under a different method (Shin, power) without re-running anything.
+
+    Honest limits. The artifact carries only the top board, ~15 rows a slate, so
+    this is an instrument for seeing whether a given pick took a bad price --
+    not a dataset that can settle a 1.6% question. And `model_minus_market` is
+    dominated by the market's own variance: `honest_p_over` is clamped to
+    [0.330, 0.660] while a de-vigged price spans roughly [0.25, 0.75], so the
+    difference is mostly `-(market_prob_pick - 0.5)` and ranking on it is mostly
+    ranking "take the longest price". The two probabilities are therefore
+    persisted separately, so a later analysis can condition on the price.
+
+    `market_prob_pick` is the no-vig probability *at the book and line that were
+    chosen*, which is not "the market's probability": selection is line-first,
+    so two books quoting 24.5 and 25.5 produce de-vigs that are not comparable.
+    It will also disagree with `inputs.market.details.chosen_implied` by exactly
+    the hold, because that one is single-sided and vig-inclusive by design.
+    """
+    side_odds = chosen.get("odds")
+    opposite_odds = chosen.get("opposite_odds")
+    market_p_over = (
+        no_vig_from_american(side_odds, opposite_odds) if side == "over"
+        else no_vig_from_american(opposite_odds, side_odds)
+    )
+    market_prob_pick = no_vig_from_american(side_odds, opposite_odds)
+
+    # None unless the component is actually ranking. honest_p_over returns 0.5
+    # for non-finite input and the dark single-output path still populates
+    # p_over, so recording it unconditionally would fill the ledger with rows
+    # that look like maximal under-conviction from a model with no opinion.
+    model_prob_pick = None
+    if ml_available and model_p_over is not None:
+        model_prob_pick = model_p_over if side == "over" else 1.0 - model_p_over
+
+    model_minus_market = None
+    if model_prob_pick is not None and market_prob_pick is not None:
+        model_minus_market = model_prob_pick - market_prob_pick
+
+    return {
+        "market_p_over": _round(market_p_over, 4),
+        "market_prob_pick": _round(market_prob_pick, 4),
+        "model_prob_pick": _round(model_prob_pick, 4),
+        "model_minus_market": _round(model_minus_market, 4),
+        "hold": _round(hold(side_odds, opposite_odds), 4),
+        "priced_both_sides": market_prob_pick is not None,
+    }
+
+
 def _compute_line_movement_context(
     line_lookup: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]],
     player_id: str,
@@ -4616,6 +4683,12 @@ def _build_candidate(
         side=side,
         ml_details=components["ml_regression"].get("details", {}) or {},
     )
+    market_edge = _market_edge_diagnostic(
+        chosen,
+        side=side,
+        model_p_over=p_over,
+        ml_available=bool(components["ml_regression"].get("available")),
+    )
     display_edge_score = promotion_guardrail.get("display_edge_score", edge_score)
     display_confidence = promotion_guardrail.get("display_confidence", confidence)
 
@@ -4649,6 +4722,9 @@ def _build_candidate(
         "display_confidence": round(float(display_confidence), 1),
         "signal_score": round(weighted_score, 3),
         "ml_p_over": p_over,
+        "market_prob_pick": market_edge["market_prob_pick"],
+        "model_prob_pick": market_edge["model_prob_pick"],
+        "model_minus_market": market_edge["model_minus_market"],
         "ml_boost_applied": round(ml_boost, 4) if ml_boost != 0.0 else None,
         "guardrail_active": bool(promotion_guardrail.get("active")),
         "guardrail_reason": promotion_guardrail.get("reason"),
@@ -4664,6 +4740,7 @@ def _build_candidate(
             "recent_form": components["recent_form"]["details"],
             "matchup": components["matchup"]["details"],
             "market": components["market"]["details"],
+            "market_edge": market_edge,
             "ml_regression": components["ml_regression"]["details"],
             "promotion_guardrail": promotion_guardrail,
             "eligibility": eligibility,
@@ -4934,6 +5011,16 @@ def _tracker_state_snapshot_for_recommendations(recommendations: List[Dict[str, 
             "recommendation_key": recommendation.get("recommendation_key"),
             "player_name": recommendation.get("player_name"),
             "player_id": recommendation.get("player_id"),
+            # The price taken, both sides. opposite_odds reaches the candidate
+            # but stopped here, so a published pick could not be re-priced after
+            # the fact -- which is exactly what closing-line value needs. The
+            # raw opposite price matters more than the derived numbers, because
+            # with it the ledger can be re-de-vigged later under a different
+            # method without re-running anything.
+            "opposite_odds": recommendation.get("opposite_odds"),
+            "market_prob_pick": recommendation.get("market_prob_pick"),
+            "model_prob_pick": recommendation.get("model_prob_pick"),
+            "model_minus_market": recommendation.get("model_minus_market"),
             # Grading needs these to find the box score and the DNP list; rank
             # is deliberately absent, because a logged pick drifts down the
             # board all night and _filter_tracker_recommendations would then
@@ -5613,6 +5700,13 @@ def _serialize_recommendation_for_results(recommendation: Dict[str, Any]) -> Dic
         "rank": recommendation.get("rank"),
         "recommendation_key": recommendation.get("recommendation_key"),
         "player_id": recommendation.get("player_id"),
+        # Downstream of the tracker snapshot above, not a second chance at it:
+        # _queue_results_recap_payload is fed from _tracker_running_recommendations,
+        # which is built out of that snapshot. A key added only here never arrives.
+        "opposite_odds": _safe_float(recommendation.get("opposite_odds")),
+        "market_prob_pick": _safe_float(recommendation.get("market_prob_pick")),
+        "model_prob_pick": _safe_float(recommendation.get("model_prob_pick")),
+        "model_minus_market": _safe_float(recommendation.get("model_minus_market")),
         "player_name": recommendation.get("player_name"),
         "team": recommendation.get("team"),
         "opponent": recommendation.get("opponent"),

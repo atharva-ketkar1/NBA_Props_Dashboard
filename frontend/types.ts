@@ -316,6 +316,13 @@ export interface EdgeScoreRecommendation {
   odds?: number | null;
   odds_display?: string;
   opposite_odds?: number | null;
+  // Recorded per published pick so a price can be judged against fair value
+  // later; nothing renders these today. market_prob_pick is the no-vig
+  // probability at the chosen book and line, so it disagrees with
+  // inputs.market.chosen_implied by exactly the hold.
+  market_prob_pick?: number | null;
+  model_prob_pick?: number | null;
+  model_minus_market?: number | null;
   edge_score: number;
   confidence: number;
   signal_score: number;
