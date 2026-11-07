@@ -57,7 +57,7 @@ from prop_modeling.p_over_calibration import (  # noqa: E402
 )
 from prop_modeling.market_prices import (  # noqa: E402
     american_to_implied,
-    even_money_payout_decimal,
+    american_to_payout_decimal,
     no_vig_probability,
 )
 from build_regression_dataset import _sum_stat  # noqa: E402
@@ -295,6 +295,20 @@ def build_rows(
             continue
         over_odds = ln.get("over_odds")
         under_odds = ln.get("under_odds")
+        payout_over = american_to_payout_decimal(over_odds)
+        payout_under = american_to_payout_decimal(under_odds)
+        if payout_over is None or payout_under is None:
+            # No price, no grade. even_money_payout_decimal would substitute a
+            # +100 here, which is right for the dataset builder's training
+            # column and wrong for anything being graded: a selection that
+            # maximises payout would pick the fabricated price and manufacture
+            # a positive return. PrizePicks rows are the known source -- they
+            # carry no single-leg American odds -- and there are none in
+            # historical_player_props today, so this is a guard rather than a
+            # filter. It is here because price_shopping.py does exactly that
+            # max() over payouts.
+            skips["no_price"] += 1
+            continue
         imp_over = american_to_implied(over_odds)
         imp_under = american_to_implied(under_odds)
         rows.append({
@@ -308,8 +322,8 @@ def build_rows(
             "over_odds": over_odds,
             "under_odds": under_odds,
             "market_prob_over": no_vig_probability(imp_over, imp_under),
-            "payout_over": even_money_payout_decimal(over_odds),
-            "payout_under": even_money_payout_decimal(under_odds),
+            "payout_over": payout_over,
+            "payout_under": payout_under,
             "source": ln.get("source"),
             "is_closing_line": ln.get("is_closing_line"),
             "result": "push" if abs(float(actual) - float(line)) < 1e-9

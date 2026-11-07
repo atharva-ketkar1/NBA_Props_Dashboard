@@ -182,6 +182,54 @@ class ThePayoutTrap(unittest.TestCase):
         self.assertAlmostEqual(payout, 1.0)          # win: +1.0, loss: -1.0
 
 
+class TheHarnessRefusesToGradeAnUnpricedRow(unittest.TestCase):
+    """`build_rows` must drop a row it cannot price, not value it at evens.
+
+    Latent today: all 60,784 graded rows are dk or fd and fully priced, and
+    historical_player_props holds no PrizePicks rows at all. The guard exists
+    because price_shopping.py selects by `max(payout)`, and a fabricated +100
+    would win that comparison every time and manufacture a positive return out
+    of a row with no price.
+    """
+
+    @staticmethod
+    def _line(**overrides):
+        line = {
+            "player_id": "1", "game_date": "2026-11-01", "stat_type": "PTS",
+            "sportsbook": "dk", "line": 20.5, "over_odds": -110, "under_odds": -110,
+            "source": "closing_line", "is_closing_line": True,
+        }
+        line.update(overrides)
+        return line
+
+    @staticmethod
+    def _outcomes():
+        return {("1", "2026-11-01"): {"PTS": 25.0, "MIN": 30.0}}
+
+    def _build(self, **overrides):
+        import prop_modeling.backtest as bt
+        return bt.build_rows([self._line(**overrides)], self._outcomes())
+
+    def test_a_fully_priced_row_grades(self):
+        rows, skips = self._build()
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["payout_over"], 0.909091, places=6)
+        self.assertEqual(skips.get("no_price", 0), 0)
+
+    def test_a_row_missing_one_price_is_skipped(self):
+        for missing in ({"over_odds": None}, {"under_odds": None}, {"over_odds": 0}):
+            rows, skips = self._build(**missing)
+            self.assertEqual(rows, [], msg=repr(missing))
+            self.assertEqual(skips["no_price"], 1, msg=repr(missing))
+
+    def test_no_row_is_ever_graded_at_a_fabricated_even_money(self):
+        # The specific failure: payout exactly 1.0 from a missing price. A
+        # genuine +100 also pays 1.0, so this asserts on the input, not the
+        # output.
+        rows, _ = self._build(over_odds=None, under_odds=None)
+        self.assertEqual(rows, [])
+
+
 class ItStaysImportableFromTheServePath(unittest.TestCase):
     """The invariant that keeps this module usable where it is needed.
 
