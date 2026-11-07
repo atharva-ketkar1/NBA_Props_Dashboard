@@ -13,6 +13,7 @@ import requests
 from dotenv import load_dotenv
 
 from prop_modeling.p_over_calibration import has_usable_spread, honest_p_over, ranking_signal
+from prop_modeling.market_prices import american_to_implied
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
     INJURY_FRESHNESS_LOCK_SENSITIVE_MAX_AGE_MINUTES,
@@ -557,15 +558,6 @@ def _parse_dt(raw_value: Any) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=ET_ZONE)
     return dt.astimezone(ET_ZONE)
-
-
-def _american_to_implied(raw_odds: Any) -> Optional[float]:
-    odds = _safe_float(raw_odds)
-    if odds is None or odds == 0:
-        return None
-    if odds > 0:
-        return 100.0 / (odds + 100.0)
-    return abs(odds) / (abs(odds) + 100.0)
 
 
 def _format_odds(raw_odds: Any) -> str:
@@ -4108,7 +4100,7 @@ def _select_market_for_side(
             continue
         side_odds = _safe_float(prop.get(side))
         opposite_odds = _safe_float(prop.get("under" if side == "over" else "over"))
-        implied = _american_to_implied(side_odds)
+        implied = american_to_implied(side_odds)
         consensus_lines.append(line)
         if implied is not None:
             implieds.append(implied)
@@ -4180,7 +4172,7 @@ def _compute_market_context(market_selection: Dict[str, Any], side: str) -> Dict
         else:
             line_delta = chosen_line - consensus_line
 
-    chosen_implied = _american_to_implied(chosen.get("odds"))
+    chosen_implied = american_to_implied(chosen.get("odds"))
     average_implied = _safe_float(market_selection.get("average_side_implied"))
     price_delta = None
     if chosen_implied is not None and average_implied is not None:
@@ -4236,8 +4228,8 @@ def _compute_line_movement_context(
         else:
             favorable_line_change = current_line - open_line
 
-    opening_implied = _american_to_implied(opening.get(side))
-    current_implied = _american_to_implied(chosen_odds)
+    opening_implied = american_to_implied(opening.get(side))
+    current_implied = american_to_implied(chosen_odds)
     favorable_price_change = None
     if opening_implied is not None and current_implied is not None:
         favorable_price_change = opening_implied - current_implied

@@ -23,6 +23,11 @@ from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from market_prices import (
+    american_to_implied,
+    even_money_payout_decimal,
+    no_vig_probability,
+)
 from feature_schema import (
     DATASET_COLUMNS,
     DEFAULT_ACTION_NETWORK_ARCHIVE_DIR,
@@ -164,34 +169,6 @@ def _sum_stat(row: Dict[str, Any], stat_type: str) -> Optional[float]:
             return None
         total += value
     return total
-
-
-def _american_to_implied(odds: Optional[float]) -> Optional[float]:
-    if odds is None or odds == 0:
-        return None
-    if odds > 0:
-        return 100.0 / (odds + 100.0)
-    return abs(odds) / (abs(odds) + 100.0)
-
-
-def _american_to_payout_decimal(odds: Optional[float]) -> float:
-    if odds is None or odds == 0:
-        # PrizePicks rows do not carry single-leg American odds in this archive.
-        # Use even-money net payout as a neutral placeholder for hit-probability
-        # model training and top-K backtest sorting.
-        return 1.0
-    if odds > 0:
-        return odds / 100.0
-    return 100.0 / abs(odds)
-
-
-def _no_vig_probability(side_implied: Optional[float], opp_implied: Optional[float]) -> Optional[float]:
-    if side_implied is None or opp_implied is None:
-        return None
-    denominator = side_implied + opp_implied
-    if denominator <= 0:
-        return None
-    return side_implied / denominator
 
 
 def _parse_matchup(matchup: Any, team: str) -> Tuple[Optional[str], Optional[int]]:
@@ -475,9 +452,9 @@ def _build_base_row(
                 result_status = "miss"
                 hit_label = 0
 
-    side_implied = _american_to_implied(odds_american)
-    opp_implied = _american_to_implied(opp_odds_american)
-    no_vig_prob = _no_vig_probability(side_implied, opp_implied)
+    side_implied = american_to_implied(odds_american)
+    opp_implied = american_to_implied(opp_odds_american)
+    no_vig_prob = no_vig_probability(side_implied, opp_implied)
     side_multiplier = SIDE_MULTIPLIERS[side]
 
     return {
@@ -495,7 +472,10 @@ def _build_base_row(
         "side_implied_prob": _round_optional(side_implied),
         "opp_implied_prob": _round_optional(opp_implied),
         "no_vig_side_prob": _round_optional(no_vig_prob),
-        "payout_decimal": _round_optional(_american_to_payout_decimal(odds_american)),
+        # even_money_* and not american_to_payout_decimal: PrizePicks rows carry no
+        # single-leg American odds, and this column is a training/sorting input
+        # that needs a neutral placeholder rather than a hole.
+        "payout_decimal": _round_optional(even_money_payout_decimal(odds_american)),
         "final_stat_value": _round_optional(final_value),
         "result_status": result_status,
         "hit_label": hit_label,
@@ -618,11 +598,11 @@ def _build_game_market_features(
         ),
         "team_moneyline_odds": _round_optional(team_moneyline_odds),
         "team_moneyline_implied_prob": _round_optional(
-            _american_to_implied(team_moneyline_odds)
+            american_to_implied(team_moneyline_odds)
         ),
         "opponent_moneyline_odds": _round_optional(opponent_moneyline_odds),
         "opponent_moneyline_implied_prob": _round_optional(
-            _american_to_implied(opponent_moneyline_odds)
+            american_to_implied(opponent_moneyline_odds)
         ),
         "team_total_line": _round_optional(team_total_line),
         "opponent_team_total_line": _round_optional(opponent_team_total_line),

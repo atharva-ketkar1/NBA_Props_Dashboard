@@ -55,10 +55,10 @@ from prop_modeling.p_over_calibration import (  # noqa: E402
     honest_p_over,
     legacy_p_over as _p_over_from_quantiles,
 )
-from build_prop_dataset import (  # noqa: E402
-    _american_to_implied,
-    _american_to_payout_decimal,
-    _no_vig_probability,
+from prop_modeling.market_prices import (  # noqa: E402
+    american_to_implied,
+    even_money_payout_decimal,
+    no_vig_probability,
 )
 from build_regression_dataset import _sum_stat  # noqa: E402
 
@@ -295,8 +295,8 @@ def build_rows(
             continue
         over_odds = ln.get("over_odds")
         under_odds = ln.get("under_odds")
-        imp_over = _american_to_implied(over_odds)
-        imp_under = _american_to_implied(under_odds)
+        imp_over = american_to_implied(over_odds)
+        imp_under = american_to_implied(under_odds)
         rows.append({
             "player_id": pid,
             "game_date": gd,
@@ -307,9 +307,9 @@ def build_rows(
             "minutes": game.get("MIN"),
             "over_odds": over_odds,
             "under_odds": under_odds,
-            "market_prob_over": _no_vig_probability(imp_over, imp_under),
-            "payout_over": _american_to_payout_decimal(over_odds),
-            "payout_under": _american_to_payout_decimal(under_odds),
+            "market_prob_over": no_vig_probability(imp_over, imp_under),
+            "payout_over": even_money_payout_decimal(over_odds),
+            "payout_under": even_money_payout_decimal(under_odds),
             "source": ln.get("source"),
             "is_closing_line": ln.get("is_closing_line"),
             "result": "push" if abs(float(actual) - float(line)) < 1e-9
