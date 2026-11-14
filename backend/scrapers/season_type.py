@@ -5,6 +5,57 @@ from datetime import date, datetime
 
 REGULAR_SEASON = "Regular Season"
 PLAYOFFS = "Playoffs"
+PRE_SEASON = "Pre Season"
+ALL_STAR = "All Star"
+PLAY_IN = "PlayIn"
+
+# An NBA GAME_ID is ten characters: "00", then one digit for the season type,
+# then a two-digit season year, then a five-digit sequence. 0022500001 is the
+# first regular-season game of 2025-26; 0042500101 is a playoff game.
+#
+# The leading zeros matter and are easy to lose: the game logs in
+# data/archive/ have been round-tripped through CSV as integers, so the same
+# file holds both "0022400455" and "22400001". Every lookup here pads back to
+# ten characters first, which is why `season_type_from_game_id` must be used
+# in preference to slicing an id by hand.
+_GAME_ID_SEASON_TYPES = {
+    "1": PRE_SEASON,
+    "2": REGULAR_SEASON,
+    "3": ALL_STAR,
+    "4": PLAYOFFS,
+    "5": PLAY_IN,
+}
+
+GAME_ID_LENGTH = 10
+
+
+def season_type_from_game_id(game_id):
+    """The season type encoded in an NBA GAME_ID, or None if it cannot be read.
+
+    None is returned rather than guessing, and callers must decide what an
+    unreadable id means for them. Defaulting it to REGULAR_SEASON would let
+    playoff rows through a regular-season filter, and defaulting it to
+    PLAYOFFS would silently delete data; neither is safe to do quietly.
+    """
+    if game_id is None:
+        return None
+    clean = str(game_id).strip()
+    if not clean or not clean.isdigit():
+        return None
+    if len(clean) > GAME_ID_LENGTH:
+        return None
+    return _GAME_ID_SEASON_TYPES.get(clean.zfill(GAME_ID_LENGTH)[2])
+
+
+def is_regular_season_game_id(game_id):
+    """True only when the id positively reads as a regular-season game.
+
+    An unreadable id is False here, so a caller filtering on this keeps only
+    what it can vouch for. Pair it with `season_type_from_game_id` when the
+    unreadable ones need counting rather than dropping.
+    """
+    return season_type_from_game_id(game_id) == REGULAR_SEASON
+
 
 _ALIASES = {
     "regular": REGULAR_SEASON,

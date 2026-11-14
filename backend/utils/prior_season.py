@@ -62,8 +62,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# BACKEND_DIR is on sys.path when this module is imported by the pipeline, but
+# not when it is run directly as `python3 utils/prior_season.py` -- then
+# sys.path[0] is utils/ and the __main__ block's own insert happens after the
+# module body has already executed. That CLI is the tool for force-rebuilding
+# the caches this filter invalidates, so the insert has to happen here.
+_BACKEND_DIR_FOR_IMPORT = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR_FOR_IMPORT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR_FOR_IMPORT))
+
+from scrapers.season_type import REGULAR_SEASON, season_type_from_game_id
 
 logger = logging.getLogger("PriorSeason")
 
@@ -300,13 +312,54 @@ def _load_season_from_csv(season: str) -> Dict[int, List[Dict[str, Any]]]:
             # match the JSON shape that Supabase and master_feed use.
             coerced: Dict[str, Any] = {}
             for key, value in row.items():
-                if key in ("TEAM_ABBREVIATION", "MATCHUP", "WL", "GAME_DATE", "DATE_STR"):
+                # GAME_ID belongs here, not in the numeric branch: _safe_float
+                # turns "0022400455" into 22400455.0, whose str() is
+                # "22400455.0", which season_type_from_game_id cannot read --
+                # so the postseason filter would silently keep everything on
+                # this path. It only runs when Supabase is unavailable, which
+                # is exactly when nobody is watching.
+                if key in ("TEAM_ABBREVIATION", "MATCHUP", "WL", "GAME_DATE",
+                           "DATE_STR", "GAME_ID"):
                     coerced[key] = value
                     continue
                 number = _safe_float(value)
                 coerced[key] = number if number is not None else value
             by_player.setdefault(player_id, []).append(coerced)
     return by_player
+
+
+def _regular_season_only(logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop postseason games from a prior-season log.
+
+    Two reasons this is not optional. The projections this feeds are
+    regular-season projections, and the training data excludes the postseason
+    (`build_regression_dataset._build_history`), so leaving it in here is a
+    train/serve mismatch.
+
+    And the selection below concentrates them:
+    `_sorted_desc(...)[:PRIOR_LOG_GAMES]` takes the most *recent* games, and
+    playoff games are the most recent games of a season. Measured on
+    data/prior/prior_history_2025-26.json, 1,199 of 12,275 cached rows were
+    postseason (9.8% overall), but they were not spread evenly -- 229 of 550
+    players had at least one in their 25-game window and 114 had six or more,
+    up to a maximum of nine. The players carrying the most are the ones on
+    teams that went deep, which is to say the ones most likely to be on the
+    board. So the prior-season baseline an early-season projection shrinks
+    toward was up to 36% playoff basketball for exactly those players.
+
+    A log with no readable GAME_ID is kept rather than dropped: master_feed's
+    own game_log shape is the fallback source here and need not carry one, and
+    deleting a player's history over a missing field would be worse than
+    including a game that might be postseason.
+    """
+    kept = []
+    for log in logs:
+        game_id = log.get("GAME_ID")
+        season_type = season_type_from_game_id(game_id) if game_id is not None else None
+        if season_type is not None and season_type != REGULAR_SEASON:
+            continue
+        kept.append(log)
+    return kept
 
 
 def _build_season_payload(season: str) -> Dict[str, Any]:
@@ -323,7 +376,13 @@ def _build_season_payload(season: str) -> Dict[str, Any]:
 
     profiles: Dict[str, Any] = {}
     logs: Dict[str, Any] = {}
-    for player_id, game_log in by_player.items():
+    dropped_postseason = 0
+    for player_id, raw_game_log in by_player.items():
+        game_log = _regular_season_only(raw_game_log)
+        dropped_postseason += len(raw_game_log) - len(game_log)
+        # Both the season averages and the trimmed tail come off the same
+        # filtered log, so the profile and the logs cannot disagree about which
+        # games count.
         aggregates = _season_aggregates(game_log)
         if not aggregates or aggregates.get("GP", 0) < MIN_PRIOR_GAMES:
             continue
@@ -333,7 +392,19 @@ def _build_season_payload(season: str) -> Dict[str, Any]:
             _trim_log(log) for log in _sorted_desc(played)[:PRIOR_LOG_GAMES]
         ]
 
-    return {"season": season, "source": source, "profiles": profiles, "logs": logs}
+    if dropped_postseason:
+        logger.info(
+            "prior season %s: dropped %d postseason log rows", season, dropped_postseason
+        )
+    return {
+        "season": season,
+        "source": source,
+        "profiles": profiles,
+        "logs": logs,
+        # Stamped so a cache built before the filter existed is identifiable.
+        # build_cache treats a payload without it as stale.
+        "regular_season_only": True,
+    }
 
 
 def _cache_path(season: str) -> Path:
@@ -341,18 +412,62 @@ def _cache_path(season: str) -> Path:
 
 
 def build_cache(season: str, *, force: bool = False) -> Dict[str, Any]:
-    """Fetch and cache one prior season. Safe to call repeatedly."""
+    """Fetch and cache one prior season. Safe to call repeatedly.
+
+    A cached payload without `regular_season_only` was written before the
+    postseason filter existed and still carries playoff games, so it is
+    rebuilt rather than returned. Without this the filter would only reach
+    machines that had never warmed a cache -- and the cache is, by design,
+    written once and then trusted forever.
+    """
     path = _cache_path(season)
+    stale: Optional[Dict[str, Any]] = None
     if path.exists() and not force:
         try:
             with path.open() as handle:
-                return json.load(handle)
+                cached = json.load(handle)
         except Exception as exc:
             logger.warning("Prior-season cache unreadable at %s (%s); rebuilding", path, exc)
+        else:
+            if cached.get("regular_season_only"):
+                return cached
+            logger.info(
+                "Prior-season cache at %s predates the postseason filter; rebuilding", path
+            )
+            stale = cached
 
     payload = _build_season_payload(season)
     if not payload.get("profiles"):
         logger.warning("No prior-season history available for %s", season)
+        # Falling through with nothing is worse than falling back. Before the
+        # postseason filter existed an unstamped cache was simply returned, so
+        # a rebuild failure was harmless; now the stamp check discards it
+        # first, and on a fresh VM -- Supabase unreachable and backend/data
+        # gitignored, so no local CSVs -- that leaves zero players. Every
+        # GP==0 player then takes the zero-filled skeleton, which is the
+        # baseline_projection = 0.0 -> +36.5 gap -> all-unders board failure
+        # this module's header docstring exists to describe.
+        #
+        # So filter the stale payload's logs in memory and use that. The
+        # profiles stay slightly postseason-contaminated, which is a far
+        # smaller error than having none: the cached logs all carry GAME_ID,
+        # so the part that feeds the rolling windows is cleaned.
+        if stale and stale.get("profiles"):
+            logger.error(
+                "Prior-season rebuild for %s produced nothing; falling back to the "
+                "pre-filter cache with its logs filtered in memory. Profiles remain "
+                "postseason-inclusive until a rebuild succeeds.", season,
+            )
+            recovered = dict(stale)
+            recovered["logs"] = {
+                player_id: _regular_season_only(logs)
+                for player_id, logs in (stale.get("logs") or {}).items()
+            }
+            # Deliberately NOT stamped regular_season_only: the profiles are
+            # still contaminated, so the next call must try the rebuild again
+            # rather than treating this as done.
+            recovered["recovered_from_stale_cache"] = True
+            return recovered
         return payload
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)

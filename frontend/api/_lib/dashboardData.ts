@@ -1340,6 +1340,34 @@ function accumulateTotals(totals: PriorSeasonTotals, games: any[]) {
 }
 
 /**
+ * Whether a game log row is a regular-season game.
+ *
+ * Mirrors `season_type_from_game_id` in backend/scrapers/season_type.py: an
+ * NBA GAME_ID is "00" + one season-type digit + a 2-digit season + a 5-digit
+ * sequence, where 2 is the regular season. The id has to be zero-padded back
+ * to ten characters first, because these values have been round-tripped
+ * through CSV as integers and arrive both as "0022400455" and "22400001".
+ *
+ * An unreadable id is KEPT, matching `prior_season._regular_season_only` --
+ * dropping a player's history over a missing field is worse than including a
+ * game that might be postseason.
+ *
+ * This exists because the backend began excluding the postseason from the
+ * prior-season blend and this path reads `archive_gamelogs` raw. Since the
+ * tail below takes the most RECENT games, and playoff games are the most
+ * recent of a season, the chart's baseline was drawn from up to 36% playoff
+ * basketball while the Signal Score's prior profile for the same player on the
+ * same page excluded it.
+ */
+function isRegularSeasonGame(game: any): boolean {
+  const raw = game?.GAME_ID;
+  if (raw === null || raw === undefined) return true;
+  const clean = String(raw).trim();
+  if (!clean || !/^\d+$/.test(clean) || clean.length > 10) return true;
+  return clean.padStart(10, '0')[2] === '2';
+}
+
+/**
  * The most recent season this player actually played, for the chart's overlay.
  *
  * Mirrors backend/utils/prior_season.py: walk back at most PRIOR_SEASON_DEPTH
@@ -1373,10 +1401,14 @@ export async function fetchPriorSeasonPayload(
       const bySeason = new Map<string, any[]>();
       for (const row of (data ?? []) as Array<{ season?: string; game_log?: unknown }>) {
         if (!row?.season) continue;
-        bySeason.set(row.season, Array.isArray(row.game_log) ? row.game_log as any[] : []);
+        const games = Array.isArray(row.game_log) ? row.game_log as any[] : [];
+        bySeason.set(row.season, games.filter(isRegularSeasonGame));
       }
 
-      // seasonKeys is already newest-first, so the first qualifying season wins.
+      // seasonKeys is already newest-first, so the first qualifying season
+      // wins. The min-games check runs on the FILTERED list, so a season a
+      // player only reached the bar in by playing playoff games does not
+      // become the anchor.
       const anchorKey = seasonKeys.find(
         (key) => (bySeason.get(key)?.length ?? 0) >= PRIOR_SEASON_MIN_GAMES,
       );
