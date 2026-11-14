@@ -1,6 +1,7 @@
 import pandas as pd
 import requests
 import json
+import re
 import time
 import random
 import logging
@@ -199,6 +200,29 @@ TEAM_MAP = {
     'jazz': 'UTA', 'wizards': 'WAS'
 }
 
+def _tricode_from_slug(slug):
+    """Resolves a lowercased team slug to a tricode, or None.
+
+    Whole words are checked before substrings, which is what keeps "hornets"
+    from being misread as "nets" -- TEAM_MAP iterates with 'nets' ahead of
+    'hornets', so the substring pass alone would hand Charlotte to Brooklyn.
+    """
+    if not slug:
+        return None
+
+    for part in re.split(r'[^a-z0-9]+', slug):
+        if part in TEAM_MAP:
+            return TEAM_MAP[part]
+
+    # Fall back to substring matching for non-standard formats (and for the
+    # multi-word 'trail_blazers' key, which no single word can match).
+    for key, tricode in TEAM_MAP.items():
+        if key in slug:
+            return tricode
+
+    return None
+
+
 def extract_team_name(logo_url):
     """
     Extracts team abbreviation from logo URL or team name.
@@ -209,21 +233,33 @@ def extract_team_name(logo_url):
         # Example URL: .../teams/cleveland_cavaliers.png or .../teams/cavaliers.png
         # We try to grab the last part
         slug = logo_url.split('/')[-1].replace('.png', '').replace('_jersey', '').lower()
-
-        # Parse slug parts first so "hornets" does not get misread as "nets".
-        parts = slug.split('_')
-        for part in parts:
-            if part in TEAM_MAP:
-                return TEAM_MAP[part]
-
-        # Fall back to full-slug substring matching for non-standard formats.
-        for key, tricode in TEAM_MAP.items():
-            if key in slug:
-                return tricode
-
+        return _tricode_from_slug(slug) or "UNK"
+    except:
         return "UNK"
-    except: 
-        return "UNK"
+
+
+def extract_team_options(game_name):
+    """Both clubs in a matchup label like "Utah Jazz @ Minnesota Timberwolves".
+
+    FanDuel omits `secondaryLogo` on some runners -- 79 of 511 rows on
+    2026-11-08, and per-player rather than per-market, so it takes out every
+    prop for that player at once. extract_team_name can only return UNK there,
+    which strips the row of the team the matcher's fuzzy tiers need: tier 3
+    requires team agreement outright, and tier 2 falls back to an unverified
+    best-name guess. The matchup still names both clubs, so hand them over as
+    options. That is what resolves "Cam Johnson", whose
+    fuzz.ratio against the roster's "Cameron Johnson" is 84.6 -- just under the
+    85 tier-2 cutoff, leaving the team-checked tier as his only route.
+    """
+    if not game_name:
+        return []
+
+    options = []
+    for side in str(game_name).split('@'):
+        tricode = _tricode_from_slug(side.strip().lower())
+        if tricode and tricode not in options:
+            options.append(tricode)
+    return options
 
 
 def extract_event_start_time(event):
@@ -431,9 +467,18 @@ def fetch_odds():
                 
                 if line is None or over_odds is None: continue
 
+                team = extract_team_name(over_runner.get('secondaryLogo', ''))
+
                 prop_entry = {
                     "player": normalize_player_name(player_name_raw),
-                    "team": extract_team_name(over_runner.get('secondaryLogo', '')),
+                    "team": team,
+                    # Only as a substitute for a missing team, never alongside a
+                    # known one: _required_teams unions context and options, so
+                    # volunteering the opponent on a row we already placed would
+                    # widen the check and weaken the wrong-player guard (a
+                    # "Jaden Smith" row could then take Jalen Smith's id off the
+                    # other club -- see tests/test_player_matcher.py).
+                    "team_options": extract_team_options(game_name) if team == "UNK" else [],
                     "prop_type": normalize_prop_type(prop_type_raw),
                     "line": float(line),
                     "over_odds": int(over_odds),

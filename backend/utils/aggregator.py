@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from utils.logging_utils import log_status
+from utils.odds_csv import parse_team_options
 from utils.player_matcher import PlayerMatcher
 from utils.prop_date_resolver import resolve_prop_game_date
 from utils.pregame_props import is_pregame_schedule_game, is_prop_pregame_by_time
@@ -766,14 +767,9 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             player_name = row.get('player', '')
             team_context = row.get('team', 'UNK')
             
-            # Extract team options if available (from DK scraper update)
-            team_opts = []
-            raw_opts = row.get('team_options')
-            if isinstance(raw_opts, str) and "[" in raw_opts:
-                try:
-                    import ast
-                    team_opts = ast.literal_eval(raw_opts)
-                except: pass
+            # The matchup's two clubs, present only on rows whose own team the
+            # book did not give us.
+            team_opts = parse_team_options(row.get('team_options'))
 
             # Match Player using robust matcher
             pid = matcher.match_player(player_name, team_context, team_opts)

@@ -25,6 +25,7 @@ class PlayerMatcher:
             "kj martin": "kenyon martin",
             "mo bamba": "mohamed bamba",
             "cam thomas": "cameron thomas",
+            "cam johnson": "cameron johnson",
             "chuma okeke": "chukwuma okeke",
             "guillermo hernangomez": "willy hernangomez",
             "juancho hernangomez": "juan hernangomez",
@@ -32,6 +33,7 @@ class PlayerMatcher:
             "alexandre sarr": "alex sarr",
             "nicolas claxton": "nic claxton",
             "cameron thomas": "cam thomas",
+            "cameron johnson": "cam johnson",
             "carlton carrington": "bub carrington",
         }
 
@@ -179,6 +181,14 @@ class PlayerMatcher:
         required_teams = set()
         if team_context and team_context != 'UNK':
             required_teams.add(team_context)
+        # A bare string is one team, not a sequence of letters. Iterating it
+        # would fill required_teams with characters, which matches no roster
+        # entry *and* makes the set non-empty -- that silently flips callers
+        # out of the "no team info" lenient path into "team info that
+        # disagrees", dropping the prop. Odds rows reach this both as native
+        # lists (in-process scraper dicts) and as CSV text, so normalize here.
+        if isinstance(team_options, str):
+            team_options = [team_options]
         if team_options:
             for t in team_options:
                 if t and t != 'UNK': required_teams.add(t)

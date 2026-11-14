@@ -1,3 +1,4 @@
+import ast
 import logging
 import os
 from datetime import datetime
@@ -21,6 +22,37 @@ ODDS_CSV_COLUMNS = [
     "sportsbook",
     "team_options",
 ]
+
+def parse_team_options(raw):
+    """Read the `team_options` column back into a list of tricodes.
+
+    The column holds a matchup's two clubs for rows whose own team could not be
+    determined. It arrives either as a native list (scraper dicts passed
+    in-process, e.g. cron_closing_lines) or as the repr pandas wrote to CSV
+    ("['UTA', 'MIN']"), so both shapes have to resolve to the same thing.
+    Anything unparseable degrades to [], which leaves the matcher exactly as
+    unconstrained as it was before the column existed.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(t) for t in raw if t]
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                return []
+            if isinstance(parsed, (list, tuple)):
+                return [str(t) for t in parsed if t]
+            return []
+        # A single tricode written without brackets.
+        return [text]
+    return []
+
 
 def _normalize_game_date(value):
     if value is None:

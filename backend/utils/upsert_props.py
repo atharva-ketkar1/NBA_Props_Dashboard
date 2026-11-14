@@ -13,7 +13,6 @@ constants imported from run_pipeline.py.
 """
 
 import os
-import ast
 import hashlib
 import json
 import logging
@@ -25,6 +24,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from utils.logging_utils import log_status
+from utils.odds_csv import parse_team_options
 from utils.player_matcher import PlayerMatcher
 from utils.pregame_props import has_game_started
 from utils.prop_date_resolver import load_schedule_rows, resolve_prop_game_date
@@ -404,15 +404,8 @@ def run_odds_update(
         if df.empty:
             continue
         for _, row in df.iterrows():
-            # --- Replicate team_options handling from aggregator.process_odds() ---
-            # DK uses this to disambiguate players on two-way contracts / traded players.
-            team_opts = []
-            raw_opts = row.get('team_options')
-            if isinstance(raw_opts, str) and '[' in raw_opts:
-                try:
-                    team_opts = ast.literal_eval(raw_opts)
-                except Exception:
-                    pass
+            # The matchup's two clubs, for rows the book left without a team.
+            team_opts = parse_team_options(row.get('team_options'))
 
             pid = matcher.match_player(
                 row.get('player', ''),

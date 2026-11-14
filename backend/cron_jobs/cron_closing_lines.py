@@ -23,7 +23,7 @@ from utils.pregame_props import has_game_started, is_within_pregame_window
 from utils.prop_date_resolver import resolve_prop_game_date
 from utils.prop_types import PROP_MAP
 from utils.snapshot_manager import SnapshotManager
-from utils.odds_csv import write_odds_csv
+from utils.odds_csv import parse_team_options, write_odds_csv
 from utils.prizepicks_archive import archive_prizepicks_rows
 from utils.upsert_market_history import (
     historical_odds_legacy_fallback_enabled,
@@ -294,6 +294,7 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         pid = matcher.match_player(
             row.get("player", ""),
             row.get("team", "UNK"),
+            parse_team_options(row.get("team_options")),
         )
         if not pid:
             unresolved_player_names[str(row.get("player", "")).strip() or "<blank>"] += 1
@@ -370,7 +371,7 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         pid = matcher.match_player(
             row.get("player", ""),
             row.get("team", "UNK"),
-            row.get("team_options"),
+            parse_team_options(row.get("team_options")),
         )
         if not pid:
             unresolved_player_names[str(row.get("player", "")).strip() or "<blank>"] += 1
