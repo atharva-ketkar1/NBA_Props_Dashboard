@@ -61,6 +61,13 @@ backend_old/
 
 # ML Generated Files & Notebooks
 backend/prop_modeling/generated/
+# Colab input bundles: ~4MB of code+data archives, reproducible from
+# scripts/make_colab_bundle.py, and they would go stale the moment the data syncs.
+backend/generated/
+# Out-of-fold predictions travel with the bundle so the gate can score the
+# model honestly, but they are 4.4MB per retrain and reproducible from the
+# trainer. A fresh clone without them makes the gate warn and fall back.
+backend/prop_modeling/exported_regression_model/oof_predictions.csv
 catboost_info/
 backend/prop_modeling/*.ipynb
 backend/prop_modeling/*test*.py

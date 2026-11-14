@@ -225,6 +225,23 @@ def build_cache(path: Path, *, source: str, all_captures: bool) -> None:
     rows, skips = bt.build_rows(lines, bt.load_outcomes(bt.DEFAULT_GAMELOGS))
     print("graded rows=%d skips=%s" % (len(rows), dict(skips)), flush=True)
 
+    # Regular season only, matching build_regression_dataset.py and
+    # backtest.py. This cache is the dataset the calibration numbers in
+    # p_over_calibration.py were fitted on, and the Supabase line history
+    # covers 2026-04-18 to 2026-05-07 -- so 10,480 of the 21,562 rows it
+    # reported as post-cutoff were playoff rows. They flatter the model: its
+    # MAE deficit against the closing line is +0.132 pooled on them against
+    # +0.199 on regular-season rows.
+    rows, dropped_season = bt.filter_regular_season(rows)
+    unreadable = dropped_season.pop("__kept_unreadable", 0)
+    if dropped_season:
+        print("regular season only: dropped %d rows (%s)"
+              % (sum(dropped_season.values()),
+                 ", ".join("%s=%d" % kv for kv in sorted(dropped_season.items()))),
+              flush=True)
+    if unreadable:
+        print("kept %d rows whose season type could not be read" % unreadable, flush=True)
+
     rows = [r for r in rows if str(r.get("sportsbook") or "").lower() in SHOPPABLE_BOOKS]
     print("after restricting to %s: %d" % ("/".join(SHOPPABLE_BOOKS), len(rows)), flush=True)
 

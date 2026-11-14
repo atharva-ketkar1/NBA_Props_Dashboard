@@ -1,13 +1,19 @@
 """Trained features that `build_regression_dataset.py` does not emit.
 
-Eight of the 117 columns the per-stat models consume are added *after* the
-dataset builder runs, and they were added in two different places:
+Ten of the columns the per-stat models consume are added *after* the dataset
+builder runs, and they were added in two different places:
 
   * `momentum_diff_5v20`, `momentum_diff_3v10`, `expected_possessions` and
     `predicted_minutes` are computed inline in `regression_notebook.py` for
     training and again, by hand, in `utils/ml_inference.py` for serving.
-  * the four `modeled_minutes_*` columns come from a separate minutes model,
-    attached by the notebook at training time and predicted live at serve time.
+  * the six `modeled_minutes_*` columns come from a separate minutes model,
+    attached at training time and predicted live at serve time.
+
+(It was eight of 117 when this module was written. The two
+`modeled_minutes_q50_x_*` interaction terms were already being built by
+`attach_modeled_minutes` below but were missing from `POST_BUILD_FEATURES`,
+so `tests/test_engineered_features.py` -- which iterates that tuple -- could
+not have caught their absence.)
 
 Nothing else knew about them, which is why scoring the raw dataset offline
 produced a model that looked signal-free: `reindex` filled all eight with NaN,
@@ -40,6 +46,8 @@ POST_BUILD_FEATURES = (
     "modeled_minutes_iqr",
     "modeled_minutes_delta_vs_recent5",
     "modeled_minutes_x_recent10_target_per_min",
+    "modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta",
+    "modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta",
 )
 
 B2B_MINUTES_PENALTY = 0.035

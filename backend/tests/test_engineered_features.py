@@ -46,9 +46,56 @@ def _frame(**overrides):
         "season_minutes_avg": [26.0], "minutes_cv_recent5": [0.1],
         "team_pace": [100.0], "season_usage_pct_avg": [25.0],
         "is_b2b": [0], "recent10_target_per_min": [0.5],
+        # Sources for the two modeled_minutes_q50_x_* interactions. The builder
+        # emits both, so the real pipeline always has them -- but
+        # attach_modeled_minutes only creates the interactions when its source
+        # is present, so without these the fixture silently skipped two of the
+        # ten post-build features it is meant to cover.
+        "missing_key_teammates_player_target_per_min_delta": [0.04],
+        "returning_key_teammates_player_target_per_min_delta": [-0.02],
     }
     base.update({k: [v] for k, v in overrides.items()})
     return pd.DataFrame(base)
+
+
+class ModeledMinutesInteractions(unittest.TestCase):
+    """The two q50 interactions, which POST_BUILD_FEATURES used to omit.
+
+    attach_modeled_minutes built them all along, but they were missing from the
+    tuple the coverage test iterates, so nothing checked they existed -- and
+    they are trained features, so a frame without them would have the model
+    predicting from a NaN.
+    """
+
+    def _preds(self):
+        return pd.DataFrame({
+            "player_id": ["1"], "game_id": ["0022600001"], "game_date": ["2026-10-20"],
+            "modeled_minutes_q25": [26.0], "modeled_minutes_q50": [30.0],
+            "modeled_minutes_q75": [34.0],
+        })
+
+    def test_missing_teammate_interaction_is_q50_times_the_delta(self):
+        out = attach_modeled_minutes(add_engineered_features(_frame()), self._preds())
+        self.assertAlmostEqual(
+            out["modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta"].iloc[0],
+            30.0 * 0.04, places=6,
+        )
+
+    def test_returning_teammate_interaction_keeps_its_sign(self):
+        out = attach_modeled_minutes(add_engineered_features(_frame()), self._preds())
+        self.assertAlmostEqual(
+            out["modeled_minutes_q50_x_returning_key_teammates_player_target_per_min_delta"].iloc[0],
+            30.0 * -0.02, places=6,
+        )
+
+    def test_a_missing_delta_zeroes_the_interaction(self):
+        frame = _frame()
+        frame["missing_key_teammates_player_target_per_min_delta"] = [float("nan")]
+        out = attach_modeled_minutes(add_engineered_features(frame), self._preds())
+        self.assertAlmostEqual(
+            out["modeled_minutes_q50_x_missing_key_teammates_player_target_per_min_delta"].iloc[0],
+            0.0, places=6,
+        )
 
 
 class EngineeredFeatures(unittest.TestCase):

@@ -19,11 +19,22 @@ import argparse
 import csv
 import json
 import math
+import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+# Run as `python3 prop_modeling/build_regression_dataset.py` from backend/,
+# sys.path[0] is prop_modeling/ and backend/ is absent -- so `scrapers.*` is
+# unimportable without this. backtest.py carries the same preamble for the
+# same reason.
+_PROP_MODELING_DIR = Path(__file__).resolve().parent
+_BACKEND_DIR = _PROP_MODELING_DIR.parent
+for _path in (str(_BACKEND_DIR), str(_PROP_MODELING_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from feature_schema import (
     DEFAULT_GAMELOG_PATHS,
@@ -61,6 +72,11 @@ from injury_feature_config import (
 from minutes_model_config import (
     MINUTES_MODEL_FEATURE_COLUMNS,
     MINUTES_MODEL_TARGET_COLUMN,
+)
+from scrapers.season_type import (
+    GAME_ID_LENGTH,
+    REGULAR_SEASON,
+    season_type_from_game_id,
 )
 
 
@@ -656,14 +672,44 @@ def _parse_args() -> argparse.Namespace:
                         default=["PTS", "AST", "REB", "FG3M", "STL", "BLK",
                                  "PTS+REB+AST", "PTS+REB", "PTS+AST", "REB+AST", "STL+BLK"])
     parser.add_argument("--data-dir", default=str(CURRENT_DATA_DIR))
+    parser.add_argument("--include-playoffs", action="store_true", default=False,
+                        help="Keep playoff, play-in, all-star and preseason games. "
+                             "Off by default: postseason rotations and usage do not "
+                             "describe the regular-season games the board prices, and "
+                             "a playoff line inside a trailing window carries that "
+                             "difference into a regular-season projection.")
     return parser.parse_args()
+
+
+# Fraction of unreadable GAME_IDs above which the season-type filter stops
+# being trustworthy. Below it the rows are kept and reported; above it the
+# build fails, because "keep what you cannot classify" quietly stops meaning
+# "regular season only".
+_MAX_UNREADABLE_GAME_ID_FRACTION = 0.01
 
 
 def _build_history(
     gamelog_paths: Sequence[Path],
     *,
     include_zero_minutes: bool = False,
+    regular_season_only: bool = True,
 ) -> List[Tuple[date, str, Dict[str, Any]]]:
+    """Every player-game, ascending, optionally regular season only.
+
+    `regular_season_only` drops playoff, play-in, all-star and preseason games
+    from the history entirely -- so they are neither training targets nor part
+    of any rolling window. That is deliberate and stronger than just excluding
+    them as targets: a playoff scoring line inside a player's trailing five
+    would carry postseason usage into a regular-season projection, which is the
+    same contamination by a longer route.
+
+    It matters on the current files. data/archive/gamelogs_2025-26.csv holds
+    1,216 rows across 55 playoff games (2026-04-18 to 2026-05-07) alongside an
+    exactly-1,230-game regular season, and those rows were about half of the
+    rows measured as "out of sample" after the 2026-04-09 cutoff -- where the
+    model's deficit against the closing line reads smaller than it does on
+    regular-season rows (+0.236 against +0.274 MAE on PTS).
+    """
     rows: List[Tuple[date, str, Dict[str, Any]]] = []
     missing = [str(p) for p in gamelog_paths if not Path(p).exists()]
     if missing:
@@ -675,6 +721,11 @@ def _build_history(
         )
     if not list(gamelog_paths):
         raise ValueError("No game log paths supplied; nothing to build from.")
+
+    kept_by_type: Counter = Counter()
+    dropped_by_type: Counter = Counter()
+    unreadable = 0
+    considered = 0
     for path in gamelog_paths:
         with path.open(newline="") as f:
             for row in csv.DictReader(f):
@@ -688,8 +739,39 @@ def _build_history(
                         continue
                 elif mins <= 0:
                     continue
+
+                considered += 1
+                season_type = season_type_from_game_id(row.get("GAME_ID"))
+                if season_type is None:
+                    unreadable += 1
+                if regular_season_only and season_type is not None \
+                        and season_type != REGULAR_SEASON:
+                    dropped_by_type[season_type] += 1
+                    continue
+                kept_by_type[season_type or "unreadable"] += 1
                 rows.append((gd, pid, row))
-    rows.sort(key=lambda x: (x[0], str(x[2].get("GAME_ID") or "").strip(), x[1]))
+
+    if considered and unreadable / considered > _MAX_UNREADABLE_GAME_ID_FRACTION:
+        raise ValueError(
+            "%d of %d game log rows (%.1f%%) have a GAME_ID whose season type "
+            "cannot be read, so a regular-season-only build cannot be trusted. "
+            "Check that GAME_ID survived the CSV round trip as digits."
+            % (unreadable, considered, 100.0 * unreadable / considered)
+        )
+    if dropped_by_type:
+        print("  season-type filter dropped %d rows: %s"
+              % (sum(dropped_by_type.values()),
+                 ", ".join("%s=%d" % kv for kv in sorted(dropped_by_type.items()))))
+    if unreadable:
+        print("  kept %d rows with an unreadable GAME_ID (under the %.0f%% bar)"
+              % (unreadable, 100.0 * _MAX_UNREADABLE_GAME_ID_FRACTION))
+
+    # Zero-padded so the ordering does not depend on how many leading zeros
+    # survived the CSV round trip -- the same file holds "0022400455" and
+    # "22400001", which sort differently as raw strings.
+    rows.sort(key=lambda x: (
+        x[0], str(x[2].get("GAME_ID") or "").strip().zfill(GAME_ID_LENGTH), x[1]
+    ))
     return rows
 
 
@@ -1778,13 +1860,21 @@ def _build_missing_team_stats(
 def _prepare_dataset_context(
     gamelog_paths: Sequence[Path],
     data_dir: Path,
+    *,
+    regular_season_only: bool = True,
 ) -> Dict[str, Any]:
     print("Loading enrichment data...")
     enrichment = EnrichmentData(data_dir)
 
     print("\nLoading game logs...")
-    active_rows = _build_history(gamelog_paths)
-    full_boxscore_rows = _build_history(gamelog_paths, include_zero_minutes=True)
+    if not regular_season_only:
+        print("  WARNING: --include-playoffs is set, so postseason rows will be "
+              "both training targets and part of every rolling window.")
+    active_rows = _build_history(gamelog_paths, regular_season_only=regular_season_only)
+    full_boxscore_rows = _build_history(
+        gamelog_paths, include_zero_minutes=True,
+        regular_season_only=regular_season_only,
+    )
     enrichment.ingest_log_positions(full_boxscore_rows)
     print(f"  {len(active_rows):,} active game-log entries")
     print(f"  {len(full_boxscore_rows):,} boxscore-present entries")
@@ -1944,7 +2034,10 @@ def main() -> int:
     data_dir = Path(args.data_dir)
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
-    context = _prepare_dataset_context(gamelog_paths, data_dir)
+    context = _prepare_dataset_context(
+        gamelog_paths, data_dir,
+        regular_season_only=not args.include_playoffs,
+    )
     rows, stats = build_regression_dataset(
         gamelog_paths=gamelog_paths,
         stat_types=args.stat_types,

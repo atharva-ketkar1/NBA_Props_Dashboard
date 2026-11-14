@@ -633,7 +633,16 @@ def train_minutes_model(
     test_df: pd.DataFrame,
     *,
     params: Optional[Dict[str, Any]] = None,
+    val_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[CatBoostRegressor, np.ndarray]:
+    """Fit the minutes head. `test_df` is scored, never selected on.
+
+    `val_df` drives early stopping. Without it the fit runs to its full
+    iteration count rather than falling back to early-stopping on `test_df`,
+    which is what this function used to do -- so the 4.52-minute MAE in
+    minutes_model_metadata.json came from a model that had picked its tree
+    count on the rows it was scored against.
+    """
     train_params = {
         "iterations": 700,
         "depth": 6,
@@ -655,10 +664,15 @@ def train_minutes_model(
 
     cat_idx = [MINUTES_FEATURE_COLS.index(c) for c in MINUTES_CAT_FEATURES if c in MINUTES_FEATURE_COLS]
     tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_idx, weight=w_tr)
-    te_pool = Pool(X_te, label=test_df[MINUTES_TARGET].to_numpy(), cat_features=cat_idx)
+    te_pool = Pool(X_te, cat_features=cat_idx)
 
     model = CatBoostRegressor(**train_params)
-    model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=50)
+    if val_df is not None and not val_df.empty:
+        X_va = prepare(val_df, MINUTES_FEATURE_COLS, MINUTES_CAT_FEATURES)
+        va_pool = Pool(X_va, label=val_df[MINUTES_TARGET].to_numpy(), cat_features=cat_idx)
+        model.fit(tr_pool, eval_set=va_pool, use_best_model=True, early_stopping_rounds=50)
+    else:
+        model.fit(tr_pool)
     preds = model.predict(te_pool)
     return model, preds
 
@@ -742,9 +756,16 @@ def build_minutes_prediction_frame(
         else pd.DataFrame(columns=["game_date", "player_id", "game_id", "modeled_minutes_q25", "modeled_minutes_q50", "modeled_minutes_q75"])
     )
 
-    train_minutes = input_df[input_df["game_date"] < train_cutoff].copy()
+    pre_cutoff = input_df[input_df["game_date"] < train_cutoff].copy()
     test_minutes = input_df[input_df["game_date"] >= train_cutoff].copy()
-    final_model, test_preds = train_minutes_model(train_minutes, test_minutes)
+    # The final minutes model needs an early-stopping block that is not the
+    # test block. `split_minutes_oof_train_eval` already carves one the way
+    # every walk-forward fold above does, so reuse it rather than inventing a
+    # second rule.
+    train_minutes, val_minutes = split_minutes_oof_train_eval(pre_cutoff)
+    final_model, test_preds = train_minutes_model(
+        train_minutes, test_minutes, val_df=val_minutes
+    )
     final_test_preds = test_minutes[["game_date", "player_id", "game_id"]].copy()
     final_test_preds["modeled_minutes_q25"] = test_preds[:, 0]
     final_test_preds["modeled_minutes_q50"] = test_preds[:, 1]
@@ -833,9 +854,17 @@ def attach_modeled_minutes(input_df: pd.DataFrame, minutes_pred_frame: pd.DataFr
     return merged
 
 
-shared_dates = sorted(df["game_date"].dt.date.unique())
-shared_test_dates = shared_dates[-20:]
-shared_split_ts = pd.Timestamp(shared_test_dates[0])
+# Derived from the same split object section 5 uses, not from a second
+# hardcoded 20. The modeled-minutes OOF boundary and the stat test boundary
+# have to be the same date: if they diverge, the minutes model that produces
+# the modeled_minutes_* features for a training row can be one that saw that
+# row's date -- reintroducing the leak through the feature rather than the fit,
+# where no assert_not_test call would catch it.
+from splits import chronological_split as _chronological_split
+
+_shared_split = _chronological_split(df, test_date_count=20, val_date_count=15)
+shared_test_dates = list(_shared_split.test_dates)
+shared_split_ts = _shared_split.test_start
 
 minutes_pred_frame, minutes_test_metrics, heuristic_minutes_metrics, minutes_oof_metrics, minutes_model = build_minutes_prediction_frame(
     minutes_df,
@@ -864,18 +893,33 @@ print("Minutes model OOF coverage:", minutes_oof_metrics)
 print(f"Total feature columns after modeled minutes: {len(FEATURE_COLS)}")
 
 # %% [markdown]
-# ## 5. Train / Test Split
+# ## 5. Train / Validation / Test Split
+#
+# There are three blocks now, not two. `val_all` is carved out of what used to
+# be train and is the only block model selection may touch: Optuna scores on
+# it (section 9) and CatBoost early-stops on it (sections 8 and 10).
+#
+# Previously there was no validation block, so both of those used `test_all`,
+# and every number in `per_stat_test_metrics` described a model that had chosen
+# its hyperparameters and its tree count on the rows it was then scored
+# against. `splits.chronological_split` owns the geometry and asserts the
+# blocks are disjoint and ordered; `assert_not_test` is the guard that refuses
+# a test frame where a validation frame belongs.
 
 # %%
-unique_dates = sorted(df["game_date"].dt.date.unique())
-test_dates   = unique_dates[-20:]   # last 20 game dates = held-out test set
-split_ts     = pd.Timestamp(test_dates[0])
+from splits import assert_not_test, chronological_split, coverage as split_coverage
 
-train_all = df[df["game_date"] < split_ts].copy()
-test_all  = df[df["game_date"] >= split_ts].copy()
+split = chronological_split(df, test_date_count=20, val_date_count=15)
+split_ts = split.test_start
 
-print(f"Train: {len(train_all):,} rows  ({train_all['game_date'].dt.date.nunique()} dates)")
-print(f"Test:  {len(test_all):,}  rows  ({test_all['game_date'].dt.date.nunique()} dates)")
+train_all = split.frame(df, "train")
+val_all   = split.frame(df, "val")
+test_all  = split.frame(df, "test")
+
+print(f"Train: {len(train_all):,} rows  ({len(split.train_dates)} dates)")
+print(f"Val:   {len(val_all):,} rows  ({len(split.val_dates)} dates)")
+print(f"Test:  {len(test_all):,}  rows  ({len(split.test_dates)} dates)")
+print(f"Coverage: {split_coverage(df, split)}")
 
 # %% [markdown]
 # ## 6. Walk-Forward Cross-Validation
@@ -935,17 +979,34 @@ def walk_forward_cv(
         if fold_train.empty or fold_test.empty:
             continue
 
-        X_tr = prepare(fold_train, feature_cols, cat_cols)
+        # Each fold's early stopping block comes out of its own train window.
+        # It used to be the fold's test window, which is why this function's
+        # pooled R-squared of 0.7753 read so much better than any per-stat
+        # number -- every fold had chosen its tree count on the rows it scored.
+        fold_train_dates = sorted(fold_train["game_date"].dt.date.unique())
+        fold_val_width = max(1, min(10, len(fold_train_dates) // 5))
+        fold_val_dates = set(fold_train_dates[-fold_val_width:])
+        fold_fit = fold_train[~fold_train["game_date"].dt.date.isin(fold_val_dates)]
+        fold_val = fold_train[fold_train["game_date"].dt.date.isin(fold_val_dates)]
+        if fold_fit.empty or fold_val.empty:
+            fold_fit, fold_val = fold_train, fold_train.iloc[0:0]
+
+        X_tr = prepare(fold_fit, feature_cols, cat_cols)
         X_te = prepare(fold_test,  feature_cols, cat_cols)
-        y_tr = fold_train[TARGET].to_numpy()
+        y_tr = fold_fit[TARGET].to_numpy()
         y_te = fold_test[TARGET].to_numpy()
-        w_tr = make_sample_weights(fold_train)
+        w_tr = make_sample_weights(fold_fit)
 
         tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices, weight=w_tr)
         te_pool = Pool(X_te, label=y_te, cat_features=cat_indices)
 
         model = CatBoostRegressor(**model_params)
-        model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=50)
+        if not fold_val.empty:
+            X_va = prepare(fold_val, feature_cols, cat_cols)
+            va_pool = Pool(X_va, label=fold_val[TARGET].to_numpy(), cat_features=cat_indices)
+            model.fit(tr_pool, eval_set=va_pool, use_best_model=True, early_stopping_rounds=50)
+        else:
+            model.fit(tr_pool)
 
         preds = model.predict(te_pool)
         mae   = mean_absolute_error(y_te, preds)
@@ -1000,18 +1061,22 @@ per_stat_results: Dict[str, Dict]              = {}
 
 for stat_type in sorted(df["stat_type"].unique()):
     train_st = train_all[train_all["stat_type"] == stat_type]
+    val_st   = val_all[val_all["stat_type"]   == stat_type]
     test_st  = test_all[test_all["stat_type"]  == stat_type]
-    if len(train_st) < 200 or test_st.empty:
-        print(f"  {stat_type:15s}  SKIP (train rows={len(train_st)})")
+    if len(train_st) < 200 or test_st.empty or val_st.empty:
+        print(f"  {stat_type:15s}  SKIP (train rows={len(train_st)}, val rows={len(val_st)})")
         continue
 
     X_tr = prepare(train_st, FEATURE_COLS)
+    X_va = prepare(val_st,   FEATURE_COLS)
     X_te = prepare(test_st,  FEATURE_COLS)
     y_tr = train_st[TARGET].to_numpy()
+    y_va = val_st[TARGET].to_numpy()
     y_te = test_st[TARGET].to_numpy()
     w_tr = make_sample_weights(train_st)
 
     tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices_per_st, weight=w_tr)
+    va_pool = Pool(X_va, label=y_va, cat_features=cat_indices_per_st)
     te_pool = Pool(X_te, label=y_te, cat_features=cat_indices_per_st)
 
     model = CatBoostRegressor(
@@ -1020,7 +1085,10 @@ for stat_type in sorted(df["stat_type"].unique()):
         random_seed=42, verbose=False, allow_writing_files=False,
         task_type="CPU", # MultiQuantile loss is not supported on GPU in CatBoost
     )
-    model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=50)
+    # eval_set is the validation block. It was te_pool, which made the metrics
+    # below describe a model early-stopped on the rows it is scored against.
+    assert_not_test(split, val_st, purpose=f"{stat_type} baseline early stopping")
+    model.fit(tr_pool, eval_set=va_pool, use_best_model=True, early_stopping_rounds=50)
 
     preds_q  = model.predict(te_pool)        # shape (n, 3)
     q25, q50, q75 = preds_q[:, 0], preds_q[:, 1], preds_q[:, 2]
@@ -1419,8 +1487,13 @@ if "PTS" in per_stat_results and prop_df_loaded is not None:
 #
 # Runs independently per stat type. Trial budget is scaled by sample size:
 # 40 trials for PTS / AST / REB / FG3M, 20 for all others.
-# Tuning uses a rolling split within the training set — the final held-out
-# test set is never touched during tuning.
+#
+# Tuning fits on `train_all` and scores on `val_all`. The comment here used to
+# claim "the final held-out test set is never touched during tuning" while the
+# code drew `stat_df` from `df` -- the full frame -- and split it at the last 15
+# dates, which are a strict subset of the 20-date test block. So the claim was
+# false and every tuned hyperparameter had been selected on test rows.
+# `assert_not_test` now enforces what the comment asserts.
 
 # %%
 HIGH_VOLUME_STATS = {"PTS", "AST", "REB", "FG3M"}
@@ -1430,23 +1503,20 @@ TRIAL_BUDGET      = {st: (40 if st in HIGH_VOLUME_STATS else 20) for st in ALL_S
 best_params_per_stat: Dict[str, Dict] = {}
 
 for stat_type in ALL_STAT_TYPES:
-    stat_df = df[df["stat_type"] == stat_type].copy()
     n_trials = TRIAL_BUDGET.get(stat_type, 20)
-    if len(stat_df) < 500:
-        print(f"  {stat_type:15s}  SKIP (n={len(stat_df)})")
-        continue
-
-    tune_dates  = sorted(stat_df["game_date"].dt.date.unique())
-    tune_split  = pd.Timestamp(tune_dates[-15])
-    tune_train  = stat_df[stat_df["game_date"] < tune_split]
-    tune_test   = stat_df[stat_df["game_date"] >= tune_split]
+    tune_train = train_all[train_all["stat_type"] == stat_type]
+    tune_test  = val_all[val_all["stat_type"] == stat_type]
     if len(tune_train) < 200 or tune_test.empty:
+        print(f"  {stat_type:15s}  SKIP (train={len(tune_train)}, val={len(tune_test)})")
         continue
+    # The guard for this cell's original defect.
+    assert_not_test(split, tune_train, purpose=f"{stat_type} tuning fit")
+    assert_not_test(split, tune_test, purpose=f"{stat_type} tuning objective")
 
     def objective(
         trial,
         _train=tune_train,
-        _test=tune_test,
+        _val=tune_test,
     ):
         params = {
             "iterations":          trial.suggest_int("iterations", 300, 1500),
@@ -1465,23 +1535,33 @@ for stat_type in ALL_STAT_TYPES:
         }
 
         X_tr = prepare(_train, FEATURE_COLS)
-        X_te = prepare(_test,  FEATURE_COLS)
+        X_va = prepare(_val,   FEATURE_COLS)
         y_tr = _train[TARGET].to_numpy()
-        y_te = _test[TARGET].to_numpy()
+        y_va = _val[TARGET].to_numpy()
         w_tr = make_sample_weights(_train)
 
         model   = CatBoostRegressor(**params)
         tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices_per_st, weight=w_tr)
-        te_pool = Pool(X_te, label=y_te, cat_features=cat_indices_per_st)
-        model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=40)
+        # The validation block, not the test block. Early stopping on the same
+        # frame the trial is scored on is standard within a trial; what was
+        # wrong before was that this frame came from the test set.
+        va_pool = Pool(X_va, label=y_va, cat_features=cat_indices_per_st)
+        model.fit(tr_pool, eval_set=va_pool, use_best_model=True, early_stopping_rounds=40)
 
-        preds_q = model.predict(te_pool)
-        return mean_absolute_error(y_te, preds_q[:, 1])  # optimise q50 MAE
+        preds_q = model.predict(va_pool)
+        # Pinball loss across all three alphas, not q50 MAE: optimising the
+        # median alone lets a trial win by tightening the median while widening
+        # the band that p_over and ranking_signal depend on.
+        losses = []
+        for idx, alpha in enumerate(float(a) for a in QUANTILE_ALPHAS.split(",")):
+            diff = y_va - preds_q[:, idx]
+            losses.append(float(np.mean(np.maximum(alpha * diff, (alpha - 1.0) * diff))))
+        return sum(losses)
 
     study = optuna.create_study(direction="minimize", study_name=f"tune_{stat_type}")
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best_params_per_stat[stat_type] = study.best_params
-    print(f"  {stat_type:15s}  best MAE={study.best_value:.4f}  trials={n_trials}")
+    print(f"  {stat_type:15s}  best pinball={study.best_value:.4f}  trials={n_trials}")
 
 print("\nOptuna tuning complete")
 
@@ -1494,8 +1574,9 @@ tuned_per_stat_results: Dict[str, Dict]              = {}
 
 for stat_type in ALL_STAT_TYPES:
     train_st = train_all[train_all["stat_type"] == stat_type]
+    val_st   = val_all[val_all["stat_type"]   == stat_type]
     test_st  = test_all[test_all["stat_type"]  == stat_type]
-    if len(train_st) < 200 or test_st.empty:
+    if len(train_st) < 200 or test_st.empty or val_st.empty:
         continue
 
     base = best_params_per_stat.get(stat_type, {})
@@ -1510,16 +1591,23 @@ for stat_type in ALL_STAT_TYPES:
     }
 
     X_tr = prepare(train_st, FEATURE_COLS)
+    X_va = prepare(val_st,   FEATURE_COLS)
     X_te = prepare(test_st,  FEATURE_COLS)
     y_tr = train_st[TARGET].to_numpy()
+    y_va = val_st[TARGET].to_numpy()
     y_te = test_st[TARGET].to_numpy()
     w_tr = make_sample_weights(train_st)
 
     tr_pool = Pool(X_tr, label=y_tr, cat_features=cat_indices_per_st, weight=w_tr)
+    va_pool = Pool(X_va, label=y_va, cat_features=cat_indices_per_st)
     te_pool = Pool(X_te, label=y_te, cat_features=cat_indices_per_st)
 
     model = CatBoostRegressor(**params)
-    model.fit(tr_pool, eval_set=te_pool, use_best_model=True, early_stopping_rounds=60)
+    # Was eval_set=te_pool with use_best_model=True: the tree count came from
+    # the test block. model_FG3M.cbm is 18.4 MB against model_BLK.cbm's 438 KB,
+    # which is what an unbounded iterations search selected against a holdout.
+    assert_not_test(split, val_st, purpose=f"{stat_type} tuned early stopping")
+    model.fit(tr_pool, eval_set=va_pool, use_best_model=True, early_stopping_rounds=60)
 
     preds_q         = model.predict(te_pool)
     q25, q50, q75   = preds_q[:, 0], preds_q[:, 1], preds_q[:, 2]
@@ -1659,20 +1747,32 @@ print("Position contract summary:", position_contract_summary)
 # Three separate LightGBM passes (alpha=0.25, 0.5, 0.75) on the full unified
 # feature set (all stat types combined with stat_type as a categorical).
 # LightGBM does not support MultiQuantile natively.
+#
+# Early stopping uses `val_all`, like every other fit in this notebook. It used
+# to use `test_all` -- the same rows it is then scored on -- while the CatBoost
+# heads it is compared against in section 15 ("Best model by MAE") were
+# corrected to stop on validation. A leaked entrant in a model-comparison table
+# is worse than a leaked number on its own: it is a reason to change
+# architecture on evidence that does not exist.
 
 # %%
 import lightgbm as lgb
 
 X_tr_lgb = prepare(train_all, UNIFIED_FEATURES, UNIFIED_CAT)
+X_va_lgb = prepare(val_all,   UNIFIED_FEATURES, UNIFIED_CAT)
 X_te_lgb = prepare(test_all,  UNIFIED_FEATURES, UNIFIED_CAT)
 y_tr_u   = train_all[TARGET].to_numpy()
+y_va_u   = val_all[TARGET].to_numpy()
 y_te_u   = test_all[TARGET].to_numpy()
 w_tr_u   = make_sample_weights(train_all)
 
 for c in UNIFIED_CAT:
     if c in X_tr_lgb.columns:
         X_tr_lgb[c] = X_tr_lgb[c].astype("category")
+        X_va_lgb[c] = X_va_lgb[c].astype("category")
         X_te_lgb[c] = X_te_lgb[c].astype("category")
+
+assert_not_test(split, val_all, purpose="LightGBM early stopping")
 
 lgb_preds_by_alpha: Dict[float, np.ndarray] = {}
 for alpha in [0.25, 0.5, 0.75]:
@@ -1684,7 +1784,7 @@ for alpha in [0.25, 0.5, 0.75]:
     lgb_model.fit(
         X_tr_lgb, y_tr_u,
         sample_weight=w_tr_u,
-        eval_set=[(X_te_lgb, y_te_u)],
+        eval_set=[(X_va_lgb, y_va_u)],
         callbacks=[lgb.early_stopping(50, verbose=False)],
     )
     lgb_preds_by_alpha[alpha] = lgb_model.predict(X_te_lgb)
@@ -1851,9 +1951,41 @@ best_name = comparison_df["MAE"].idxmin()
 print(f"\nBest model by MAE: {best_name}  (MAE={comparison_df.loc[best_name,'MAE']:.4f})")
 
 # %% [markdown]
-# ## 16. Export Models
+# ## 16. Export Models  —  RETIRED
+#
+# **`prop_modeling/train_regression_model.py` is the only supported way to
+# produce a bundle.** Run it instead of this section:
+#
+#     cd backend && python3 prop_modeling/train_regression_model.py \
+#         --model-dir prop_modeling/exported_regression_model
+#
+# This section is kept because sections 1-15 are still a useful exploration
+# surface, and because deleting it would lose the record of what the April
+# bundle was built from. But it must not write one again. Why:
+#
+#   * It records no provenance -- no git SHA, no dataset fingerprint, no split
+#     boundaries, no per-stat hyperparameters. That is how the shipped bundle
+#     came to carry .cbm files dated 2026-04-11 beside a model_metadata.json
+#     rewritten 2026-11-05, with nothing recording that they had diverged.
+#   * It writes `cv_results` from `walk_forward_cv`, which fits
+#     `loss_function="RMSE"` on the unified feature set. Those numbers
+#     (mean_r2 0.7753) describe a different model to the eleven heads they are
+#     written beside.
+#   * It is a top-level script, so a partial run exports a partial bundle. The
+#     saved .ipynb shows exactly that: Optuna died after AST/BLK/FG3M and the
+#     notebook's recorded outputs do not correspond to the exported models.
+#
+# `EXPORT_ENABLED` is the switch. Leave it False.
 
 # %%
+EXPORT_ENABLED = False
+
+if not EXPORT_ENABLED:
+    print("Export is retired -- use prop_modeling/train_regression_model.py.")
+    print("Set EXPORT_ENABLED = True above only to reproduce a historical bundle.")
+    raise SystemExit(0)
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.tmp")

@@ -60,6 +60,10 @@ from prop_modeling.market_prices import (  # noqa: E402
     american_to_payout_decimal,
     no_vig_probability,
 )
+from scrapers.season_type import (  # noqa: E402
+    REGULAR_SEASON,
+    season_type_from_game_id,
+)
 from build_regression_dataset import _sum_stat  # noqa: E402
 
 CURRENT_DIR = BACKEND_DIR / "data" / "current"
@@ -286,6 +290,10 @@ def build_rows(
         if game is None:
             skips["no_gamelog"] += 1
             continue
+        # Read off the game log's own GAME_ID. The lines carry no game id, and
+        # a date boundary would not work: the play-in sits between the regular
+        # season and the playoffs and moves every year.
+        season_type = season_type_from_game_id(game.get("GAME_ID"))
         actual = _sum_stat(game, stat)
         if actual is None:
             # _sum_stat is fail-closed: a missing component column makes the row
@@ -326,10 +334,40 @@ def build_rows(
             "payout_under": payout_under,
             "source": ln.get("source"),
             "is_closing_line": ln.get("is_closing_line"),
+            "season_type": season_type,
             "result": "push" if abs(float(actual) - float(line)) < 1e-9
                       else ("over" if float(actual) > float(line) else "under"),
         })
     return rows, skips
+
+
+def filter_regular_season(
+    rows: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Counter]:
+    """Keep the rows this board actually prices, and say what went.
+
+    The postseason is a different game -- rotations shorten, usage concentrates
+    -- and the model no longer trains on it, so grading against it measures
+    something nobody ships. It also mattered more than its row count suggests:
+    of the 21,562 closing-line rows after the 2026-04-09 cutoff that were being
+    reported as "out of sample", 10,480 were playoff rows, and the model's MAE
+    deficit against the closing line reads smaller on them (+0.132 pooled)
+    than on regular-season rows (+0.199). Leaving them in flattered the model.
+
+    A row whose season type could not be read is kept, and counted separately
+    so it is visible rather than silently dropped from the denominator.
+    """
+    kept: List[Dict[str, Any]] = []
+    dropped: Counter = Counter()
+    for row in rows:
+        season_type = row.get("season_type")
+        if season_type is not None and season_type != REGULAR_SEASON:
+            dropped[season_type] += 1
+            continue
+        if season_type is None:
+            dropped["__kept_unreadable"] += 1
+        kept.append(row)
+    return kept, dropped
 
 
 def profit_for_side(row: Dict[str, Any], side: str) -> Optional[float]:
@@ -408,6 +446,9 @@ def summarise(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 TRAIN_CUTOFF_DEFAULT = "2026-04-09"
 
 
+DEFAULT_MODEL_DIR = PROP_MODELING_DIR / "exported_regression_model"
+
+
 def score_dataset(
     dataset_csv: Path,
     *,
@@ -415,6 +456,7 @@ def score_dataset(
     keys: Optional[set] = None,
     minutes_csv: Optional[Path] = None,
     batch: int = 8192,
+    model_dir: Optional[Path] = None,
 ) -> Dict[Tuple[str, str, str], Tuple[float, float, float]]:
     """(player_id, game_date, stat_type) -> sanitized (q25, q50, q75).
 
@@ -426,7 +468,12 @@ def score_dataset(
     import pandas as pd
     from catboost import CatBoostRegressor, Pool
 
-    model_dir = PROP_MODELING_DIR / "exported_regression_model"
+    # Defaults to the live bundle, but a candidate can be scored where it was
+    # trained. Gating a bundle used to require installing it first, which meant
+    # the only way to find out whether a retrain was worth shipping was to ship
+    # it -- and a bad one then had to be rolled back out of the directory the
+    # serve path reads on every predict().
+    model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
     meta = json.loads((model_dir / "model_metadata.json").read_text())
     feat_cols: List[str] = list(meta["feature_columns"])
     cat_cols: List[str] = list(meta["cat_features"])
@@ -519,6 +566,42 @@ def score_dataset(
     return out
 
 
+def load_oof_predictions(path: Path) -> Dict[Tuple[str, str, str], Tuple[float, float, float]]:
+    """(player_id, game_date, stat_type) -> sanitized (q25, q50, q75) from a CSV.
+
+    The alternative to this is `score_dataset`, which loads the bundle's .cbm
+    files and re-predicts. That is wrong for any bundle whose weights were
+    refitted on every row -- which is the default -- because then every row is
+    training data and the comparison against the closing line is in-sample.
+    Measured once that way, the model appeared to beat the line by 0.105 MAE on
+    PTS; against its own out-of-fold predictions the honest figure is different.
+
+    The trainer writes this file as `oof_predictions.csv` inside the bundle.
+    """
+    out: Dict[Tuple[str, str, str], Tuple[float, float, float]] = {}
+    by_source: Counter = Counter()
+    with open(path, newline="") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                q25, q50, q75 = (float(row["q25"]), float(row["q50"]), float(row["q75"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not all(math.isfinite(v) for v in (q25, q50, q75)):
+                continue
+            key = (
+                str(row.get("player_id") or "").strip(),
+                str(row.get("game_date") or "")[:10],
+                str(row.get("stat_type") or "").strip(),
+            )
+            # Same contract as the serve path and score_dataset.
+            lo, mid, hi = sorted((q25, q50, q75))
+            out[key] = (max(0.0, lo), max(0.0, mid), max(0.0, hi))
+            by_source[str(row.get("source") or "?")] += 1
+    print("  loaded %d out-of-fold predictions (%s)"
+          % (len(out), ", ".join("%s=%d" % kv for kv in sorted(by_source.items()))))
+    return out
+
+
 def model_report(
     rows: Sequence[Dict[str, Any]],
     scores: Dict[Tuple[str, str, str], Tuple[float, float, float]],
@@ -566,6 +649,16 @@ def model_report(
                 "delta": (mll - kll) if (mll is not None and kll is not None) else None,
                 "model_brier": brier_score([x["model_p_over"] for x in v], y),
                 "q50_minus_actual": sum(x["q50"] - x["actual"] for x in v) / len(v),
+                # The projection question, separate from the probability one:
+                # is the model's median a better estimate of the outcome than
+                # the number the book closed at? Measured on 2026-27 rows the
+                # answer is no on every PTS market, by +0.26 to +0.40.
+                "model_mae": sum(abs(x["q50"] - x["actual"]) for x in v) / len(v),
+                "line_mae": sum(abs(x["line"] - x["actual"]) for x in v) / len(v),
+                "mae_delta": (
+                    sum(abs(x["q50"] - x["actual"]) for x in v)
+                    - sum(abs(x["line"] - x["actual"]) for x in v)
+                ) / len(v),
                 "coverage_discrete": interval_coverage(
                     [x["actual"] for x in v], [x["q25"] for x in v], [x["q75"] for x in v],
                     discrete=True,
@@ -589,6 +682,9 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--output-csv", default=None, help="Write the joined rows here.")
     ap.add_argument("--reliability", action="store_true",
                     help="Print the market's reliability table.")
+    ap.add_argument("--include-playoffs", action="store_true", default=False,
+                    help="Grade postseason rows too. Off by default, to match "
+                         "build_regression_dataset.py, which no longer trains on them.")
     ap.add_argument("--model", action="store_true",
                     help="Also score the exported models against these lines.")
     ap.add_argument("--dataset-csv",
@@ -597,6 +693,16 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--minutes-csv",
                     default=str(PROP_MODELING_DIR / "generated" / "minutes_training_dataset.csv"),
                     help="Minutes dataset, needed to attach the modeled_minutes_* features.")
+    ap.add_argument("--predictions-csv", default=None,
+                    help="Score these out-of-fold predictions instead of re-running the "
+                         "bundle. Required for an honest comparison when the bundle's "
+                         "weights were refitted on all rows (the default), since "
+                         "re-scoring is then in-sample. Defaults to the bundle's own "
+                         "oof_predictions.csv when present.")
+    ap.add_argument("--model-dir", default=None,
+                    help="Bundle to score. Defaults to exported_regression_model/. "
+                         "Point it at a staging dir to gate a candidate before "
+                         "installing it.")
     ap.add_argument("--train-cutoff", default=TRAIN_CUTOFF_DEFAULT,
                     help="Rows at or before this date are in-sample for the exported bundle.")
     return ap.parse_args()
@@ -604,6 +710,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    args.train_cutoff_explicit = (
+        "--train-cutoff" in sys.argv or args.train_cutoff != TRAIN_CUTOFF_DEFAULT
+    )
     try:
         from dotenv import load_dotenv
         load_dotenv(BACKEND_DIR / ".env")
@@ -625,8 +734,25 @@ def main() -> int:
     print("  joined=%d" % len(rows))
     for reason, n in skips.most_common(8):
         print("    skipped %-28s %d" % (reason, n))
+
+    if not args.include_playoffs:
+        rows, dropped = filter_regular_season(rows)
+        unreadable = dropped.pop("__kept_unreadable", 0)
+        if dropped:
+            print("  regular season only: dropped %d rows (%s)"
+                  % (sum(dropped.values()),
+                     ", ".join("%s=%d" % kv for kv in sorted(dropped.items()))))
+        if unreadable:
+            print("  kept %d rows whose season type could not be read" % unreadable)
+        print("  gradeable=%d" % len(rows))
     if not rows:
-        print("nothing to report")
+        # A clean non-zero exit, not a traceback: an empty join is an ordinary
+        # outcome when the odds archive and the game logs do not overlap, and
+        # this used to return 1. The season filter made it worth saying which
+        # of the two reasons applies.
+        print("nothing to report: no gradeable rows%s"
+              % ("" if args.include_playoffs else " (regular-season only; "
+                 "pass --include-playoffs if the lines are postseason)"))
         return 1
 
     print()
@@ -669,12 +795,59 @@ def main() -> int:
             print("no dataset at %s -- run build_regression_dataset.py first" % ds)
         else:
             print()
-            print("scoring exported models over %s" % ds.name)
+            scored_dir = Path(args.model_dir) if args.model_dir else DEFAULT_MODEL_DIR
+            print("scoring %s over %s" % (scored_dir.name, ds.name))
+            # A candidate bundle has its own train cutoff, and using the
+            # default 2026-04-09 against a freshly trained one would label
+            # months of genuinely out-of-sample rows as in-sample.
+            cand_meta: Dict[str, Any] = {}
+            try:
+                cand_meta = json.loads((scored_dir / "model_metadata.json").read_text())
+            except (OSError, ValueError):
+                pass
+            if not args.train_cutoff_explicit and cand_meta:
+                prov = cand_meta.get("provenance") or {}
+                split_meta = prov.get("split") or {}
+                shipped = prov.get("shipped_fit") or ["holdout"]
+                # `train_last` is the HOLDOUT fit's boundary. For a bundle
+                # refitted on all rows it says nothing about what the shipped
+                # weights saw -- they saw everything up to `test_last`. Using
+                # train_last there labelled months of training data
+                # "out of sample" and turned leakage into an apparent win.
+                if "holdout" in shipped:
+                    boundary = split_meta.get("train_last")
+                else:
+                    boundary = split_meta.get("test_last")
+                    print("  this bundle was refitted on all rows, so its weights saw "
+                          "everything through %s -- re-scoring the dataset with them is "
+                          "in-sample by construction." % boundary)
+                if boundary and boundary != args.train_cutoff:
+                    print("  in/out-of-sample boundary from metadata: %s "
+                          "(default was %s)" % (boundary, args.train_cutoff))
+                    args.train_cutoff = boundary
             needed = {
                 (r["player_id"], r["game_date"], r["stat_type"])
                 for r in rows if r["result"] != "push"
             }
-            scores = score_dataset(ds, keys=needed, minutes_csv=Path(args.minutes_csv))
+            oof_path = Path(args.predictions_csv) if args.predictions_csv else (
+                scored_dir / "oof_predictions.csv"
+            )
+            # cand_meta is assigned above, defaulting to {}.
+            shipped_fit = (cand_meta.get("provenance") or {}).get("shipped_fit") or ["holdout"]
+            refit = "holdout" not in shipped_fit
+            if oof_path.exists():
+                scores = load_oof_predictions(oof_path)
+            else:
+                print("  NO out-of-fold predictions at %s; re-scoring with the bundle's "
+                      "weights instead." % oof_path.name)
+                if refit:
+                    print("  WARNING: this bundle's weights were refitted on every row "
+                          "(provenance.shipped_fit), so the numbers below are IN-SAMPLE "
+                          "and cannot show an edge. Retrain to emit oof_predictions.csv.")
+                scores = score_dataset(
+                    ds, keys=needed, minutes_csv=Path(args.minutes_csv),
+                    model_dir=Path(args.model_dir) if args.model_dir else None,
+                )
             rep = model_report(rows, scores, train_cutoff=args.train_cutoff)
             for regime in ("in_sample (trained on)", "out_of_sample"):
                 stats = rep.get(regime) or []
@@ -683,22 +856,48 @@ def main() -> int:
                 if not stats:
                     print("  no rows")
                     continue
-                print("  %-14s %7s %10s %10s %10s %8s %10s %9s %9s" % (
-                    "stat", "n", "model_ll", "legacy_ll", "mkt_ll", "delta", "q50-act",
+                # Two questions, two tables. A model can be a better
+                # projector and a worse probability, or the reverse, and one
+                # wide table invites reading whichever column flatters.
+                print("  PROJECTION -- is q50 closer to the outcome than the closing line?")
+                print("  %-14s %7s %10s %10s %9s %9s %9s %9s" % (
+                    "stat", "n", "model_mae", "line_mae", "delta", "q50-act",
                     "cov_disc", "cov_raw"))
+                beaten = []
                 for st in stats:
-                    print("  %-14s %7d %10s %10s %10s %8s %10s %9s %9s" % (
+                    if st.get("mae_delta") is not None and st["mae_delta"] > 0:
+                        beaten.append(st["stat_type"])
+                    print("  %-14s %7d %10s %10s %9s %9s %9s %9s" % (
+                        st["stat_type"], st["n"],
+                        "%.3f" % st["model_mae"] if st.get("model_mae") is not None else "-",
+                        "%.3f" % st["line_mae"] if st.get("line_mae") is not None else "-",
+                        "%+.3f" % st["mae_delta"] if st.get("mae_delta") is not None else "-",
+                        "%+.2f" % st["q50_minus_actual"],
+                        "%.3f" % st["coverage_discrete"] if st["coverage_discrete"] is not None else "-",
+                        "%.3f" % st["coverage_raw"] if st["coverage_raw"] is not None else "-",
+                    ))
+                print("  (delta > 0 means the closing line is the better projection.")
+                print("   cov_disc/cov_raw are the same q25-q75 band judged as a discrete")
+                print("   count and as a continuum; nominal is 0.50 and neither reading is")
+                print("   right on its own -- see interval_coverage.)")
+                if beaten:
+                    print("  LOSES to the line on: %s" % ", ".join(beaten))
+
+                print()
+                print("  PROBABILITY -- does p_over beat the de-vigged market on log-loss?")
+                print("  %-14s %7s %10s %10s %10s %8s" % (
+                    "stat", "n", "model_ll", "legacy_ll", "mkt_ll", "delta"))
+                for st in stats:
+                    print("  %-14s %7d %10s %10s %10s %8s" % (
                         st["stat_type"], st["n"],
                         "%.4f" % st["model_log_loss"] if st["model_log_loss"] is not None else "-",
                         "%.4f" % st["legacy_log_loss"] if st["legacy_log_loss"] is not None else "-",
                         "%.4f" % st["market_log_loss"] if st["market_log_loss"] is not None else "-",
                         "%+.4f" % st["delta"] if st["delta"] is not None else "-",
-                        "%+.2f" % st["q50_minus_actual"],
-                        "%.3f" % st["coverage_discrete"] if st["coverage_discrete"] is not None else "-",
-                        "%.3f" % st["coverage_raw"] if st["coverage_raw"] is not None else "-",
                     ))
                 print("  (delta < 0 means the model beat the market on log-loss;")
-                print("   model_ll is what ships, legacy_ll the map it replaced)")
+                print("   model_ll is what ships, legacy_ll the map it replaced.")
+                print("   0.6931 is answering 0.5 every time.)")
 
     if args.output_csv:
         out = Path(args.output_csv)
