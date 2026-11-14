@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
 
+from utils import injury_availability
+
 logger = logging.getLogger("MLInference")
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -61,7 +63,10 @@ from minutes_model_config import (
 
 ML_MODEL_DIR = BACKEND_DIR / "prop_modeling" / "exported_regression_model"
 CURRENT_DATA_DIR = BACKEND_DIR / "data" / "current"
-UNAVAILABLE_INJURY_STATUSES = {"out", "doubtful"}
+# Kept as the name the rest of this module reads, but the availability rule now
+# lives in utils/injury_availability.py because edge_score needs the same table
+# and had its own inlined copy of this set.
+UNAVAILABLE_INJURY_STATUSES = {injury_availability.OUT, injury_availability.DOUBTFUL}
 NON_ACTIONABLE_LIVE_INJURY_REASON_MARKERS = (
     "g league - two-way",
     "g league - on assignment",
@@ -149,6 +154,10 @@ class MLPredictor:
         self.live_team_vacancy_stats: Dict[Tuple[str, date], Dict[str, float]] = {}
         self.live_same_pos_vacancy_stats: Dict[Tuple[str, date, str], Dict[str, float]] = {}
         self.live_missing_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
+        # Every player's own reported status, recorded for all statuses -- not
+        # just the unavailable ones -- because the serve path needs to know a
+        # player is Questionable in order to discount their own projection.
+        self.live_player_injury_statuses: Dict[Tuple[str, date], str] = {}
         self.live_active_player_priors: Dict[Tuple[str, date], Dict[str, Dict[str, Any]]] = {}
         self.live_team_presence_index: Dict[Tuple[str, date], set[str]] = {}
         self.live_team_game_dates_by_season: Dict[Tuple[str, int], List[date]] = {}
@@ -229,7 +238,12 @@ class MLPredictor:
 
             new_models: Dict[str, CatBoostRegressor] = {}
             declared_models = (new_meta.get("model_files", {}) or {})
+            # Read ahead of the loop: this is the order predict() builds its
+            # vector in (self.feat_cols, assigned from the same key below), so
+            # it is what each model's own feature names have to match.
+            declared_features = list(new_meta.get("feature_columns", []) or [])
             missing_models: List[str] = []
+            mismatched_models: List[str] = []
             for stat_type, filename in declared_models.items():
                 cbm_path = ML_MODEL_DIR / str(filename)
                 if not cbm_path.exists():
@@ -237,7 +251,31 @@ class MLPredictor:
                     continue
                 model = CatBoostRegressor()
                 model.load_model(str(cbm_path))
+                # The metadata's feature_columns IS the vector order predict()
+                # builds, so a model whose own feature names disagree with it
+                # is being fed a shifted vector. That direction is silent:
+                # metadata listing more features than the model has raises a
+                # CatBoostError, but a model trained on the *same count in a
+                # different order*, or an older model paired with newer
+                # metadata, returns plausible numbers with no exception. It was
+                # measured returning [8.65, 8.78, 8.89] where the correct
+                # answer was [9.07, 10.06, 9.50]. The bundle's own history is
+                # the reason to check: its .cbm files were committed
+                # 2026-04-11 and its model_metadata.json rewritten 2026-11-05.
+                trained_names = list(getattr(model, "feature_names_", None) or [])
+                if trained_names and declared_features and trained_names != declared_features:
+                    mismatched_models.append(str(stat_type))
+                    continue
                 new_models[stat_type] = model
+
+            if mismatched_models:
+                logger.error(
+                    "MLPredictor: %d model(s) whose trained feature names disagree with "
+                    "model_metadata.json were rejected rather than predicted from a "
+                    "shifted vector: %s. The bundle is inconsistent -- metadata and .cbm "
+                    "files are from different runs.",
+                    len(mismatched_models), ", ".join(sorted(mismatched_models)),
+                )
 
             if missing_models:
                 # A per-market outage used to be one warning at load and then
@@ -329,6 +367,7 @@ class MLPredictor:
             self.live_same_pos_vacancy_stats = {}
             self.live_missing_player_priors = {}
             self.live_active_player_priors = {}
+            self.live_player_injury_statuses = {}
             self.live_team_presence_index = {}
             self.live_team_game_dates_by_season = {}
             self.live_team_game_dates = {}
@@ -441,6 +480,7 @@ class MLPredictor:
         self.live_same_pos_vacancy_stats = {}
         self.live_missing_player_priors = {}
         self.live_active_player_priors = {}
+        self.live_player_injury_statuses = {}
         self.live_team_game_dates = {}
         self.live_team_game_dates_all = {}
         self.live_team_matchup_dates = {}
@@ -641,13 +681,26 @@ class MLPredictor:
                 }
                 current_missing_player_priors: Dict[str, Dict[str, Any]] = {}
                 current_active_player_priors: Dict[str, Dict[str, Any]] = {}
-                missing_player_ids: set[str] = set()
+                # Weight, not membership. Out and Doubtful weigh 1.0 as before;
+                # Questionable weighs 1 - P(plays), measured at 0.419. Treating
+                # Questionable as a full absence overstated teammate upside, and
+                # treating it as fully present -- which is what this did -- left
+                # the vacancy features blind to it entirely.
+                missing_player_weights: Dict[str, float] = {}
 
                 for report in team_data.get("players", []):
                     if not isinstance(report, dict):
                         continue
                     status = str(report.get("current_status") or "").strip().lower()
-                    if status not in UNAVAILABLE_INJURY_STATUSES:
+                    status_name = normalize_player_name(
+                        report.get("player_name") or report.get("report_player_name")
+                    )
+                    if status and status_name:
+                        status_player_id = self.live_player_name_lookup.get((team_key, status_name))
+                        if status_player_id:
+                            self.live_player_injury_statuses[(status_player_id, game_date)] = status
+                    vacancy = injury_availability.vacancy_weight(status)
+                    if vacancy <= 0.0:
                         continue
                     if not _is_actionable_live_injury_report_row(report):
                         skipped_non_actionable_reports += 1
@@ -662,7 +715,11 @@ class MLPredictor:
                     player_id = self.live_player_name_lookup.get((team_key, normalized_name))
                     if not player_id:
                         continue
-                    missing_player_ids.add(player_id)
+                    # max(): a player listed twice for the same team keeps the
+                    # worse status rather than whichever row came last.
+                    missing_player_weights[player_id] = max(
+                        missing_player_weights.get(player_id, 0.0), vacancy
+                    )
 
                 for player_id in sorted(self.live_team_player_ids.get(team_key, set())):
                     priors = self._get_live_player_priors(
@@ -675,7 +732,8 @@ class MLPredictor:
                     if not priors.get("within_active_roster_window"):
                         continue
 
-                    if player_id in missing_player_ids:
+                    vacancy = missing_player_weights.get(player_id, 0.0)
+                    if vacancy > 0.0:
                         usage_pct = priors.get("usage_pct")
                         minutes = priors.get("minutes")
                         ast_pct = priors.get("ast_pct")
@@ -684,30 +742,35 @@ class MLPredictor:
                         pos_group = priors.get("pos_group") or normalize_position_group(None)
                         if usage_pct is None and minutes is None:
                             continue
+                        # Whether someone is a key teammate is a property of the
+                        # player, so this gate reads their unweighted usage and
+                        # minutes. Only the amount of vacancy they create scales.
                         if not is_key_teammate(usage_pct, minutes, ast_pct, potential_ast_pg, drives_pg):
                             continue
-                        current_missing_player_priors[player_id] = dict(priors)
+                        missing_priors = dict(priors)
+                        missing_priors["vacancy_weight"] = round(vacancy, 4)
+                        current_missing_player_priors[player_id] = missing_priors
 
-                        team_stats["missing_team_usage_pct"] += usage_pct or 0.0
-                        team_stats["missing_team_minutes"] += minutes or 0.0
-                        same_pos_stats[pos_group]["missing_same_pos_usage_pct"] += usage_pct or 0.0
-                        same_pos_stats[pos_group]["missing_same_pos_minutes"] += minutes or 0.0
+                        team_stats["missing_team_usage_pct"] += (usage_pct or 0.0) * vacancy
+                        team_stats["missing_team_minutes"] += (minutes or 0.0) * vacancy
+                        same_pos_stats[pos_group]["missing_same_pos_usage_pct"] += (usage_pct or 0.0) * vacancy
+                        same_pos_stats[pos_group]["missing_same_pos_minutes"] += (minutes or 0.0) * vacancy
 
                         if pos_group == "G":
-                            team_stats["missing_guard_usage_pct"] += usage_pct or 0.0
-                            team_stats["missing_guard_minutes"] += minutes or 0.0
+                            team_stats["missing_guard_usage_pct"] += (usage_pct or 0.0) * vacancy
+                            team_stats["missing_guard_minutes"] += (minutes or 0.0) * vacancy
 
                         if is_high_usage(usage_pct):
-                            team_stats["missing_high_usage_usage_pct"] += usage_pct or 0.0
-                            team_stats["missing_high_usage_minutes"] += minutes or 0.0
+                            team_stats["missing_high_usage_usage_pct"] += (usage_pct or 0.0) * vacancy
+                            team_stats["missing_high_usage_minutes"] += (minutes or 0.0) * vacancy
 
                         if is_playmaker(priors.get("ast_pct"), priors.get("potential_ast_pg")):
-                            team_stats["missing_playmaker_potential_ast_pg"] += priors.get("potential_ast_pg") or 0.0
-                            team_stats["missing_playmaker_minutes"] += minutes or 0.0
+                            team_stats["missing_playmaker_potential_ast_pg"] += (priors.get("potential_ast_pg") or 0.0) * vacancy
+                            team_stats["missing_playmaker_minutes"] += (minutes or 0.0) * vacancy
 
                         if is_onball(priors.get("drives_pg")):
-                            team_stats["missing_onball_drives_pg"] += priors.get("drives_pg") or 0.0
-                            team_stats["missing_onball_minutes"] += minutes or 0.0
+                            team_stats["missing_onball_drives_pg"] += (priors.get("drives_pg") or 0.0) * vacancy
+                            team_stats["missing_onball_minutes"] += (minutes or 0.0) * vacancy
                     else:
                         current_active_player_priors[player_id] = dict(priors)
 
@@ -736,6 +799,33 @@ class MLPredictor:
                 "MLPredictor: Skipped %s non-actionable injury report rows during live vacancy load.",
                 skipped_non_actionable_reports,
             )
+
+    def live_injury_status(
+        self,
+        player_id: Any,
+        team_abbrev: Optional[str] = None,
+        opponent_abbrev: Optional[str] = None,
+    ) -> Optional[str]:
+        """This player's reported status for tonight, or None if unreported.
+
+        None means "not on the injury report", which is the overwhelming
+        majority and is not the same as Available -- callers must treat it as
+        "no information" and leave the projection alone.
+        """
+        key = str(player_id or "").strip()
+        if not key or not self.live_player_injury_statuses:
+            return None
+        if team_abbrev:
+            target = self._resolve_live_target_date(str(team_abbrev), opponent_abbrev)
+            status = self.live_player_injury_statuses.get((key, target))
+            if status:
+                return status
+        # Without a team, or on a date mismatch, fall back to any date we hold
+        # for this player -- the report payload is a single slate.
+        for (held_id, _), status in self.live_player_injury_statuses.items():
+            if held_id == key:
+                return status
+        return None
 
     def _resolve_live_target_date(self, team_abbrev: str, opponent_abbrev: Optional[str]) -> date:
         team_key = str(team_abbrev or "").strip().upper()

@@ -45,6 +45,55 @@ python3 backend/scripts/watchdog_check.py   # stdlib only; same check GitHub Act
 backend/scripts/pull_vm_logs.sh             # pull VM logs into vm_logs/
 ```
 
+### Retraining on Colab
+
+`train_regression_model.py` runs anywhere; Colab is for not tying up a laptop for an hour.
+It is **not** a speedup: CatBoost's `MultiQuantile` loss is CPU-only (the trainer pins
+`task_type="CPU"`), so a GPU runtime is pure waste, and Colab's free tier gives ~2 vCPUs
+against an M1's 8.
+
+```bash
+cd backend
+python3 scripts/sync_all_data.py        # inputs current first
+python3 scripts/make_colab_bundle.py    # -> backend/generated/colab_input.tar.gz (~4MB)
+```
+
+Upload that to Drive, then open `notebooks/retrain_on_colab.ipynb` and pick a Colab
+runtime as the kernel (the `google.colab` VS Code extension, or colab.research.google.com).
+The bundle carries code *and* the 17MB of inputs — not the 287MB derived dataset, which the
+notebook rebuilds — so no git credentials are needed and a Colab run can never train on a
+dataset built by different code than it ships.
+
+The notebook pins `catboost==1.2.10` because `requirements-vm.txt` does and the VM has to
+load the resulting `.cbm` files. It stamps the input bundle's sha256 into
+`provenance.colab.input_bundle_sha256`, since `git_sha` is null on a runtime with no
+checkout.
+
+Gate the downloaded bundle with `python3 prop_modeling/backtest.py --model` before
+committing it, and keep the previous `exported_regression_model/` until it passes.
+
+### Getting all the data locally
+
+`backend/data` is gitignored, so a checkout starts empty and drifts from the VM with
+every cron tick. One command collects everything:
+
+```bash
+cd backend
+python3 scripts/sync_all_data.py              # VM rsync + Supabase dumps, additive
+python3 scripts/sync_all_data.py --inventory   # what is on disk, and how stale
+```
+
+It is additive by default — unlike `pull_vm_data.sh`, which rsyncs with `--delete` and
+removes local-only files. Use `--mirror` only when you actually want the VM's state to
+win. Supabase tables land in `backend/data/supabase/<table>.jsonl` with a `.meta.json`
+sidecar; `archive_gamelogs` pages at 200 because one row holds a whole season of logs and
+a 1000-row page makes the API answer HTTP 500.
+
+Run `--inventory` before trusting any derived artifact: it prints how many days behind
+today each game log is, and whether
+`prop_modeling/generated/regression_training_dataset.csv` predates them. A stale dataset
+is the single most common cause of a surprising model result.
+
 ## Architecture
 
 ### Pipeline (extract → transform → load → score)
@@ -102,6 +151,17 @@ to the alert bar: a higher floor would alert picks that are never logged, so nev
 through a `get_ml_predictor()` singleton and predicts in pure NumPy over ~69 features.
 Projections are then adjusted for tonight's conditions (usage vacuums from the injury report,
 blowout penalties, rest bounces) *after* the model, not inside it.
+
+A player listed **Questionable** is a coin flip, not a certainty: measured against
+gamelog ground truth, P(plays) is 58.1% (Available 98.5%, Probable 96.4%, Doubtful 1.5%,
+Out 0.0%). `utils/injury_availability.py` holds that table and is the only place it
+lives. Two consequences, in different modules: `ml_inference` weights a Questionable
+teammate at `1 - P(plays)` in the usage-vacuum features, and `edge_score` discounts the
+player's own `p_over` by `P(plays)` — at the probability, never on the quantiles, because
+the mixture's median is the 13.8th percentile of the playing distribution rather than
+`P(plays)` times its median. `EDGE_QUESTIONABLE_AVAILABILITY=1.0` reverts both without a
+deploy. `_load_tonight_dnps` is intentionally still binary; its consumers read absences as
+facts, not quantities.
 
 Early in a season the ML term stays dark until a player has 3+ same-season games, and
 `utils/prior_season.py` shrinks projections toward `archive_gamelogs`. `run_pipeline.py` warms

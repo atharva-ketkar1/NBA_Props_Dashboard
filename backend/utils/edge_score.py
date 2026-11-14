@@ -13,6 +13,7 @@ import requests
 from dotenv import load_dotenv
 
 from prop_modeling.p_over_calibration import has_usable_spread, honest_p_over, ranking_signal
+from utils import injury_availability
 from prop_modeling.market_prices import american_to_implied, hold, no_vig_from_american
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
@@ -2867,6 +2868,15 @@ def _load_tonight_dnps(master_feed: Any, injury_report: Any, schedule_context: D
 
             for team_context, player_entry in team_player_entries:
                 status = str(player_entry.get("current_status") or "").lower()
+                # Deliberately still binary, unlike the ML vacancy features in
+                # ml_inference, which now weight a Questionable teammate at
+                # 1 - P(plays) = 0.419. The entries built here are consumed as
+                # facts rather than quantities -- `any(dnp["role"] == "star")`
+                # flips blowout_risk_boost, and opponent_frontcourt_freed sums
+                # raw season_minutes -- so admitting a fractional absence would
+                # fire those heuristics at full strength off a coin flip, which
+                # is worse than omitting it. Weighting here means teaching every
+                # consumer about the weight first; see utils/injury_availability.
                 if status not in {"out", "doubtful"}:
                     continue
 
@@ -3614,6 +3624,34 @@ def _compute_ml_regression_context(
             
         p_over = honest_p_over(q25, q50, q75, line)
 
+        # A Questionable player is a mixture: ~42% chance of not playing at all,
+        # ~58% chance of their normal distribution (measured against gamelog
+        # ground truth -- see utils/injury_availability.py). The serve path used
+        # to model them at full freight.
+        #
+        # The adjustment is applied here, to the probability, because that is the
+        # only place it is exact: a DNP is under any positive line, so
+        # P(over) = P(plays) * P(over | plays). Scaling q25/q50/q75 instead would
+        # be wrong -- the mixture's median is the 13.8th percentile of the
+        # playing distribution, not P(plays) times its median, and its q25 is 0.
+        # getattr: the predictor is a swappable singleton and the test doubles
+        # implement only `predict`. A missing lookup means "no injury
+        # information", which leaves the probability untouched.
+        _status_lookup = getattr(_ml_predictor, "live_injury_status", None)
+        injury_status = (
+            _status_lookup(player.get("id"), player.get("team"), opponent)
+            if callable(_status_lookup)
+            else None
+        )
+        availability = injury_availability.probability_plays(injury_status)
+        availability_applied = (
+            availability is not None
+            and injury_availability.normalize_status(injury_status)
+            in injury_availability.PARTIAL_STATUSES
+        )
+        if availability_applied:
+            p_over = p_over * availability
+
         prediction_val = q50
         spread = round(q75 - q25, 2)
         details = {
@@ -3625,6 +3663,8 @@ def _compute_ml_regression_context(
             "hit_probability": round(p_over * 100.0, 1),
             "p_over": round(p_over, 4),
             "calibration": "pooled_gap_logistic",
+            "injury_status": injury_status,
+            "availability_p_plays": round(availability, 4) if availability_applied else None,
             "ml_lineup_adjustment": adjustment,
             "injury_report_freshness": injury_report_freshness,
             "position_resolution_summary": position_resolution_summary,
