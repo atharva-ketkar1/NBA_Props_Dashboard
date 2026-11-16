@@ -143,6 +143,78 @@ class LineMovementArchive(unittest.TestCase):
         self.assertFalse(self.manager.write_snapshot("intraday", {}))
         self.assertFalse(self.archive_dir.exists())
 
+    def test_corrupt_archive_bytes_are_quarantined_not_destroyed(self):
+        """Replacing the file is right; deleting the evidence is not.
+
+        A day's file only becomes unreadable by being half-written, and what it
+        still holds is most of a day of intraday history. Overwriting it in
+        place made that unrecoverable and left nothing in the log, so the gap
+        was only ever discovered later, from the inventory.
+        """
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        today = date.today().isoformat()
+        truncated = '{"date": "%s", "snapshots": [{"timest' % today
+        (self.archive_dir / f"{today}.json").write_text(truncated)
+
+        with patch.object(snapshot_manager_module.logger, "error") as error:
+            self.assertTrue(self.manager.write_snapshot("intraday", {"1628369": _player(27.5)}))
+            error.assert_called_once()
+
+        quarantined = list(self.archive_dir.glob(f"{today}.json.corrupt-*"))
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_text(), truncated)
+
+    def test_a_quarantined_file_is_invisible_to_the_json_glob(self):
+        """`sync_all_data`'s inventory globs `*.json`, and so will any trainer.
+
+        A half-written day must not be picked up as if it were a clean one,
+        which is why the quarantine name deliberately does not end in .json.
+        """
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        today = date.today().isoformat()
+        (self.archive_dir / f"{today}.json").write_text("{ not json")
+        self.manager.write_snapshot("intraday", {"1628369": _player(27.5)})
+
+        self.assertEqual(
+            [path.name for path in self.archive_dir.glob("*.json")],
+            [f"{today}.json"],
+        )
+
+    def test_a_crash_mid_write_leaves_the_previous_day_intact(self):
+        """The write is a temp file plus os.replace, never a truncate in place.
+
+        `_archive_snapshot` rewrites a 4-10MB file ~57 times a day, and
+        `open(path, "w")` truncates before json.dump writes a byte. A process
+        death in that window -- OOM on the small VM, the SIGTERM master_cron
+        raises SystemExit on -- used to leave the file truncated, and the next
+        snapshot then started the day over from an empty list.
+
+        Driven through `_archive_snapshot` rather than `write_snapshot`,
+        because the interval gate makes a second same-second `write_snapshot`
+        return False without ever reaching the write -- which would pass this
+        test while testing nothing.
+        """
+        today = date.today().isoformat()
+        first = {"timestamp": "t1", "label": "intraday", "players": {"1628369": _player(27.5)}}
+        second = {"timestamp": "t2", "label": "intraday", "players": {"1628369": _player(31.5)}}
+
+        self.assertTrue(self.manager._archive_snapshot(today, first))
+        intact = (self.archive_dir / f"{today}.json").read_text()
+
+        with patch.object(
+            snapshot_manager_module.json, "dump", side_effect=OSError("no space left")
+        ):
+            with self.assertRaises(OSError):
+                self.manager._archive_snapshot(today, second)
+
+        self.assertEqual((self.archive_dir / f"{today}.json").read_text(), intact)
+        self.assertEqual(len(self._archive_for(today)["snapshots"]), 1)
+
+        # And the next successful write still appends, rather than tripping
+        # over whatever the failed attempt left in the temp path.
+        self.assertTrue(self.manager._archive_snapshot(today, second))
+        self.assertEqual(len(self._archive_for(today)["snapshots"]), 2)
+
 
 class SyncStatePruneMatchesThePurge(unittest.TestCase):
     """The prune window and master_cron's DELETE cutoff must be one number."""

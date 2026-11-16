@@ -57,8 +57,26 @@ class SnapshotManager:
             return default if default is not None else {}
 
     def _write_json(self, filepath, data):
-        with open(filepath, 'w') as f:
+        """Write via a temp file and os.replace, never by truncating in place.
+
+        `_archive_snapshot` does a read-modify-write of a 4-10MB file ~57 times
+        a day, and `open(path, "w")` truncates before json.dump has written a
+        byte. A process death in that window -- OOM on the small VM, the
+        SIGTERM `master_cron._handle_termination` raises on, a reprovision --
+        left the file truncated, and `_read_json` swallows JSONDecodeError and
+        returns `{}`. So the next snapshot started the day from an empty list
+        and overwrote the remains: the whole day's intraday series gone, with
+        nothing logged. That archive is the only durable copy of the series
+        (Supabase is purged on a rolling window), so the write has to be
+        atomic. os.replace is atomic on POSIX; the fsync is what makes the
+        temp file's contents durable before the rename publishes it.
+        """
+        temp_path = f"{filepath}.tmp"
+        with open(temp_path, 'w') as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, filepath)
 
     def _load_schedule(self):
         return self._read_json(self.schedule_path, default={})
@@ -163,7 +181,44 @@ class SnapshotManager:
         os.makedirs(self.line_movements_archive_dir, exist_ok=True)
         archive_path = os.path.join(self.line_movements_archive_dir, f"{game_date}.json")
 
-        existing = self._read_json(archive_path, default={})
+        # A day's file that exists but will not parse must never be silently
+        # restarted from an empty list -- that is how a whole day of history
+        # gets overwritten without a trace. Move it aside instead, so the bytes
+        # survive for a salvage attempt and the loss is visible in the log
+        # rather than inferred later from a gap. Parsed inline rather than
+        # through _read_json, which maps a missing file and an unparseable one
+        # onto the same empty dict -- the distinction this branch turns on.
+        existing = {}
+        unreadable = False
+        if os.path.exists(archive_path):
+            try:
+                with open(archive_path, 'r') as handle:
+                    existing = json.load(handle)
+            except (json.JSONDecodeError, OSError):
+                unreadable = True
+
+        if unreadable:
+            # Deliberately not ending in .json: readers of this directory glob
+            # `*.json` (sync_all_data's inventory does, and anything training
+            # off the series will), and a half-written file must not be picked
+            # up as if it were a day's clean history.
+            quarantine_path = "%s.corrupt-%s" % (
+                archive_path, get_et_now().strftime("%Y%m%dT%H%M%S"),
+            )
+            try:
+                os.replace(archive_path, quarantine_path)
+                logger.error(
+                    "Line movement archive for %s was unreadable; moved to %s and "
+                    "starting a fresh file. The snapshots it held are not in the new one.",
+                    game_date, quarantine_path,
+                )
+            except OSError as exc:
+                logger.error(
+                    "Line movement archive for %s is unreadable and could not be "
+                    "quarantined (%s); refusing to overwrite it.", game_date, exc,
+                )
+                return False
+            existing = {}
         if not isinstance(existing, dict):
             existing = {}
         snapshots = existing.get("snapshots")
