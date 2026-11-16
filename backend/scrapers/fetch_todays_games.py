@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+import hashlib
 import json
 import time
 from datetime import datetime, timedelta
@@ -270,6 +271,45 @@ def _get_action_network_schedule_fallback(days_ahead: int):
     )
 
 
+GAMES_SYNC_STATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "current",
+    "games_sync_state.json",
+)
+
+
+def _games_row_fingerprint(row: dict) -> str:
+    serialized = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+
+
+def _load_games_sync_state() -> dict:
+    if not os.path.exists(GAMES_SYNC_STATE_PATH):
+        return {}
+    try:
+        with open(GAMES_SYNC_STATE_PATH, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"   Warning: could not read games sync state ({exc}); treating every row as changed")
+        return {}
+
+
+def _save_games_sync_state(state: dict) -> None:
+    """Temp file plus os.replace: a truncated state file reads back as empty,
+    which is safe here (everything is re-upserted) but throws away a day of
+    suppression for no reason."""
+    try:
+        os.makedirs(os.path.dirname(GAMES_SYNC_STATE_PATH), exist_ok=True)
+        temp_path = f"{GAMES_SYNC_STATE_PATH}.tmp"
+        with open(temp_path, "w") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+        os.replace(temp_path, GAMES_SYNC_STATE_PATH)
+    except Exception as exc:
+        print(f"   Warning: could not persist games sync state ({exc})")
+
+
 def upsert_games_to_db(raw_data: list) -> None:
     """Upsert the dashboard lookahead schedule into Supabase games table.
     Non-fatal: logs errors and continues if Supabase is unavailable.
@@ -379,9 +419,53 @@ def upsert_games_to_db(raw_data: list) -> None:
             print(f"   games upsert: 0 games written to Supabase ({stale_row_count} stale rows removed)")
             return
 
+        # Only write the rows that actually changed.
+        #
+        # The game-status refresh runs every 10 minutes and used to rewrite all
+        # ~49 rows each time: ~4,700 row versions a day for a table whose
+        # contents are static outside of tip-off and final score. Every one of
+        # those left a dead tuple for autovacuum, which is disk I/O budget spent
+        # to write what was already there. `upsert_props` has gated on a
+        # fingerprint for the same reason; this is that pattern.
+        #
+        # The fingerprint covers the whole row, not a chosen subset: these are
+        # all scalar columns and any of them changing -- score, game_status,
+        # is_live, the closing-scrape deadline -- is a change the frontend reads.
+        #
+        # Deliberately NOT gating the stale-row sweep above. That is about rows
+        # vanishing from the schedule, which no fingerprint of the incoming
+        # payload can observe.
+        sync_state = _load_games_sync_state()
+        next_sync_state = {}
+        changed_rows = []
+        for row in rows:
+            game_id = str(row.get("game_id") or "").strip()
+            if not game_id:
+                changed_rows.append(row)
+                continue
+            fingerprint = _games_row_fingerprint(row)
+            next_sync_state[game_id] = fingerprint
+            if sync_state.get(game_id) != fingerprint:
+                changed_rows.append(row)
+
+        # next_sync_state is rebuilt from the incoming payload rather than merged
+        # into the old one, so game_ids that have rolled out of the lookahead
+        # window drop out instead of accumulating forever. A game that leaves the
+        # window and returns is simply re-upserted, which is the safe direction.
+
+        if not changed_rows:
+            print(f"   games upsert: 0 of {len(rows)} games changed, skipping "
+                  f"({stale_row_count} stale rows removed)")
+            _save_games_sync_state(next_sync_state)
+            return
+
         # Batch upsert (all games fit in one batch — max ~30 rows per day)
-        supabase.table("games").upsert(rows, on_conflict="game_id").execute()
-        print(f"   games upsert: {len(rows)} games written to Supabase ({stale_row_count} stale rows removed)")
+        supabase.table("games").upsert(changed_rows, on_conflict="game_id").execute()
+        # Persisted only after the write landed: a fingerprint recorded for a row
+        # that never reached Supabase would suppress every later attempt.
+        _save_games_sync_state(next_sync_state)
+        print(f"   games upsert: {len(changed_rows)} of {len(rows)} games written to Supabase "
+              f"({stale_row_count} stale rows removed)")
     except Exception as e:
         print(f"   Warning: games upsert failed (non-fatal): {e}")
 
