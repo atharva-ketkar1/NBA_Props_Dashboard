@@ -67,30 +67,10 @@ _last_request_at = 0.0
 
 
 def _get_session():
-    """Pooled session + retry on 403/429/5xx.
+    """Pooled session + retry on 429/5xx.
 
     Previously every call was a bare requests.get: a new TCP+TLS handshake each
     time and no retry at all, so a single 429 permanently dropped that tab's props.
-
-    403 is in the list for the reason `utils/http_client` documents at length:
-    the Worker samples a User-Agent from a 4-entry pool per request, and a UA
-    that ages out of support returns INTERMITTENT 403s -- the Worker itself does
-    not retry them. Every retry here is a fresh request to the Worker, so it
-    draws a fresh UA, which turns a ~1-in-4 failure into a near-certain success.
-
-    Measured on 2026-11-16: zero 403s on the preceding seven days, then three
-    isolated `content-managed-page` failures (12:45, 13:05, 13:25) and a burst
-    of twenty on event pages at 14:55. The main page is the entry point, so each
-    of those three returned None from `get_nba_main_page_data`, left the run with
-    no event IDs, and cost a whole intraday snapshot -- 3 of the day's ~30, and
-    an hour-wide hole in the line-movement series the model trains on.
-
-    The cost of being wrong is bounded but real: when a 403 is about the egress
-    IP rather than the UA, retrying cannot help, and a run that scans ~48 event
-    pages pays up to 10.5s of backoff on each. That is the case `http_client`
-    answers with a circuit breaker and a shallower 403 budget; urllib3's Retry
-    cannot vary attempts per status, so migrating this scraper onto that client
-    is the follow-up. Until then a slow run beats a lost snapshot.
     """
     global _session
     with _session_lock:
@@ -101,7 +81,7 @@ def _get_session():
         retry = Retry(
             total=3,
             backoff_factor=1.5,          # 1.5s, 3s, 6s
-            status_forcelist=[403, 429, 500, 502, 503, 504],
+            status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET", "HEAD", "OPTIONS"],
             respect_retry_after_header=True,
             raise_on_status=False,
