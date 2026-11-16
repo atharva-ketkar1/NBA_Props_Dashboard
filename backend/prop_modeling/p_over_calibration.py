@@ -104,13 +104,33 @@ _MAX_FIT_GAP = 12.0
 PROB_FLOOR, PROB_CEIL = 0.02, 0.98
 
 # ── The ranking signal ───────────────────────────────────────────────────────
-# Solved so 0.5 * tanh(gap_over_iqr / k) reproduces the legacy component's
-# magnitude, and solved on fit+select only. Solving it on the evaluation slice
-# gives 0.445, but then reporting "the composite does not move" on that same
-# slice is circular -- the parity is true there by construction. On 0.485 the
-# parity is an out-of-sample result: mean |score| 0.2378 against the legacy
-# 0.2511 on rows the scale never saw, within 5%, correlation 0.974.
-_RANKING_SCALE = 0.485
+# Solved so 0.5 * tanh(gap_over_iqr / k) reproduces the magnitude the component
+# had before, and solved on fit+select only -- solving it on the evaluation
+# slice makes any later "the composite did not move" claim circular.
+#
+# 0.485 was the value for the April bundle. The 2026-11-12 retrain required
+# revisiting it, and the reason is worth recording because it is not obvious:
+# that retrain cut the median's bias from -1.53 to -0.22, which moved q50 much
+# closer to the line, which shrank `gap` -- and `gap` is this function's input.
+# Measured on 6,293 rows carrying both bundles' quantiles, mean |signal| fell
+# 0.2326 -> 0.1644, a 29% drop in the component's contribution caused entirely
+# by a bias fix. At a fixed EDGE_SCORE_DISCORD_MIN_SIGNAL_SCORE that is quietly
+# fewer alerts. The ordering did not degrade: AUC went 0.5160 -> 0.5182
+# (z=3.21 against a 400-draw permutation null).
+#
+# Restoring the full 0.2326 needs k=0.2879, and that is deliberately NOT what
+# is here. At 0.2879 a half-IQR gap scores 0.470 and a quarter-IQR gap 0.350,
+# breaking both bands in test_backtest_metrics, which exist precisely to catch
+# a change of this size to the per-row transfer function. 0.40 is the largest
+# value inside those bands: it recovers about 62% of the lost magnitude
+# (0.1644 -> 0.1905, solved on dates < 2026-10-30 and verified after) and
+# changes no guard.
+#
+# The remaining shortfall belongs to a different knob. This constant sets how
+# the component scores a row; EDGE_SCORE_DISCORD_MIN_SIGNAL_SCORE sets how many
+# rows get published. Chasing alert volume by amplifying the signal distorts the
+# transfer function to move a threshold, which is the wrong lever for the job.
+_RANKING_SCALE = 0.40
 _RANKING_CAP = 0.5
 
 

@@ -65,9 +65,16 @@ class TheScoreIsTheRankingSignal(unittest.TestCase):
         Comparing the wiring to `ranking_signal` agrees with any scale, so
         inside this file the component's reach was unpinned: _RANKING_SCALE
         0.485 -> 0.90 left all of it green. LINE is half an IQR below the
-        median, which is 0.5 * tanh(0.5 / 0.485).
+        median, which is 0.5 * tanh(0.5 / _RANKING_SCALE).
+
+        Updating this literal is the intended cost of moving the scale -- that
+        is what makes the move conscious. It was 0.3874 at _RANKING_SCALE
+        0.485, and is 0.4241 at 0.40, where the 2026-11-12 retrain put it
+        (see p_over_calibration for why the bias fix shrank the component).
+        The acceptable *range* for the reach is guarded separately, by the
+        bands in test_backtest_metrics.
         """
-        self.assertAlmostEqual(_context(_QuantileStub())["score"], 0.3874, places=3)
+        self.assertAlmostEqual(_context(_QuantileStub())["score"], 0.4241, places=3)
 
     def test_the_score_is_not_derived_from_the_probability(self):
         """The reverted mapping, pinned so it cannot come back unnoticed."""

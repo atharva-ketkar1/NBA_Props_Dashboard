@@ -68,6 +68,10 @@ backend/generated/
 # model honestly, but they are 4.4MB per retrain and reproducible from the
 # trainer. A fresh clone without them makes the gate warn and fall back.
 backend/prop_modeling/exported_regression_model/oof_predictions.csv
+# Written by the trainer, read by nothing at serve time, and it embeds the
+# absolute path of whichever machine trained. model_metadata.json already
+# carries the provenance the serve path and the gate actually use.
+backend/prop_modeling/exported_regression_model/manifest.json
 catboost_info/
 backend/prop_modeling/*.ipynb
 backend/prop_modeling/*test*.py
