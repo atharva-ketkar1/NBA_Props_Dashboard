@@ -271,16 +271,43 @@ class PriorSeasonFilterTests(unittest.TestCase):
             build.assert_not_called()
             self.assertEqual(set(out["profiles"]), {"1"})
 
-    def test_the_real_cache_on_disk_carries_playoff_rows(self):
+    def test_the_real_cache_on_disk_agrees_with_its_own_stamp(self):
+        """Whichever state the live cache is in, it must match what it claims.
+
+        This started out asserting the on-disk cache *did* carry postseason
+        rows, to show the filter had real work to do. That self-invalidates:
+        once the fix reaches the VM and the cache is rebuilt, the rows are gone
+        and the test fails for the best possible reason. Worse, it fails on
+        data that is gitignored and syncs from a disposable host, so the result
+        depended on when someone last pulled.
+
+        So it reads the `regular_season_only` stamp and checks the matching
+        invariant instead. A stamped cache must be clean -- that is the fix
+        holding in production. An unstamped one predates the filter and must
+        still have something to remove, or the filter is a no-op and the
+        exclusion never mattered.
+        """
         import json
         path = BACKEND_DIR / "data" / "prior" / "prior_history_2025-26.json"
         if not path.exists():
             self.skipTest("prior cache not present (backend/data is gitignored)")
         data = json.loads(path.read_text())
-        before = sum(len(v) for v in data["logs"].values())
-        after = sum(len(self.ps._regular_season_only(v)) for v in data["logs"].values())
-        self.assertGreater(before - after, 0,
-                           "expected the pre-filter cache to contain postseason rows")
+        logs = data.get("logs") or {}
+        if not logs:
+            self.skipTest("prior cache carries no game logs")
+        before = sum(len(v) for v in logs.values())
+        after = sum(len(self.ps._regular_season_only(v)) for v in logs.values())
+        if data.get("regular_season_only"):
+            self.assertEqual(
+                before, after,
+                "cache stamped regular_season_only still holds %d postseason rows"
+                % (before - after),
+            )
+        else:
+            self.assertGreater(
+                before - after, 0,
+                "an unstamped cache should still contain postseason rows to remove",
+            )
 
 
 if __name__ == "__main__":

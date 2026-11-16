@@ -124,8 +124,27 @@ places, and a change to scoring affects all of them:
 
 `edge_score.py` is ~7,000 lines and holds scoring, Discord formatting, webhook rate-limit
 handling, dedup state, and tracker grading in one module. **It posts to Discord as a side
-effect of scoring.** Before running a refresh locally, unset the `EDGE_SCORE_DISCORD_*`
-webhook vars or you will alert the live channel.
+effect of scoring.** Before running a refresh locally, set the `EDGE_SCORE_DISCORD_*`
+webhook vars to the **empty string** or you will alert the live channel.
+
+Do **not** unset them. `edge_score.py:37` calls `load_dotenv` on `backend/.env`, which
+holds live webhook URLs, and `load_dotenv` populates any var that is *absent* — so
+unsetting hands the real webhook back. An empty string already exists in the
+environment, so `load_dotenv` leaves it alone, and every post is gated on
+`if not webhook_url`. All five matter, and `EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL`
+falls back to `EDGE_SCORE_DISCORD_LOG_WEBHOOK_URL`, so blanking the tracker alone still
+posts:
+
+```bash
+EDGE_SCORE_DISCORD_WEBHOOK_URL="" EDGE_SCORE_DISCORD_TRACKER_WEBHOOK_URL="" EDGE_SCORE_DISCORD_PREVIEW_WEBHOOK_URL="" EDGE_SCORE_DISCORD_RESULTS_WEBHOOK_URL="" EDGE_SCORE_DISCORD_LOG_WEBHOOK_URL="" python3 your_script.py
+```
+
+Assert inside the script that the module read them as empty, rather than trusting the
+shell — `env $VAR_STRING` does not word-split in zsh, which silently leaves them unset
+and re-arms the live webhook. Scoring also upserts to the Supabase table the frontend
+reads in DB mode (`_sync_payload_to_supabase`), so patch that out too, and restore
+`data/current/edge_score_notification_state.json` plus the two archive histories
+afterwards — a local run mutates the dedup state and the pick ledger.
 
 The composite is scored over the component weight that was actually available, not the full
 book (`_normalized_weighted_score`), so a dark component widens the error bars instead of
