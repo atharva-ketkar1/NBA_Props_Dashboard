@@ -88,8 +88,33 @@ def get_max_pipeline_failures_per_day():
     return max(1, parsed)
 
 
+def get_nba_injury_report_retry_cooldown_seconds():
+    raw_value = os.getenv("NBA_INJURY_REPORT_RETRY_COOLDOWN_SECONDS", "900")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 900
+    return max(300, parsed)
+
+
+def get_max_nba_injury_report_failures_per_day():
+    raw_value = os.getenv("MAX_NBA_INJURY_REPORT_FAILURES_PER_DAY", "4")
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = 4
+    return max(1, parsed)
+
+
 PIPELINE_RETRY_COOLDOWN_SECONDS = get_pipeline_retry_cooldown_seconds()
 MAX_PIPELINE_FAILURES_PER_DAY = get_max_pipeline_failures_per_day()
+# Shorter and more forgiving than the pipeline's hour/2: the injury artifact's own
+# freshness target is 15 minutes on a game day, so an hour-long cooldown would
+# guarantee a stale report after a single transient blip -- the cure causing the
+# disease. 15 minutes x 4 still self-heals from a one-off worker 5xx while bounding
+# a dead upstream to 4 doomed calls a day instead of 288.
+NBA_INJURY_REPORT_RETRY_COOLDOWN_SECONDS = get_nba_injury_report_retry_cooldown_seconds()
+MAX_NBA_INJURY_REPORT_FAILURES_PER_DAY = get_max_nba_injury_report_failures_per_day()
 
 
 def parse_mock_time(value):
@@ -117,6 +142,9 @@ def load_state():
         "pipeline_failure_date": "",
         "pipeline_failures_today": 0,
         "last_pipeline_attempt_ts": 0,
+        "nba_injury_report_failure_date": "",
+        "nba_injury_report_failures_today": 0,
+        "last_nba_injury_report_attempt_ts": 0,
     }
     # Scheduler state lives in Supabase so a rebuilt VM resumes mid-season; STATE_FILE
     # is kept in sync as a local cache for when Supabase is unreachable.
@@ -395,6 +423,33 @@ def run_nba_injury_report_if_needed(now, state, dry_run=False):
     if current_timestamp - last_run < interval_seconds:
         return False
 
+    # A failing refresh must not retry on every 5-minute tick. The old code returned
+    # before advancing last_nba_injury_report_refresh_time, so when NBA moved the
+    # injury report page this job fired ~288 times a day and failed every time,
+    # spending the proxy budget DraftKings and FanDuel share. Same shape as Priority 1.
+    today_str = now.strftime("%Y-%m-%d")
+    failed_today = state.get("nba_injury_report_failure_date") == today_str
+    failures_today = int(state.get("nba_injury_report_failures_today", 0) or 0) if failed_today else 0
+    last_attempt_ts = float(state.get("last_nba_injury_report_attempt_ts", 0) or 0)
+    seconds_since_attempt = current_timestamp - last_attempt_ts if last_attempt_ts else None
+
+    if failed_today and failures_today >= MAX_NBA_INJURY_REPORT_FAILURES_PER_DAY:
+        log_status(
+            logger,
+            "WARN",
+            "Skipping NBA injury report after repeated failures",
+            date=today_str,
+            failures=failures_today,
+        )
+        return False
+
+    if (
+        failed_today
+        and seconds_since_attempt is not None
+        and seconds_since_attempt < NBA_INJURY_REPORT_RETRY_COOLDOWN_SECONDS
+    ):
+        return False
+
     log_section(
         logger,
         "Priority 4 - NBA injury report refresh",
@@ -434,9 +489,25 @@ def run_nba_injury_report_if_needed(now, state, dry_run=False):
             injury_ok = False
 
     if not injury_ok:
+        state["nba_injury_report_failure_date"] = today_str
+        state["nba_injury_report_failures_today"] = failures_today + 1
+        state["last_nba_injury_report_attempt_ts"] = current_timestamp
+        if not dry_run:
+            save_state(state)
+        log_status(
+            logger,
+            "WARN",
+            "NBA injury report attempt failed; deferring retry",
+            date=today_str,
+            failures_today=state["nba_injury_report_failures_today"],
+            retry_cooldown_s=NBA_INJURY_REPORT_RETRY_COOLDOWN_SECONDS,
+        )
         return False
 
     state["last_nba_injury_report_refresh_time"] = time.time()
+    state["nba_injury_report_failure_date"] = ""
+    state["nba_injury_report_failures_today"] = 0
+    state["last_nba_injury_report_attempt_ts"] = 0
     if not dry_run:
         save_state(state)
     return True
