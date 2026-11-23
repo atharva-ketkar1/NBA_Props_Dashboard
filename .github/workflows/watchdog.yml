@@ -4,10 +4,11 @@ name: Pipeline watchdog
 # cannot also silence its own alarm. See backend/scripts/watchdog_check.py for
 # what is checked and why.
 #
-# Runs on GitHub's schedule, which is best-effort: ticks can be delayed by
-# several minutes under load, and are skipped entirely if the queue is busy.
-# That is fine here -- the staleness threshold (90m) is far wider than the
-# jitter, so a late run does not produce a false alarm.
+# Runs on GitHub's schedule, which is best-effort. Measured 2026-11-23: the twelve
+# most recent runs span 77 hours, i.e. roughly one every 6-7 hours, so the great
+# majority of */30 ticks are dropped outright rather than merely delayed. Size any
+# threshold against that cadence, not against 30 minutes -- and do not expect
+# detection sooner than a few hours from this workflow alone.
 #
 # NOTE: GitHub disables scheduled workflows in repositories with no activity
 # for 60 days. During the offseason, either push something occasionally or
@@ -35,6 +36,12 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Job-level so the Alert Discord step's `if: env.WEBHOOK != ''` is reading a value
+    # that is certainly in scope. Declared on that step itself, the condition is
+    # evaluated against step env, which is the kind of subtlety nobody should have to
+    # reason about mid-incident.
+    env:
+      WEBHOOK: ${{ secrets.WATCHDOG_DISCORD_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@v5
 
@@ -45,6 +52,10 @@ jobs:
         id: check
         env:
           WATCHDOG_STALE_MINUTES: ${{ github.event.inputs.stale_minutes || '90' }}
+        # shell: bash is load-bearing, not style. The default `bash -e` has no
+        # pipefail, so this pipeline exited with tee's status and the check's own exit
+        # code was thrown away -- see this commit's message.
+        shell: bash
         run: python3 backend/scripts/watchdog_check.py | tee "$RUNNER_TEMP/report.txt"
 
       - name: Write run summary
@@ -61,7 +72,6 @@ jobs:
       - name: Alert Discord
         if: failure() && env.WEBHOOK != ''
         env:
-          WEBHOOK: ${{ secrets.WATCHDOG_DISCORD_WEBHOOK_URL }}
           SUMMARY: ${{ steps.check.outputs.summary }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
