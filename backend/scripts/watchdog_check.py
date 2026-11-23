@@ -47,6 +47,11 @@ BASE_URL = os.environ.get("WATCHDOG_BASE_URL", "https://propx-dashboard.vercel.a
 STALE_MINUTES = int(os.environ.get("WATCHDOG_STALE_MINUTES", "90"))
 UPCOMING_WINDOW_DAYS = int(os.environ.get("WATCHDOG_UPCOMING_WINDOW_DAYS", "3"))
 TIMEOUT_SECONDS = int(os.environ.get("WATCHDOG_TIMEOUT_SECONDS", "30"))
+# Three consecutive missed hourly refreshes. Sized against the pipeline's own
+# behaviour, not against this workflow's cadence: steady state is under 20 minutes,
+# one missed tick is ~70 and two ~135, so 180 is out of reach of jitter while sitting
+# 25x below the 4,480 minutes the 2026-11-20 outage reached.
+INJURY_STALE_MINUTES = int(os.environ.get("WATCHDOG_INJURY_STALE_MINUTES", "180"))
 
 # The API rejects requests without this (see frontend/api/_lib/http.ts).
 # It is a client-identity marker, not a credential, and is public in the repo.
@@ -88,16 +93,20 @@ def check_site_up():
 
 
 def check_edge_heartbeat(season_active):
-    """The core check: is anything still writing data?"""
+    """The core check: is anything still writing data?
+
+    Returns the payload's `summary` dict (empty when it could not be read) so
+    check_injury_freshness can read it without a second request.
+    """
     status, payload, error = _get("/api/edge")
     if status != 200 or payload is None:
         problems.append(f"/api/edge unavailable: {error or f'HTTP {status}'}")
-        return
+        return {}
 
     generated_at = payload.get("generated_at")
     if not generated_at:
         problems.append("/api/edge returned no generated_at, so freshness cannot be established")
-        return
+        return {}
 
     try:
         stamped = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
@@ -105,7 +114,7 @@ def check_edge_heartbeat(season_active):
             stamped = stamped.replace(tzinfo=timezone.utc)
     except ValueError:
         problems.append(f"/api/edge generated_at is unparseable: {generated_at!r}")
-        return
+        return {}
 
     age_minutes = (datetime.now(timezone.utc) - stamped).total_seconds() / 60.0
     summary = payload.get("summary") or {}
@@ -117,7 +126,7 @@ def check_edge_heartbeat(season_active):
     )
 
     if age_minutes <= STALE_MINUTES:
-        return
+        return summary
 
     message = (f"pipeline data is {age_minutes:.0f} minutes stale "
                f"(threshold {STALE_MINUTES}m, last write {generated_at})")
@@ -125,6 +134,79 @@ def check_edge_heartbeat(season_active):
         problems.append(message)
     else:
         notes.append(f"{message} -- expected, no games scheduled")
+    return summary
+
+
+def _report_date(value):
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def check_injury_freshness(summary, season_active):
+    """Is the injury report still arriving?
+
+    Not hypothetical. NBA moved the report page around 2026-11-20 and nothing
+    noticed for three days, while this script printed four healthy-looking lines
+    and the board quietly blocked 533 of 869 candidates on stale injury context.
+    The /api/edge payload check_edge_heartbeat already fetched carries both
+    numbers, so this costs no extra request and no new credential.
+    """
+    freshness = (summary or {}).get("injury_report_freshness")
+    if not isinstance(freshness, dict):
+        # A pipeline deploy older than the field is a legitimate reason for this to
+        # be missing, and paging on a schema gap is how an alert channel gets muted.
+        warnings.append(
+            "/api/edge summary carries no injury_report_freshness, "
+            "so injury staleness cannot be established"
+        )
+        return
+
+    query_date = freshness.get("query_date")
+    blocked = (summary or {}).get("blocked_stale_injury_context_count")
+
+    try:
+        age_minutes = float(freshness.get("age_minutes"))
+    except (TypeError, ValueError):
+        warnings.append(
+            f"/api/edge reports no injury report age (query_date {query_date!r}), "
+            "so injury staleness cannot be established"
+        )
+        return
+
+    # Printed even when healthy, so the next incident is diagnosable from one run
+    # summary rather than from three days of silence.
+    notes.append(
+        f"injury report: {age_minutes:.0f}m old "
+        f"(pipeline target {freshness.get('max_age_minutes')}m), "
+        f"query_date {query_date}, {blocked} candidates blocked on stale injury context"
+    )
+
+    # Deliberately not freshness["is_stale"]. The pipeline's own target is 15 minutes
+    # inside the lock-sensitive window, so is_stale flips true on a single slow cron
+    # tick; a check that pages on one missed refresh gets muted within a week.
+    if age_minutes > INJURY_STALE_MINUTES:
+        message = (
+            f"injury report is {age_minutes:.0f} minutes stale "
+            f"(threshold {INJURY_STALE_MINUTES}m, query_date {query_date}), "
+            f"blocking {blocked} candidates on stale injury context"
+        )
+        if season_active:
+            problems.append(message)
+        else:
+            notes.append(f"{message} -- expected, no games scheduled")
+
+    # The age stamp can look fine while the report is for the wrong day, which is a
+    # failure the age alone structurally cannot see. `> 1` absorbs the ET/UTC offset
+    # without reaching for zoneinfo, keeping this stdlib-only and dependency-free.
+    report_date = _report_date(query_date)
+    if report_date is not None and season_active:
+        days_behind = (datetime.now(timezone.utc).date() - report_date).days
+        if days_behind > 1:
+            problems.append(
+                f"injury report is for {query_date}, {days_behind} days behind today"
+            )
 
 
 def check_schedule():
@@ -173,12 +255,14 @@ def check_dashboard_payload(season_active):
 
 def main():
     print(f"Watchdog target: {BASE_URL}")
-    print(f"Staleness threshold: {STALE_MINUTES} minutes\n")
+    print(f"Staleness threshold: {STALE_MINUTES} minutes "
+          f"(injury report: {INJURY_STALE_MINUTES} minutes)\n")
 
     site_ok = check_site_up()
     season_active = check_schedule() if site_ok else True
     if site_ok:
-        check_edge_heartbeat(season_active)
+        summary = check_edge_heartbeat(season_active)
+        check_injury_freshness(summary, season_active)
         check_dashboard_payload(season_active)
 
     for note in notes:
