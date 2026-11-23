@@ -31,6 +31,12 @@ ARCHIVE_DIR = BASE_DIR / "data" / "archive" / "nba_injury_report"
 DEFAULT_SCHEDULE_PATH = BASE_DIR / "data" / "current" / "today_schedule.json"
 DEFAULT_MIN_REFRESH_INTERVAL_SECONDS = 3600
 
+# NBA retired the season-scoped page in November 2026:
+# official.nba.com/nba-injury-report-<season>-season/ now 301s here, and the worker
+# refuses redirects, so the old URL fails outright rather than following. This page is
+# not season-scoped, which is why nothing builds a season slug any more.
+DEFAULT_REPORT_PAGE_URL = "https://www.nba.com/players/injury-report"
+
 PLAYER_STATUSES = {"Available", "Probable", "Questionable", "Doubtful", "Out"}
 NOT_SUBMITTED_TOKENS = ("NOT", "YET", "SUBMITTED")
 TABLE_HEADER_TOKENS = (
@@ -211,15 +217,12 @@ def _normalize_report_time(value: Any) -> Optional[str]:
     return f"{text} ET"
 
 
-def _season_slug_for_date(target_date: date) -> str:
-    start_year = target_date.year if target_date.month >= 8 else target_date.year - 1
-    return f"{start_year}-{str(start_year + 1)[-2:]}"
-
-
-def _report_page_url_for_date(query_date: str) -> str:
-    target_date = datetime.strptime(query_date, "%Y%m%d").date()
-    season_slug = _season_slug_for_date(target_date)
-    return f"https://official.nba.com/nba-injury-report-{season_slug}-season/"
+def _report_page_url() -> str:
+    # Read on use rather than captured at import, both so load_dotenv has run and so the
+    # URL can be repointed during an incident without a deploy -- the same reason
+    # http_client reads PROXY_MAX_ATTEMPTS_403 on use.
+    override = os.environ.get("NBA_INJURY_REPORT_PAGE_URL", "").strip()
+    return override or DEFAULT_REPORT_PAGE_URL
 
 
 def _parse_report_timestamp_from_url(report_url: str) -> Optional[datetime]:
@@ -846,10 +849,10 @@ def fetch_latest_report_pdf_url(
     query_date: str,
     timeout_seconds: int = 20,
 ) -> Tuple[str, str, str]:
-    report_page_url = _report_page_url_for_date(query_date)
-    # official.nba.com 403s datacenter IPs (measured from the VM), so this has to
-    # go through the worker. proxied_get raises on failure instead of returning a
-    # non-2xx, so raise_for_status() is redundant.
+    report_page_url = _report_page_url()
+    # nba.com 403s datacenter IPs (measured from the VM), so this has to go through the
+    # worker. proxied_get raises on failure instead of returning a non-2xx, so
+    # raise_for_status() is redundant.
     response = proxied_get(report_page_url, headers=HEADERS,
                            timeout=max(timeout_seconds, 60),
                            label="injury-report-page")
@@ -857,14 +860,41 @@ def fetch_latest_report_pdf_url(
     target_date = datetime.strptime(query_date, "%Y%m%d").date()
     soup = BeautifulSoup(response.text, "html.parser")
     candidates = []
+    dates_on_page = set()
+    anchor_count = 0
+    # urljoin is a pass-through for the absolute hrefs the page serves today, and keeps
+    # this correct if NBA ever switches to relative ones.
     for anchor in soup.find_all("a", href=True):
+        anchor_count += 1
         report_url = urljoin(report_page_url, str(anchor.get("href") or "").strip())
         report_dt = _parse_report_timestamp_from_url(report_url)
-        if report_dt and report_dt.date() == target_date:
+        if not report_dt:
+            continue
+        dates_on_page.add(report_dt.date())
+        if report_dt.date() == target_date:
             candidates.append((report_dt, report_url))
 
     if not candidates:
-        raise ValueError(f"No injury report PDF links found for {target_date.isoformat()} at {report_page_url}")
+        # Two different upstream failures, and telling them apart is the point. A page
+        # listing other dates means the date coverage changed -- this page lists only
+        # today's reports, where the retired season page listed the whole season, so
+        # --days-ahead and past-date backfill land here. A page with no report PDFs at
+        # all means it was restructured or went client-rendered, which is the class of
+        # break that went undiagnosed for three days in November 2026.
+        #
+        # Deliberately no fall back to the newest PDF of another date: downstream merges
+        # key on query_date, so a wrong-date report would be fresh *and* wrong, which is
+        # what the freshness guardrail exists to prevent.
+        if dates_on_page:
+            found = ", ".join(day.isoformat() for day in sorted(dates_on_page))
+            raise ValueError(
+                f"No injury report PDF for {target_date.isoformat()} at {report_page_url}; "
+                f"the page lists reports for {found} only"
+            )
+        raise ValueError(
+            f"No injury report PDF for {target_date.isoformat()} at {report_page_url}; "
+            f"the page contains no Injury-Report PDFs ({anchor_count} anchors parsed)"
+        )
 
     report_dt, report_pdf_url = max(candidates, key=lambda item: item[0])
     return report_page_url, report_pdf_url, report_dt.isoformat()
