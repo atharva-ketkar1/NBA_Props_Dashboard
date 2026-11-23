@@ -102,6 +102,23 @@ export function getOptionalEnv(name: string) {
   return loadLocalEnvFallback().get(name)?.trim() || '';
 }
 
+// Every Supabase request gets a deadline. On 2026-11-23 the database stopped
+// answering and each read hung ~19.7s before the route threw a 500, so one slow
+// query burned most of the function's budget and nothing downstream got a chance
+// to degrade. Failing fast is strictly better here: readCached in dashboardData
+// serves its last good value on a rejection, and the CDN can serve its own under
+// stale-if-error. Tunable because the right number is a property of the database's
+// health, not of this code.
+const SUPABASE_REQUEST_TIMEOUT_MS = Number(getOptionalEnv('SUPABASE_REQUEST_TIMEOUT_MS')) || 5000;
+
+function fetchWithDeadline(input: RequestInfo | URL, init?: RequestInit) {
+  // If a caller ever supplies its own signal it owns the deadline; nothing does today.
+  if (init?.signal) {
+    return fetch(input, init);
+  }
+  return fetch(input, { ...init, signal: AbortSignal.timeout(SUPABASE_REQUEST_TIMEOUT_MS) });
+}
+
 export function getSupabaseAdmin() {
   if (!globalThis.__propsmadnessSupabaseAdmin) {
     const url = getOptionalEnv('SUPABASE_URL') || getOptionalEnv('VITE_SUPABASE_URL');
@@ -123,6 +140,9 @@ export function getSupabaseAdmin() {
         autoRefreshToken: false,
         detectSessionInUrl: false,
         persistSession: false,
+      },
+      global: {
+        fetch: fetchWithDeadline,
       },
     });
   }

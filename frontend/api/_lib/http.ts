@@ -2,6 +2,13 @@ type CacheProfile = {
   browserMaxAge?: number;
   sMaxAge?: number;
   staleWhileRevalidate?: number;
+  // How long the CDN may keep serving its last good copy when the origin is
+  // failing. Supabase went unreachable on 2026-11-23 and every read route 500d
+  // within seconds, because s-maxage + stale-while-revalidate was the only
+  // cross-instance memory and it spanned ~75s. The in-process cache in
+  // dashboardData.readCached already serves stale-on-error, but it is per-lambda,
+  // so a cold invocation has nothing to fall back to.
+  staleIfError?: number;
 };
 
 type JsonResponseOptions = {
@@ -33,13 +40,20 @@ function buildCacheControl(cache?: CacheProfile) {
   const browserMaxAge = Math.max(0, Math.floor(cache.browserMaxAge ?? 0));
   const sMaxAge = Math.max(0, Math.floor(cache.sMaxAge ?? 0));
   const staleWhileRevalidate = Math.max(0, Math.floor(cache.staleWhileRevalidate ?? 0));
+  const staleIfError = Math.max(0, Math.floor(cache.staleIfError ?? 0));
 
-  return [
+  const directives = [
     'public',
     `max-age=${browserMaxAge}`,
     `s-maxage=${sMaxAge}`,
     `stale-while-revalidate=${staleWhileRevalidate}`,
-  ].join(', ');
+  ];
+
+  if (staleIfError > 0) {
+    directives.push(`stale-if-error=${staleIfError}`);
+  }
+
+  return directives.join(', ');
 }
 
 function buildBaseHeaders(cache?: CacheProfile, headers?: HeadersInit) {

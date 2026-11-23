@@ -84,6 +84,12 @@ const dashboardCache = globalThis.__propsmadnessDashboardCache ??= new Map();
 const dashboardInflight = globalThis.__propsmadnessDashboardInflight ??= new Map();
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFilePath);
+// A `vercel dev` convenience ONLY, and not production resilience: backend/data is
+// gitignored, so neither file is ever deployed and both readers return null on
+// Vercel. That is worth stating because the code below reads as protected and is
+// not -- when Supabase went down on 2026-11-23 the "fallback" branch could not
+// fire. The cross-instance safety net is the CDN (see the cache profiles in
+// api/edge.ts and _lib/http.ts), not these paths.
 const LOCAL_EDGE_SCORE_PATH = path.resolve(currentDir, '..', '..', '..', 'backend', 'data', 'current', 'edge_scores_top15.json');
 const LOCAL_NBA_INJURY_REPORT_PATH = path.resolve(currentDir, '..', '..', '..', 'backend', 'data', 'current', 'nba_injury_report.json');
 
@@ -1494,7 +1500,11 @@ export async function fetchEdgePayload(): Promise<EdgeScorePayload> {
           .maybeSingle();
 
         if (error) {
-          if (isMissingRelationError(error, 'edge_scores_current') && localFallback) {
+          // Any read error, not just a missing relation. A timeout or an
+          // unreachable database is exactly when a usable older payload beats a
+          // 500, and the caller cannot tell the difference anyway. Only throw when
+          // there is genuinely nothing to serve.
+          if (localFallback) {
             return localFallback;
           }
           assertNoError(error, 'edge_scores_current');

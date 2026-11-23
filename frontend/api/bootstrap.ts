@@ -51,7 +51,8 @@ async function handleGet(request: Request) {
       cache: {
         browserMaxAge: 0,
         sMaxAge: 60,
-        staleWhileRevalidate: 300,
+        staleWhileRevalidate: 1800,
+        staleIfError: 86400,
       },
     });
   } catch (error) {
