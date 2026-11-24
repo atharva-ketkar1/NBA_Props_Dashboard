@@ -265,6 +265,34 @@ value is computed from. `line_movements_sync_state.json` is pruned on the same w
 so a fingerprint can never claim a deleted row is still synced. `backend/data` is gitignored, so the
 archive lives on the VM — `backend/scripts/pull_vm_data.sh` already rsyncs it down.
 
+The two homes also hold **different shapes**, and this is the easy thing to get wrong. The local
+file and the disk archive hold every snapshot verbatim. What goes to Supabase is
+delta-encoded by `_compact_snapshots_for_supabase`: an entry's `players` carries only the props
+whose **line** moved since the last entry that mentioned them, so **the series is sparse** and a
+reader wanting a prop's value at some moment has to carry the last entry forward rather than
+expect every prop in every entry. Both current readers already do —
+`LineMovementSparkline` plots the change points as a step, and `applyIntradayOverrides` walks
+backwards taking the newest value per `stat:book`.
+
+Odds are deliberately *not* part of the comparison: juice jitters a cent or two on most ticks,
+nobody reads a sparkline to learn that -106 became -104, and comparing on the full payload kept
+~5× the entries. The odds at each moment the line moved still ride along on the entry.
+
+This exists because `line_movements` is one jsonb row per game_date and Postgres cannot patch a
+jsonb value — it rewrites and WAL-logs the whole TOASTed thing on every upsert, ~57 times a day.
+The row's size *is* the write cost, which is what took the database down on 2026-11-23. The
+previous encoding capped a trailing window of whole snapshots, so cost grew with the square of
+the day and keeping more history was paid for 57 times over — while ~97% of stored values
+repeated the line before them. Measured over `data/archive/line_movements`: ~1,900 distinct
+(player, stat, book) keys across ~56 snapshots is ~106,000 values, of which ~3,500 are a line
+that differs from the one before it. A whole day now costs ~0.5MB of jsonb where a two-hour tail
+cost 1.3MB. Do not reintroduce a snapshot cap; if the row ever needs to shrink again, the next
+move is narrow append-only rows, not a smaller window.
+
+`pre_game` captures are stored whole. They are the authoritative pre-tip read for the games in
+that window, and keeping them guarantees a prop still quoted at tip has a point there, so a line
+that never moved all day draws as a flat series instead of a lone dot. Costs ~6% more jsonb.
+
 ### Two delivery modes
 
 The frontend switches on `VITE_USE_DB`:

@@ -74,7 +74,6 @@ const StatItem = ({ label, value, diff, isCompact }: { label: string, value: str
 };
 
 export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate = {}, activeTab, onTabChange, activeSportsbook, onSportsbookChange, activeGameDate, customLine, onToggleFilters, isFiltersOpen, historicalGameCount, baselineAverages, baselineSeasonLabel, mobileView, onMobileViewChange }) => {
-  const [sparklineMode, setSparklineMode] = useState<'line' | 'juice'>('line');
   const [showHelp, setShowHelp] = useState(false);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -624,7 +623,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
             </div>
           </div>
         )}
-        {activeSportsbook !== 'pp' && player?.intraday_movements && player.intraday_movements.length >= 2 && hasLine && (
+        {activeSportsbook !== 'pp' && player?.intraday_movements && player.intraday_movements.length > 0 && hasLine && (
           <div className="hidden md:flex items-center gap-4 px-4 py-1.5 bg-bgElevation0/60">
             <span className="text-[9px] font-bold uppercase tracking-widest text-fgSubtle shrink-0 opacity-70">Line Movement</span>
             <div className="flex-1 min-w-0">
@@ -633,20 +632,8 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
                 playerId={player.id}
                 statKey={statKey}
                 activeSportsbook={activeSportsbook}
-                mode={sparklineMode}
                 activeGameDate={activePropForSparkline?.game_date ?? null}
               />
-            </div>
-            <div className="flex bg-bgElevation1 border border-borderMedium/40 rounded p-0.5 shrink-0">
-              {(['line', 'juice'] as const).map(m => (
-                <button
-                  key={m}
-                  onClick={() => setSparklineMode(m)}
-                  className={`px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded transition-colors ${sparklineMode === m ? 'bg-blue500 text-white' : 'text-fgSubtle hover:text-white'}`}
-                >
-                  {m}
-                </button>
-              ))}
             </div>
           </div>
         )}

@@ -8,31 +8,48 @@ interface MovementSnapshot {
     players: Record<string, any>;
 }
 
+interface MovementPoint {
+    time: Date;
+    val: number;
+    label: string;
+    over: number | null;
+    under: number | null;
+}
+
 interface SparklineProps {
     movements: MovementSnapshot[];
     playerId: string | number;
     statKey: string;
     activeSportsbook: SportsbookId;
-    mode: 'line' | 'juice';
     activeGameDate?: string | null;
 }
 
 const SB_MAP: Record<string, string> = { dk: 'draftkings', fd: 'fanduel' };
 
-const impliedProb = (odds: number) => {
-    if (odds < 0) return (-odds) / (-odds + 100) * 100;
-    return 100 / (odds + 100) * 100;
+// The series Supabase holds is sparse: `_compact_snapshots_for_supabase` stores
+// an entry only for the moments a line actually moved, so a prop missing from an
+// entry held its previous value rather than having no value. Two consequences
+// below: the path is drawn as a step (flat, then a jump) instead of a diagonal,
+// and the last known value is carried forward to the right edge rather than the
+// chart ending at the last change. A diagonal between 6am and 9pm would imply a
+// drift that never happened.
+const CARRY_FORWARD_MAX_HOURS = 36;
+
+const formatOdds = (odds: number | null) => {
+    if (odds === null || Number.isNaN(odds)) return null;
+    return odds > 0 ? `+${odds}` : String(odds);
 };
 
-export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, playerId, statKey, activeSportsbook, mode, activeGameDate }) => {
+export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, playerId, statKey, activeSportsbook, activeGameDate }) => {
     // ── ALL HOOKS MUST BE ABOVE ANY EARLY RETURN ──────────────────────────────
     const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
     const { dataPoints, opening, current, delta, direction } = useMemo(() => {
-        if (!movements || movements.length === 0) return { dataPoints: [], opening: null, current: null, delta: null, direction: 'flat' as const };
+        const empty = { dataPoints: [] as MovementPoint[], opening: null, current: null, delta: null, direction: 'flat' as const };
+        if (!movements || movements.length === 0) return empty;
 
         const sbKey = SB_MAP[activeSportsbook] || activeSportsbook;
-        const pts: { time: Date; val: number; label: string }[] = [];
+        const pts: MovementPoint[] = [];
 
         movements.forEach(snap => {
             const pData = snap.players[String(playerId)];
@@ -42,35 +59,36 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
                 }
                 const propObj = pData.props[statKey]?.[sbKey];
                 if (propObj) {
-                    const val = mode === 'line' ? Number(propObj.line) : Number(propObj.over);
-                    if (!isNaN(val)) pts.push({ time: new Date(snap.timestamp), val, label: snap.label });
+                    const val = Number(propObj.line);
+                    if (!isNaN(val)) {
+                        const over = Number(propObj.over);
+                        const under = Number(propObj.under);
+                        pts.push({
+                            time: new Date(snap.timestamp),
+                            val,
+                            label: snap.label,
+                            over: isNaN(over) ? null : over,
+                            under: isNaN(under) ? null : under,
+                        });
+                    }
                 }
             }
         });
 
         pts.sort((a, b) => a.time.getTime() - b.time.getTime());
-        if (pts.length === 0) return { dataPoints: pts, opening: null, current: null, delta: null, direction: 'flat' as const };
+        if (pts.length === 0) return empty;
 
-        const opening = pts[0].val;
-        const current = pts[pts.length - 1].val;
+        // The sparse series repeats nothing, but a `pre_game` entry is stored
+        // whole, so the same line can arrive twice. Collapse those so a flat
+        // stretch is not drawn as two identical change points.
+        const deduped = pts.filter((pt, i) => i === 0 || pt.val !== pts[i - 1].val);
+
+        const opening = deduped[0].val;
+        const current = deduped[deduped.length - 1].val;
         const delta = +(current - opening).toFixed(1);
         const direction: 'up' | 'down' | 'flat' = delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat';
-        return { dataPoints: pts, opening, current, delta, direction };
-    }, [movements, playerId, statKey, activeSportsbook, mode, activeGameDate]);
-
-    // Must also be above any early return (Rules of Hooks)
-    const displayDelta = useMemo(() => {
-        if (delta === null || opening === null || current === null) return null;
-        if (mode === 'line') {
-            return { text: delta > 0 ? `+${delta}` : delta === 0 ? 'No change' : String(delta), show: delta !== 0 };
-        }
-        // For juice: show implied probability shift (raw American-odds diff is meaningless)
-        const openProb = impliedProb(opening);
-        const nowProb = impliedProb(current);
-        const probDelta = +(nowProb - openProb).toFixed(1);
-        if (probDelta === 0) return { text: 'No change', show: false };
-        return { text: `${probDelta > 0 ? '+' : ''}${probDelta}% impl.`, show: true };
-    }, [delta, opening, current, mode]);
+        return { dataPoints: deduped, opening, current, delta, direction };
+    }, [movements, playerId, statKey, activeSportsbook, activeGameDate]);
 
     if (activeSportsbook === 'pp') {
         return (
@@ -82,7 +100,9 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
     }
 
     // ── EARLY RETURN (after all hooks) ────────────────────────────────────────
-    if (dataPoints.length < 2) {
+    // One point is a complete answer now, not missing data: it means the line
+    // opened there and never moved. Only an empty series is nothing to show.
+    if (dataPoints.length === 0) {
         return (
             <div className="flex items-center gap-1.5 text-borderMuted text-[10px] italic opacity-50">
                 <Minus className="w-3 h-3" />
@@ -96,17 +116,21 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
     const trendColor = direction === 'up' ? 'text-green500' : direction === 'down' ? 'text-red500' : 'text-fgSubtle';
     const TrendIcon = direction === 'up' ? TrendingUp : direction === 'down' ? TrendingDown : Minus;
 
-    const formatVal = (v: number | null) => {
-        if (v === null) return '--';
-        if (mode === 'juice') return v > 0 ? `+${v}` : String(v);
-        return String(v);
-    };
+    const formatVal = (v: number | null) => (v === null ? '--' : String(v));
 
     const now = new Date();
     const dateKey = (date: Date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
     const todayKey = dateKey(now);
-    const distinctDayKeys = new Set(dataPoints.map((point) => dateKey(point.time)));
-    const showDateContext = distinctDayKeys.size > 1 || (dataPoints[0] && dateKey(dataPoints[0].time) !== todayKey);
+
+    // Carry the last known line forward to "now", because that is what the book
+    // is still posting -- the series just has nothing new to say about it. Only
+    // within a sane horizon, so an archived date is not stretched to today.
+    const lastPoint = dataPoints[dataPoints.length - 1];
+    const hoursSinceLast = (now.getTime() - lastPoint.time.getTime()) / 3_600_000;
+    const axisEnd = hoursSinceLast > 0 && hoursSinceLast < CARRY_FORWARD_MAX_HOURS ? now : lastPoint.time;
+
+    const distinctDayKeys = new Set([...dataPoints.map((point) => dateKey(point.time)), dateKey(axisEnd)]);
+    const showDateContext = distinctDayKeys.size > 1 || dateKey(dataPoints[0].time) !== todayKey;
 
     const formatTimestamp = (date: Date) =>
         date.toLocaleString([], showDateContext
@@ -124,8 +148,8 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
     let minV = Math.min(...vals);
     let maxV = Math.max(...vals);
     if (minV === maxV) {
-        minV -= mode === 'line' ? 0.5 : 5;
-        maxV += mode === 'line' ? 0.5 : 5;
+        minV -= 0.5;
+        maxV += 0.5;
     } else {
         const pad = (maxV - minV) * 0.3;
         minV -= pad; maxV += pad;
@@ -133,20 +157,28 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
     const valRange = maxV - minV;
 
     const timeMin = dataPoints[0].time.getTime();
-    const timeMax = dataPoints[dataPoints.length - 1].time.getTime();
+    const timeMax = axisEnd.getTime();
     const timeRange = timeMax - timeMin || 1;
 
-    const points = dataPoints.map(dp => ({
-        ...dp,
-        x: PAD.left + ((dp.time.getTime() - timeMin) / timeRange) * cW,
-        y: PAD.top + cH - ((dp.val - minV) / valRange) * cH,
-    }));
+    const xFor = (time: number) => PAD.left + ((time - timeMin) / timeRange) * cW;
+    const yFor = (val: number) => PAD.top + cH - ((val - minV) / valRange) * cH;
 
-    const pathD = `M ${points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' L ')}`;
-    const fillId = `fill-${playerId}-${mode}`;
-    const fillD = `${pathD} L ${points[points.length - 1].x},${PAD.top + cH} L ${points[0].x},${PAD.top + cH} Z`;
+    const points = dataPoints.map(dp => ({ ...dp, x: xFor(dp.time.getTime()), y: yFor(dp.val) }));
+    const rightEdge = PAD.left + cW;
+
+    // A step, not a polyline: hold the previous value across to the moment it
+    // changed, then jump. The flat tail is the line as it stands right now.
+    const pathD = [
+        `M ${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`,
+        ...points.slice(1).flatMap(p => [`H ${p.x.toFixed(1)}`, `V ${p.y.toFixed(1)}`]),
+        `H ${rightEdge.toFixed(1)}`,
+    ].join(' ');
+
+    const fillId = `fill-${playerId}-${statKey}`;
+    const fillD = `${pathD} V ${PAD.top + cH} H ${points[0].x.toFixed(1)} Z`;
 
     const hovered = hoveredIdx !== null ? points[hoveredIdx] : null;
+    const hoveredOdds = hovered ? formatOdds(hovered.over) : null;
 
     return (
         <div className="flex items-center gap-4 w-full min-w-0">
@@ -162,12 +194,10 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
                     <span className="text-fgSubtle/60 uppercase tracking-wider font-semibold text-[9px]">Now</span>
                     <span className="text-white font-bold">{formatVal(current)}</span>
                 </div>
-                {displayDelta?.show && (
-                    <div className={`flex items-center gap-0.5 font-bold text-[10px] ${trendColor}`}>
-                        <TrendIcon className="w-3 h-3" />
-                        <span>{displayDelta.text}</span>
-                    </div>
-                )}
+                <div className={`flex items-center gap-0.5 font-bold text-[10px] ${trendColor}`}>
+                    <TrendIcon className="w-3 h-3" />
+                    <span>{delta === 0 ? 'No change' : delta > 0 ? `+${delta}` : String(delta)}</span>
+                </div>
             </div>
 
             {/* Sparkline — fills remaining space */}
@@ -195,10 +225,18 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
                     {/* Main line */}
                     <path d={pathD} fill="none" stroke={strokeColor} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
 
-                    {/* Last point dot */}
-                    {points.length > 0 && (
-                        <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3" fill={strokeColor} stroke="#111113" strokeWidth="1.5" />
-                    )}
+                    {/* Dot on each moment the line moved — the opening included */}
+                    {points.map((p, i) => (
+                        <circle
+                            key={`dot-${i}`}
+                            cx={p.x}
+                            cy={p.y}
+                            r={i === points.length - 1 ? 3 : 2}
+                            fill={strokeColor}
+                            stroke="#111113"
+                            strokeWidth="1.5"
+                        />
+                    ))}
 
                     {/* Invisible hit areas for hover */}
                     {points.map((p, i) => {
@@ -230,9 +268,12 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
                 {hovered && (
                     <div
                         className="absolute z-50 pointer-events-none bg-bgElevation0 border border-borderMedium/60 rounded-sm px-2 py-1 text-[10px] whitespace-nowrap shadow-xl"
-                        style={{ left: `clamp(0px, ${(hovered.x / VW * 100).toFixed(1)}%, calc(100% - 80px))`, bottom: '100%', marginBottom: '6px' }}
+                        style={{ left: `clamp(0px, ${(hovered.x / VW * 100).toFixed(1)}%, calc(100% - 96px))`, bottom: '100%', marginBottom: '6px' }}
                     >
-                        <div className="text-white font-bold">{formatVal(hovered.val)}</div>
+                        <div className="text-white font-bold">
+                            {formatVal(hovered.val)}
+                            {hoveredOdds && <span className="text-fgSubtle font-semibold ml-1">({hoveredOdds})</span>}
+                        </div>
                         <div className="text-fgSubtle">{formatTimestamp(hovered.time)}</div>
                     </div>
                 )}
@@ -242,7 +283,7 @@ export const LineMovementSparkline: React.FC<SparklineProps> = ({ movements, pla
             <div className="flex items-center gap-1 shrink-0 text-[9px] text-fgSubtle/50">
                 <span>{formatTimestamp(dataPoints[0].time)}</span>
                 <span className="opacity-40">→</span>
-                <span>{formatTimestamp(dataPoints[dataPoints.length - 1].time)}</span>
+                <span>{axisEnd === now ? 'now' : formatTimestamp(axisEnd)}</span>
             </div>
         </div>
     );

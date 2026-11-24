@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 UPSERT_BATCH_SIZE = max(1, int(os.getenv("SUPABASE_UPSERT_BATCH_SIZE", "50")))
 UPSERT_MAX_RETRIES = max(1, int(os.getenv("SUPABASE_UPSERT_MAX_RETRIES", "4")))
-LINE_MOVEMENT_MAX_SNAPSHOTS = max(0, int(os.getenv("SUPABASE_LINE_MOVEMENT_MAX_SNAPSHOTS", "32")))
 # The rolling window master_cron purges line_movements on. Imported there so the
 # DELETE cutoff and the sync-state prune below are the same number.
 LINE_MOVEMENT_RETENTION_DAYS = max(1, int(os.getenv("SUPABASE_LINE_MOVEMENT_RETENTION_DAYS", "3")))
@@ -37,6 +36,10 @@ ARCHIVE_DATA_DIR = os.path.join(
 )
 DEFAULT_HISTORICAL_ODDS_PATH = os.path.join(ARCHIVE_DATA_DIR, "historical_odds.json")
 HISTORICAL_PLAYER_PROPS_TABLE = "historical_player_props"
+
+# Distinguishes "this key has never been seen" from "this key's line is None",
+# which is a real state a book can be in (posted, then pulled).
+_UNSEEN = object()
 
 
 def _chunk_rows(rows, chunk_size):
@@ -160,27 +163,133 @@ def _prune_line_movement_sync_state(state, today=None):
     return pruned
 
 
+def _line_fingerprint(line_payload):
+    """The posted line as a comparable scalar, ignoring the juice.
+
+    Only the line decides whether a snapshot is worth storing. Odds jitter by a
+    cent or two on most ticks and nobody reads a sparkline to learn that -106
+    became -104, so comparing on the full payload would keep ~5x the entries
+    for no information anyone uses. The odds still ride along on the entries
+    that are kept, which is where they are worth seeing.
+    """
+    if isinstance(line_payload, dict):
+        raw_line = line_payload.get("line")
+        if raw_line in (None, ""):
+            return ("line", None)
+        try:
+            return ("line", float(raw_line))
+        except (TypeError, ValueError):
+            return ("line", str(raw_line))
+    # Not a dict, so there is no line to compare. Fall back to the whole value
+    # rather than dropping it, so an unexpected shape is stored on change
+    # instead of disappearing.
+    return ("raw", json.dumps(line_payload, sort_keys=True, default=str))
+
+
 def _compact_snapshots_for_supabase(snapshots):
-    if LINE_MOVEMENT_MAX_SNAPSHOTS <= 0 or len(snapshots) <= LINE_MOVEMENT_MAX_SNAPSHOTS:
-        return snapshots
+    """Reduce the day's snapshots to the moments a line actually moved.
 
-    keep = []
-    if snapshots:
-        keep.append(snapshots[0])
+    `line_movements` is one jsonb row per game_date, and Postgres cannot patch
+    a jsonb value -- it rewrites and WAL-logs the whole TOASTed thing on every
+    upsert. At ~57 upserts a day that made the row's size the pipeline's
+    dominant write cost, which is what took the database down on 2026-11-23.
 
-    keep.extend(snapshot for snapshot in snapshots if snapshot.get("label") == "pre_game")
-    keep.extend(snapshots[-LINE_MOVEMENT_MAX_SNAPSHOTS:])
+    The previous version controlled that size by keeping a trailing window of
+    whole snapshots (`SUPABASE_LINE_MOVEMENT_MAX_SNAPSHOTS`), so the cost grew
+    with the square of the day and the price of keeping more history was paid
+    57 times over. That is backwards: measured across the 18 days in
+    `data/archive/line_movements`, a day holds ~1,900 distinct
+    (player, stat, book) keys over ~56 snapshots -- ~106,000 stored values --
+    of which only ~3,500 are a line that differs from the one before it. The
+    window was discarding the morning to make room for copies of the afternoon.
 
+    So store transitions, not snapshots: an entry's `players` carries only the
+    props whose line changed since the last entry that mentioned them. The
+    first sighting of a key always counts as a change, which is how the opening
+    line survives to the end of the day. A whole day now costs ~0.5MB instead
+    of 1.3MB for a two-hour tail, which is ~17MB of jsonb a day instead of
+    ~85MB.
+
+    `pre_game` captures are kept whole. They are the authoritative pre-tip read
+    for the games in that window, and keeping them guarantees every prop that
+    was live at tip has a point there -- so a line that never moved all day
+    still draws as a flat series rather than a single point. Measured at ~6%
+    more jsonb, which is worth it.
+
+    Entries keep the `{timestamp, label, players}` shape of a real snapshot, so
+    `flattenIntradayMovements` on the frontend and anything else reading the
+    row needs no change. Note that the series is now sparse: a reader that
+    wants a prop's value at an arbitrary moment has to carry the last entry
+    forward, rather than expecting every prop in every entry.
+
+    This only governs what Supabase holds for the dashboard's sparkline. The
+    durable, full-fidelity series is still every snapshot verbatim in
+    `data/archive/line_movements/<date>.json`, which is what closing-line value
+    is computed from.
+    """
+    if not isinstance(snapshots, list) or not snapshots:
+        return []
+
+    ordered = sorted(
+        (snapshot for snapshot in snapshots if isinstance(snapshot, dict)),
+        key=lambda snapshot: str(snapshot.get("timestamp") or ""),
+    )
+
+    last_line_by_key = {}
     compacted = []
-    seen = set()
-    for snapshot in keep:
-        dedupe_key = f"{snapshot.get('timestamp', '')}|{snapshot.get('label', '')}"
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        compacted.append(snapshot)
 
-    compacted.sort(key=lambda snapshot: str(snapshot.get("timestamp") or ""))
+    for snapshot in ordered:
+        players = snapshot.get("players")
+        if not isinstance(players, dict):
+            continue
+
+        # The pre-tip read is stored in full, so every prop still quoted at tip
+        # has a point there even if its line never moved.
+        keep_whole = snapshot.get("label") == "pre_game"
+        entry_players = {}
+
+        for player_id, player_data in players.items():
+            if not isinstance(player_data, dict):
+                continue
+            props = player_data.get("props")
+            if not isinstance(props, dict):
+                continue
+
+            moved_props = {}
+            for stat_type, sportsbook_map in props.items():
+                if not isinstance(sportsbook_map, dict):
+                    continue
+
+                moved_books = {}
+                for sportsbook, line_payload in sportsbook_map.items():
+                    key = (str(player_id), str(stat_type), str(sportsbook))
+                    fingerprint = _line_fingerprint(line_payload)
+                    # `_UNSEEN` rather than None: a book posting no line is a
+                    # real, comparable state, and must not read as never seen.
+                    if keep_whole or last_line_by_key.get(key, _UNSEEN) != fingerprint:
+                        moved_books[sportsbook] = line_payload
+                    last_line_by_key[key] = fingerprint
+
+                if moved_books:
+                    moved_props[stat_type] = moved_books
+
+            if moved_props:
+                # The player's scalars (name, team, game_id, game_date) ride on
+                # every entry that mentions them. game_date in particular is
+                # what the sparkline filters on, so an entry without it would
+                # be silently dropped from the chart.
+                entry_players[player_id] = {
+                    **{key: value for key, value in player_data.items() if key != "props"},
+                    "props": moved_props,
+                }
+
+        if entry_players:
+            compacted.append({
+                "timestamp": snapshot.get("timestamp"),
+                "label": snapshot.get("label"),
+                "players": entry_players,
+            })
+
     return compacted
 
 
