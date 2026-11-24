@@ -33,6 +33,7 @@ from scrapers import opp_shot_type_analysis as opp_shot_type_analysis
 from scrapers import play_type_analysis as play_type_analysis
 from scrapers import boxscores as boxscores
 from utils import aggregator
+from utils import health_ledger
 from utils.odds_csv import write_odds_csv
 import json
 
@@ -135,7 +136,7 @@ def run_dk():
         sportsbook_label="DraftKings",
     )
     df = pd.DataFrame(data or [])
-    return f"DraftKings: {len(df)} rows"
+    return f"DraftKings: {len(df)} rows", len(df)
 
 def run_fd():
     logger.info("Starting FanDuel...")
@@ -148,7 +149,7 @@ def run_fd():
         sportsbook_label="FanDuel",
     )
     df = pd.DataFrame(data or [])
-    return f"FanDuel: {len(df)} rows"
+    return f"FanDuel: {len(df)} rows", len(df)
 
 def run_pp():
     disabled_reason = prizepicks.prizepicks_disabled_reason()
@@ -157,7 +158,7 @@ def run_pp():
 
     logger.info("Starting PrizePicks...")
     rows, _diagnostics = prizepicks.fetch_and_write_rows(output_path=Path(PP_PATH))
-    return f"PrizePicks: {len(rows)} rows"
+    return f"PrizePicks: {len(rows)} rows", len(rows)
 
 def run_stats():
     logger.info("Starting Season Stats...")
@@ -174,7 +175,11 @@ def run_stats():
                 len(df) if isinstance(df, pd.DataFrame) else 0,
                 list(df.columns) if isinstance(df, pd.DataFrame) else [],
             )
-            return "Season Stats: 0 players (preserved previous file)"
+            # Not a success: preserving the previous file is exactly the shape of
+            # failure that leaves a healthy-looking artifact on disk, and the only
+            # reason the run continues at all.
+            return ("Season Stats: 0 players (preserved previous file)", 0,
+                    "season stats scrape returned unusable data; previous file preserved")
 
         missing_cols = (
             sorted(STATS_REQUIRED_COLUMNS - set(df.columns))
@@ -186,7 +191,7 @@ def run_stats():
         )
 
     _atomic_write_dataframe_csv(df, STATS_PATH)
-    return f"Season Stats: {len(df)} players"
+    return f"Season Stats: {len(df)} players", len(df)
 
 def run_logs():
     logger.info("Starting Game Logs (Incremental)...")
@@ -201,7 +206,12 @@ def run_logs():
                     "Game logs refresh failed; continuing with existing logs through %s.",
                     result["last_saved_date"],
                 )
-                return message
+                # Continuing on the existing file keeps the slate usable, so this
+                # is not an exception -- but it is not a success either, and the
+                # loop must not record it as one. The third element says so.
+                return (message, None,
+                        f"game logs refresh failed; continuing on existing logs "
+                        f"through {result['last_saved_date']}")
             raise RuntimeError(message)
         if status == "partial":
             logger.warning("Game logs completed with partial coverage: %s", message)
@@ -229,6 +239,9 @@ def run_schedule():
     except Exception as e:
         logger.warning("games DB upsert failed (non-fatal): %s", e)
 
+    # Row count deliberately not reported: an empty schedule is a normal
+    # off-season or off-day answer, and `scraper:schedule` is dormancy-exempt, so
+    # counting zero here would be the one empty streak that pages in July.
     return f"Schedule: {len(df)} games"
 
 
@@ -238,54 +251,96 @@ def run_shooting_zones():
     data = shooting_zones.get_shooting_zones_data()
     with open(SHOOTING_PATH, "w") as f:
         json.dump(data, f, indent=4)
-    return f"Shooting Zones: {len(data)} players"
+    return f"Shooting Zones: {len(data)} players", len(data)
 
 def run_assist_zones():
     logger.info("Starting Assist Zones...")
     data = assist_zones.get_assist_zones_data()
     with open(ASSISTS_PATH, "w") as f:
         json.dump(data, f, indent=4)
-    return f"Assist Zones: {len(data)} players"
+    return f"Assist Zones: {len(data)} players", len(data)
 
 def run_opp_assist_zones():
     logger.info("Starting Opponent Assist Zones...")
     data = opp_assist_zones.get_opp_assist_zones_data()
     with open(OPP_ASSIST_PATH, "w") as f:
         json.dump(data, f, indent=4)
-    return f"Opp Assist Zones: {len(data)} teams"
+    return f"Opp Assist Zones: {len(data)} teams", len(data)
 
 def run_opp_def_zones():
     logger.info("Starting Opponent Defense Zones...")
     data = opp_def_zones.get_opp_def_zones_data()
     with open(OPP_DEF_PATH, "w") as f:
         json.dump(data, f, indent=4)
-    return f"Opp Defense Zones: {len(data)} teams"
+    return f"Opp Defense Zones: {len(data)} teams", len(data)
 
 def run_shot_type_analysis():
     logger.info("Starting Shot Type Analysis...")
     data = shot_type_analysis.get_shot_type_data()
     with open(SHOT_TYPE_PATH, "w") as f:
         json.dump(data, f, indent=4)
-    return f"Shot Type Analysis: {len(data.get('players', {}))} players, {len(data.get('teams', {}))} teams"
+    return (f"Shot Type Analysis: {len(data.get('players', {}))} players, "
+            f"{len(data.get('teams', {}))} teams"), len(data.get("players", {}))
 
 def run_opp_shot_type_analysis():
     logger.info("Starting Opponent Shot Type Analysis...")
     data = opp_shot_type_analysis.process_defensive_rankings()
     with open(OPP_SHOT_TYPE_PATH, "w") as f:
         json.dump(data, f, indent=4)
-    return f"Opp Shot Type Analysis: {len(data)} teams"
+    return f"Opp Shot Type Analysis: {len(data)} teams", len(data)
 
 def run_play_type_analysis():
     logger.info("Starting Play Type Analysis...")
     data = play_type_analysis.get_play_type_data()
     with open(PLAY_TYPE_PATH, "w") as f:
         json.dump(data, f, indent=4)
-    return f"Play Type Analysis: {len(data.get('players', {}))} players, {len(data.get('teams', {}))} teams"
+    return (f"Play Type Analysis: {len(data.get('players', {}))} players, "
+            f"{len(data.get('teams', {}))} teams"), len(data.get("players", {}))
 
 def run_boxscores():
     logger.info("Starting Boxscores...")
     boxscores.run_scrape(BOXSCORES_PATH)
     return "Boxscores Updated"
+
+def _games_scheduled_today():
+    """How many games today, or None if that cannot be established.
+
+    Used only to decide whether an empty scrape is evidence of breakage. Zero rows
+    is the *correct* answer for every odds and zone scraper on a gameless day --
+    the All-Star break is four or five of them in a row, which is exactly the
+    threshold that promotes an empty streak to an incident. Without this, the
+    monitor's first act of the season would have been to page about February.
+
+    Schedule runs first in the scraper list, so SCHEDULE_PATH is this run's own
+    answer by the time any odds scraper reports. None (unreadable, or the schedule
+    scrape failed) suppresses empty-tracking too: `scraper:schedule` is itself
+    monitored and dormancy-exempt, so that failure is already covered and does not
+    need to be inferred from everything downstream of it.
+    """
+    try:
+        with open(SCHEDULE_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    games = payload.get("games") if isinstance(payload, dict) else payload
+    return len(games) if isinstance(games, list) else None
+
+
+def _unpack_scraper_result(result):
+    """Normalise a `run_*` return value to (message, rows, failure_reason).
+
+    A wrapper may return a bare message, `(message, rows)` where it already knows
+    how many rows it produced, or `(message, rows, failure_reason)` for the awkward
+    middle case: the refresh did not work, but the run continues on a preserved
+    artifact rather than raising. That third form exists so the loop does not record
+    a success for something the wrapper just warned about -- the shape of failure
+    that leaves a healthy-looking file on disk and goes unnoticed for days.
+    """
+    if not isinstance(result, tuple):
+        return result, None, None
+    padded = result + (None,) * (3 - len(result))
+    return padded[0], padded[1], padded[2]
+
 
 def log_memory(stage_name):
     process = psutil.Process(os.getpid())
@@ -307,21 +362,26 @@ def main():
 
             # STEP 1: Run Scrapers (Sequential - Memory Safe)
             # Order: Schedule -> Zones -> Odds -> Stats -> Logs -> Boxscores
+            #
+            # The third element is the health ledger unit. Every one of these
+            # failures used to be logged and dropped here, which is how the injury
+            # report stayed broken for three days: the except block below knew, and
+            # told nothing that outlived the process. See utils/health_ledger.py.
             scrapers = [
-                ("Schedule", run_schedule),
-                ("Shooting Zones", run_shooting_zones),
-                ("Assist Zones", run_assist_zones),
-                ("Opp Assist Zones", run_opp_assist_zones),
-                ("Opp Defense Zones", run_opp_def_zones),
-                ("Shot Type Analysis", run_shot_type_analysis),
-                ("Opp Shot Type Analysis", run_opp_shot_type_analysis),
-                ("Play Type Analysis", run_play_type_analysis),
-                ("DraftKings", run_dk),
-                ("FanDuel", run_fd),
-                ("PrizePicks", run_pp),
-                ("Season Stats", run_stats),
-                ("Game Logs", run_logs),
-                ("Boxscores", run_boxscores)
+                ("Schedule", run_schedule, "scraper:schedule"),
+                ("Shooting Zones", run_shooting_zones, "scraper:shooting_zones"),
+                ("Assist Zones", run_assist_zones, "scraper:assist_zones"),
+                ("Opp Assist Zones", run_opp_assist_zones, "scraper:opp_assist_zones"),
+                ("Opp Defense Zones", run_opp_def_zones, "scraper:opp_def_zones"),
+                ("Shot Type Analysis", run_shot_type_analysis, "scraper:shot_type"),
+                ("Opp Shot Type Analysis", run_opp_shot_type_analysis, "scraper:opp_shot_type"),
+                ("Play Type Analysis", run_play_type_analysis, "scraper:play_type"),
+                ("DraftKings", run_dk, "scraper:draftkings"),
+                ("FanDuel", run_fd, "scraper:fanduel"),
+                ("PrizePicks", run_pp, "scraper:prizepicks"),
+                ("Season Stats", run_stats, "scraper:season_stats"),
+                ("Game Logs", run_logs, "scraper:gamelogs"),
+                ("Boxscores", run_boxscores, "scraper:boxscores"),
             ]
             # These are the only blockers that should cause the daily pipeline
             # to be treated as a failed run by master_cron. Game logs can lag
@@ -329,13 +389,27 @@ def main():
             critical_scrapers = {"Schedule", "Season Stats"}
             critical_failures = []
             
-            for name, func in scrapers:
+            for name, func, unit in scrapers:
                 try:
                     log_status(logger, "RUN", "Scraper started", step=name)
                     result = func()
-                    log_status(logger, "OK", str(result), step=name)
+                    message, rows, soft_failure = _unpack_scraper_result(result)
+                    if soft_failure:
+                        log_status(logger, "WARN", str(message), step=name)
+                        health_ledger.record_failure(unit, soft_failure,
+                                                     detail=str(message))
+                    else:
+                        log_status(logger, "OK", str(message), step=name)
+                        # Row counts are only evidence on a day that has games;
+                        # see _games_scheduled_today.
+                        health_ledger.record_success(
+                            unit,
+                            rows=rows if _games_scheduled_today() else None,
+                            detail=str(message),
+                        )
                 except Exception as e:
                     log_status(logger, "FAIL", "Scraper failed", step=name, error=e)
+                    health_ledger.record_failure(unit, e)
                     if name in critical_scrapers:
                         critical_failures.append(f"{name}: {e}")
                 finally:
@@ -419,12 +493,20 @@ def main():
 
             db_sync_ok = props_ok and historical_sync_ok
             if db_sync_ok:
+                health_ledger.record_success("sync:supabase_props")
                 log_status(logger, "OK", "Supabase sync complete")
             else:
                 # Supabase is the only durable copy: local data/current/ is scratch that the
                 # next run overwrites, and the VM itself is disposable. A failed sync therefore
                 # loses the day permanently unless we report failure and let master_cron retry
                 # (bounded by MAX_PIPELINE_FAILURES_PER_DAY), so this is ERROR, not WARN.
+                health_ledger.record_failure(
+                    "sync:supabase_props",
+                    f"props_ok={props_ok} normalized_historical_ok={normalized_historical_ok} "
+                    f"legacy_historical_ok={legacy_historical_ok}",
+                    detail="data/current is scratch and the VM is disposable, so an "
+                           "unsynced day is lost permanently",
+                )
                 log_status(
                     logger,
                     "ERROR",
@@ -452,8 +534,10 @@ def main():
             try:
                 from utils.edge_score import run_edge_score_refresh
                 run_edge_score_refresh(refresh_label="pipeline")
+                health_ledger.record_success("score:edge_refresh")
             except Exception as e:
                 log_status(logger, "WARN", "Edge Score refresh failed", error=e)
+                health_ledger.record_failure("score:edge_refresh", e)
 
             if critical_failures:
                 log_status(logger, "WARN", "Critical scraper failures detected", count=len(critical_failures))

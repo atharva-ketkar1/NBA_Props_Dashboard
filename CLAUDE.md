@@ -43,6 +43,11 @@ python3 scripts/verify_design_tokens.py   # diffs Tailwind tokens against propsm
 ```bash
 python3 backend/scripts/watchdog_check.py   # stdlib only; same check GitHub Actions runs every 30m
 backend/scripts/pull_vm_logs.sh             # pull VM logs into vm_logs/
+
+cd backend
+python3 -m utils.health_monitor --report       # every monitored unit and its state
+python3 -m utils.health_monitor --test-push    # confirm the phone gets notifications
+python3 -m utils.health_monitor --evaluate --dry-run   # what would be alerted, sending nothing
 ```
 
 ### Retraining on Colab
@@ -185,6 +190,60 @@ facts, not quantities.
 Early in a season the ML term stays dark until a player has 3+ same-season games, and
 `utils/prior_season.py` shrinks projections toward `archive_gamelogs`. `run_pipeline.py` warms
 that cache before scoring because the first build pulls ~550 players and takes about a minute.
+
+### Failure alerting
+
+`utils/health_ledger.py` keeps one record per **unit of work that is supposed to
+succeed on a cadence** — each scraper, each cron job, each Supabase sync, each upstream
+host the circuit breaker knows about. `UNITS` in that module is the registry of the
+monitored surface and is meant to be read as documentation; an unlisted unit still
+records and gets generic defaults.
+
+It exists because every one of those failures used to be logged and dropped. NBA moved
+the injury report page on 2026-11-20, `master_cron` spent its four daily retries, and
+then logged `"Skipping NBA injury report after repeated failures"` on every tick for
+three days. Nothing read it.
+
+Three modules, deliberately separate — `edge_score.py` is 7,000 lines because scoring,
+Discord formatting and dedup all landed in one file:
+
+- `health_ledger.py` — accounting and the promotion rule. Sends nothing.
+- `alert_push.py` — ntfy transport and wording, plus the heartbeat ping. Stdlib only.
+- `health_monitor.py` — the glue `master_cron` calls once per tick.
+
+**A failure is not an incident.** Promotion to `broken` needs both 3+ consecutive
+failures *and* a duration floor scaled to that unit's own cadence (they differ by 300×),
+or one of three states that are already terminal: the scheduler's daily retry budget
+exhausted on two separate days, 3 consecutive successes returning zero rows (the shape
+of every `preserve_on_empty=True` artifact — the file on disk looks fine while being
+days old), or no success at all inside the unit's staleness window, which catches a job
+that stopped being *attempted* rather than failing. Severity `warn` units record and
+show up in the health block but never push; that is the mute knob that keeps the channel
+credible.
+
+Writes are durable in the Supabase `pipeline_health` table with a local JSON cache, same
+contract as `cron_state` — a missing table degrades to file-only, so deploying before
+the migration is safe. Durability is load-bearing: three days of continuous failure is
+precisely what one 5-minute process cannot see.
+
+Alerts go to **ntfy** (`HEALTH_NTFY_TOPIC`; blank disables, and the topic name *is* the
+credential on ntfy.sh). Not Discord — that is where the picks go, and an alarm in the
+same app as the thing you read for fun is an alarm you scroll past. One push when an
+incident opens, one per `HEALTH_REMINDER_HOURS` (default 24) while it stays broken, one
+on recovery, and a single combined push when more than three units break at once. The
+ledger is marked notified only *after* a push lands, so a failed send is retried rather
+than silently swallowed.
+
+The health block rides on `/api/edge`'s `summary.health`, which gives `watchdog_check.py`
+**one generic check** instead of a new hand-written one after every incident.
+
+`HEALTH_HEARTBEAT_URL` (healthchecks.io or similar) is the only part that works when the
+VM does not: everything else is pushed *from* the box, so it cannot report that the box
+is gone, the disk is full, or cron has stopped. The GitHub Actions watchdog has its own
+heartbeat secret for the same reason — GitHub drops most `*/30` ticks and disables
+scheduled workflows after 60 days of repo inactivity, and the only evidence is an absence.
+
+`docs/alerting_setup.md` has the one-time phone setup.
 
 ### Scheduling and state
 

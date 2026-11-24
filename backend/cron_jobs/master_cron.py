@@ -15,6 +15,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
+from utils import health_ledger, health_monitor
 from utils.intraday_schedule import get_schedule_aware_intraday_interval_seconds
 from utils.logging_utils import configure_logging, log_section, log_status
 from utils.pregame_props import is_within_pregame_window
@@ -227,6 +228,15 @@ def run_pipeline_if_needed(now, state, dry_run=False):
             seconds_since_attempt = now.timestamp() - last_attempt_ts if last_attempt_ts else None
 
             if failed_today and failures_today >= MAX_PIPELINE_FAILURES_PER_DAY:
+                # The budget is spent: nothing further will be attempted today. This
+                # is the terminal state that used to be logged on every tick and
+                # heard by nobody -- recorded now, and paged on the second such day.
+                if not dry_run:
+                    health_ledger.record_budget_exhausted(
+                        "job:pipeline", today_str,
+                        detail=f"{failures_today} failed attempts, "
+                               f"max {MAX_PIPELINE_FAILURES_PER_DAY}/day",
+                    )
                 log_status(
                     logger,
                     "WARN",
@@ -272,6 +282,13 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                         log_status(logger, "WARN", "Stale DB cleanup failed", error=e)
 
             if not pipeline_ok:
+                if not dry_run:
+                    health_ledger.record_failure(
+                        "job:pipeline",
+                        "pipeline run reported failure",
+                        detail=f"attempt {failures_today + 1} of "
+                               f"{MAX_PIPELINE_FAILURES_PER_DAY} today",
+                    )
                 state["pipeline_failure_date"] = today_str
                 state["pipeline_failures_today"] = failures_today + 1
                 state["last_pipeline_attempt_ts"] = attempt_ts
@@ -287,6 +304,8 @@ def run_pipeline_if_needed(now, state, dry_run=False):
                 )
                 return False
 
+            if not dry_run:
+                health_ledger.record_success("job:pipeline")
             state["last_pipeline_date"] = today_str
             # Reset scraped games for the new day
             state["scraped_closing_games"] = []
@@ -370,6 +389,9 @@ def check_closing_lines(now, state, dry_run=False):
                 closing_ok = False
                 
         if not closing_ok:
+            if not dry_run:
+                health_ledger.record_failure("job:closing_lines",
+                                             "pre-tip props refresh reported failure")
             return False
 
         for g in games_to_scrape:
@@ -377,6 +399,7 @@ def check_closing_lines(now, state, dry_run=False):
                 state["scraped_closing_games"].append(g["game_id"])
 
         if not dry_run:
+            health_ledger.record_success("job:closing_lines")
             save_state(state)
         return [g['matchup'] for g in games_to_scrape]
         
@@ -401,6 +424,9 @@ def run_intraday_if_needed(now, state, dry_run=False):
                 intraday_ok = False
 
         if not intraday_ok:
+            if not dry_run:
+                health_ledger.record_failure("job:intraday",
+                                             "intraday props refresh reported failure")
             return False
                 
         # Anchor the interval to the completion time, not the start time.
@@ -408,6 +434,7 @@ def run_intraday_if_needed(now, state, dry_run=False):
         # cron tick and create a write-amplification loop.
         state["last_intraday_time"] = time.time()
         if not dry_run:
+            health_ledger.record_success("job:intraday")
             save_state(state)
         return True
         
@@ -434,6 +461,14 @@ def run_nba_injury_report_if_needed(now, state, dry_run=False):
     seconds_since_attempt = current_timestamp - last_attempt_ts if last_attempt_ts else None
 
     if failed_today and failures_today >= MAX_NBA_INJURY_REPORT_FAILURES_PER_DAY:
+        # The 2026-11-20 incident lived here for three days: this exact branch, on
+        # every five-minute tick, writing a WARN that nothing read.
+        if not dry_run:
+            health_ledger.record_budget_exhausted(
+                "scraper:nba_injury_report", today_str,
+                detail=f"{failures_today} failed attempts, "
+                       f"max {MAX_NBA_INJURY_REPORT_FAILURES_PER_DAY}/day",
+            )
         log_status(
             logger,
             "WARN",
@@ -458,6 +493,10 @@ def run_nba_injury_report_if_needed(now, state, dry_run=False):
     )
 
     injury_ok = True
+    # Row count carried out of the try block: a refresh that "succeeds" with zero
+    # player rows is the failure mode that looks healthy from every other angle,
+    # and three in a row is an incident (see utils/health_ledger.py).
+    injury_rows = None
     if not dry_run:
         try:
             from scrapers import fetch_nba_injury_report
@@ -468,6 +507,11 @@ def run_nba_injury_report_if_needed(now, state, dry_run=False):
                 min_refresh_interval_seconds=interval_seconds,
             )
             payload = result.get("payload") if isinstance(result, dict) else {}
+            # Only evidence when there are games to report on: an injury report
+            # with zero player rows is the correct answer on a gameless day, and
+            # three of those in a row is the empty-streak threshold.
+            injury_rows = ((payload or {}).get("player_row_count")
+                           if (payload or {}).get("game_count") else None)
             log_status(
                 logger,
                 "OK",
@@ -486,6 +530,7 @@ def run_nba_injury_report_if_needed(now, state, dry_run=False):
                 log_status(logger, "WARN", "nba_injury_reports_current sync failed", error=e)
         except Exception as e:
             log_status(logger, "FAIL", "NBA injury report refresh failed", error=e)
+            health_ledger.record_failure("scraper:nba_injury_report", e)
             injury_ok = False
 
     if not injury_ok:
@@ -504,6 +549,8 @@ def run_nba_injury_report_if_needed(now, state, dry_run=False):
         )
         return False
 
+    if not dry_run:
+        health_ledger.record_success("scraper:nba_injury_report", rows=injury_rows)
     state["last_nba_injury_report_refresh_time"] = time.time()
     state["nba_injury_report_failure_date"] = ""
     state["nba_injury_report_failures_today"] = 0
@@ -540,6 +587,11 @@ def run_action_network_if_needed(now, state, dry_run=False):
                 min_refresh_interval_seconds=interval_seconds,
             )
             payload = result.get("payload") if isinstance(result, dict) else {}
+            # Only evidence when there are games to report on: an injury report
+            # with zero player rows is the correct answer on a gameless day, and
+            # three of those in a row is the empty-streak threshold.
+            injury_rows = ((payload or {}).get("player_row_count")
+                           if (payload or {}).get("game_count") else None)
             log_status(
                 logger,
                 "OK",
@@ -557,6 +609,7 @@ def run_action_network_if_needed(now, state, dry_run=False):
                 log_status(logger, "WARN", "game_markets_current sync failed", error=e)
         except Exception as e:
             log_status(logger, "FAIL", "Action Network markets refresh failed", error=e)
+            health_ledger.record_failure("job:action_network", e)
             action_ok = False
 
     if not action_ok:
@@ -564,6 +617,7 @@ def run_action_network_if_needed(now, state, dry_run=False):
 
     state["last_action_network_refresh_time"] = time.time()
     if not dry_run:
+        health_ledger.record_success("job:action_network")
         save_state(state)
     return True
 
@@ -585,6 +639,10 @@ def refresh_game_status_if_needed(now, state, dry_run=False):
     )
 
     refresh_ok = True
+    # Falling back to the cached snapshot keeps the tick alive but did not refresh
+    # anything, so it must not be recorded as a success -- that is how a dead
+    # upstream hides behind a file that is still on disk.
+    served_from_cache = False
     if not dry_run:
         try:
             from scrapers import fetch_todays_games as schedule
@@ -614,6 +672,7 @@ def refresh_game_status_if_needed(now, state, dry_run=False):
                 cached_schedule_exists = False
 
             if cached_schedule_exists:
+                served_from_cache = True
                 log_status(
                     logger,
                     "WARN",
@@ -625,9 +684,18 @@ def refresh_game_status_if_needed(now, state, dry_run=False):
                 log_status(logger, "FAIL", "Game status refresh failed", error=e)
                 refresh_ok = False
 
+            if not dry_run:
+                health_ledger.record_failure(
+                    "job:game_status", e,
+                    detail="served from cached schedule snapshot" if served_from_cache
+                           else "no cached snapshot available",
+                )
+
     if refresh_ok:
         state["last_game_status_refresh_time"] = time.time()
         if not dry_run:
+            if not served_from_cache:
+                health_ledger.record_success("job:game_status")
             save_state(state)
 
     return refresh_ok
@@ -682,10 +750,47 @@ def release_lock():
         except Exception:
             pass
 
+def _close_out_tick(dry_run=False, healthy=True):
+    """Health bookkeeping that must happen however the tick ended.
+
+    Three things, in this order, each independently guarded so none of them can
+    take the scheduler down with it:
+
+      1. Record that the scheduler ran at all. `job:master_cron` going stale is the
+         only in-band evidence that cron itself has stopped.
+      2. Classify every unit and push anything that has crossed from "failing" to
+         "will not fix itself". This is why it lives in a finally: main() returns
+         early after whichever job ran, so no single job's path can be trusted to
+         reach it.
+      3. Check in with the external dead-man's switch, which is the half of the
+         monitoring that still works when the VM does not.
+    """
+    if dry_run:
+        return
+    try:
+        if healthy:
+            health_ledger.record_success("job:master_cron")
+    except Exception as exc:
+        logger.warning("health: could not record scheduler tick: %s", exc)
+    try:
+        health_monitor.evaluate_and_notify()
+    except Exception as exc:
+        logger.warning("health: evaluation failed: %s", exc)
+    try:
+        health_monitor.heartbeat(healthy=healthy)
+    except Exception as exc:
+        logger.warning("health: heartbeat failed: %s", exc)
+
+
 def main(dry_run=False, mock_time=None):
     if not check_mutual_exclusion():
+         # Deliberately no heartbeat: a tick that could not get the lock did no
+         # work, and claiming otherwise would let a permanently stuck lock look
+         # like a healthy scheduler. The lock self-clears after 45 minutes, which
+         # is inside any sane heartbeat grace window.
          return
-         
+
+    tick_healthy = True
     try:
         now = mock_time if mock_time else get_et_now()
         
@@ -719,8 +824,14 @@ def main(dry_run=False, mock_time=None):
             return
 
         logger.debug("No priority matched at this time.")
-        
+
+    except BaseException:
+        # An exception escaping the job functions means the tick itself is broken,
+        # not just one upstream. Say so to the dead-man's switch and re-raise.
+        tick_healthy = False
+        raise
     finally:
+        _close_out_tick(dry_run=dry_run, healthy=tick_healthy)
         release_lock()
 
 if __name__ == "__main__":

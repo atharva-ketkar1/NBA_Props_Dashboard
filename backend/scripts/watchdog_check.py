@@ -209,6 +209,57 @@ def check_injury_freshness(summary, season_active):
             )
 
 
+def check_health_block(summary, season_active):
+    """The generic check: is anything in the pipeline's own health ledger broken?
+
+    Every other check in this file was written after an incident, for that
+    incident. That does not scale and it does not generalise -- the injury report
+    broke in a way none of the existing checks could see, and the fix was a new
+    check. This one asks the pipeline what it already knows about itself.
+
+    The ledger has done the hard part (distinguishing a transient 403 from a
+    structural break; see backend/utils/health_ledger.py), so this only has to
+    report it. Units marked severity "warn" are reported without failing the job:
+    things that break often enough that paging on them would get this muted.
+
+    The specific checks above are deliberately kept. This one is only as good as
+    the ledger, and the ledger runs on the box being watched.
+    """
+    health = (summary or {}).get("health")
+    if not isinstance(health, dict):
+        # A pipeline deploy older than this field is a legitimate reason for it to
+        # be missing, and failing on a schema gap is how an alert channel gets muted.
+        warnings.append(
+            "/api/edge summary carries no health block, so per-source health "
+            "cannot be established"
+        )
+        return
+
+    broken = [entry for entry in (health.get("broken") or []) if isinstance(entry, dict)]
+    degraded = [entry for entry in (health.get("degraded") or []) if isinstance(entry, dict)]
+    notes.append(
+        f"health: {health.get('monitored_units')} units monitored, "
+        f"{len(broken)} broken, {len(degraded)} degraded "
+        f"(evaluated {health.get('evaluated_at')})"
+    )
+
+    for entry in degraded:
+        notes.append(f"degraded: {entry.get('label') or entry.get('unit')} "
+                     f"- {entry.get('reason')}")
+
+    for entry in broken:
+        label = entry.get("label") or entry.get("unit") or "unknown unit"
+        age = entry.get("last_success_age_h")
+        age_text = f", last success {age}h ago" if age is not None else ""
+        message = f"{label} is broken{age_text}: {entry.get('reason')}"
+        if entry.get("severity") != "page":
+            warnings.append(message)
+        elif season_active and not health.get("dormant"):
+            problems.append(message)
+        else:
+            notes.append(f"{message} -- not escalated, no games scheduled")
+
+
 def check_schedule():
     """Return True if games fall inside the upcoming window.
 
@@ -263,6 +314,7 @@ def main():
     if site_ok:
         summary = check_edge_heartbeat(season_active)
         check_injury_freshness(summary, season_active)
+        check_health_block(summary, season_active)
         check_dashboard_payload(season_active)
 
     for note in notes:

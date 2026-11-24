@@ -42,6 +42,9 @@ jobs:
     # reason about mid-incident.
     env:
       WEBHOOK: ${{ secrets.WATCHDOG_DISCORD_WEBHOOK_URL }}
+      NTFY_TOPIC: ${{ secrets.WATCHDOG_NTFY_TOPIC }}
+      NTFY_SERVER: ${{ secrets.WATCHDOG_NTFY_SERVER }}
+      HEARTBEAT_URL: ${{ secrets.WATCHDOG_HEARTBEAT_URL }}
     steps:
       - uses: actions/checkout@v5
 
@@ -68,6 +71,40 @@ jobs:
             cat "$RUNNER_TEMP/report.txt" 2>/dev/null || echo 'check produced no output'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The phone channel. Same incident text as the pipeline's own pushes, so
+      # everything that needs a human lands in one app with one sound, rather than
+      # split between a Discord server and wherever else.
+      - name: Alert ntfy
+        if: failure() && env.NTFY_TOPIC != ''
+        env:
+          SUMMARY: ${{ steps.check.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -n \
+            --arg topic "$NTFY_TOPIC" \
+            --arg message "${SUMMARY:-the health check failed; see the run log}" \
+            --arg url "$RUN_URL" \
+            '{topic: $topic, title: "BROKEN: NBA dashboard watchdog",
+                message: $message, priority: 5, tags: ["rotating_light"],
+                click: $url}' > ntfy.json
+          curl -sS -X POST -H 'content-type: application/json' \
+            --data @ntfy.json "${NTFY_SERVER:-https://ntfy.sh}" \
+            --retry 3 --retry-delay 5 --max-time 30
+
+      # Nothing watches the watchdog. GitHub drops most */30 ticks (see the note at
+      # the top), and disables scheduled workflows outright after 60 days of repo
+      # inactivity -- in which case this job stops running and stops alerting, and
+      # the only evidence is an absence. Checking in with an external dead-man's
+      # switch turns that absence into a notification.
+      - name: Ping watchdog heartbeat
+        if: always() && env.HEARTBEAT_URL != ''
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            curl -sS -m 20 --retry 2 "$HEARTBEAT_URL" || true
+          else
+            curl -sS -m 20 --retry 2 "${HEARTBEAT_URL%/}/fail" || true
+          fi
 
       - name: Alert Discord
         if: failure() && env.WEBHOOK != ''

@@ -13,7 +13,7 @@ import requests
 from dotenv import load_dotenv
 
 from prop_modeling.p_over_calibration import has_usable_spread, honest_p_over, ranking_signal
-from utils import injury_availability
+from utils import health_ledger, health_monitor, injury_availability
 from prop_modeling.market_prices import american_to_implied, hold, no_vig_from_american
 from prop_modeling.injury_feature_config import (
     CREATION_BENEFIT_POTENTIAL_AST_THRESHOLD,
@@ -9029,6 +9029,11 @@ def run_edge_score_refresh(
             "injury_report_freshness": injury_report_freshness,
             "blocked_stale_injury_context_count": blocked_stale_count,
             "blocked_promotion_under_count": blocked_promotion_under_count,
+            # Per-source health, so the external watchdog needs one generic check
+            # instead of a new hand-written one after every incident. It rides on a
+            # payload the dashboard already serves: no extra request, no new
+            # credential, and nothing here can fail scoring (see health_monitor).
+            "health": health_monitor.snapshot(),
             "board_preserved_from_previous": board_preserved_from_previous,
             "preserved_board_generated_at": preserved_board_generated_at,
             "duration_s": round(time.time() - start_time, 2),
@@ -9155,6 +9160,13 @@ def run_edge_score_refresh(
         _write_json_atomic(EDGE_SCORE_STATE_PATH, state if isinstance(state, dict) else {})
 
     sync_ok = _sync_payload_to_supabase(payload)
+    # The table the frontend reads in DB mode. A refresh that scores correctly but
+    # cannot store the result leaves the dashboard serving yesterday's board.
+    if sync_ok:
+        health_ledger.record_success("sync:supabase_edge")
+    else:
+        health_ledger.record_failure(
+            "sync:supabase_edge", "edge_scores_current upsert failed")
     if discord_sent:
         log_status(
             logger,
