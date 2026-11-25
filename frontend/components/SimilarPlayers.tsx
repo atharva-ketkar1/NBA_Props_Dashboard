@@ -13,6 +13,13 @@ interface SimilarPlayersProps {
    activeSportsbook: SportsbookId;
    activeSeason: string;
    targetOpponent?: string | null;
+   /**
+    * Reports how many rows currently fit the panel, so the parent can rank and
+    * prefetch enough comps to fill it. The measurement has to happen here --
+    * it is this component's box -- but what follows from it (how many
+    * candidates to rank, how many histories to fetch) is the parent's job.
+    */
+   onRowCapacityChange?: (rows: number) => void;
    isLoadingCandidates?: boolean;
    similarCandidatesByProp: SimilarPlayerCandidate[];
    similarCandidatesByPosition: SimilarPlayerCandidate[];
@@ -64,6 +71,7 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    activeSportsbook,
    activeSeason,
    targetOpponent,
+   onRowCapacityChange,
    isLoadingCandidates = false,
    similarCandidatesByProp,
    similarCandidatesByPosition,
@@ -100,6 +108,12 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       observer.observe(area);
       return () => observer.disconnect();
    }, []);
+
+   // Tell the parent how many rows fit, so it can rank and prefetch enough
+   // comps to fill the box rather than a hardcoded 12/14 and 2/3.
+   useEffect(() => {
+      onRowCapacityChange?.(pageSize);
+   }, [pageSize, onRowCapacityChange]);
 
    const dataset = useMemo(() => buildSimilarPlayersDataset({
       player,

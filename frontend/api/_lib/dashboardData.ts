@@ -1146,13 +1146,19 @@ export async function fetchSimilarCandidatesPayload({
   playerId,
   selectedGameDate,
   targetOpponent,
+  candidateLimit,
 }: {
   activeSportsbook: SportsbookId;
   activeTab: string;
   playerId: number;
   selectedGameDate?: string | null;
   targetOpponent?: string | null;
+  candidateLimit?: number;
 }) {
+  // Mirrors the client default so a request without the parameter behaves as
+  // before rather than silently ranking a different number of comps.
+  const propLimit = Math.max(12, Math.min(32, candidateLimit ?? 12));
+  const positionLimit = propLimit + 2;
   return readCached(
     buildCacheKey([
       'similar',
@@ -1163,6 +1169,7 @@ export async function fetchSimilarCandidatesPayload({
       // Part of the cache key: ranking prefers comps who have faced this
       // opponent, so two opponents are two different answers.
       targetOpponent ?? '',
+      propLimit,
     ]),
     SIMILAR_CACHE_MS,
     async () => {
@@ -1191,7 +1198,7 @@ export async function fetchSimilarCandidatesPayload({
           selectedGameDate: selectedGameDate ?? null,
           mode: 'position',
           targetOpponent: targetOpponent ?? null,
-          limit: 14,
+          limit: positionLimit,
         }) satisfies SimilarPlayerCandidate[],
         similarCandidatesByProp: rankSimilarPlayers({
           player,
@@ -1201,7 +1208,7 @@ export async function fetchSimilarCandidatesPayload({
           selectedGameDate: selectedGameDate ?? null,
           mode: 'prop',
           targetOpponent: targetOpponent ?? null,
-          limit: 12,
+          limit: propLimit,
         }) satisfies SimilarPlayerCandidate[],
       };
     },

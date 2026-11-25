@@ -49,6 +49,9 @@ async function handleGet(request: Request) {
   // Tricode, so a tight whitelist rather than free text reaching the ranker.
   const rawOpponent = (requestUrl.searchParams.get('targetOpponent') ?? '').trim().toUpperCase();
   const targetOpponent = /^[A-Z]{2,4}$/.test(rawOpponent) ? rawOpponent : null;
+  // Bounded server-side: this sizes a ranking loop over the league, so it is
+  // not something a caller gets to set arbitrarily.
+  const requestedLimit = parseInteger(requestUrl.searchParams.get('candidateLimit'), { min: 1, max: 40 });
 
   if (!playerId) {
     return errorResponse(400, 'A valid playerId is required.');
@@ -65,6 +68,7 @@ async function handleGet(request: Request) {
       playerId,
       selectedGameDate,
       targetOpponent,
+      candidateLimit: requestedLimit ?? undefined,
     });
 
     return jsonResponse(payload, {

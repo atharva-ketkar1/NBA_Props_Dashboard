@@ -874,6 +874,17 @@ function App() {
   const [activeSportsbook, setActiveSportsbook] = useState<SportsbookId>(DEFAULT_SPORTSBOOK);
   const [customLineValue, setCustomLineValue] = useState<number | null>(null);
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
+  // How many comparable-player rows currently fit that panel. Reported up from
+  // SimilarPlayers, which is the only place that can measure its own box, and
+  // used here to size the two things the panel cannot do for itself: how many
+  // candidates to rank, and how many of their histories to fetch. A hardcoded
+  // 12/14 left a tall panel visibly short -- measured, prop mode filled 11 of
+  // 16 rows.
+  const [similarRowCapacity, setSimilarRowCapacity] = useState(8);
+  const handleSimilarRowCapacity = React.useCallback((rows: number) => {
+    setSimilarRowCapacity((previous) => (previous === rows ? previous : rows));
+  }, []);
+
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   // Whether an overlay's comparison line reads as the season mean or the median
   // of the games shown. Prop distributions are skewed and bounded at zero, so
@@ -1021,8 +1032,23 @@ function App() {
   const USE_DB = import.meta.env.VITE_USE_DB === 'true';
   const FULL_DB_POLL_MS = parsePollMs(import.meta.env.VITE_FULL_DB_POLL_MS, 60 * 60 * 1000);
   const HOT_DATA_POLL_MS = parsePollMs(import.meta.env.VITE_HOT_DATA_POLL_MS, 2 * 60 * 1000);
-  const SIMILAR_PREFETCH_PROP_LIMIT = parsePositiveInt(import.meta.env.VITE_SIMILAR_PREFETCH_PROP_LIMIT, 2);
-  const SIMILAR_PREFETCH_POSITION_LIMIT = parsePositiveInt(import.meta.env.VITE_SIMILAR_PREFETCH_POSITION_LIMIT, 3);
+  // Prefetch is the expensive half: each one is a sequential, signed,
+  // rate-limited player-detail request, and in DB mode a comp with no loaded
+  // game log contributes no rows at all -- which is why the table could only
+  // ever show 2-3 players' games however many candidates were ranked.
+  //
+  // So these scale with the panel, but are capped: filling a 16-row box exactly
+  // would mean 16 round trips before the table is complete. The cap trades a
+  // partially-filled table on a very tall screen for a page that loads.
+  const SIMILAR_PREFETCH_CEILING = parsePositiveInt(import.meta.env.VITE_SIMILAR_PREFETCH_CEILING, 8);
+  const SIMILAR_PREFETCH_PROP_LIMIT = parsePositiveInt(
+    import.meta.env.VITE_SIMILAR_PREFETCH_PROP_LIMIT,
+    Math.min(SIMILAR_PREFETCH_CEILING, Math.max(2, similarRowCapacity)),
+  );
+  const SIMILAR_PREFETCH_POSITION_LIMIT = parsePositiveInt(
+    import.meta.env.VITE_SIMILAR_PREFETCH_POSITION_LIMIT,
+    Math.min(SIMILAR_PREFETCH_CEILING, Math.max(3, similarRowCapacity)),
+  );
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() => isDocumentVisible());
   const lineMovementVersionRef = useRef('');
   const rawDataRef = useRef<Player[]>([]);
@@ -1966,7 +1992,17 @@ function App() {
   // The opponent is part of the key because comp RANKING now depends on it:
   // comps who have already faced tonight's opponent are ranked first, so a
   // change of opponent invalidates the candidate list, not just the rows.
-  const similarRankingKey = `${displayPlayer?.id ?? 'none'}:${activeSeason}:${activeTab}:${activeSportsbook}:${resolvedSelectedGameDate ?? ''}:${displayPlayerOpponent ?? ''}`;
+  /**
+   * How many comps to rank. Ranking is cheap -- ~7ms for the whole league --
+   * so this runs a little past what the panel can show: under the opponent
+   * filter a comp contributes roughly one row, and some contribute none, so a
+   * surplus is what actually fills the table. buildSimilarPlayersDataset trims
+   * to the rows that fit regardless.
+   */
+  const similarCandidateLimit = Math.max(12, Math.min(32, similarRowCapacity + 6));
+
+  // Capacity is in the key because the candidate list depends on it now.
+  const similarRankingKey = `${displayPlayer?.id ?? 'none'}:${activeSeason}:${activeTab}:${activeSportsbook}:${resolvedSelectedGameDate ?? ''}:${displayPlayerOpponent ?? ''}:${similarCandidateLimit}`;
   const areSimilarCandidatesCurrent = similarCandidatesKey === similarRankingKey;
   const readySimilarCandidatesByProp = areSimilarCandidatesCurrent ? similarCandidatesByProp : [];
   const readySimilarCandidatesByPosition = areSimilarCandidatesCurrent ? similarCandidatesByPosition : [];
@@ -2116,6 +2152,7 @@ function App() {
                 activeSportsbook,
                 resolvedSelectedGameDate,
                 displayPlayerOpponent,
+                similarCandidateLimit,
               )
               : {
                 similarCandidatesByProp: rankSimilarPlayers({
@@ -2126,7 +2163,7 @@ function App() {
                   selectedGameDate: resolvedSelectedGameDate,
                   mode: 'prop',
                   targetOpponent: displayPlayerOpponent,
-                  limit: 12,
+                  limit: similarCandidateLimit,
                 }),
                 similarCandidatesByPosition: rankSimilarPlayers({
                   player: displayPlayer,
@@ -2136,7 +2173,7 @@ function App() {
                   selectedGameDate: resolvedSelectedGameDate,
                   mode: 'position',
                   targetOpponent: displayPlayerOpponent,
-                  limit: 14,
+                  limit: similarCandidateLimit + 2,
                 }),
               };
 
@@ -2418,6 +2455,7 @@ function App() {
                 activeSportsbook={activeSportsbook}
                 activeSeason={activeSeason}
                 targetOpponent={displayPlayerOpponent}
+                onRowCapacityChange={handleSimilarRowCapacity}
                 isLoadingCandidates={shouldShowSimilarLoading}
                 similarCandidatesByProp={readySimilarCandidatesByProp}
                 similarCandidatesByPosition={readySimilarCandidatesByPosition}
@@ -2502,6 +2540,7 @@ function App() {
                     activeSportsbook={activeSportsbook}
                     activeSeason={activeSeason}
                     targetOpponent={displayPlayerOpponent}
+                    onRowCapacityChange={handleSimilarRowCapacity}
                     isLoadingCandidates={shouldShowSimilarLoading}
                     similarCandidatesByProp={readySimilarCandidatesByProp}
                     similarCandidatesByPosition={readySimilarCandidatesByPosition}
