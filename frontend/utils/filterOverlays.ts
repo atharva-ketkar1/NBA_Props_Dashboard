@@ -1,8 +1,23 @@
 import { Game, Player } from '../types';
 
-export type OverlayKind = 'numeric' | 'rank' | 'binary';
+/**
+ * 'chartMode' is not an overlay at all: H2H / Home / Away / B2B SUBSET the
+ * chart's games rather than drawing a second series. BarChart checks them
+ * first (`CHART_MODE_FILTERS`) and sets `overlayDefinition` to null, so these
+ * definitions are only ever consulted through `isOverlayFilterSupported`, to
+ * decide whether the button is enabled.
+ *
+ * They were previously typed 'binary', which made `isBinaryOverlay`, the
+ * `MATCH RATE` legend and the 0-1 axis branch all unreachable code that looked
+ * live. Naming the kind honestly is what let that dead handling be deleted.
+ */
+export type OverlayKind = 'numeric' | 'rank' | 'chartMode';
+
+export type BaseStatMode = 'average' | 'median';
 
 export interface OverlayFilterContext {
+  /** Whether a comparison line reads as the mean or the median. Defaults to mean. */
+  baseStat?: BaseStatMode;
   player?: Player;
   game?: any;
   gameIndex?: number;
@@ -18,6 +33,8 @@ export interface OverlayFilterDefinition {
   kind: OverlayKind;
   unit?: string;
   comparisonLabel?: string;
+  /** Label used when baseStat is 'median'; falls back to comparisonLabel. */
+  medianComparisonLabel?: string;
   fallbackUpcoming?: 'graph_average' | 'none';
   isAvailable: (player?: Player) => boolean;
   getGameValue: (context: OverlayFilterContext) => number | null;
@@ -86,6 +103,28 @@ const averageMetric = (games: any[] | undefined, extractor: (game: any) => numbe
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
 
+/**
+ * Median of a metric over the loaded games.
+ *
+ * Worth offering alongside the mean because prop distributions are skewed and
+ * bounded at zero: one 42-point night drags a scoring average above the number
+ * the player actually hits most of the time, and the mean is what every
+ * comparison line in this app used. The median answers "what is the typical
+ * game", which is the more useful read for an over/under.
+ */
+const medianMetric = (games: any[] | undefined, extractor: (game: any) => number | null) => {
+  const values = (games ?? [])
+    .map((game) => extractor(game))
+    .filter((value): value is number => value !== null && Number.isFinite(value))
+    .sort((left, right) => left - right);
+
+  if (!values.length) return null;
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2 === 0
+    ? (values[middle - 1] + values[middle]) / 2
+    : values[middle];
+};
+
 const getBackToBackValue = (context: OverlayFilterContext) => {
   const games = context.games ?? [];
   const gameIndex = context.gameIndex ?? 0;
@@ -114,6 +153,19 @@ const getComparisonAverage = (
 ) => (context: OverlayFilterContext) => {
   const player = context.player;
   if (!player) return null;
+
+  // Median is computed from the loaded game log, because `player.stats` only
+  // carries season MEANS -- there is no stored median to read. That makes the
+  // two modes cover different game sets: the mean is the season average the
+  // pipeline published, while the median is over the games on screen. The
+  // label changes with the mode so the comparison is never silently mixed.
+  if (context.baseStat === 'median') {
+    return medianMetric(
+      player.game_log,
+      (game) => (transform ? transform(game?.[metricKey]) : toNumber(game?.[metricKey])),
+    );
+  }
+
   const rawValue = player.stats?.[metricKey];
   return transform ? transform(rawValue) : toNumber(rawValue);
 };
@@ -141,6 +193,7 @@ const getNumericFilter = (
   kind: 'numeric',
   unit: options?.unit,
   comparisonLabel: options?.comparisonLabel ?? 'SEASON AVG',
+  medianComparisonLabel: 'MEDIAN (SHOWN)',
   fallbackUpcoming: 'graph_average',
   isAvailable: (player) => hasAnyMetric(player, metricKey),
   getGameValue: getNumericGameValue(metricKey, options?.transform),
@@ -178,7 +231,7 @@ export const OVERLAY_FILTER_DEFINITIONS: Record<string, OverlayFilterDefinition>
   H2H: {
     id: 'H2H',
     label: 'H2H',
-    kind: 'binary',
+    kind: 'chartMode',
     fallbackUpcoming: 'none',
     isAvailable: (player) => Boolean(player?.game_log?.length),
     getGameValue: (context) => {
@@ -192,7 +245,7 @@ export const OVERLAY_FILTER_DEFINITIONS: Record<string, OverlayFilterDefinition>
   Home: {
     id: 'Home',
     label: 'Home',
-    kind: 'binary',
+    kind: 'chartMode',
     fallbackUpcoming: 'none',
     isAvailable: (player) => Boolean(player?.game_log?.length),
     getGameValue: (context) => (isHomeGame(context.game) ? 1 : 0),
@@ -204,7 +257,7 @@ export const OVERLAY_FILTER_DEFINITIONS: Record<string, OverlayFilterDefinition>
   Away: {
     id: 'Away',
     label: 'Away',
-    kind: 'binary',
+    kind: 'chartMode',
     fallbackUpcoming: 'none',
     isAvailable: (player) => Boolean(player?.game_log?.length),
     getGameValue: (context) => (isAwayGame(context.game) ? 1 : 0),
@@ -216,7 +269,7 @@ export const OVERLAY_FILTER_DEFINITIONS: Record<string, OverlayFilterDefinition>
   B2B: {
     id: 'B2B',
     label: 'B2B',
-    kind: 'binary',
+    kind: 'chartMode',
     fallbackUpcoming: 'none',
     isAvailable: (player) => Boolean(player?.game_log?.length),
     getGameValue: getBackToBackValue,
@@ -274,6 +327,7 @@ export function formatOverlayLegend(
   definition: OverlayFilterDefinition | null,
   graphAverage: number,
   comparisonAverage: number | null,
+  baseStat: BaseStatMode = 'average',
 ) {
   if (!definition) return '';
 
@@ -281,21 +335,19 @@ export function formatOverlayLegend(
     return `[AVG OPP RANK: #${Math.round(graphAverage)}]`;
   }
 
-  if (definition.kind === 'binary') {
-    return `[MATCH RATE: ${(graphAverage * 100).toFixed(0)}%]`;
-  }
-
   const valueFormatter = (value: number) => `${value.toFixed(1)}${definition.unit ?? ''}`;
   if (comparisonAverage === null || !Number.isFinite(comparisonAverage)) {
     return `[GRAPH AVG: ${valueFormatter(graphAverage)}]`;
   }
 
-  return `[GRAPH AVG: ${valueFormatter(graphAverage)} | ${definition.comparisonLabel ?? 'AVG'}: ${valueFormatter(comparisonAverage)}]`;
+  const comparisonLabel = baseStat === 'median'
+    ? (definition.medianComparisonLabel ?? definition.comparisonLabel ?? 'MEDIAN')
+    : (definition.comparisonLabel ?? 'AVG');
+  return `[GRAPH AVG: ${valueFormatter(graphAverage)} | ${comparisonLabel}: ${valueFormatter(comparisonAverage)}]`;
 }
 
 export function formatOverlayAxisValue(definition: OverlayFilterDefinition | null, value: number) {
   if (!definition) return String(Math.round(value));
   if (definition.kind === 'rank') return `#${Math.round(value)}`;
-  if (definition.kind === 'binary') return `${Math.round(value * 100)}%`;
   return `${Math.round(value)}${definition.unit ?? ''}`;
 }

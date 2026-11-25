@@ -112,6 +112,56 @@ function getWeightedLeaders(weights: Record<string, any> | undefined, limit = 2)
     .slice(0, limit);
 }
 
+/**
+ * Model-vs-market display helpers.
+ *
+ * `model_prob_pick` is the model's probability for the side being recommended;
+ * `market_prob_pick` is the *no-vig* market probability, so it disagrees with
+ * `inputs.market.chosen_implied` by exactly the book's hold -- that is expected,
+ * not an inconsistency, and the caption below says so.
+ *
+ * A negative delta means the model rates the pick worse than the price implies.
+ * That is shown plainly rather than hidden: a recommendation the model disagrees
+ * with is the single most useful thing a reader could know about it.
+ */
+function hasModelMarket(recommendation: EdgeScoreRecommendation) {
+  return Number.isFinite(recommendation.model_prob_pick as number)
+    && Number.isFinite(recommendation.market_prob_pick as number)
+    && Number.isFinite(recommendation.model_minus_market as number);
+}
+
+function formatProbPercent(value?: number | null) {
+  if (!Number.isFinite(value as number)) return '--';
+  return `${((value as number) * 100).toFixed(1)}%`;
+}
+
+function formatProbDelta(value?: number | null) {
+  if (!Number.isFinite(value as number)) return '--';
+  const points = (value as number) * 100;
+  // Percentage POINTS, not percent: the gap between two probabilities.
+  return `${points >= 0 ? '+' : ''}${points.toFixed(1)} pp`;
+}
+
+function modelMarketTone(recommendation: EdgeScoreRecommendation) {
+  const delta = recommendation.model_minus_market as number;
+  if (!Number.isFinite(delta)) return 'text-fgSubtle';
+  // A near-zero gap is agreement, which is neither good nor bad news. Only a
+  // meaningful disagreement earns a colour.
+  if (Math.abs(delta) < 0.01) return 'text-white';
+  return delta > 0 ? 'text-green500' : 'text-red500';
+}
+
+function describeModelMarket(recommendation: EdgeScoreRecommendation) {
+  const delta = recommendation.model_minus_market as number;
+  if (!Number.isFinite(delta)) return '';
+  if (Math.abs(delta) < 0.01) {
+    return 'Model and book agree on this side. Market probability is no-vig, so it reads lower than the raw price.';
+  }
+  return delta > 0
+    ? 'Model rates this side higher than the no-vig price. Ranking signal only — the fitted probability is not calibrated, so treat the size of the gap loosely.'
+    : 'Model rates this side LOWER than the no-vig price, so the model does not support the pick even though other signals scored it well.';
+}
+
 function getPositiveSignals(recommendation: EdgeScoreRecommendation, limit = 8) {
   return Object.entries(recommendation.component_scores ?? {})
     .filter(([, score]) => Number.isFinite(score) && score > 0.04)
@@ -871,6 +921,17 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                 />
                                 {recommendation.confidence.toFixed(0)}% data support
                               </div>
+                              {hasModelMarket(recommendation) && (
+                                <div
+                                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-borderMedium bg-bgElevation0 px-2 py-0.5 text-[10px] font-semibold text-fgSubtle"
+                                  title="Model probability minus no-vig market probability. Negative means the model rates this side worse than the price."
+                                >
+                                  <span>Model vs mkt</span>
+                                  <span className={`tabular-nums ${modelMarketTone(recommendation)}`}>
+                                    {formatProbDelta(recommendation.model_minus_market)}
+                                  </span>
+                                </div>
+                              )}
                             </div>
                           </div>
 
@@ -963,6 +1024,52 @@ export const EdgeBoardPanel: React.FC<EdgeBoardPanelProps> = ({
                                   </div>
                                 </div>
                               </div>
+
+                              {/*
+                                Model vs market. These three fields were computed,
+                                serialized and shipped to the browser, and the type
+                                definition said outright that "nothing renders these
+                                today" -- so the one number that expresses the model's
+                                disagreement with the price was invisible.
+
+                                Deliberately NOT labelled as an edge or an EV. The
+                                fitted probability ranks only weakly and does not
+                                calibrate, so the honest framing is "where the model
+                                and the book disagree", which is a reason to look
+                                closer rather than a number to bet off.
+                              */}
+                              {hasModelMarket(recommendation) && (
+                                <div className="rounded-lg border border-borderMedium bg-bgElevation0 px-3 py-3">
+                                  <div className="flex items-baseline justify-between gap-2">
+                                    <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-fgSubtle">
+                                      Model vs Market
+                                    </div>
+                                    <div
+                                      className={`font-chakra text-lg font-semibold tabular-nums ${modelMarketTone(recommendation)}`}
+                                      title="Model probability minus the no-vig market probability for this side"
+                                    >
+                                      {formatProbDelta(recommendation.model_minus_market)}
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] leading-5">
+                                    <div>
+                                      <div className="text-fgSubtle">Model</div>
+                                      <div className="font-semibold text-white tabular-nums">
+                                        {formatProbPercent(recommendation.model_prob_pick)}
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <div className="text-fgSubtle">Market (no-vig)</div>
+                                      <div className="font-semibold text-white tabular-nums">
+                                        {formatProbPercent(recommendation.market_prob_pick)}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 text-[10px] leading-4 text-fgSubtle">
+                                    {describeModelMarket(recommendation)}
+                                  </div>
+                                </div>
+                              )}
 
                               <button
                                 type="button"

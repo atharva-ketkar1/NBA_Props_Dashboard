@@ -23,9 +23,9 @@ import type {
 } from '../../types.js';
 
 const PLAYER_PROP_SELECT = 'player_id, stat_type, sportsbook, line, over_odds, under_odds, implied, game_date, game_id, updated_at';
-const PLAYER_BASE_SELECT = 'id, name, team, position, stats';
+const PLAYER_BASE_SELECT = 'id, name, team, position, height_inches, weight_lbs, stats';
 const PLAYER_DETAIL_SELECT = 'game_log, shooting_zones, assist_zones, opp_def_zones, opp_def_zones_positional, opp_assist_zones, opp_assist_zones_positional, shot_type_analysis, play_type_analysis';
-const PLAYER_SIMILAR_SELECT = 'id, name, team, position, stats, play_type_analysis, shot_type_analysis';
+const PLAYER_SIMILAR_SELECT = 'id, name, team, position, height_inches, weight_lbs, opponents_played, stats, play_type_analysis, shot_type_analysis';
 const HISTORICAL_ODDS_SELECT = 'game_date, props, source';
 const HISTORICAL_PLAYER_PROP_SELECT = 'game_date, stat_type, sportsbook, line, over_odds, under_odds, implied, source, captured_at, is_closing_line';
 const INITIAL_LINE_SELECT = 'game_date, snapshots, updated_at';
@@ -463,7 +463,16 @@ function buildSimilarityPlayers(players: any[], props: any[], selectedGameDate?:
     name: player.name,
     team: player.team,
     position: player.position,
+    // These three are what make DB-mode ranking match JSON mode. They are
+    // mapped explicitly like everything else here, so leaving them out would
+    // silently make comps size-blind and opponent-blind on the served path
+    // while working fine locally -- the worst kind of divergence.
+    height_inches: player.height_inches ?? null,
+    weight_lbs: player.weight_lbs ?? null,
+    opponents_played: player.opponents_played ?? null,
     stats: player.stats ?? {},
+    // Deliberately empty: PLAYER_SIMILAR_SELECT does not fetch game logs, which
+    // is why `opponents_played` exists as a precomputed summary.
     game_log: [],
     props: {},
     props_by_date: propsByDateMap[player.id] ?? {},
@@ -644,6 +653,14 @@ async function fetchPlayerRows(selectClause: string, rosterSeason: string | null
       return null;
     }
 
+    const absentColumn = missingOptionalColumn(error);
+    if (absentColumn) {
+      // A selected column the table does not have yet. Distinct sentinel from
+      // the roster_season one above, because the retry is different: drop the
+      // column from the projection rather than drop the filter.
+      return MISSING_OPTIONAL_COLUMN;
+    }
+
     assertNoError(error, 'players');
 
     if (!data?.length) {
@@ -658,6 +675,33 @@ async function fetchPlayerRows(selectClause: string, rosterSeason: string | null
   }
 }
 
+/**
+ * Columns added after the table shipped. A `select` naming a column Postgres
+ * does not have is a hard 400 from PostgREST -- not a null -- so listing these
+ * unconditionally would take DB mode down between deploying this code and
+ * running supabase/migrations/20261124_player_measurements.sql by hand.
+ *
+ * Same contract the rest of this file already uses for `roster_season`: try the
+ * richer read, detect the missing-column error, retry without it. Size then
+ * simply goes missing from the similarity ranking, which it already tolerates.
+ */
+const MISSING_OPTIONAL_COLUMN = Symbol('missing-optional-column');
+
+const OPTIONAL_PLAYER_COLUMNS = ['height_inches', 'weight_lbs', 'opponents_played'];
+
+function withoutOptionalColumns(selectClause: string) {
+  const dropped = new Set(OPTIONAL_PLAYER_COLUMNS);
+  return selectClause
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part && !dropped.has(part))
+    .join(', ');
+}
+
+function missingOptionalColumn(error: { message?: string } | null) {
+  return OPTIONAL_PLAYER_COLUMNS.find((column) => isMissingColumnError(error, column)) ?? null;
+}
+
 async function fetchPlayers(selectClause: string, options: { currentRosterOnly?: boolean } = {}) {
   // Retirees are never deleted from `players` (archive seasons still read their
   // identity from it), so the live reads filter to players the backend has
@@ -668,7 +712,21 @@ async function fetchPlayers(selectClause: string, options: { currentRosterOnly?:
     buildCacheKey(['players', selectClause, rosterSeason ?? 'all']),
     PLAYERS_CACHE_MS,
     async () => {
-      const rows = await fetchPlayerRows(selectClause, rosterSeason);
+      let rows = await fetchPlayerRows(selectClause, rosterSeason);
+
+      if (rows === MISSING_OPTIONAL_COLUMN) {
+        const leanClause = withoutOptionalColumns(selectClause);
+        console.warn(
+          '[api/players] player measurement columns missing; retrying without them. '
+          + 'Apply supabase/migrations/20261124_player_measurements.sql to restore '
+          + 'size-aware comparable players.',
+        );
+        rows = await fetchPlayerRows(leanClause, rosterSeason);
+      }
+
+      if (rows === MISSING_OPTIONAL_COLUMN) {
+        return [];
+      }
 
       if (rosterSeason && (rows === null || !rows.length)) {
         // Fail open. roster_season is stamped from the backend's
@@ -679,7 +737,8 @@ async function fetchPlayers(selectClause: string, options: { currentRosterOnly?:
         console.warn(
           `[api/players] ${rows === null ? 'roster_season column missing' : `no rows for roster_season=${rosterSeason}`}; falling back to the unfiltered read`,
         );
-        return (await fetchPlayerRows(selectClause, null)) ?? [];
+        const unfiltered = await fetchPlayerRows(withoutOptionalColumns(selectClause), null);
+        return unfiltered === MISSING_OPTIONAL_COLUMN ? [] : (unfiltered ?? []);
       }
 
       return rows ?? [];
@@ -1086,11 +1145,13 @@ export async function fetchSimilarCandidatesPayload({
   activeTab,
   playerId,
   selectedGameDate,
+  targetOpponent,
 }: {
   activeSportsbook: SportsbookId;
   activeTab: string;
   playerId: number;
   selectedGameDate?: string | null;
+  targetOpponent?: string | null;
 }) {
   return readCached(
     buildCacheKey([
@@ -1099,6 +1160,9 @@ export async function fetchSimilarCandidatesPayload({
       activeTab,
       activeSportsbook,
       selectedGameDate ?? '',
+      // Part of the cache key: ranking prefers comps who have faced this
+      // opponent, so two opponents are two different answers.
+      targetOpponent ?? '',
     ]),
     SIMILAR_CACHE_MS,
     async () => {
@@ -1126,6 +1190,7 @@ export async function fetchSimilarCandidatesPayload({
           activeSportsbook,
           selectedGameDate: selectedGameDate ?? null,
           mode: 'position',
+          targetOpponent: targetOpponent ?? null,
           limit: 14,
         }) satisfies SimilarPlayerCandidate[],
         similarCandidatesByProp: rankSimilarPlayers({
@@ -1135,6 +1200,7 @@ export async function fetchSimilarCandidatesPayload({
           activeSportsbook,
           selectedGameDate: selectedGameDate ?? null,
           mode: 'prop',
+          targetOpponent: targetOpponent ?? null,
           limit: 12,
         }) satisfies SimilarPlayerCandidate[],
       };

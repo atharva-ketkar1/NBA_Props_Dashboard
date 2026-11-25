@@ -2,8 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Player, SimilarPlayerCandidate, SimilarPlayersMode, SportsbookId } from '../types';
 import { buildSimilarPlayersDataset } from '../utils/similarPlayers';
-import { LIVE_SEASON } from '../constants';
+import { LIVE_SEASON, teamNickname } from '../constants';
 import { PanelSeasonSelect } from './PanelSeason';
+import { formatBreakEvenLabel, hitRateToneClass } from '../utils/betMath';
 
 interface SimilarPlayersProps {
    player?: Player | null;
@@ -20,7 +21,26 @@ interface SimilarPlayersProps {
    onPanelSeasonChange?: (season: string) => void;
 }
 
-const PAGE_SIZE = 8;
+/**
+ * Row sizing.
+ *
+ * The panel is `h-full` inside a grid, so its height changes with the viewport,
+ * which stat tab is open, and whether the filters drawer is pushing the layout.
+ * A fixed page size therefore either leaves dead space at the bottom or pushes
+ * the pagination out of view. These let the table ask how many rows actually
+ * fit and render exactly that many.
+ *
+ * ROW_HEIGHT_PX tracks the row markup below: py-2.5 (20px) + a ~16px xs line +
+ * 1px bottom border, plus the 4px space-y-1 gap. Measured once from a real row
+ * at runtime where possible, so a style change cannot silently desync it.
+ */
+const FALLBACK_ROW_HEIGHT_PX = 41;
+const MIN_ROWS = 3;
+// Caps how tall the table can get on a large monitor. 16 rows x ~41px is ~656px
+// of rows, which fills a ~980px panel without leaving dead space under it;
+// beyond that the second page takes over rather than the table running on.
+const MAX_ROWS = 16;
+const DEFAULT_PAGE_SIZE = 8;
 const MAX_PAGES = 2;
 
 function formatSignedValue(value: number, digits = 1) {
@@ -54,6 +74,33 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    const [page, setPage] = useState(0);
 
    const activeCandidates = mode === 'prop' ? similarCandidatesByProp : similarCandidatesByPosition;
+   // How many rows fit in the box right now. Measured rather than assumed --
+   // see the note on ROW sizing above.
+   const rowsAreaRef = React.useRef<HTMLDivElement | null>(null);
+   const rowProbeRef = React.useRef<HTMLDivElement | null>(null);
+   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+   useEffect(() => {
+      const area = rowsAreaRef.current;
+      if (!area || typeof ResizeObserver === 'undefined') return undefined;
+
+      const recompute = () => {
+         const available = area.clientHeight;
+         // 0 while the panel is in a `hidden` mobile view. Keep the last good
+         // value rather than collapsing the table to MIN_ROWS behind the scenes.
+         if (!available) return;
+         const probe = rowProbeRef.current?.getBoundingClientRect().height;
+         const rowHeight = probe && probe > 8 ? probe + 4 : FALLBACK_ROW_HEIGHT_PX;
+         const fits = Math.floor(available / rowHeight);
+         setPageSize(Math.max(MIN_ROWS, Math.min(MAX_ROWS, fits)));
+      };
+
+      recompute();
+      const observer = new ResizeObserver(recompute);
+      observer.observe(area);
+      return () => observer.disconnect();
+   }, []);
+
    const dataset = useMemo(() => buildSimilarPlayersDataset({
       player,
       players,
@@ -61,30 +108,48 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       activeTab,
       activeSportsbook,
       targetOpponent,
-      rowLimit: PAGE_SIZE * MAX_PAGES,
-   }), [activeCandidates, activeSportsbook, activeTab, player, players, targetOpponent]);
+      rowLimit: pageSize * MAX_PAGES,
+   }), [activeCandidates, activeSportsbook, activeTab, player, players, targetOpponent, pageSize]);
 
    useEffect(() => {
       setPage(0);
-   }, [mode, player?.id, activeTab, activeSportsbook, targetOpponent, dataset.rows.length]);
+   }, [mode, player?.id, activeTab, activeSportsbook, targetOpponent, dataset.rows.length, pageSize]);
 
    const pagedRows = useMemo(
-      () => dataset.rows.slice(0, PAGE_SIZE * MAX_PAGES),
-      [dataset.rows],
+      () => dataset.rows.slice(0, pageSize * MAX_PAGES),
+      [dataset.rows, pageSize],
    );
 
-   const pageCount = Math.max(1, Math.min(MAX_PAGES, Math.ceil(pagedRows.length / PAGE_SIZE)));
+   const pageCount = Math.max(1, Math.min(MAX_PAGES, Math.ceil(pagedRows.length / pageSize)));
    const currentPage = Math.min(page, pageCount - 1);
-   const visibleRows = pagedRows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+   const visibleRows = pagedRows.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+   // The two modes now mean genuinely different things, so the copy says which
+   // is which. Previously both mixed scoring level into the ranking, so "By
+   // Position" returned players who produced a similar number of points rather
+   // than players who play alike, and the distinction was mostly cosmetic.
    const modeDescription = mode === 'prop'
-      ? `Closest current lines plus matching production profile, then filtered to past games${targetOpponent ? ` vs ${targetOpponent}` : ''}.`
-      : `Closest position archetypes, then filtered by line, role profile, and past games${targetOpponent ? ` vs ${targetOpponent}` : ''}.`;
+      ? `Players who play alike and are currently priced near this line.`
+      : `Players with the closest playstyle — size, shot mix and role, independent of how much they score.`;
+   // Comps that have already faced tonight's opponent are ranked first, because
+   // the table below only shows games against that opponent. Saying so stops
+   // the list looking arbitrary when a very similar player is absent from it.
+   // With the hard filter in place, every comp shown has faced this opponent --
+   // so the note states the rule rather than reporting a ratio.
+   const opponentNote = targetOpponent
+      ? `Only comps who have already played ${teamNickname(targetOpponent)} are shown, since the table is their games against ${teamNickname(targetOpponent)}.`
+      : null;
    const ppHistoryUnavailable = activeSportsbook === 'pp';
    const summary = dataset.summary;
    const candidatePreview = dataset.candidateNames.join(', ');
    const avgDiffColor = summary.total === 0 ? 'text-white' : summary.avgDiff >= 0 ? 'text-green500' : 'text-red500';
    const avgDiffPercentColor = summary.total === 0 ? 'text-white' : summary.avgDiffPercent >= 0 ? 'text-green500' : 'text-red500';
-   const hitRateColor = summary.total === 0 ? 'text-white' : summary.hitRate >= 50 ? 'text-green500' : 'text-red500';
+   // No odds here: these are historical closing LINES for comparable players,
+   // and the archive does not carry each row's price. So this falls back to
+   // -110 (52.4%) rather than the 50% bar it used to use, which coloured a
+   // losing hit rate green.
+   const hitRateColor = summary.total === 0
+      ? 'text-white'
+      : hitRateToneClass(summary.hitRate);
    const rowsMissingHistoricalLine = dataset.rows.filter((row) => !row.hasHistoricalLine).length;
    const showLoadingState = activeSeason === LIVE_SEASON
       && Boolean(player)
@@ -116,6 +181,24 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
       }
 
       if (!activeCandidates.length) {
+         // Reachable now in a way it was not before: comps are hard-filtered to
+         // players who have already faced this opponent, so early in a season a
+         // genuinely similar player may simply not have played them yet. Say
+         // that specifically rather than "no comparables found", which would
+         // read as a data problem.
+         if (targetOpponent) {
+            return (
+               <div className="flex-1 flex flex-col items-center justify-center text-center px-6 py-10 gap-1">
+                  <span className="text-sm text-gray-400">
+                     No similar player has played {teamNickname(targetOpponent)} yet this season.
+                  </span>
+                  <span className="text-xs text-gray-500 max-w-[28rem]">
+                     This panel only compares against the same opponent, so it fills in as
+                     {' '}{teamNickname(targetOpponent)} works through the schedule.
+                  </span>
+               </div>
+            );
+         }
          return (
             <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
                {mode === 'position'
@@ -129,21 +212,21 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
          if (dataset.loadedCandidateCount > 0) {
             return (
                <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
-                  Comparable players were found, but the prefetched histories do not include enough games{targetOpponent ? ` vs ${targetOpponent}` : ''} near the current {dataset.statLabel} number yet.
+                  Comparable players were found, but the prefetched histories do not include enough games{targetOpponent ? ` vs ${teamNickname(targetOpponent)}` : ''} near the current {dataset.statLabel} number yet.
                </div>
             );
          }
 
          return (
             <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
-               Loading comparable-player histories ({dataset.loadedCandidateCount}/{dataset.totalCandidateCount} ready) to replace the placeholder table with real historical lines{targetOpponent ? ` vs ${targetOpponent}` : ''}.
+               Loading comparable-player histories ({dataset.loadedCandidateCount}/{dataset.totalCandidateCount} ready) to replace the placeholder table with real historical lines{targetOpponent ? ` vs ${teamNickname(targetOpponent)}` : ''}.
             </div>
          );
       }
 
       return (
          <div className="flex-1 flex items-center justify-center text-center px-6 py-10 text-sm text-gray-400">
-            Comparable players were found, but there were not enough historical lines{targetOpponent ? ` vs ${targetOpponent}` : ''} near the current {dataset.statLabel} number to build a stable sample.
+            Comparable players were found, but there were not enough historical lines{targetOpponent ? ` vs ${teamNickname(targetOpponent)}` : ''} near the current {dataset.statLabel} number to build a stable sample.
          </div>
       );
    };
@@ -189,7 +272,12 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
          <div className="flex justify-between items-start mb-4 gap-3">
             <div className="min-w-0">
                <div className="flex items-center gap-2 mb-1">
-                  <h3 className="text-sm font-bold text-white">Similar Players</h3>
+                  <h3 className="text-sm font-bold text-white">
+                     Similar Players
+                     {targetOpponent
+                        ? ` ${dataset.statLabel} vs ${teamNickname(targetOpponent)}`
+                        : ''}
+                  </h3>
                   <span
                      className="shrink-0"
                      title="Comps are ranked from the current slate, then historical rows are filtered to the selected player's opponent and past lines that were close to the current number."
@@ -213,6 +301,9 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                   {modeDescription}
                   {candidatePreview ? ` Top comps: ${candidatePreview}.` : ''}
                 </p>
+               {opponentNote && (
+                  <p className="text-[11px] text-gray-500 mt-1 max-w-[34rem]">{opponentNote}</p>
+               )}
                {ppHistoryUnavailable ? (
                   <p className="text-[11px] text-gray-500 mt-1">
                      PrizePicks comparable rows use current PP lines only. Archived closing-line history is unavailable in v1.
@@ -257,9 +348,17 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
             </div>
             <div className="text-center">
                <div className="text-[10px] text-fgSubtle font-bold uppercase mb-1 whitespace-nowrap">Hit Rate</div>
-               <div className={`${hitRateColor} font-semibold font-chakra text-lg whitespace-nowrap`}>
+               <div
+                  className={`${hitRateColor} font-semibold font-chakra text-lg whitespace-nowrap`}
+                  title={`Green above ${formatBreakEvenLabel(null)}, not 50% -- at -110 a prop needs 52.4% to break even`}
+               >
                   {summary.total ? `${summary.hitRate}% (${summary.hits}/${summary.total})` : '--'}
                </div>
+               {summary.total > 0 && (
+                  <div className="text-[9px] text-fgSubtle mt-0.5 whitespace-nowrap tabular-nums">
+                     vs 52.4% to break even
+                  </div>
+               )}
             </div>
          </div>
 
@@ -267,8 +366,8 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
             renderPriorSeasonUnavailable()
          ) : showLoadingState ? renderLoadingState() : dataset.rows.length > 0 ? (
             <>
-               <div className="w-full overflow-x-auto custom-scrollbar pb-2">
-                  <div className="min-w-[600px]">
+               <div className="w-full flex-1 min-h-0 flex flex-col overflow-x-auto custom-scrollbar pb-2">
+                  <div className="min-w-[600px] flex-1 min-h-0 flex flex-col">
                      <div className="grid grid-cols-[1fr_1fr_2fr_1fr_1fr_1fr] text-[10px] text-fgSubtle font-bold uppercase mb-3 px-2">
                         <div>Date</div>
                         <div>Opp</div>
@@ -278,11 +377,31 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                         <div className="text-right">Diff %</div>
                      </div>
 
-                     <div className="space-y-1">
-                        {visibleRows.map((game) => (
-                           <div key={`${game.playerId}-${game.gameDate}-${game.line}-${game.result}`} className="grid grid-cols-[1fr_1fr_2fr_1fr_1fr_1fr] text-xs items-center py-2.5 px-2 hover:bg-bgElevation1 rounded transition-colors border-b border-borderMedium/40 last:border-0">
+                     {/*
+                        `flex-1 min-h-0 overflow-y-auto` is load-bearing, not
+                        cosmetic. This box is measured to decide how many rows to
+                        render, so if its own content could stretch it, rendering
+                        a row would grow the box, which would fit another row,
+                        which would grow it again. Taking the height from the
+                        panel and letting content scroll breaks that loop.
+                        Scroll rather than clip, so that on a panel too short for
+                        even MIN_ROWS the last row is reachable instead of being
+                        cut in half. In the normal case exactly as many rows are
+                        rendered as fit, so no scrollbar ever appears.
+                      */}
+                     <div ref={rowsAreaRef} className="space-y-1 flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+                        {visibleRows.map((game, rowIndex) => (
+                           <div
+                              key={`${game.playerId}-${game.gameDate}-${game.line}-${game.result}`}
+                              ref={rowIndex === 0 ? rowProbeRef : undefined}
+                              className="grid grid-cols-[1fr_1fr_2fr_1fr_1fr_1fr] text-xs items-center py-2.5 px-2 hover:bg-bgElevation1 rounded transition-colors border-b border-borderMedium/40 last:border-0"
+                           >
                               <div className="text-gray-300 font-medium">{game.date}</div>
-                              <div className="text-gray-300">{game.opponent ?? 'N/A'}</div>
+                              <div className="text-gray-300 truncate pr-2">
+                                 {targetOpponent
+                                    ? teamNickname(game.team)
+                                    : (game.opponent ?? 'N/A')}
+                              </div>
                               <div className="text-white font-medium truncate pr-2">{game.player}</div>
                               <div className="text-center">
                                  <span className={`px-1.5 py-0.5 rounded font-semibold font-chakra tracking-[-0.01em] border text-[11px] ${game.line === null ? 'text-gray-300 bg-bgElevation1 border-borderMedium/60' : 'text-white bg-borderMedium border-borderMuted'}`}>

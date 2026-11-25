@@ -78,6 +78,69 @@ def _is_retryable_players_upsert_error(error) -> bool:
 # DB HELPERS
 # ==========================================
 
+def _opponents_from_log(game_log):
+    """Distinct opponent tricodes from a player's game log.
+
+    MATCHUP is 'HOU vs. PHX' or 'HOU @ PHX', so the opponent is the last token
+    either way. Sorted for a stable fingerprint: this field feeds
+    `_row_fingerprint`, and an unstable ordering would make every player look
+    changed on every run and defeat the skip-unchanged-rows optimisation.
+    """
+    opponents = set()
+    for game in game_log or []:
+        matchup = str((game or {}).get("MATCHUP") or "").strip()
+        if not matchup:
+            continue
+        token = matchup.split()[-1].strip().upper()
+        if token and token.isalpha() and len(token) <= 4:
+            opponents.add(token)
+    return sorted(opponents)
+
+
+# Columns added after the table shipped; see the guard below for why that matters.
+MEASUREMENT_COLUMNS = ("height_inches", "weight_lbs", "opponents_played")
+
+
+def _without_measurements(chunk):
+    return [
+        {k: v for k, v in row.items() if k not in MEASUREMENT_COLUMNS}
+        for row in chunk
+    ]
+
+
+def _is_missing_measurement_column(error):
+    """True when PostgREST rejected the write for an unknown measurement column.
+
+    PostgREST answers an unknown column with an error, not by ignoring it, so
+    this has to be detected rather than hoped away.
+    """
+    message = str(error).lower()
+    if not any(column in message for column in MEASUREMENT_COLUMNS):
+        return False
+    return (
+        ("column" in message and "does not exist" in message)
+        or "could not find the" in message
+        or "schema cache" in message
+    )
+
+
+def _opt_number(value):
+    """Native float, or None for NaN/missing.
+
+    A left-merge leaves NaN for players absent from the index response, and NaN
+    is not valid JSON -- it serialises to the bare token `NaN`, which
+    `JSON.parse` rejects outright. None is the honest representation of "not
+    listed" and survives the trip to both master_feed.json and Supabase.
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if number != number else number  # NaN is the only x != x
+
+
 def _safe_json(obj):
     """
     Recursively cast numpy scalar types to native Python types.
@@ -123,6 +186,9 @@ def upsert_players_to_db(master_data: dict):
             'name':                        data['name'],
             'team':                        data['team'],
             'position':                    data.get('position'),
+            'height_inches':               data.get('height_inches'),
+            'weight_lbs':                  data.get('weight_lbs'),
+            'opponents_played':            data.get('opponents_played') or [],
             'stats':                       _safe_json(data.get('stats', {})),
             'game_log':                    _safe_json(data.get('game_log', [])),
             'shooting_zones':              _safe_json(data.get('shooting_zones')),
@@ -165,16 +231,32 @@ def upsert_players_to_db(master_data: dict):
     # (not silently marked "synced") on the next run.
     chunk_size = 25
     failed_ids = set()
+    # Set once if the measurement columns turn out not to exist yet, so the
+    # remaining chunks skip straight to the lean payload instead of each
+    # burning a failed round trip to learn the same thing.
+    drop_measurements = False
     for i in range(0, len(changed_rows), chunk_size):
         chunk = changed_rows[i:i + chunk_size]
         last_error = None
         for attempt in range(1, 4):
             try:
-                sb.table('players').upsert(chunk).execute()
+                payload = _without_measurements(chunk) if drop_measurements else chunk
+                sb.table('players').upsert(payload).execute()
                 last_error = None
                 break
             except Exception as e:
                 last_error = e
+                # Deploying before applying 20261124_player_measurements.sql
+                # would otherwise fail EVERY chunk on EVERY run, which stops the
+                # players table syncing altogether -- a much worse outcome than
+                # losing height and weight. Strip them and carry on.
+                if not drop_measurements and _is_missing_measurement_column(e):
+                    drop_measurements = True
+                    logger.warning(
+                        "players.height_inches/weight_lbs not present; upserting "
+                        "without them. Apply supabase/migrations/"
+                        "20261124_player_measurements.sql to store player size.")
+                    continue
                 if attempt >= 3 or not _is_retryable_players_upsert_error(e):
                     break
                 time.sleep(1.5 * attempt)
@@ -688,6 +770,19 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
             "name": row['PLAYER_NAME'],
             "team": team,
             "position": exact_pos,
+            # From the same playerindex response POSITION comes from, so these
+            # cost no extra request. None when unlisted -- never imputed, since
+            # a league-average height would make an unknown player look like a
+            # typical one to the comparable-player ranking.
+            "height_inches": _opt_number(row.get("HEIGHT_INCHES")),
+            "weight_lbs": _opt_number(row.get("WEIGHT_LBS")),
+            # Which teams this player has already faced. Precomputed because
+            # the comparable-player panel ranks comps who have played tonight's
+            # opponent ahead of those who have not -- and the DB-mode
+            # similarity pool deliberately does not fetch game logs, so it has
+            # no other way to answer the question. A list of <=30 tricodes is
+            # a few hundred bytes against a season of logs.
+            "opponents_played": _opponents_from_log(player_log_items),
             "stats": season_stats,
             "game_log": player_log_items, 
             "shooting_zones": shooting_data.get(row['PLAYER_NAME'], None),

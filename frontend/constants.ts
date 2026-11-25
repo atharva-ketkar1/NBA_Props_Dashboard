@@ -66,6 +66,28 @@ export const SIMILAR_GAMES: SimilarPlayerGame[] = [
 // ... existing code ...
 
 // Map of Tricode to NBA Team ID
+/**
+ * Tricode -> nickname, for places that read better as "Nuggets" than "DEN".
+ *
+ * Used by the comparable-player table, where every row is a game against the
+ * same opponent, so the useful column is which team the COMP plays for.
+ */
+export const TEAM_NICKNAMES: Record<string, string> = {
+  ATL: 'Hawks', BOS: 'Celtics', BKN: 'Nets', CHA: 'Hornets', CHI: 'Bulls',
+  CLE: 'Cavaliers', DAL: 'Mavericks', DEN: 'Nuggets', DET: 'Pistons',
+  GSW: 'Warriors', HOU: 'Rockets', IND: 'Pacers', LAC: 'Clippers',
+  LAL: 'Lakers', MEM: 'Grizzlies', MIA: 'Heat', MIL: 'Bucks',
+  MIN: 'Timberwolves', NOP: 'Pelicans', NYK: 'Knicks', OKC: 'Thunder',
+  ORL: 'Magic', PHI: '76ers', PHX: 'Suns', POR: 'Trail Blazers',
+  SAC: 'Kings', SAS: 'Spurs', TOR: 'Raptors', UTA: 'Jazz', WAS: 'Wizards',
+};
+
+/** Nickname when known, otherwise the tricode itself. Never blank. */
+export function teamNickname(tricode?: string | null) {
+  const key = String(tricode ?? '').trim().toUpperCase();
+  return TEAM_NICKNAMES[key] ?? (key || 'N/A');
+}
+
 export const TEAM_IDS: Record<string, number> = {
   "ATL": 1610612737,
   "BOS": 1610612738,

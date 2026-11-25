@@ -306,16 +306,27 @@ const PlayerRow = ({
                 </div>
             </div>
 
-            {/* Plus Button / Active Indicator */}
-            <button className={`w-4 h-4 rounded-xxs flex items-center justify-center ${isPending || isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 hover:bg-yellow-400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}>
+            {/*
+              Status indicator, not a control. It never had an onClick: the whole
+              row is the button (see `onClick` on the wrapper above), and this
+              only ever worked by click bubbling. A <button> here is a nested
+              interactive element -- it takes its own tab stop and announces
+              itself as a second action to a screen reader, for an affordance
+              that does not exist. Rendered as a span so it is decorative in
+              markup as well as in fact.
+            */}
+            <span
+                aria-hidden="true"
+                className={`w-4 h-4 rounded-xxs flex items-center justify-center ${isPending || isActive ? 'bg-blue500 text-white' : (isPlusYellow ? 'bg-yellow400 text-black' : 'bg-red500 text-white')} self-start mt-0.5`}
+            >
                 {isPending ? (
-                    <div className="w-2.5 h-2.5 rounded-full border-2 border-white/40 border-t-white animate-spin" aria-hidden="true" />
+                    <div className="w-2.5 h-2.5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
                 ) : isActive ? (
                     <LockOpen className="w-3 h-3" />
                 ) : (
                     <Plus className="w-3 h-3 font-bold" strokeWidth={4} />
                 )}
-            </button>
+            </span>
         </div>
     )
 }

@@ -46,6 +46,9 @@ async function handleGet(request: Request) {
   const selectedGameDate = parseIsoDate(requestUrl.searchParams.get('selectedGameDate'));
   const activeTab = (requestUrl.searchParams.get('activeTab') ?? 'Points').slice(0, 64);
   const activeSportsbook = requestUrl.searchParams.get('activeSportsbook') ?? 'dk';
+  // Tricode, so a tight whitelist rather than free text reaching the ranker.
+  const rawOpponent = (requestUrl.searchParams.get('targetOpponent') ?? '').trim().toUpperCase();
+  const targetOpponent = /^[A-Z]{2,4}$/.test(rawOpponent) ? rawOpponent : null;
 
   if (!playerId) {
     return errorResponse(400, 'A valid playerId is required.');
@@ -61,6 +64,7 @@ async function handleGet(request: Request) {
       activeTab,
       playerId,
       selectedGameDate,
+      targetOpponent,
     });
 
     return jsonResponse(payload, {

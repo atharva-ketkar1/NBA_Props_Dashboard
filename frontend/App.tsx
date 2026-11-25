@@ -44,6 +44,7 @@ import {
 } from './utils/propResolution';
 import { fetchApiJson } from './utils/network';
 import { rankSimilarPlayers } from './utils/similarPlayers';
+import type { BaseStatMode } from './utils/filterOverlays';
 import {
   ArchiveInjuryCoverage,
   fetchDashboardAccess,
@@ -874,6 +875,10 @@ function App() {
   const [customLineValue, setCustomLineValue] = useState<number | null>(null);
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
+  // Whether an overlay's comparison line reads as the season mean or the median
+  // of the games shown. Prop distributions are skewed and bounded at zero, so
+  // one big night can pull the mean above the number a player typically hits.
+  const [baseStat, setBaseStat] = useState<BaseStatMode>('average');
   const [filterGameCount, setFilterGameCount] = useState<number>(19);
   const hasManualFilterGameCountRef = useRef(false);
   const [activeSeason, setActiveSeason] = useState<SeasonLabel>(LIVE_SEASON);
@@ -1958,7 +1963,10 @@ function App() {
     };
   }, [USE_DB, displayPlayer?.id, activeStatKey, resolvedSelectedGameDate]);
   const isSelectionPending = Boolean(pendingSelection);
-  const similarRankingKey = `${displayPlayer?.id ?? 'none'}:${activeSeason}:${activeTab}:${activeSportsbook}:${resolvedSelectedGameDate ?? ''}`;
+  // The opponent is part of the key because comp RANKING now depends on it:
+  // comps who have already faced tonight's opponent are ranked first, so a
+  // change of opponent invalidates the candidate list, not just the rows.
+  const similarRankingKey = `${displayPlayer?.id ?? 'none'}:${activeSeason}:${activeTab}:${activeSportsbook}:${resolvedSelectedGameDate ?? ''}:${displayPlayerOpponent ?? ''}`;
   const areSimilarCandidatesCurrent = similarCandidatesKey === similarRankingKey;
   const readySimilarCandidatesByProp = areSimilarCandidatesCurrent ? similarCandidatesByProp : [];
   const readySimilarCandidatesByPosition = areSimilarCandidatesCurrent ? similarCandidatesByPosition : [];
@@ -2107,6 +2115,7 @@ function App() {
                 activeTab,
                 activeSportsbook,
                 resolvedSelectedGameDate,
+                displayPlayerOpponent,
               )
               : {
                 similarCandidatesByProp: rankSimilarPlayers({
@@ -2116,6 +2125,7 @@ function App() {
                   activeSportsbook,
                   selectedGameDate: resolvedSelectedGameDate,
                   mode: 'prop',
+                  targetOpponent: displayPlayerOpponent,
                   limit: 12,
                 }),
                 similarCandidatesByPosition: rankSimilarPlayers({
@@ -2125,6 +2135,7 @@ function App() {
                   activeSportsbook,
                   selectedGameDate: resolvedSelectedGameDate,
                   mode: 'position',
+                  targetOpponent: displayPlayerOpponent,
                   limit: 14,
                 }),
               };
@@ -2343,6 +2354,7 @@ function App() {
                 customLine={customLineValue}
                 onCustomLineChange={setCustomLineValue}
                 activeFilterOverlay={activeFilter}
+                baseStat={baseStat}
                 activeTeammateFilter={displayActiveTeammateFilter}
                 isFiltersOpen={isFiltersOpen}
                 historicalGameCount={appliedHistoricalGameCount}
@@ -2359,6 +2371,8 @@ function App() {
                 onClose={() => setIsFiltersOpen(false)}
                 activeFilter={activeFilter}
                 onFilterChange={setActiveFilter}
+                baseStat={baseStat}
+                onBaseStatChange={setBaseStat}
                 player={displayPlayer}
                 teammateInjuryCards={displayTeammateInjuryCards}
                 teamInjuryReport={displayTeamInjuryReport}

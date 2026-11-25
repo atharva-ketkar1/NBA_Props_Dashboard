@@ -1,5 +1,5 @@
 import React from 'react';
-import { Copy, Info, Menu, TrendingUp, User } from 'lucide-react';
+import { Info, Menu, TrendingUp } from 'lucide-react';
 import { ASSETS_BASE } from '../utils/config';
 import { GlossaryModal } from './GlossaryModal';
 import { createPortal } from 'react-dom';
@@ -174,17 +174,17 @@ export const TopNav: React.FC<TopNavProps> = ({
                         <Info className="h-5 w-5" />
                     </button>
 
-                    <button type="button" className="group relative flex items-center gap-2 rounded-lg border border-borderMedium bg-bgCanvas px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-borderMedium">
-                        <Copy className="h-3.5 w-3.5" />
-                        <span className="hidden sm:inline">Check My Prop</span>
-                        <span className="absolute -right-2 -top-2 rounded bg-green500 px-1.5 py-0.5 text-[9px] font-extrabold leading-none text-neutral950 shadow-sm">
-                            NEW
-                        </span>
-                    </button>
+                    {/*
+                      Removed: a "Check My Prop" button carrying a NEW badge, and
+                      a profile avatar. Neither had an onClick, and there is no
+                      paste-a-prop parser and no auth, watchlist or saved-picks
+                      code anywhere in the app to hang them on. A disabled-looking
+                      control is a dead end; one advertised as NEW that does
+                      nothing when clicked is worse, because it reads as broken
+                      rather than unbuilt.
 
-                    <button type="button" className="flex h-9 w-9 items-center justify-center rounded-full border border-borderMedium bg-bgCanvas text-gray-400 transition-colors hover:bg-borderMedium hover:text-white">
-                        <User className="h-5 w-5" />
-                    </button>
+                      Restore them in the same commit as the feature behind them.
+                    */}
                 </div>
             </div>
             {showGlossary && createPortal(

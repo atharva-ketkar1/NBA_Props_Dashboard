@@ -118,6 +118,21 @@ export interface Player {
   name: string;
   team: string; // Tricode like 'GSW'
   position?: string; // Not always in master_feed, might be in 'stats'
+  /**
+   * Listed height in inches and weight in pounds, from the same NBA
+   * `playerindex` response POSITION comes from. Optional because the row may
+   * predate the column, and null rather than imputed when a player is
+   * unlisted -- see utils/similarPlayers.ts, which drops the size term and
+   * renormalises instead of treating an unknown player as league-average.
+   */
+  height_inches?: number | null;
+  weight_lbs?: number | null;
+  /**
+   * Tricodes this player has already faced this season, emitted by the
+   * aggregator so comparable-player ranking can prefer comps with a game
+   * against tonight's opponent without fetching every candidate's game log.
+   */
+  opponents_played?: string[] | null;
   stats: PlayerStats;
   game_log: GameLog[];
   props: PlayerProps;
@@ -283,6 +298,13 @@ export interface SimilarPlayerCandidate {
   currentAverage: number;
   similarityScore: number;
   detailLoaded: boolean;
+  /**
+   * Whether this comp has already played tonight's opponent. null when no
+   * opponent is in play. Comps that have are ranked first, because the panel's
+   * table only shows games against that opponent -- one that has not faced
+   * them contributes no rows at all.
+   */
+  facedTargetOpponent?: boolean | null;
 }
 
 export interface SimilarPlayersSummary {

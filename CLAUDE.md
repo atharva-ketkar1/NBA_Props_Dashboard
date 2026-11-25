@@ -23,9 +23,26 @@ python3 -m pytest tests/test_prior_season_blend.py -q        # single file
 python3 -m pytest tests/test_prior_season_blend.py -q -k combo_stat_sums_only_present_components   # single case
 ```
 
-There is no `pytest.ini`/`pyproject.toml` and no `conftest.py`; the import path works
-only because of the `sys.path` preamble in each test file. Keep that preamble when
-adding a test.
+There is no `pytest.ini`/`pyproject.toml`. `backend/conftest.py` puts `backend/` on
+`sys.path`, so a new test file no longer needs the four-line preamble the existing 39
+carry (those stay; they are harmless).
+
+`conftest.py` also holds an **autouse** fixture that every test gets whether it asks or
+not, because both halves of a real bug lived in code a test reaches incidentally:
+
+- It redirects the `DATA_DIR` of `cron_closing_lines`, `master_cron` and `run_pipeline`
+  to a tmp dir. `tests/test_odds_shaping_dates.py` calls the real
+  `scrape_and_shape_odds()`, whose `persist_raw_odds_csvs` was overwriting
+  `data/current/{draftkings,fanduel}.csv` with stubs.
+- It points `EDGE_SCORE_ODDS_DIR` at that tmp dir with freshly-written stubs, because
+  five `tests/test_book_pause.py` cases *read* those CSVs through
+  `book_toggles.stale_books()`, which stats their mtime against a 90-minute bound — so
+  they used to fail on a fresh clone and pass only within 90 minutes of a pipeline run.
+
+`utils/odds_csv.write_odds_csv` raises if a test tries to write anywhere inside the real
+`backend/data` tree; opt out with `ODDS_CSV_ALLOW_REAL_WRITES=1`. A test that needs to
+control odds freshness itself sets `EDGE_SCORE_ODDS_DIR` in its own `setUp`, which runs
+inside the fixture and so wins (see `BookFreshnessTests`).
 
 ### Frontend (from `frontend/`)
 
@@ -36,6 +53,7 @@ npm run dev        # NOTE: predev runs backend/scripts/pull_vm_data.sh, which rs
 npm run build
 npx tsc --noEmit   # typechecks both the app and frontend/api/; run before any push
 python3 scripts/verify_design_tokens.py   # diffs Tailwind tokens against propsmadness.com; exits non-zero on drift
+npx vite-node scripts/verify_similar_players.ts   # comp-ranking recall vs hand-labelled sets; exits non-zero on regression
 ```
 
 ### Ops
@@ -308,6 +326,69 @@ The frontend switches on `VITE_USE_DB`:
 
 `USE_DB` is read independently in `App.tsx`, `Sidebar.tsx`, and `BarChart.tsx`, so a mode-dependent
 change usually needs touching more than one of them.
+
+### Comparable players rank on archetype, not production
+
+`utils/similarPlayers.ts` scores players on a **scale-free** vector -- per-36 rates, shot
+mix and share-of-production, the 11-dim play-type distribution, and listed height/weight --
+then z-scores every feature against the league and takes a weighted Euclidean distance.
+Points per game carries a deliberately low weight.
+
+That is a correction, not a preference. The previous version averaged
+`clamp(stat / magicDenominator)` terms three times over, which compressed the whole league
+into a 0.039-0.084 band and let the tiebreak decide the answer -- and the tiebreak was
+production level, because `scoringLoad` alone held 0.42 of the role weight. Asked for comps
+for a 6'8" combo forward averaging 17.8, it returned Kevin Durant, Paul George, LeBron James
+and a centre: every one within +/-3 points of 17.8, none of them the same kind of player.
+Recall against hand-labelled sets went 10/20 -> 14/20 (archetype) -> 16/20 (production term).
+
+`height_inches` / `weight_lbs` ride along in the NBA `playerindex` response that
+`season_stats_scrape.py` already fetches for `POSITION` and used to discard, so size costs
+**no extra request**. It is the largest single contributor to the ranking. A player with no
+listed size has the term omitted and the weights renormalised -- never imputed, because a
+league-average height would make an unknown player look like a typical one.
+
+The two tabs mean different things: **By Position** is pure archetype (no line, no scoring
+level); **By Prop** is archetype plus line proximity.
+
+**Opponent is a HARD FILTER, and this is the panel's actual point.** "Similar players"
+means similar players measured against the team this prop is going up against. The table
+shows only games vs that opponent, so a comp who has never faced them is not a weaker comp,
+it is an empty row. `rankSimilarPlayers` takes `targetOpponent` and drops every candidate
+who has not played them. Measured for Alperen Sengun vs Phoenix: 3/12 usable comps before,
+12/12 after, with Jokic 1st and Wembanyama in the top page.
+
+Three things follow from that filter, each of which was wrong until it was applied:
+
+- **No line window.** Against one opponent a comp has one or two games all season, so also
+  requiring their line to be near the target's throws away most of the evidence. It was
+  dropping Wembanyama's 26.5 -> 40 for being 5.0 off a 21.5 line while keeping a backup's
+  20.5. `Diff %` is what makes rows at different line levels comparable.
+- **Rows order by comp quality**, not line proximity, since every row is already against
+  the right team.
+- **The `Opp` column becomes `Team`** (the comp's own club), because the opponent is now
+  constant down the whole table.
+
+`opponents_played` (sorted tricodes, emitted by the aggregator) is what makes that work in
+DB mode, where `PLAYER_SIMILAR_SELECT` deliberately does not fetch game logs. It is sorted
+because it feeds `_row_fingerprint`, and unstable ordering would mark every player changed
+on every run.
+
+**`productionGap` is a first-class scoring term, not a feature.** The archetype vector is
+scale-free on purpose, but taken alone it made a 22-minute backup look like a comp for a
+25.6%-usage hub -- Sengun's top eight included a 6.5-line centre. Raising the `usage`
+feature weight cannot fix that: one feature out of ~33 is ~7% of the distance however it is
+weighted. So production enters as its own term sized against `positionDistance`, using the
+book's line when both players have one and per-36 scoring otherwise. Coefficient 0.60 is the
+middle of a measured plateau (0.45-0.80 all score 16/20; 0.30 and 1.00 both score 15). This
+is the correction to an over-correction: the original bug was production *dominating*, and
+removing it entirely was also wrong.
+
+Keep `scripts/verify_similar_players.ts` green -- it carries per-target floors plus the
+opponent-anchoring case, so a change that helps wings at the cost of bigs, or that
+re-breaks opponent anchoring, fails rather than passing quietly. It folds diacritics when
+matching names, because the feed stores `Nikola Jokić` and a plain match on `Jokic` finds
+nothing and reports a false regression.
 
 Charts are hand-written SVG (`components/BarChart.tsx`), not a chart library. Tailwind comes from
 the CDN with its config embedded in `index.html`; `utils/TAILWIND_REFERENCE.md` records the

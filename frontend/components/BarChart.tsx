@@ -11,6 +11,7 @@ import {
     formatOverlayLegend,
     getOverlayFilterDefinition,
 } from '../utils/filterOverlays';
+import type { BaseStatMode } from '../utils/filterOverlays';
 import { fetchApiJson } from '../utils/network';
 import { fetchDashboardGames } from '../utils/dashboardApi';
 import { STAT_LABELS } from '../utils/statLabels';
@@ -24,6 +25,7 @@ interface BarChartProps {
     customLine?: number | null;
     onCustomLineChange?: (line: number | null) => void;
     activeFilterOverlay?: string | null;
+    baseStat?: BaseStatMode;
     activeTeammateFilter?: ActiveTeammateFilter | null;
     isFiltersOpen?: boolean;
     historicalGameCount?: number;
@@ -107,7 +109,7 @@ const mergeActionNetworkMarkets = (
     });
 };
 
-export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, activeTeammateFilter, isFiltersOpen, historicalGameCount, activeSeason }) => {
+export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSportsbook, customLine, onCustomLineChange, activeFilterOverlay, baseStat = 'average', activeTeammateFilter, isFiltersOpen, historicalGameCount, activeSeason }) => {
     const statKey = STAT_LABELS[activeTab] || 'PTS';
     const chartMode = CHART_MODE_FILTERS.has(activeFilterOverlay ?? '') ? activeFilterOverlay : null;
     const overlayDefinition = useMemo(
@@ -281,7 +283,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         return undefined;
     }, [chartPlayer]);
 
-    const { chartData, lineValue, graphAvgSecondary, comparisonAvgSecondary, isRankOverlay, isBinaryOverlay, historicalSampleCount } = useMemo(() => {
+    const { chartData, lineValue, graphAvgSecondary, comparisonAvgSecondary, isRankOverlay, historicalSampleCount } = useMemo(() => {
         if (!chartPlayer || !chartPlayer.game_log) {
             return {
                 chartData: [],
@@ -289,7 +291,6 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                 graphAvgSecondary: 0,
                 comparisonAvgSecondary: null,
                 isRankOverlay: false,
-                isBinaryOverlay: false,
                 historicalSampleCount: 0,
             };
         }
@@ -430,6 +431,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             upcomingGame,
             upcomingOpponent,
             graphAverage: graphAvgSecondary,
+            baseStat,
         }) ?? null;
 
         const latestSeasonGame = chronologicalSeasonGames[chronologicalSeasonGames.length - 1] ?? null;
@@ -498,10 +500,9 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             graphAvgSecondary,
             comparisonAvgSecondary,
             isRankOverlay: overlayDefinition?.kind === 'rank',
-            isBinaryOverlay: overlayDefinition?.kind === 'binary',
             historicalSampleCount: log.length,
         };
-    }, [chartPlayer, statKey, activeSportsbook, activeTeammateFilter, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile]);
+    }, [chartPlayer, statKey, activeSportsbook, activeTeammateFilter, scheduleData, overlayDefinition, chartMode, isFiltersOpen, historicalGameCount, activeSeason, isMobile, baseStat]);
 
     if (!player) return null;
 
@@ -553,9 +554,6 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
         if (isRankOverlay) {
             minSecondary = 1;
             maxSecondary = 30;
-        } else if (isBinaryOverlay) {
-            minSecondary = 0;
-            maxSecondary = 1;
         } else {
             let rawMin = Math.min(...secondaryValues, 0);
             let rawMax = Math.max(...secondaryValues, 0);
@@ -1150,7 +1148,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     <div className="flex items-center gap-1.5 flex-1 justify-start">
                         <div className="w-2.5 h-2.5 bg-blue500 rounded-2xs" />
                         <span className="text-blue500 font-bold text-[9px] tracking-widest uppercase whitespace-nowrap">
-                            {overlayDefinition.label} {formatOverlayLegend(overlayDefinition, graphAvgSecondary, comparisonAvgSecondary)}
+                            {overlayDefinition.label} {formatOverlayLegend(overlayDefinition, graphAvgSecondary, comparisonAvgSecondary, baseStat)}
                         </span>
                     </div>
                 ) : (

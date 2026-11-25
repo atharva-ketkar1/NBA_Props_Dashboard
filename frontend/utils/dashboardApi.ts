@@ -132,12 +132,16 @@ export function fetchDashboardSimilar(
   activeTab: string,
   activeSportsbook: SportsbookId,
   selectedGameDate?: string | null,
+  targetOpponent?: string | null,
 ) {
   return fetchAppJson<SimilarResponse>('/api/similar', {
     activeSportsbook,
     activeTab,
     playerId,
     selectedGameDate,
+    // Ranking is opponent-aware, so this is part of the request rather than a
+    // client-side post-filter.
+    targetOpponent,
   });
 }
 

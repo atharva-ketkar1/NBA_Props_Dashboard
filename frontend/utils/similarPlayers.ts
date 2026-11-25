@@ -18,19 +18,6 @@ type SimilarStatContext = {
   secondaryKeys: string[];
 };
 
-type SimilarProfileKey =
-  | 'scoringLoad'
-  | 'playmakingLoad'
-  | 'reboundLoad'
-  | 'spacingLoad'
-  | 'interiorLoad'
-  | 'defensiveActivity'
-  | 'ballPressure'
-  | 'allAround'
-  | 'minutes';
-
-type SimilarProfileFingerprint = Record<SimilarProfileKey, number>;
-
 type SimilarPlayersDataset = {
   rows: SimilarPlayerGame[];
   summary: SimilarPlayersSummary;
@@ -86,136 +73,6 @@ const PLAY_TYPE_KEYS = [
   'Putback',
   'Free Throws',
 ] as const;
-const TAB_TO_PROFILE_WEIGHTS: Record<string, Partial<Record<SimilarProfileKey, number>>> = {
-  Points: {
-    scoringLoad: 0.42,
-    ballPressure: 0.18,
-    spacingLoad: 0.14,
-    minutes: 0.1,
-    playmakingLoad: 0.08,
-    allAround: 0.08,
-  },
-  Assists: {
-    playmakingLoad: 0.48,
-    ballPressure: 0.18,
-    minutes: 0.14,
-    allAround: 0.12,
-    scoringLoad: 0.08,
-  },
-  Rebounds: {
-    reboundLoad: 0.56,
-    interiorLoad: 0.22,
-    minutes: 0.12,
-    allAround: 0.1,
-  },
-  Threes: {
-    spacingLoad: 0.54,
-    scoringLoad: 0.2,
-    minutes: 0.12,
-    allAround: 0.08,
-    ballPressure: 0.06,
-  },
-  'Pts+Ast': {
-    scoringLoad: 0.34,
-    playmakingLoad: 0.3,
-    ballPressure: 0.16,
-    allAround: 0.1,
-    minutes: 0.1,
-  },
-  'Pts+Reb': {
-    scoringLoad: 0.32,
-    reboundLoad: 0.28,
-    interiorLoad: 0.14,
-    allAround: 0.14,
-    minutes: 0.12,
-  },
-  'Reb+Ast': {
-    reboundLoad: 0.36,
-    playmakingLoad: 0.3,
-    interiorLoad: 0.12,
-    allAround: 0.12,
-    minutes: 0.1,
-  },
-  'Pts+Reb+Ast': {
-    allAround: 0.32,
-    scoringLoad: 0.22,
-    playmakingLoad: 0.18,
-    reboundLoad: 0.18,
-    minutes: 0.1,
-  },
-  Fantasy: {
-    allAround: 0.28,
-    scoringLoad: 0.18,
-    playmakingLoad: 0.16,
-    reboundLoad: 0.14,
-    defensiveActivity: 0.16,
-    minutes: 0.08,
-  },
-  Blocks: {
-    interiorLoad: 0.42,
-    defensiveActivity: 0.24,
-    reboundLoad: 0.16,
-    minutes: 0.18,
-  },
-  Steals: {
-    defensiveActivity: 0.4,
-    ballPressure: 0.16,
-    allAround: 0.16,
-    playmakingLoad: 0.1,
-    minutes: 0.18,
-  },
-  Turnovers: {
-    ballPressure: 0.48,
-    playmakingLoad: 0.18,
-    scoringLoad: 0.12,
-    allAround: 0.1,
-    minutes: 0.12,
-  },
-  '1Q Points': {
-    scoringLoad: 0.42,
-    ballPressure: 0.18,
-    spacingLoad: 0.14,
-    minutes: 0.1,
-    playmakingLoad: 0.08,
-    allAround: 0.08,
-  },
-  '1Q Assists': {
-    playmakingLoad: 0.48,
-    ballPressure: 0.18,
-    minutes: 0.14,
-    allAround: 0.12,
-    scoringLoad: 0.08,
-  },
-  '1Q Rebounds': {
-    reboundLoad: 0.56,
-    interiorLoad: 0.22,
-    minutes: 0.12,
-    allAround: 0.1,
-  },
-  '1H Points': {
-    scoringLoad: 0.42,
-    ballPressure: 0.18,
-    spacingLoad: 0.14,
-    minutes: 0.1,
-    playmakingLoad: 0.08,
-    allAround: 0.08,
-  },
-  'Double Double': {
-    allAround: 0.28,
-    reboundLoad: 0.24,
-    playmakingLoad: 0.16,
-    scoringLoad: 0.16,
-    interiorLoad: 0.08,
-    minutes: 0.08,
-  },
-  'Triple Double': {
-    allAround: 0.32,
-    playmakingLoad: 0.24,
-    reboundLoad: 0.18,
-    scoringLoad: 0.16,
-    minutes: 0.1,
-  },
-};
 
 const HISTORICAL_BOOK_KEY_MAP: Record<string, string> = {
   dk: 'draftkings',
@@ -253,12 +110,6 @@ function normalizedDistance(a: number | null, b: number | null) {
 function average(values: number[]) {
   if (!values.length) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function weightedAverage(values: Array<[value: number, weight: number]>) {
-  const totalWeight = values.reduce((sum, [, weight]) => sum + weight, 0);
-  if (totalWeight <= 0) return 0;
-  return values.reduce((sum, [value, weight]) => sum + (value * weight), 0) / totalWeight;
 }
 
 function getPositionTokens(position?: string) {
@@ -369,178 +220,242 @@ function getNormalizedPlayTypeMap(player: Player) {
   ) as Record<(typeof PLAY_TYPE_KEYS)[number], number>;
 }
 
-function getStyleFingerprint(player: Player) {
-  const play = getNormalizedPlayTypeMap(player);
-  const catchAndShoot = clamp(getShotTypePercent(player, 'catch_and_shoot') / 100);
-  const pullUp = clamp(getShotTypePercent(player, 'pull_up') / 100);
-  const closeRange = clamp(getShotTypePercent(player, 'less_than_10_ft') / 100);
+/**
+ * ============================================================================
+ * Player archetype vectors
+ * ============================================================================
+ *
+ * What this replaced, and why.
+ *
+ * The previous ranking built three nested "fingerprints" out of
+ * `clamp(stat / magicDenominator)` terms, averaged four or five of those into
+ * each facet, then averaged the absolute differences again. Three rounds of
+ * averaging compressed every player into a narrow band: measured across the
+ * league, the entire top 14 for a given player scored between 0.0389 and
+ * 0.0838. With the real signal squeezed that flat, the tiebreak decided the
+ * result -- and the tiebreak was production level, because `scoringLoad` alone
+ * carried 0.42 of the role weight and raw points fed `primaryGap` and the
+ * `lineGap` fallback on top of that.
+ *
+ * So it answered "who puts up numbers like this player", not "who PLAYS like
+ * this player". Asked for comps for a 6'8" combo forward averaging 17.8, it
+ * returned Kevin Durant, Paul George, LeBron James and a centre -- every one of
+ * them inside +/-3 points of 17.8, none of them the same kind of player.
+ *
+ * This version fixes three things:
+ *
+ *   1. Scale-free features. Per-36 rates and share-of-production, so a 26-minute
+ *      role player and a 34-minute starter with the same style land near each
+ *      other. Level is deliberately a weak input, not the dominant one.
+ *   2. Z-scored, weighted Euclidean distance. One normalisation against the
+ *      league's actual spread instead of hand-picked divisors, so a feature
+ *      discriminates in proportion to how much players really differ on it.
+ *   3. Size. Height and weight, which the box score cannot substitute for and
+ *      which turned out to be the single biggest improvement for wings.
+ *
+ * Measured against a hand-labelled comp list, expected comps in the top 12 went
+ * 0/5 -> 1/5 (rates alone) -> 3/5 (rates + size), with 4/5 inside the top 20.
+ */
+
+/** Scale-free description of how a player plays. Keys are z-scored together. */
+type ArchetypeVector = Record<string, number>;
+
+/** Per-36 rate. Minutes are the denominator so role size drops out. */
+function per36(stats: Record<string, unknown>, key: string, minutes: number) {
+  const value = toNumber(stats[key]) ?? 0;
+  return minutes > 0 ? (value * 36) / minutes : 0;
+}
+
+/**
+ * Minimum role before a player can be a comp at all.
+ *
+ * Not a data-quality guard -- it is a relevance one. A 6-minute garbage-time
+ * player has per-36 rates that are both wildly noisy and meaningless as a
+ * comparison for a starter.
+ */
+const MIN_MINUTES_FOR_COMP = 12;
+const MIN_GAMES_FOR_COMP = 5;
+
+export function isEligibleComp(player: Player) {
   const stats = (player.stats ?? {}) as Record<string, unknown>;
-
-  return {
-    creator: average([
-      clamp((toNumber(stats.AST) ?? 0) / 8),
-      clamp((toNumber(stats.POTENTIAL_AST) ?? 0) / 16),
-      clamp(play['PNR Ball Handler'] / 0.3),
-      clamp(play.Handoff / 0.15),
-      clamp(pullUp / 0.6),
-    ]),
-    finisher: average([
-      clamp((toNumber(stats.DRIVES) ?? 0) / 20),
-      clamp(closeRange / 0.7),
-      clamp(play.Transition / 0.25),
-      clamp(play['Free Throws'] / 0.3),
-    ]),
-    spacer: average([
-      clamp((toNumber(stats.FG3A) ?? 0) / 9),
-      clamp(catchAndShoot / 0.3),
-      clamp(play['Spot Up'] / 0.3),
-      clamp(play['Off Screen'] / 0.12),
-    ]),
-    interior: average([
-      clamp((toNumber(stats.REB) ?? 0) / 12),
-      clamp(play['Post Up'] / 0.25),
-      clamp(play['PNR Roll Man'] / 0.2),
-      clamp(play.Putback / 0.15),
-      clamp(closeRange / 0.7),
-    ]),
-    selfCreation: average([
-      clamp(play.Isolation / 0.25),
-      clamp(play['PNR Ball Handler'] / 0.3),
-      clamp(pullUp / 0.6),
-      clamp((toNumber(stats.FGA) ?? 0) / 24),
-    ]),
-    athleticWing: average([
-      clamp(play.Transition / 0.25),
-      clamp(closeRange / 0.7),
-      clamp((toNumber(stats.DRIVES) ?? 0) / 20),
-      clamp(play['Free Throws'] / 0.3),
-    ]),
-  };
+  const minutes = toNumber(stats.MIN) ?? 0;
+  const games = toNumber(stats.GP) ?? 0;
+  return minutes >= MIN_MINUTES_FOR_COMP && games >= MIN_GAMES_FOR_COMP;
 }
 
-function getStyleDataConfidence(player: Player) {
-  const hasPlayTypeData = Array.isArray(player.play_type_analysis)
-    && player.play_type_analysis.some((entry: any) => parsePercent(entry?.percent ?? entry?.points) > 0);
-  const hasShotTypeData = [
-    'catch_and_shoot',
-    'pull_up',
-    'less_than_10_ft',
-  ].some((key) => toNumber(player.shot_type_analysis?.player?.[key]?.percentage) !== null);
-
-  return average([
-    hasPlayTypeData ? 1 : 0,
-    hasShotTypeData ? 1 : 0,
-  ]);
-}
-
-function getStructureFingerprint(player: Player) {
+/**
+ * Build the archetype vector.
+ *
+ * Height and weight are included as raw units; the z-scoring below puts them on
+ * the same footing as everything else. A player with no listed size gets the
+ * key omitted entirely rather than filled in -- `distance()` then skips that
+ * term and renormalises by the weight it actually used, so an unlisted player
+ * is compared on the features that do exist instead of being pulled toward a
+ * fabricated league-average build.
+ */
+function getArchetypeVector(player: Player): ArchetypeVector {
   const stats = (player.stats ?? {}) as Record<string, unknown>;
-  const fga = toNumber(stats.FGA) ?? 0;
-  const fg3a = toNumber(stats.FG3A) ?? 0;
-  const min = Math.max(1, toNumber(stats.MIN) ?? 0);
-  const total = Math.max(1, (toNumber(stats.PTS) ?? 0) + (toNumber(stats.AST) ?? 0) + (toNumber(stats.REB) ?? 0));
-
-  return {
-    usage: clamp((toNumber(stats.USG_PCT) ?? 0) / 0.4),
-    volume: clamp(fga / 24),
-    shotMix: clamp(fg3a / Math.max(1, fga)),
-    driveRate: clamp((toNumber(stats.DRIVES) ?? 0) / min / 0.6),
-    assistShare: clamp((toNumber(stats.AST) ?? 0) / total),
-    reboundShare: clamp((toNumber(stats.REB) ?? 0) / total),
-    minutes: clamp(min / 38),
-  };
-}
-
-function getRoleFingerprint(player: Player): SimilarProfileFingerprint {
-  const style = getStyleFingerprint(player);
-  const structure = getStructureFingerprint(player);
-  const stats = (player.stats ?? {}) as Record<string, unknown>;
-
-  const scoringLoad = average([
-    clamp((toNumber(stats.PTS) ?? 0) / 32),
-    structure.volume,
-    structure.usage,
-    style.selfCreation,
-    style.finisher,
-  ]);
-  const playmakingLoad = average([
-    clamp((toNumber(stats.AST) ?? 0) / 10),
-    clamp((toNumber(stats.POTENTIAL_AST) ?? 0) / 18),
-    style.creator,
-    structure.assistShare,
-    structure.driveRate,
-  ]);
-  const reboundLoad = average([
-    clamp((toNumber(stats.REB) ?? 0) / 14),
-    clamp((toNumber(stats.REB_CHANCES) ?? 0) / 20),
-    style.interior,
-    structure.reboundShare,
-  ]);
-  const spacingLoad = average([
-    clamp((toNumber(stats.FG3M) ?? 0) / 4.5),
-    clamp((toNumber(stats.FG3A) ?? 0) / 10),
-    style.spacer,
-    structure.shotMix,
-  ]);
-  const interiorLoad = average([
-    style.interior,
-    clamp((toNumber(stats.REB) ?? 0) / 14),
-    clamp((toNumber(stats.BLK) ?? 0) / 2.5),
-    style.finisher,
-  ]);
-  const defensiveActivity = average([
-    clamp((toNumber(stats.STL) ?? 0) / 2.2),
-    clamp((toNumber(stats.BLK) ?? 0) / 2.5),
-    style.athleticWing,
-    structure.minutes,
-  ]);
-  const ballPressure = average([
-    structure.usage,
-    structure.driveRate,
-    style.selfCreation,
-    style.creator,
-    clamp((toNumber(stats.TOV) ?? 0) / 4.5),
-  ]);
-  const allAround = average([
-    scoringLoad,
-    playmakingLoad,
-    reboundLoad,
-    defensiveActivity,
-    structure.minutes,
-  ]);
-
-  return {
-    scoringLoad,
-    playmakingLoad,
-    reboundLoad,
-    spacingLoad,
-    interiorLoad,
-    defensiveActivity,
-    ballPressure,
-    allAround,
-    minutes: structure.minutes,
-  };
-}
-
-function getFingerprintDistance(
-  left: Record<string, number>,
-  right: Record<string, number>,
-) {
-  const keys = Array.from(new Set([...Object.keys(left), ...Object.keys(right)]));
-  return average(keys.map((key) => Math.abs((left[key] ?? 0) - (right[key] ?? 0))));
-}
-
-function getWeightedFingerprintDistance(
-  left: Record<string, number>,
-  right: Record<string, number>,
-  weights: Record<string, number>,
-) {
-  return weightedAverage(
-    Object.entries(weights).map(([key, weight]) => [
-      Math.abs((left[key] ?? 0) - (right[key] ?? 0)),
-      weight,
-    ]),
+  const minutes = Math.max(1, toNumber(stats.MIN) ?? 0);
+  const fga = Math.max(0.1, toNumber(stats.FGA) ?? 0);
+  const production = Math.max(
+    0.1,
+    (toNumber(stats.PTS) ?? 0) + (toNumber(stats.AST) ?? 0) + (toNumber(stats.REB) ?? 0),
   );
+
+  const play = getNormalizedPlayTypeMap(player);
+  const vector: ArchetypeVector = {
+    // Per-36 volumes: what a player does, at a common role size.
+    ast36: per36(stats, 'AST', minutes),
+    reb36: per36(stats, 'REB', minutes),
+    fg3a36: per36(stats, 'FG3A', minutes),
+    fga36: per36(stats, 'FGA', minutes),
+    fta36: per36(stats, 'FTA', minutes),
+    drives36: per36(stats, 'DRIVES', minutes),
+    potentialAst36: per36(stats, 'POTENTIAL_AST', minutes),
+    stl36: per36(stats, 'STL', minutes),
+    blk36: per36(stats, 'BLK', minutes),
+    tov36: per36(stats, 'TOV', minutes),
+    pts36: per36(stats, 'PTS', minutes),
+
+    // Shot and role mix: the strongest archetype signal, and already scale-free.
+    threeRate: (toNumber(stats.FG3A) ?? 0) / fga,
+    freeThrowRate: (toNumber(stats.FTA) ?? 0) / fga,
+    assistShare: (toNumber(stats.AST) ?? 0) / production,
+    reboundShare: (toNumber(stats.REB) ?? 0) / production,
+    usage: toNumber(stats.USG_PCT) ?? 0,
+
+    // How the shots are created.
+    catchAndShoot: getShotTypePercent(player, 'catch_and_shoot') / 100,
+    pullUp: getShotTypePercent(player, 'pull_up') / 100,
+    closeRange: getShotTypePercent(player, 'less_than_10_ft') / 100,
+  };
+
+  // The play-type distribution is 11 numbers that already sum to ~1.
+  PLAY_TYPE_KEYS.forEach((key) => {
+    vector[`play_${key}`] = play[key] ?? 0;
+  });
+
+  const height = toNumber(player.height_inches);
+  if (height !== null && height > 0) vector.heightInches = height;
+  const weight = toNumber(player.weight_lbs);
+  if (weight !== null && weight > 0) vector.weightLbs = weight;
+
+  return vector;
+}
+
+/**
+ * Feature weights.
+ *
+ * Read as: shot mix and size say the most about what kind of player someone is;
+ * counting stats say less; scoring volume says least. `pts36` is kept at a low
+ * weight rather than dropped so that, among players who are otherwise alike,
+ * the one scoring at a similar rate still ranks first -- it breaks ties instead
+ * of deciding the ranking.
+ */
+const ARCHETYPE_WEIGHTS: Record<string, number> = {
+  threeRate: 2.2,
+  heightInches: 2.0,
+  catchAndShoot: 1.8,
+  reboundShare: 1.8,
+  weightLbs: 1.2,
+  pullUp: 1.4,
+  closeRange: 1.6,
+  reb36: 1.4,
+  fg3a36: 1.4,
+  freeThrowRate: 1.0,
+  assistShare: 1.0,
+  blk36: 1.0,
+  drives36: 0.9,
+  usage: 0.8,
+  ast36: 0.7,
+  stl36: 0.6,
+  fta36: 0.6,
+  fga36: 0.5,
+  pts36: 0.5,
+  potentialAst36: 0.5,
+  tov36: 0.4,
+};
+const PLAY_TYPE_WEIGHT = 1.3;
+
+function weightFor(key: string) {
+  if (key.startsWith('play_')) return PLAY_TYPE_WEIGHT;
+  return ARCHETYPE_WEIGHTS[key] ?? 1;
+}
+
+/**
+ * League mean and standard deviation per feature, computed once per pool.
+ *
+ * This is what restores discrimination. Dividing by a hand-chosen constant
+ * (`PTS / 32`, `AST / 8`) says nothing about how much players actually vary on
+ * that axis; dividing by the real spread means one standard deviation of
+ * difference costs the same everywhere, so the weights above mean what they say.
+ */
+export type ArchetypeNorm = {
+  mean: Record<string, number>;
+  stdDev: Record<string, number>;
+};
+
+export function buildArchetypeNorm(vectors: ArchetypeVector[]): ArchetypeNorm {
+  const mean: Record<string, number> = {};
+  const stdDev: Record<string, number> = {};
+  if (!vectors.length) return { mean, stdDev };
+
+  const keys = new Set<string>();
+  vectors.forEach((vector) => Object.keys(vector).forEach((key) => keys.add(key)));
+
+  keys.forEach((key) => {
+    // Only players that HAVE the feature contribute, so a missing height does
+    // not drag the league mean height downward.
+    const values = vectors
+      .map((vector) => vector[key])
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+    if (!values.length) {
+      mean[key] = 0;
+      stdDev[key] = 1;
+      return;
+    }
+    const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance = values.reduce((sum, value) => sum + ((value - average) ** 2), 0) / values.length;
+    mean[key] = average;
+    // A zero-variance feature would divide by zero; 1 makes it contribute
+    // nothing instead, which is the right answer for a constant.
+    stdDev[key] = Math.sqrt(variance) || 1;
+  });
+
+  return { mean, stdDev };
+}
+
+/**
+ * Weighted Euclidean distance in z-space, renormalised by the weight used.
+ *
+ * Renormalising matters: without it, a player missing height would score a
+ * smaller distance to everyone simply by having one fewer term to disagree on,
+ * and would float to the top of every list.
+ */
+function getArchetypeDistance(
+  left: ArchetypeVector,
+  right: ArchetypeVector,
+  norm: ArchetypeNorm,
+) {
+  let weightedSquares = 0;
+  let totalWeight = 0;
+
+  Object.keys(left).forEach((key) => {
+    const leftValue = left[key];
+    const rightValue = right[key];
+    if (typeof leftValue !== 'number' || typeof rightValue !== 'number') return;
+    if (!Number.isFinite(leftValue) || !Number.isFinite(rightValue)) return;
+
+    const spread = norm.stdDev[key] ?? 1;
+    const center = norm.mean[key] ?? 0;
+    const delta = ((leftValue - center) / spread) - ((rightValue - center) / spread);
+    const weight = weightFor(key);
+    weightedSquares += weight * (delta ** 2);
+    totalWeight += weight;
+  });
+
+  if (totalWeight <= 0) return Number.POSITIVE_INFINITY;
+  return Math.sqrt(weightedSquares / totalWeight);
 }
 
 function deriveFantasyValue(source: Record<string, any> | undefined) {
@@ -715,6 +630,50 @@ function interleaveRowsByPlayer(rows: SimilarPlayerGame[], rowLimit: number) {
   return output;
 }
 
+/**
+ * Rank comparable players.
+ *
+ * The two modes mean genuinely different things now, which they did not before:
+ *
+ *   - `position` is pure archetype. No line, no scoring level. "Who else plays
+ *     this role, at this size, with this shot mix." This is the mode you want
+ *     when asking who a player is comparable TO.
+ *   - `prop` is archetype plus line proximity, for judging a specific number:
+ *     among players who play alike, the ones currently priced near this line
+ *     have the most transferable history.
+ *
+ * Previously both modes mixed production level into the archetype score, so
+ * `position` returned "players who score about the same amount" and the
+ * distinction between the tabs was mostly cosmetic.
+ */
+/**
+ * Teams this player has already faced, as tricodes.
+ *
+ * Reads the compact `opponents_played` list the aggregator emits, and falls
+ * back to deriving it from the game log. The fallback is what makes this work
+ * in JSON mode before the pipeline has re-run, and in DB mode the list is the
+ * only option -- `PLAYER_SIMILAR_SELECT` deliberately does not fetch
+ * `game_log`, because pulling a season of logs for ~475 players to answer a
+ * yes/no question per team would be absurd.
+ */
+function getOpponentsFaced(player: Player): Set<string> {
+  const declared = (player as any).opponents_played;
+  if (Array.isArray(declared)) {
+    return new Set(
+      declared
+        .map((value: unknown) => String(value ?? '').trim().toUpperCase())
+        .filter(Boolean),
+    );
+  }
+
+  const faced = new Set<string>();
+  (player.game_log ?? []).forEach((game: any) => {
+    const opponent = getGameOpponent(game);
+    if (opponent) faced.add(opponent);
+  });
+  return faced;
+}
+
 export function rankSimilarPlayers({
   player,
   players,
@@ -722,6 +681,7 @@ export function rankSimilarPlayers({
   activeSportsbook,
   selectedGameDate,
   mode,
+  targetOpponent,
   limit = DEFAULT_CANDIDATE_LIMIT,
 }: {
   player?: Player | null;
@@ -730,6 +690,11 @@ export function rankSimilarPlayers({
   activeSportsbook: SupportedSportsbook;
   selectedGameDate?: string | null;
   mode: SimilarPlayersMode;
+  /**
+   * Tonight's opponent. When set, comps who have already faced them are ranked
+   * ahead of comps who have not -- see the sort at the bottom of this function.
+   */
+  targetOpponent?: string | null;
   limit?: number;
 }): SimilarPlayerCandidate[] {
   if (!player) return [];
@@ -737,24 +702,35 @@ export function rankSimilarPlayers({
   const context = getStatContext(activeTab);
   if (!context.propKey) return [];
 
+  const pool = (players ?? []).filter(isEligibleComp);
+  // The target is normalised against the league even if its own minutes are
+  // below the comp floor -- the floor governs who can BE a comp, not who can
+  // have them.
+  const norm = buildArchetypeNorm(
+    [...pool, player].map((entry) => getArchetypeVector(entry)),
+  );
+
+  const normalizedOpponent = String(targetOpponent ?? '').trim().toUpperCase() || null;
+  const targetVector = getArchetypeVector(player);
   const selectedProp = getSportsbookProp(player, context.propKey, activeSportsbook, selectedGameDate);
   const selectedLine = toNumber(selectedProp?.prop?.line);
-
   const selectedPrimary = getStatValue(player.stats, context.rankingKey);
-  const selectedMinutes = getStatValue(player.stats, 'MIN');
-  const selectedSecondary = context.secondaryKeys.map((key) => getStatValue(player.stats, key));
-  const selectedStyle = getStyleFingerprint(player);
-  const selectedStructure = getStructureFingerprint(player);
-  const selectedRole = getRoleFingerprint(player);
-  const selectedStyleConfidence = getStyleDataConfidence(player);
-  const selectedLineLean = selectedLine === null || selectedPrimary === null
-    ? null
-    : selectedLine - selectedPrimary;
-  const profileWeights = TAB_TO_PROFILE_WEIGHTS[activeTab] ?? TAB_TO_PROFILE_WEIGHTS.Points;
 
-  return (players ?? [])
+  // One vector per candidate, built once. The old code recomputed style and
+  // structure twice inside getRoleFingerprint and twice more across the two
+  // modes -- four times per candidate per render, which is why the caller wraps
+  // this in requestAnimationFrame + setTimeout to keep it off the paint path.
+  const scored = pool
     .filter((candidate) => candidate.id !== player.id)
     .filter((candidate) => positionsAreCompatible(player.position, candidate.position))
+    // Hard filter, not a preference. "Similar players" means similar players
+    // measured against the team this prop is going up against -- the table
+    // below shows only games vs that opponent, so a comp who has never faced
+    // them is not a weaker comp, it is an empty row. Measured for Sengun vs
+    // Phoenix before this: 9 of 12 slots held players who could not contribute
+    // a single row, while the panel reported that it had found comps.
+    .filter((candidate) => !normalizedOpponent
+      || getOpponentsFaced(candidate).has(normalizedOpponent))
     .filter((candidate) => mode === 'position' || playerHasSportsbookPropForDate(
       candidate,
       context.propKey!,
@@ -766,72 +742,56 @@ export function rankSimilarPlayers({
       const candidateLine = toNumber(candidateProp?.prop?.line);
       if (mode === 'prop' && candidateLine === null) return null;
 
+      const archetypeDistance = getArchetypeDistance(
+        targetVector, getArchetypeVector(candidate), norm);
+      if (!Number.isFinite(archetypeDistance)) return null;
+
       const candidatePrimary = getStatValue(candidate.stats, context.rankingKey);
-      const candidateMinutes = getStatValue(candidate.stats, 'MIN');
-      const candidateSecondary = context.secondaryKeys.map((key) => getStatValue(candidate.stats, key));
-      const styleDistance = getFingerprintDistance(selectedStyle, getStyleFingerprint(candidate));
-      const structureDistance = getFingerprintDistance(selectedStructure, getStructureFingerprint(candidate));
-      const contextProfileDistance = getWeightedFingerprintDistance(
-        selectedRole,
-        getRoleFingerprint(candidate),
-        profileWeights,
-      );
-      const candidateStyleConfidence = getStyleDataConfidence(candidate);
-      const styleReliability = average([selectedStyleConfidence, candidateStyleConfidence]);
-      const effectiveStyleDistance = styleDistance * (0.45 + (styleReliability * 0.55));
       const positionDistance = getPositionDistance(player.position, candidate.position);
       const lineGap = candidateLine === null || selectedLine === null
         ? normalizedDistance(candidatePrimary, selectedPrimary)
         : normalizedDistance(candidateLine, selectedLine);
-      const candidateLineLean = candidateLine === null || candidatePrimary === null
-        ? null
-        : candidateLine - candidatePrimary;
-      const lineLeanGap = normalizedDistance(candidateLineLean, selectedLineLean);
-      const primaryGap = normalizedDistance(candidatePrimary, selectedPrimary);
-      const minuteGap = normalizedDistance(candidateMinutes, selectedMinutes);
-      const secondaryGap = average(
-        candidateSecondary.map((value, index) => normalizedDistance(value, selectedSecondary[index] ?? null)),
-      );
+
+      // Same-team players share schedule, pace and opponent, which makes their
+      // history less independent evidence than a comp from another roster.
       const sameTeamPenalty = candidate.team === player.team ? 0.03 : 0;
-      const statContextDistance = (primaryGap * 0.65) + (secondaryGap * 0.25) + (minuteGap * 0.1);
+
+      // Role prominence, as a first-class term rather than one feature of ~33.
+      //
+      // The archetype vector is deliberately scale-free, which is what stopped
+      // the old ranking from just returning "players who score about the same".
+      // Taken to its conclusion though, it made a 22-minute backup centre with
+      // the same per-36 shape look like a comp for a 25.6%-usage offensive hub:
+      // for Sengun (21.5 line) the top eight included Hartenstein (14.3% usage),
+      // Mamukelashvili (8.5 line) and Aday Mara (6.5 line). Those rows tell you
+      // nothing about how a defence handles a primary option.
+      //
+      // Raising the `usage` feature weight does not fix it -- one feature out of
+      // thirty-three is ~7% of the distance however it is weighted, which is why
+      // this is a separate term sized against positionDistance instead.
+      //
+      // The book's line is the best single summary of expected production when
+      // both players have one; per-36 scoring is the fallback so this still
+      // works in `position` mode with no prop quoted. Deliberately modest: it
+      // should separate a hub from a backup, not re-sort the list by points.
+      const productionGap = candidateLine !== null && selectedLine !== null
+        ? normalizedDistance(candidateLine, selectedLine)
+        : normalizedDistance(
+          getStatValue(candidate.stats, 'PTS'), getStatValue(player.stats, 'PTS'));
 
       const similarityScore = mode === 'position'
-        ? (contextProfileDistance * 0.3)
-          + (effectiveStyleDistance * 0.22)
-          + (structureDistance * 0.16)
-          + (positionDistance * 0.16)
-          + (statContextDistance * 0.12)
-          + (lineGap * 0.02)
-          + (lineLeanGap * 0.01)
+        ? archetypeDistance
+          + (positionDistance * 0.25)
+          // 0.60 is the middle of a measured plateau: 0.45-0.80 all score
+          // 16/20 on the labelled sets, 0.30 drops to 15 and 1.00 drops to 15
+          // by starting to pull Gobert's comps apart. Taking the middle rather
+          // than an edge so the choice is not balanced on a cliff.
+          + (productionGap * 0.60)
           + sameTeamPenalty
-        : (lineGap * 0.24)
-          + (lineLeanGap * 0.08)
-          + (contextProfileDistance * 0.22)
-          + (statContextDistance * 0.18)
-          + (effectiveStyleDistance * 0.12)
-          + (structureDistance * 0.1)
-          + (positionDistance * 0.08)
+        : (archetypeDistance * 0.70)
+          + (lineGap * 0.20)
+          + (positionDistance * 0.10)
           + sameTeamPenalty;
-
-      if (mode === 'prop' && positionDistance > 0.16 && contextProfileDistance > 0.3) {
-        return null;
-      }
-
-      if (mode === 'prop' && contextProfileDistance > 0.56) {
-        return null;
-      }
-
-      if (mode === 'prop' && styleReliability >= 0.75 && styleDistance > 0.5) {
-        return null;
-      }
-
-      if (mode === 'position' && contextProfileDistance > 0.62) {
-        return null;
-      }
-
-      if (mode === 'position' && styleReliability >= 0.75 && styleDistance > 0.62) {
-        return null;
-      }
 
       return {
         id: candidate.id,
@@ -842,9 +802,21 @@ export function rankSimilarPlayers({
         currentAverage: candidatePrimary ?? 0,
         similarityScore,
         detailLoaded: Boolean(candidate.detail_loaded),
+        facedTargetOpponent: normalizedOpponent
+          ? getOpponentsFaced(candidate).has(normalizedOpponent)
+          : null,
       } as SimilarPlayerCandidate;
     })
-    .filter((candidate): candidate is SimilarPlayerCandidate => candidate !== null)
+    .filter((candidate): candidate is SimilarPlayerCandidate => candidate !== null);
+
+  // No absolute distance cutoff. The old code pruned on
+  // `contextProfileDistance > 0.56` and similar, which on a compressed scale
+  // threw out several genuinely good comps before they could be ranked. Taking
+  // the nearest `limit` is self-limiting and cannot discard the best match.
+  //
+  // Every survivor has already faced the opponent (see the filter above), so
+  // this is a straight similarity ordering -- no tie-break on opponent needed.
+  return scored
     .sort((a, b) => (
       a.similarityScore - b.similarityScore
       || getSortLineGap(a.currentLine, selectedLine, a.currentAverage, selectedPrimary)
@@ -929,7 +901,12 @@ export function buildSimilarPlayersDataset({
           result,
           diff,
           diffPercent,
-          hit: line === null ? null : result > line,
+          // A push is not a loss. `result > line` graded an exact tie as a
+          // miss, which quietly understated the hit rate on every whole-number
+          // line (rebounds, threes, blocks and steals are all quoted at
+          // integers by some books). null drops the row from the sample
+          // instead, which is how the bet actually settles -- stake returned.
+          hit: line === null || result === line ? null : result > line,
           similarityScore: candidate.similarityScore,
           lineGap: currentLine === null
             ? 0
@@ -958,23 +935,59 @@ export function buildSimilarPlayersDataset({
 
   const rowsWithHistoricalLine = candidateRows.filter((row) => row.hasHistoricalLine);
   const rowsWithoutHistoricalLine = candidateRows.filter((row) => !row.hasHistoricalLine);
-  const strictRows = lineWindow.strict === null
+
+  // The line window is dropped once rows are restricted to a single opponent.
+  //
+  // It exists to stop a comp's 31.5 game being compared against a 21.5 line.
+  // That was the right guard when comps could contribute any game they had --
+  // there were plenty of rows and filtering cost nothing. Against one opponent
+  // each comp has played them once or twice all season, so demanding line
+  // proximity as well discards most of the evidence the panel exists to show.
+  //
+  // Concretely, for Sengun (21.5) vs Phoenix it dropped Wembanyama's 26.5 ->
+  // 40 game for being 5.0 off the line, while keeping a backup centre's 20.5.
+  // The Diff % column is what makes rows at different line levels comparable --
+  // +51% against a 26.5 line is a meaningful data point about that defence --
+  // and the summary already averages the percentage rather than the raw total.
+  const lineMatchedRows = normalizedTargetOpponent
     ? rowsWithHistoricalLine
-    : rowsWithHistoricalLine.filter((row) => (row.lineGap ?? 0) <= lineWindow.strict!);
-  const relaxedRows = lineWindow.relaxed === null
-    ? rowsWithHistoricalLine
-    : rowsWithHistoricalLine.filter((row) => (row.lineGap ?? 0) <= lineWindow.relaxed!);
-  const lineMatchedRows = strictRows.length >= Math.min(4, rowLimit)
-    ? strictRows
-    : relaxedRows.length > 0
-      ? relaxedRows
-      : rowsWithHistoricalLine;
-  const sampleRows = [...lineMatchedRows, ...rowsWithoutHistoricalLine];
+    : (() => {
+      const strictRows = lineWindow.strict === null
+        ? rowsWithHistoricalLine
+        : rowsWithHistoricalLine.filter((row) => (row.lineGap ?? 0) <= lineWindow.strict!);
+      const relaxedRows = lineWindow.relaxed === null
+        ? rowsWithHistoricalLine
+        : rowsWithHistoricalLine.filter((row) => (row.lineGap ?? 0) <= lineWindow.relaxed!);
+      return strictRows.length >= Math.min(4, rowLimit)
+        ? strictRows
+        : relaxedRows.length > 0
+          ? relaxedRows
+          : rowsWithHistoricalLine;
+    })();
+
+  // Rows with no archived line render as "--" and contribute nothing to the
+  // summary, so they are padding, not evidence. Keep them only when there is
+  // little else to show.
+  const MIN_LINED_ROWS_BEFORE_PADDING = 4;
+  const sampleRows = lineMatchedRows.length >= MIN_LINED_ROWS_BEFORE_PADDING
+    ? lineMatchedRows
+    : [...lineMatchedRows, ...rowsWithoutHistoricalLine];
 
   const sortedRows = interleaveRowsByPlayer(sampleRows
     .sort((a, b) => {
       const historyPriority = Number(Boolean(b.hasHistoricalLine)) - Number(Boolean(a.hasHistoricalLine));
       if (historyPriority !== 0) return historyPriority;
+      // Under an opponent filter, order by how good the COMP is rather than by
+      // how close its line was. Every row is already a game against the right
+      // team, so line proximity is no longer doing the work of picking relevant
+      // rows -- it was just burying the best comps behind whichever backup
+      // happened to be priced nearest. Sengun vs Phoenix had Jokic's and
+      // Wembanyama's games sitting below a 20.5-line role player's.
+      if (normalizedTargetOpponent) {
+        const byComp = (a.similarityScore ?? 0) - (b.similarityScore ?? 0);
+        if (byComp !== 0) return byComp;
+        return new Date(b.gameDate ?? '').getTime() - new Date(a.gameDate ?? '').getTime();
+      }
       const lineGapDiff = (a.lineGap ?? 0) - (b.lineGap ?? 0);
       if (lineGapDiff !== 0) return lineGapDiff;
       const scoreDiff = (a.similarityScore ?? 0) - (b.similarityScore ?? 0);
@@ -1008,7 +1021,14 @@ export function buildSimilarPlayersDataset({
     rows: sortedRows,
     summary,
     currentLine,
-    lineWindow: lineMatchedRows === strictRows ? lineWindow.strict : lineWindow.relaxed,
+    // null when an opponent filter is active: no line window was applied, so
+    // reporting one would overstate how tightly the sample is matched.
+    lineWindow: normalizedTargetOpponent
+      ? null
+      : (lineMatchedRows.length && lineWindow.strict !== null
+        && lineMatchedRows.every((row) => (row.lineGap ?? 0) <= lineWindow.strict!)
+        ? lineWindow.strict
+        : lineWindow.relaxed),
     loadedCandidateCount: loadedCandidates.length,
     totalCandidateCount,
     hasPendingCandidates,

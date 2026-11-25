@@ -19,6 +19,29 @@ except ImportError:
     from season_type import encoded_season_type, resolve_season, resolve_season_type
 
 
+def _height_to_inches(raw):
+    """'6-8' -> 80. Returns None for anything else.
+
+    NBA's playerindex reports height as feet-dash-inches. A missing or
+    unparseable value must come back as None rather than a league-average
+    guess: imputing would make every player with no listed height look
+    average-sized, which is worse than the ranking simply not using size for
+    them.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or "-" not in text:
+        return None
+    feet, _, inches = text.partition("-")
+    try:
+        total = int(feet) * 12 + int(inches)
+    except ValueError:
+        return None
+    # Sanity bound: a parsed value outside human range means the format changed.
+    return total if 60 <= total <= 96 else None
+
+
 def _atomic_write_csv(df: pd.DataFrame, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_name(f".{output_path.name}.tmp")
@@ -181,6 +204,26 @@ class NBAStatsEngine:
                     .rename(columns={position_source_col: "POSITION"})
                 )
                 main_df = main_df.merge(position_df, on='PLAYER_ID', how='left')
+
+            # Height and weight ride along in the SAME playerindex response that
+            # POSITION comes from -- they were being fetched over the wire and
+            # dropped on the floor by the two-column projection above. Keeping
+            # them costs no extra request, which matters because size is the
+            # single most discriminating feature for "is this the same kind of
+            # player" and the comparable-player ranking had nothing like it:
+            # a 6'8" forward and a 6'3" guard with equal per-minute rates were
+            # indistinguishable.
+            if "HEIGHT" in index_df.columns:
+                height_df = index_df[["PLAYER_ID", "HEIGHT"]].copy()
+                height_df["HEIGHT_INCHES"] = height_df["HEIGHT"].map(_height_to_inches)
+                main_df = main_df.merge(
+                    height_df[["PLAYER_ID", "HEIGHT_INCHES"]], on="PLAYER_ID", how="left")
+            if "WEIGHT" in index_df.columns:
+                weight_df = index_df[["PLAYER_ID", "WEIGHT"]].copy()
+                weight_df["WEIGHT_LBS"] = pd.to_numeric(
+                    weight_df["WEIGHT"], errors="coerce")
+                main_df = main_df.merge(
+                    weight_df[["PLAYER_ID", "WEIGHT_LBS"]], on="PLAYER_ID", how="left")
 
         if "POSITION" not in main_df.columns:
             main_df["POSITION"] = pd.NA

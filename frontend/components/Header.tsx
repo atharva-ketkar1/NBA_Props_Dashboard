@@ -10,6 +10,7 @@ import { ASSETS_BASE } from '../utils/config';
 import { MobileViewSwitcher, MobileView } from './MobileViewSwitcher';
 import { getSportsbookProp } from '../utils/propResolution';
 import { STAT_LABELS, TAB_ORDER } from '../utils/statLabels';
+import { formatBreakEvenLabel, hitRateToneClass } from '../utils/betMath';
 
 type PlayerAvailabilityByDate = Record<string, Record<string, Record<string, boolean>>>;
 
@@ -153,6 +154,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
     const totalGames = logs.length;
 
     let hits = 0;
+    let pushes = 0;
     let sum = 0;
     let validGamesCount = 0;
 
@@ -172,13 +174,24 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       if (val !== undefined) {
         sum += val;
         validGamesCount++;
-        if (hasLine && val >= activeLine) {
-          hits++;
+        // A push settles as a returned stake, so it is neither a hit nor a
+        // miss. `val >= activeLine` counted it as a HIT, which inflated the
+        // headline rate on every whole-number line -- and inflating in the
+        // bettor's favour is the dangerous direction to be wrong in. (The
+        // comparable-player table had the mirror-image bug, grading a push as
+        // a loss; see utils/similarPlayers.ts.) Lines are usually .5, so this
+        // changes nothing most of the time and the right amount the rest.
+        if (hasLine) {
+          if (val === activeLine) pushes++;
+          else if (val > activeLine) hits++;
         }
       }
     });
 
-    const rate = (hasLine && gamesShown > 0) ? ((hits / gamesShown) * 100).toFixed(1) : '0.0';
+    // Pushes leave the denominator too, so the rate is hits/graded rather than
+    // hits/games-shown.
+    const gradedGames = Math.max(0, gamesShown - pushes);
+    const rate = (hasLine && gradedGames > 0) ? ((hits / gradedGames) * 100).toFixed(1) : '0.0';
     const graphAvg = validGamesCount > 0 ? (sum / validGamesCount) : 0;
 
     // While the chart is backfilled from last season, the comparison baseline is
@@ -248,6 +261,7 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
 
     const mobileLogs = logs.slice(0, mobileGameCount);
     let mobileHits = 0;
+    let mobilePushes = 0;
 
     let mobileSum = 0;
     let mobileValidCount = 0;
@@ -262,23 +276,28 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
       if (val !== undefined) {
         mobileSum += val;
         mobileValidCount++;
-        if (hasLine && val >= activeLine) {
-          mobileHits++;
+        // Same push handling as the desktop rate above.
+        if (hasLine) {
+          if (val === activeLine) mobilePushes++;
+          else if (val > activeLine) mobileHits++;
         }
       }
     });
 
-    const mobileRate = hasLine ? ((mobileHits / mobileGameCount) * 100).toFixed(1) : '0.0';
+    const mobileGraded = Math.max(0, mobileGameCount - mobilePushes);
+    const mobileRate = (hasLine && mobileGraded > 0)
+      ? ((mobileHits / mobileGraded) * 100).toFixed(1)
+      : '0.0';
     const mobileGraphAvg: number | null = mobileValidCount > 0 ? mobileSum / mobileValidCount : null;
 
     return {
       line: lineVal,
       odds: oddsVal,
-      hitRateInfo: { rate, hits, gamesShown, total: totalGames },
+      hitRateInfo: { rate, hits, gamesShown: gradedGames, total: totalGames, pushes },
       statsData: tickerItems,
       activeStatAverages: { graphAvg, seasonAvg, diff },
       hasLine,
-      mobileHitRateInfo: { rate: mobileRate, hits: mobileHits, gamesShown: mobileGameCount },
+      mobileHitRateInfo: { rate: mobileRate, hits: mobileHits, gamesShown: mobileGraded },
       mobileGraphAvg
     };
   }, [player, statKey, activeSportsbook, activeSportsbookProp, customLine, historicalGameCount, mobileGameCount, baselineAverages]);
@@ -542,7 +561,10 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
           <div className={`hidden md:flex flex-col items-center justify-center h-full border-l border-r border-white/5 w-[175px] shrink-0 transition-all duration-300 ${isFiltersOpen ? 'px-2' : 'px-3'}`}>
             <span className={`text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase transition-all duration-300 ${isFiltersOpen ? 'text-[9px]' : 'text-[10px]'}`}>HIT RATE</span>
             {hasLine ? (
-              <span className={`font-bold tracking-tight leading-none mb-1 transition-all duration-300 ${parseFloat(hitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'} ${isFiltersOpen ? 'text-[14px]' : 'text-[18px]'}`}>
+              <span
+                title={`Over hit rate vs ${formatBreakEvenLabel(odds?.over)}`}
+                className={`font-bold tracking-tight leading-none mb-1 transition-all duration-300 ${hitRateToneClass(parseFloat(hitRateInfo?.rate || '0'), odds?.over)} ${isFiltersOpen ? 'text-[14px]' : 'text-[18px]'}`}
+              >
                 {hitRateInfo?.rate}% <span className={`opacity-90 transition-all duration-300 ${isFiltersOpen ? 'text-[14px]' : 'text-[18px]'}`}>({hitRateInfo?.hits}/{hitRateInfo?.gamesShown})</span>
               </span>
             ) : (
@@ -602,7 +624,10 @@ export const Header: React.FC<HeaderProps> = ({ player, playerAvailabilityByDate
               <div className="flex flex-col items-center flex-1 min-w-0 px-2">
                 <span className="text-[9px] text-fgSubtle font-bold tracking-widest mb-1 whitespace-nowrap uppercase">HIT RATE</span>
                 {hasLine ? (
-                  <div className={`font-bold text-[15px] tracking-tight leading-none flex items-baseline gap-0.5 ${parseFloat(mobileHitRateInfo?.rate || '0') >= 50 ? 'text-green500' : 'text-red500'}`}>
+                  <div
+                    title={`Over hit rate vs ${formatBreakEvenLabel(odds?.over)}`}
+                    className={`font-bold text-[15px] tracking-tight leading-none flex items-baseline gap-0.5 ${hitRateToneClass(parseFloat(mobileHitRateInfo?.rate || '0'), odds?.over)}`}
+                  >
                     {mobileHitRateInfo?.rate}%<span className="text-[12px] opacity-90 font-semibold">({mobileHitRateInfo?.hits}/{mobileHitRateInfo?.gamesShown})</span>
                   </div>
                 ) : (

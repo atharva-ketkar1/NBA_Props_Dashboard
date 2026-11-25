@@ -5,6 +5,7 @@ import { ImageWithFallback } from './ui/ImageWithFallback';
 import { ASSETS_BASE } from '../utils/config';
 import { LIVE_SEASON, SEASON_FILTER_OPTIONS, TEAM_IDS, isArchiveSeason, isSelectableSeason } from '../constants';
 import { isOverlayFilterSupported } from '../utils/filterOverlays';
+import type { BaseStatMode } from '../utils/filterOverlays';
 import {
     ActiveTeammateFilter,
     Player,
@@ -18,6 +19,8 @@ interface FiltersPanelProps {
     onClose: () => void;
     activeFilter: string | null;
     onFilterChange: (filter: string | null) => void;
+    baseStat?: BaseStatMode;
+    onBaseStatChange?: (mode: BaseStatMode) => void;
     player?: Player | null;
     teammateInjuryCards?: TeammateInjuryCard[];
     teamInjuryReport?: TeamInjuryReport | null;
@@ -184,6 +187,8 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     onClose,
     activeFilter,
     onFilterChange,
+    baseStat = 'average',
+    onBaseStatChange,
     player,
     teammateInjuryCards = [],
     teamInjuryReport = null,
@@ -996,19 +1001,19 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     </>
                 ) : activeTab === 'Opp Rankings' ? (
                     <div className="flex flex-col mt-2">
-                        <div className="flex items-center gap-3 border-b border-borderMedium/40 pb-3">
-                            <span className="text-[11px] font-semibold text-white uppercase tracking-wider flex items-center gap-1">Timeframe <HelpCircle className="w-3 h-3 text-borderMuted" /></span>
-                            <div className="flex gap-1 ml-auto">
-                                {['All', 'L5', 'L10', 'L15'].map(tf => (
-                                    <button
-                                        key={tf}
-                                        className={`px-3 py-1 text-[11px] font-medium rounded transition-colors ${tf === 'All' ? 'bg-blue500 text-white' : 'text-fgSubtle hover:text-white bg-bgElevation1 border border-borderMedium/40'}`}
-                                    >
-                                        {tf}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
+                        {/*
+                          Removed: an All / L5 / L10 / L15 "Timeframe" row with no
+                          handlers and `All` hard-coded active, so it looked like a
+                          live filter that silently did nothing.
+
+                          It is not a trivial build, which is why it is removed
+                          rather than wired: opponent ranks arrive from the
+                          pipeline already aggregated over the full season
+                          (`opp_ranks` per game log, `opp_def_zones` per player),
+                          so an L5/L10 view needs the backend to emit windowed
+                          ranks -- there is nothing client-side to recompute from.
+                          Bring it back with that artifact.
+                        */}
 
                         <div className="mt-4">
                             <span className="text-[10px] font-semibold text-borderMuted uppercase tracking-wider block mb-2">Team Defense</span>
@@ -1067,9 +1072,36 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                     <div className="flex flex-col mt-2 border border-borderMedium/40 rounded-lg p-3 bg-bgElevation1/50 relative overflow-hidden">
                         <div className="flex justify-between items-center mb-4">
                             <span className="text-white text-xs font-semibold">Base Status</span>
-                            <div className="flex bg-bgElevation1 border border-borderMedium/40 rounded p-0.5">
-                                <button className="bg-blue500 text-white rounded text-[10px] uppercase font-bold px-2 py-0.5 tracking-wider">Average</button>
-                                <button className="text-borderMuted rounded text-[10px] uppercase font-bold px-2 py-0.5 tracking-wider hover:text-fgSubtle">Median</button>
+                            {/*
+                              Was two buttons with no handlers and `Average`
+                              permanently highlighted. Median is computed from
+                              the loaded game log rather than from
+                              `player.stats`, which only stores season means --
+                              so the comparison label switches to
+                              "MEDIAN (SHOWN)" to be clear it covers the games
+                              on screen rather than the whole season.
+                            */}
+                            <div
+                                className="flex bg-bgElevation1 border border-borderMedium/40 rounded p-0.5"
+                                role="group"
+                                aria-label="Comparison baseline"
+                            >
+                                {(['average', 'median'] as const).map((mode) => (
+                                    <button
+                                        key={mode}
+                                        type="button"
+                                        aria-pressed={baseStat === mode}
+                                        onClick={() => onBaseStatChange?.(mode)}
+                                        title={mode === 'median'
+                                            ? 'Median of the games shown -- less sensitive to one outlier night'
+                                            : 'Season average as published by the pipeline'}
+                                        className={`rounded text-[10px] uppercase font-bold px-2 py-0.5 tracking-wider transition-colors ${baseStat === mode
+                                            ? 'bg-blue500 text-white'
+                                            : 'text-borderMuted hover:text-fgSubtle'}`}
+                                    >
+                                        {mode === 'average' ? 'Average' : 'Median'}
+                                    </button>
+                                ))}
                             </div>
                         </div>
                         <div className="flex flex-wrap gap-2">
