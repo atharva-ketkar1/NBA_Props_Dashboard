@@ -24,6 +24,7 @@ from utils.prop_date_resolver import resolve_prop_game_date
 from utils.prop_types import PROP_MAP
 from utils.snapshot_manager import SnapshotManager
 from utils.odds_csv import parse_team_options, write_odds_csv
+from utils import health_ledger
 from utils.prizepicks_archive import archive_prizepicks_rows
 from utils.upsert_market_history import (
     historical_odds_legacy_fallback_enabled,
@@ -206,6 +207,15 @@ def supplement_missing_players_from_snapshots(players_data, snapshot_manager, ga
 # notice if that failed. A healthy eleven-category run is ~65-75s, so 120 is
 # room for a slow one rather than a target.
 DK_SCRAPE_BUDGET_SECONDS = float(os.environ.get("DK_SCRAPE_BUDGET_SECONDS", "120"))
+
+# Same contract for FanDuel, which now also honours a cooperative deadline.
+# Deliberately larger than DK's: FanDuel is per-event/per-tab (~70-81 requests
+# against DraftKings' 11) and both books now share one pace governor in
+# http_client, so FanDuel's wall clock includes slots DraftKings is using.
+# A measured 10-game slate was ~90s on its own clock; 150 leaves headroom for
+# that plus contention, and the scraper returns partial rows rather than
+# nothing when it runs out.
+FD_SCRAPE_BUDGET_SECONDS = float(os.environ.get("FD_SCRAPE_BUDGET_SECONDS", "150"))
 # Margin for the one request that may already be in flight when the deadline
 # passes. If the backstop fires anyway, the scraper ignored its deadline.
 SCRAPE_BACKSTOP_GRACE_SECONDS = float(
@@ -232,7 +242,12 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
         # drew DraftKings' block actually accumulated.
         f1 = executor.submit(draftkings.fetch_dk_odds, force=is_closing,
                              deadline=time.monotonic() + DK_SCRAPE_BUDGET_SECONDS)
-        f2 = executor.submit(fanduel.fetch_odds)
+        # FanDuel gets the same shape as DraftKings: `force` on the closing
+        # capture bypasses its tab caches so completeness wins over volume, and
+        # `deadline` lets it return the props it already has instead of being
+        # abandoned wholesale by the backstop below.
+        f2 = executor.submit(fanduel.fetch_odds, force=is_closing,
+                             deadline=time.monotonic() + FD_SCRAPE_BUDGET_SECONDS)
         
         # --- DraftKings Safeguard ---
         try:
@@ -248,13 +263,17 @@ def scrape_and_shape_odds(is_closing=False, allowed_game_ids=None):
             log_status(logger, "FAIL", "DraftKings scraper crashed", error=e)
             
         # --- FanDuel Safeguard ---
-        # FanDuel has no cooperative deadline yet, so this is still the old
-        # abandon-the-result shape for that book. It has stayed healthy
-        # throughout the DraftKings block, so it has not needed one.
+        # Now the same shape as DraftKings above: the scraper owns a deadline
+        # inside the budget, so this backstop only has to notice if that gate
+        # failed. The old form was `timeout=120` against a ~90s scrape with no
+        # cooperative deadline, which threw away every row on a 35% slowdown.
         try:
-            fd_data = f2.result(timeout=120)
+            fd_data = f2.result(
+                timeout=FD_SCRAPE_BUDGET_SECONDS + SCRAPE_BACKSTOP_GRACE_SECONDS)
         except concurrent.futures.TimeoutError:
-            log_status(logger, "FAIL", "FanDuel scraper timed out")
+            log_status(logger, "FAIL",
+                       "FanDuel scraper overran its own deadline; backstop fired",
+                       budget_s=FD_SCRAPE_BUDGET_SECONDS)
         except Exception as e:
             log_status(logger, "FAIL", "FanDuel scraper crashed", error=e)
     finally:
@@ -519,15 +538,33 @@ def save_cron_state(state):
 
 
 def _run_edge_score_refresh(players_data, refresh_label):
+    """Refresh the Signal Score and record the outcome in the health ledger.
+
+    The record is the point of this wrapper existing at all. `score:edge_refresh`
+    declares `expected_interval_s=1800` and `stale_after_s=3h`, but it was only
+    ever recorded by run_pipeline.py -- which runs once a day at 06:00 ET. So the
+    unit went stale at 09:00 and stayed "broken" for ~15 hours every single day,
+    while the refresh was in fact running every half hour from here. Measured
+    2026-11-24: the watchdog reported 10.4h at 16:31 and 14.3h at 20:26, both of
+    which are exactly 06:00 plus the reported gap.
+
+    A monitor that cries wolf daily is worse than no monitor: the entire argument
+    for putting these alerts on ntfy rather than Discord is that the channel stays
+    credible enough to read. Note `sync:supabase_edge` was always recorded
+    correctly from inside edge_score.py, which is why this was the only one of 24
+    units stuck broken.
+    """
     try:
         from utils.edge_score import run_edge_score_refresh
         run_edge_score_refresh(
             refresh_label=refresh_label,
             current_players_data=players_data,
         )
+        health_ledger.record_success("score:edge_refresh", detail=refresh_label)
         return True
     except Exception as error:
         log_status(logger, "WARN", "Edge Score refresh failed", error=error, label=refresh_label)
+        health_ledger.record_failure("score:edge_refresh", error)
         return False
 
 

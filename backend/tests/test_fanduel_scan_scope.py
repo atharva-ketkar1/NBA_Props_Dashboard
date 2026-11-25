@@ -123,7 +123,9 @@ class FanDuelScanScopeTests(unittest.TestCase):
         events = [_event(i, i) for i in range(1, 4)]
         main_page.return_value = self._main_page(events)
 
-        def fake_tabs(event_id):
+        def fake_tabs(event_id, **_kwargs):
+            # **_kwargs absorbs use_cache, which fetch_odds passes to control the
+            # on-disk tab cache.
             if event_id == "1":
                 raise FanDuelRequestError("429 Too Many Requests")
             return [{"name": "player-points", "title": "Player Points"}]

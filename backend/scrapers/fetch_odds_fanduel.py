@@ -1,17 +1,16 @@
 import pandas as pd
-import requests
 import json
 import re
 import time
-import random
 import logging
 import threading
 from datetime import datetime, timezone
 from dateutil import tz
 from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import os
+
+from utils import http_client
+from utils import scrape_cadence
 
 load_dotenv()
 
@@ -25,6 +24,14 @@ class FanDuelRequestError(Exception):
     says this game has no props" apart from "we never got an answer". The two
     used to be indistinguishable, which let a single 429 look like a propless
     game -- and with early-exit scanning that would silently truncate the slate.
+    """
+
+
+class FanDuelDeadlineReached(Exception):
+    """The cooperative deadline passed; stop issuing requests.
+
+    Caught inside `fetch_odds`, which then returns the props already collected.
+    Not a `FanDuelRequestError`: nothing failed, there was simply no time left.
     """
 
 # CONSTANTS
@@ -41,18 +48,11 @@ HEADERS = {
     'Accept-Language': 'en-US,en;q=0.9'
 }
 
-REQUEST_TIMEOUT = 15
-
-# The Cloudflare Worker in utils/cloudflare_worker.js rate-limits per client IP
-# (RATE_LIMIT_MAX, default 60 requests / 60s) and that budget is shared with every
-# other scraper routed through it. FanDuel is per-event/per-tab, so it is the one
-# scraper that can exhaust the window on its own -- hence the pacing below.
-# The worker's window is 60 requests / 60s, so spacing must be >= 1.0s to stay
-# under it. 1.1s leaves margin for DraftKings' ~15 requests, which run immediately
-# before FanDuel in the pipeline and share the same per-IP bucket.
-# Raising RATE_LIMIT_MAX on the worker is the better long-term fix; this default is
-# chosen to be correct under the worker's current (unset, therefore 60) config.
-REQUEST_DELAY_SECONDS = float(os.getenv("FANDUEL_REQUEST_DELAY_SECONDS", "1.1"))
+# Must exceed the worker's own worst case: it allows 2 upstream attempts at 15s
+# each, so anything under ~30s cancels work that was about to succeed. The old
+# value here was 15s, which could only ever have been cutting the worker off
+# mid-retry.
+REQUEST_TIMEOUT = float(os.getenv("FANDUEL_REQUEST_TIMEOUT", "60"))
 
 # Stop scanning after this many consecutive games with no props. 2 rather than 1
 # because a lone propless game is occasionally an anomaly (a postponed game, or a
@@ -60,61 +60,167 @@ REQUEST_DELAY_SECONDS = float(os.getenv("FANDUEL_REQUEST_DELAY_SECONDS", "1.1"))
 # costs one extra event scan and avoids truncating the slate on a fluke.
 PROPLESS_STOP_STREAK = max(1, int(os.getenv("FANDUEL_PROPLESS_STOP_STREAK", "2")))
 
-_session = None
-_session_lock = threading.Lock()
-_pace_lock = threading.Lock()
-_last_request_at = 0.0
+# How long an event's tab list stays good. The list is which prop markets exist
+# for a game, and it does not change minute to minute -- but it was refetched on
+# every 5-minute tick, one request per event. See _tab_cache below.
+TAB_LIST_TTL_SECONDS = float(os.getenv("FANDUEL_TAB_LIST_TTL_SECONDS", "3600"))
+
+# How long a tab that returned no usable props is skipped for. Deliberately much
+# shorter than the tab-list TTL: an empty tab at noon is often a market FanDuel
+# has not posted yet, so this has to re-check well before tip.
+EMPTY_TAB_TTL_SECONDS = float(os.getenv("FANDUEL_EMPTY_TAB_TTL_SECONDS", "1200"))
+
+# The cache has to live on disk, not in memory. master_cron runs as a FRESH
+# PROCESS every five minutes (see the crontab: `*/5 * * * * ... master_cron.py`),
+# so a module-global dict is empty on every tick and would never save a single
+# request -- which is the entire point of caching the tab list. Same reason
+# utils/scrape_cadence.py keeps its state in logs/scrape_cadence.json, and the
+# file layout here deliberately mirrors it.
+#
+# Expiries are wall-clock `time.time()`, not `time.monotonic()`: monotonic is
+# only comparable within one process, so a monotonic deadline written by the
+# 10:05 tick is meaningless to the 10:10 tick.
+_cache_lock = threading.Lock()
 
 
-def _get_session():
-    """Pooled session + retry on 429/5xx.
+def _cache_path():
+    return os.environ.get("FANDUEL_TAB_CACHE_PATH") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "logs", "fanduel_tab_cache.json",
+    )
 
-    Previously every call was a bare requests.get: a new TCP+TLS handshake each
-    time and no retry at all, so a single 429 permanently dropped that tab's props.
+
+def _cache_inert():
+    """True when this process must not read or write the real cache file.
+
+    Same contract as `health_ledger._inert()`: under pytest, with no explicit
+    path set, the cache is a no-op. A test that wants to exercise it sets
+    FANDUEL_TAB_CACHE_PATH, so no test can poison a real slate's cache and no
+    test depends on one left behind by another.
     """
-    global _session
-    with _session_lock:
-        if _session is not None:
-            return _session
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        retry = Retry(
-            total=3,
-            backoff_factor=1.5,          # 1.5s, 3s, 6s
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "HEAD", "OPTIONS"],
-            respect_retry_after_header=True,
-            raise_on_status=False,
-        )
-        adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=8)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        _session = session
-        return _session
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) and not os.environ.get(
+        "FANDUEL_TAB_CACHE_PATH")
 
 
-def _pace():
-    """Space out requests so we stay inside the worker's per-IP window."""
-    global _last_request_at
-    if REQUEST_DELAY_SECONDS <= 0:
+def _cache_day():
+    """ET date, so the cache cannot carry across a slate boundary."""
+    return datetime.now(tz.gettz("America/New_York")).date().isoformat()
+
+
+def _load_cache():
+    """Read the cache, discarding it wholesale if it is from another day.
+
+    Any read problem returns an empty cache rather than raising: a missing or
+    corrupt cache must cost requests, never a scrape.
+    """
+    if _cache_inert():
+        return {"day": _cache_day(), "tabs": {}, "empty": {}}
+    try:
+        with open(_cache_path(), "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict) or state.get("day") != _cache_day():
+        return {"day": _cache_day(), "tabs": {}, "empty": {}}
+    state.setdefault("tabs", {})
+    state.setdefault("empty", {})
+    return state
+
+
+def _save_cache(state):
+    if _cache_inert():
         return
-    with _pace_lock:
-        elapsed = time.monotonic() - _last_request_at
-        wait = REQUEST_DELAY_SECONDS - elapsed
-        if wait > 0:
-            time.sleep(wait + random.uniform(0, 0.15))
-        _last_request_at = time.monotonic()
+    path = _cache_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Write-then-rename: a tick killed mid-write must not leave a truncated
+        # file that the next tick reads as "no cache" forever.
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, path)
+    except OSError as error:
+        logger.warning("Could not persist FanDuel tab cache: %s", error)
+
+
+def clear_caches():
+    """Drop the tab-list and empty-tab caches.
+
+    Used by the pre-tip closing capture, which must not inherit any skip
+    decision made hours earlier, and by tests.
+    """
+    with _cache_lock:
+        _save_cache({"day": _cache_day(), "tabs": {}, "empty": {}})
+
+
+# Nominal reservation, corrected to the real count when the run finishes.
+# A measured 10-game slate issues ~81 requests (1 main page + 10 events x
+# (1 tab list + ~7 tabs)); 90 reserves a little above that so a busier slate
+# does not overspend before the correction lands.
+EXPECTED_REQUESTS_PER_RUN = int(os.getenv("FANDUEL_EXPECTED_REQUESTS", "90"))
+
+_request_count_lock = threading.Lock()
+_request_count = 0
+
+
+def _expected_request_count():
+    return max(1, EXPECTED_REQUESTS_PER_RUN)
+
+
+def _reset_request_count():
+    global _request_count
+    with _request_count_lock:
+        _request_count = 0
+
+
+def _note_request():
+    global _request_count
+    with _request_count_lock:
+        _request_count += 1
+
+
+def requests_made():
+    with _request_count_lock:
+        return _request_count
 
 
 def _fetch_via_proxy(url):
-    """Helper clearly route request via Cloudflare Worker if set."""
-    _pace()
-    session = _get_session()
-    proxy_url = os.environ.get("PBPSTATS_PROXY_URL")
-    if not proxy_url:
-        logger.warning("PBPSTATS_PROXY_URL not set. Falling back to direct connection.")
-        return session.get(url, timeout=REQUEST_TIMEOUT)
-    return session.get(proxy_url, params={"url": url}, timeout=REQUEST_TIMEOUT)
+    """GET `url` through the one hardened HTTP path.
+
+    Everything this used to do by hand, utils/http_client does better and with
+    measured justification in its docstring: it retries 403 so the worker draws a
+    fresh User-Agent (a stale UA produces intermittent 403s with p~0.25, and the
+    worker itself does not retry them), respects Retry-After, backs off with full
+    jitter, and widens the pacing for ALL subsequent traffic on any 429/403 while
+    walking it back after sustained clean responses.
+
+    The decisive reason, though, is that the pace lock is *shared*. FanDuel and
+    DraftKings are submitted to a ThreadPoolExecutor together by
+    cron_closing_lines.scrape_and_shape_odds -- they run concurrently, not
+    sequentially as the old comment here claimed -- and each used to keep its own
+    1.1s clock. Two independent clocks against one 60-requests/60s worker bucket
+    is ~109/min: the aggregate was roughly double the ceiling, and nothing could
+    see it because neither half knew about the other. One governor makes the
+    total correct by construction.
+
+    Raises FanDuelRequestError for every failure mode, so callers keep telling
+    "no answer" apart from "no props" exactly as before.
+    """
+    _note_request()
+    try:
+        return http_client.proxied_get(
+            url,
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
+            label="fanduel",
+        )
+    except http_client.ProxyNotConfigured as error:
+        # Not retryable and not FanDuel's fault: a direct connection from this
+        # host is a guaranteed 403 that also advertises the egress IP, so there
+        # is deliberately no fallback path.
+        raise FanDuelRequestError(f"proxy not configured: {error}") from error
+    except Exception as error:
+        raise FanDuelRequestError(str(error)) from error
 
 def get_nba_main_page_data():
     """Fetches the main NBA page."""
@@ -140,8 +246,22 @@ def get_player_props(event_id, prop_tab_name):
         logger.error("Error fetching props for event %s: %s", event_id, e)
         raise FanDuelRequestError(f"props fetch failed for event {event_id}: {e}") from e
 
-def get_all_available_tabs(event_id):
-    """Fetches available tabs for an event."""
+def get_all_available_tabs(event_id, *, use_cache=True):
+    """Fetches available tabs for an event, from cache when it is still good.
+
+    Which prop markets a game has does not change between 5-minute ticks, but
+    this was one request per event per tick -- 10 of ~81 on a typical slate, for
+    an answer that was already known.
+
+    `use_cache=False` forces a refetch, which is what the pre-tip closing capture
+    passes: closing-line completeness is never traded for request volume.
+    """
+    if use_cache:
+        with _cache_lock:
+            entry = _load_cache()["tabs"].get(str(event_id))
+        if entry and float(entry.get("expires", 0)) > time.time():
+            return list(entry.get("tabs") or [])
+
     cache_buster = int(time.time())
     url = f"https://api.sportsbook.fanduel.com/sbapi/event-page?_ak={FANDUEL_PUBLIC_ACCESS_KEY}&eventId={event_id}&_={cache_buster}"
     try:
@@ -161,7 +281,21 @@ def get_all_available_tabs(event_id):
             if tab_name in ignored_tabs:
                 continue
             available_tabs.append({'name': tab_name, 'title': tab_title})
+
+        # Only a successful fetch is cached. A failure must stay uncached so the
+        # next tick retries: caching it would turn one bad response into an
+        # hour of a game looking propless, which is the early-exit scan's
+        # worst input.
+        with _cache_lock:
+            state = _load_cache()
+            state["tabs"][str(event_id)] = {
+                "expires": time.time() + TAB_LIST_TTL_SECONDS,
+                "tabs": list(available_tabs),
+            }
+            _save_cache(state)
         return available_tabs
+    except FanDuelRequestError:
+        raise
     except Exception as e:
         logger.error("Error fetching tabs for event %s: %s", event_id, e)
         # Must raise, not return []. An empty list is a real answer ("no prop tabs
@@ -337,10 +471,47 @@ def payload_marks_event_in_play(payload, event_id):
         return bool((event or {}).get('inPlay', False))
     return False
 
-def fetch_odds():
-    logger.info("[RUN] FanDuel odds fetch")
+def fetch_odds(*, deadline=None, force=False):
+    """Scrape FanDuel player props for the upcoming slate.
+
+    `deadline` is a `time.monotonic()` value after which no NEW request is
+    started; whatever has been collected is returned instead. This mirrors
+    DraftKings' contract. Before it existed, the caller's only protection was
+    `f2.result(timeout=120)`, which *abandons the whole result* -- at ~90s for a
+    10-game slate, a 35% slowdown silently discarded all ~838 props. Partial
+    rows beat none: a prop whose line was captured is still a usable quote.
+
+    `force` bypasses the tab/empty-tab caches, for the pre-tip closing capture
+    where completeness matters more than request volume.
+    """
+    # Reserved before the first request, because what blocks a book is total
+    # daily volume, not any individual request. `force` is the pre-tip capture,
+    # which still respects the ceiling -- same as DraftKings, where the budget is
+    # the one guard that survives `force`.
+    expected = _expected_request_count()
+    decision = scrape_cadence.check_budget("FD", expected)
+    if not decision.allowed:
+        logger.warning("[SKIP] FanDuel odds fetch | %s", decision.reason)
+        # Empty list, matching the paused-book contract: no rows means nothing
+        # refreshes, rather than stale lines being re-stamped as current.
+        return []
+
+    logger.info("[RUN] FanDuel odds fetch | force=%s pace=%.1fs budget=%d/%d",
+                force, http_client.current_pace(),
+                decision.spent, decision.budget)
+    _reset_request_count()
+    if force:
+        clear_caches()
+
+    def _out_of_time():
+        return deadline is not None and time.monotonic() >= deadline
+
     main_page = get_nba_main_page_data()
-    if not main_page: return []
+    if not main_page:
+        # Return the unspent reservation: one failed request must not cost the
+        # day 90 of its ceiling, or a flaky morning would silence the evening.
+        scrape_cadence.record_book_requests("FD", requests_made() - expected)
+        return []
 
     upcoming_events = []
     attachments = main_page.get('attachments', {})
@@ -383,6 +554,13 @@ def fetch_odds():
     scanned = 0
     failed_event_ids = []
     stopped_early = False
+    hit_deadline = False
+    skipped_empty_tabs = 0
+
+    # Loaded once and written back once, rather than touching the file per tab:
+    # a 10-game slate iterates ~70 tabs, and this is a cache, not a ledger.
+    with _cache_lock:
+        empty_tabs = dict(_load_cache()["empty"])
 
     for event in upcoming_events:
         if propless_streak >= PROPLESS_STOP_STREAK:
@@ -391,6 +569,15 @@ def fetch_odds():
                 "Stopping FanDuel scan: %d consecutive games with no props | remaining_unscanned=%d",
                 propless_streak,
                 len(upcoming_events) - scanned,
+            )
+            break
+
+        if _out_of_time():
+            hit_deadline = True
+            logger.warning(
+                "[PARTIAL] FanDuel odds fetch hit its deadline | props=%d "
+                "events=%d/%d -- returning what the book already quoted",
+                len(all_props), scanned, len(upcoming_events),
             )
             break
 
@@ -404,7 +591,7 @@ def fetch_odds():
         request_failed = False
         tabs = []
         try:
-            tabs = get_all_available_tabs(event_id)
+            tabs = get_all_available_tabs(event_id, use_cache=not force)
         except FanDuelRequestError as e:
             request_failed = True
             failed_event_ids.append(str(event_id))
@@ -416,6 +603,27 @@ def fetch_odds():
                 discard_event = True
                 break
 
+            if _out_of_time():
+                hit_deadline = True
+                request_failed = True   # coverage for this event is unknown
+                if str(event_id) not in failed_event_ids:
+                    failed_event_ids.append(str(event_id))
+                logger.warning(
+                    "[PARTIAL] FanDuel deadline reached mid-event | event=%s "
+                    "props=%d", event_id, len(all_props) + len(event_props),
+                )
+                break
+
+            # A tab that produced nothing usable recently is skipped, on a much
+            # shorter TTL than the tab list itself. Alt-line and quarter/half
+            # tabs are filtered out downstream anyway, so they cost a full
+            # request to yield zero every single tick.
+            tab_key = f"{event_id}|{tab['name']}"
+            if not force and float(empty_tabs.get(tab_key, 0)) > time.time():
+                skipped_empty_tabs += 1
+                continue
+
+            tab_yield_start = len(event_props)
             try:
                 prop_data = get_player_props(event_id, tab['name'])
             except FanDuelRequestError as e:
@@ -490,6 +698,15 @@ def fetch_odds():
                 }
                 event_props.append(prop_entry)
 
+            # Record the verdict for this tab. Only a tab that was actually
+            # fetched and returned nothing usable gets marked -- a tab skipped
+            # by the cache never reaches here, so its TTL cannot be refreshed
+            # indefinitely by its own absence. It expires and gets re-checked.
+            if len(event_props) == tab_yield_start:
+                empty_tabs[tab_key] = time.time() + EMPTY_TAB_TTL_SECONDS
+            else:
+                empty_tabs.pop(tab_key, None)
+
         if discard_event or not is_event_pregame(event):
             logger.info("Discarded FanDuel event after tip/live detection | event=%s game=%s", event_id, game_name)
             # A game that just tipped says nothing about whether later games have
@@ -510,13 +727,33 @@ def fetch_odds():
                 "No props for %s (%s) | propless_streak=%d", game_name, event_id, propless_streak
             )
 
+    # Drop expired entries on the way out so the file cannot grow without bound
+    # across a long slate day.
+    now = time.time()
+    with _cache_lock:
+        state = _load_cache()
+        state["empty"] = {k: v for k, v in empty_tabs.items() if float(v) > now}
+        _save_cache(state)
+
+    # Settle the reservation against what was actually spent. The caching below
+    # is the whole reason this matters: a run that skips 20 tabs must return
+    # those 20 to the day's budget, or the ceiling would punish the saving.
+    actual = requests_made()
+    scrape_cadence.record_book_requests("FD", actual - expected)
+
     logger.info(
-        "[OK] FanDuel odds fetch complete | props=%d events_scanned=%d/%d stopped_early=%s incomplete_events=%d",
+        "[%s] FanDuel odds fetch complete | props=%d events_scanned=%d/%d "
+        "stopped_early=%s incomplete_events=%d requests=%d "
+        "skipped_empty_tabs=%d pace=%.1fs",
+        "PARTIAL" if hit_deadline else "OK",
         len(all_props),
         scanned,
         len(upcoming_events),
         stopped_early,
         len(failed_event_ids),
+        actual,
+        skipped_empty_tabs,
+        http_client.current_pace(),
     )
     if failed_event_ids:
         # Surfaced as WARN because props=N previously looked like a clean result

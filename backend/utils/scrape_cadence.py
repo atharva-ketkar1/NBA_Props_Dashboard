@@ -86,6 +86,19 @@ DEFAULTS = {
     # to the timeout. Volume is what earned the block; this is a trim, and it
     # is not worth losing data for. Raise it only with that budget in mind.
     "DK_JITTER_MAX_SECONDS": "20",
+    # FanDuel's runaway guard. It is NOT throttled the way DraftKings is: FD has
+    # never been blocked, and its per-event/per-tab scan is what gives the
+    # intraday line-movement series its resolution, so cutting its frequency
+    # would cost real product behaviour to solve a problem that is not happening.
+    #
+    # What it did lack was any ceiling at all. Measured on 2026-11-23: FanDuel
+    # ran 37 times against DraftKings' 6, at ~70-81 requests each, so roughly
+    # 3,000 requests/day uncapped -- four times the ~730/day that earned
+    # DraftKings its block. This is set above a normal day (37 x 81 = ~3,000) so
+    # it never bites in healthy operation, and only catches a loop or a slate
+    # that somehow explodes in size. Same philosophy as the DK ceiling above:
+    # a cap that silences the useful hours is worse than no cap.
+    "FD_DAILY_REQUEST_BUDGET": "3600",
 }
 
 _lock = threading.Lock()
@@ -336,6 +349,81 @@ def record_requests(count):
     with _lock:
         state = _load_state()
         state["requests"] = max(0, int(state.get("requests", 0)) + int(count))
+        _save_state(state)
+
+
+# ---------------------------------------------------------------------------
+# Per-book daily budgets for books that are NOT cadence-throttled.
+#
+# Deliberately additive: DraftKings' counters stay in the flat top-level keys
+# they have always used, so none of its tuned window/interval behaviour and none
+# of its tests are touched by this. Other books get their own namespace.
+# ---------------------------------------------------------------------------
+
+def _book_budget_key(book):
+    return str(book or "").strip().upper()
+
+
+def check_budget(book, expected_requests):
+    """Reserve `expected_requests` against `book`'s daily ceiling.
+
+    Returns a `Decision`. Unlike `should_scrape_dk` this applies no slate window
+    and no minimum interval -- it is purely a runaway guard, so a healthy day
+    never sees it. Reserves up front rather than counting afterwards, because a
+    run that dies midway has still spent its requests upstream.
+    """
+    key = _book_budget_key(book)
+    if not _enabled():
+        return Decision(True, "cadence control disabled", window="disabled")
+
+    budget_name = f"{key}_DAILY_REQUEST_BUDGET"
+    if budget_name not in DEFAULTS and not os.environ.get(budget_name):
+        # No ceiling defined for this book: allow, rather than invent one.
+        return Decision(True, f"no budget configured for {key}", window="unbudgeted")
+
+    with _lock:
+        state = _load_state()
+        day = _et_day(datetime.now(timezone.utc))
+        books = state.get("books")
+        if not isinstance(books, dict):
+            books = {}
+        entry = books.get(key)
+        if not isinstance(entry, dict) or entry.get("day") != day:
+            entry = {"day": day, "requests": 0}
+
+        spent = int(entry.get("requests", 0))
+        budget = int(_num(budget_name))
+        if spent + expected_requests > budget:
+            return Decision(
+                False,
+                f"{key} daily budget spent ({spent}/{budget} requests)",
+                window="budget", spent=spent, budget=budget)
+
+        entry["requests"] = spent + expected_requests
+        entry["day"] = day
+        books[key] = entry
+        state["books"] = books
+        _save_state(state)
+        return Decision(True, f"{key} within budget", window="budget",
+                        spent=entry["requests"], budget=budget)
+
+
+def record_book_requests(book, count):
+    """Correct a book's reservation after the fact. Negative returns unspent."""
+    key = _book_budget_key(book)
+    if not _enabled() or not count:
+        return
+    with _lock:
+        state = _load_state()
+        books = state.get("books")
+        if not isinstance(books, dict):
+            books = {}
+        entry = books.get(key)
+        if not isinstance(entry, dict):
+            return
+        entry["requests"] = max(0, int(entry.get("requests", 0)) + int(count))
+        books[key] = entry
+        state["books"] = books
         _save_state(state)
 
 
