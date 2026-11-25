@@ -13,21 +13,40 @@ from utils.logging_utils import configure_logging, log_section, log_status
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from cron_closing_lines import scrape_and_shape_odds
 from utils.snapshot_manager import SnapshotManager
+from utils import health_ledger
 
 configure_logging()
 logger = logging.getLogger("CronIntradayRefresh")
 
 
 def _run_edge_score_refresh(players_data, refresh_label):
+    """Refresh the Signal Score and record the outcome in the health ledger.
+
+    The record is the point of this wrapper existing at all. `score:edge_refresh`
+    declares `expected_interval_s=1800` and `stale_after_s=3h`, but it was only
+    ever recorded by run_pipeline.py -- which runs once a day at 06:00 ET. So the
+    unit went stale at 09:00 and stayed "broken" for ~15 hours every single day,
+    while the refresh was in fact running every half hour from here. Measured
+    2026-11-24: the watchdog reported 10.4h at 16:31 and 14.3h at 20:26, both of
+    which are exactly 06:00 plus the reported gap.
+
+    A monitor that cries wolf daily is worse than no monitor: the entire argument
+    for putting these alerts on ntfy rather than Discord is that the channel stays
+    credible enough to read. Note `sync:supabase_edge` was always recorded
+    correctly from inside edge_score.py, which is why this was the only one of 24
+    units stuck broken.
+    """
     try:
         from utils.edge_score import run_edge_score_refresh
         run_edge_score_refresh(
             refresh_label=refresh_label,
             current_players_data=players_data,
         )
+        health_ledger.record_success("score:edge_refresh", detail=refresh_label)
         return True
     except Exception as error:
         log_status(logger, "WARN", "Edge Score refresh failed", error=error, label=refresh_label)
+        health_ledger.record_failure("score:edge_refresh", error)
         return False
 
 

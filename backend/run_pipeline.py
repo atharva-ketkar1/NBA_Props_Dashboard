@@ -389,17 +389,30 @@ def main():
             critical_scrapers = {"Schedule", "Season Stats"}
             critical_failures = []
             
+            # Per-step wall clock. Memory was already recorded after every
+            # scraper but duration never was, so "which of the fourteen is
+            # slow" was unanswerable from the logs -- only the 433s total was.
+            # That is the measurement the sequential-vs-parallel decision needs:
+            # the VM is no longer the small box the sequential ordering was
+            # chosen for (11GiB total, ~0.6GiB used), but nothing should be
+            # parallelised on a guess.
+            step_durations = {}
+
             for name, func, unit in scrapers:
+                step_started_at = time.time()
                 try:
                     log_status(logger, "RUN", "Scraper started", step=name)
                     result = func()
                     message, rows, soft_failure = _unpack_scraper_result(result)
+                    step_seconds = time.time() - step_started_at
                     if soft_failure:
-                        log_status(logger, "WARN", str(message), step=name)
+                        log_status(logger, "WARN", str(message), step=name,
+                                   duration_s=f"{step_seconds:.1f}")
                         health_ledger.record_failure(unit, soft_failure,
                                                      detail=str(message))
                     else:
-                        log_status(logger, "OK", str(message), step=name)
+                        log_status(logger, "OK", str(message), step=name,
+                                   duration_s=f"{step_seconds:.1f}")
                         # Row counts are only evidence on a day that has games;
                         # see _games_scheduled_today.
                         health_ledger.record_success(
@@ -408,13 +421,29 @@ def main():
                             detail=str(message),
                         )
                 except Exception as e:
-                    log_status(logger, "FAIL", "Scraper failed", step=name, error=e)
+                    log_status(logger, "FAIL", "Scraper failed", step=name, error=e,
+                               duration_s=f"{time.time() - step_started_at:.1f}")
                     health_ledger.record_failure(unit, e)
                     if name in critical_scrapers:
                         critical_failures.append(f"{name}: {e}")
                 finally:
+                    # Recorded in `finally` so a failed scraper still reports how
+                    # long it spent failing -- a scraper that burns 90s of
+                    # timeouts is the interesting case, not the cheap one.
+                    step_durations[name] = time.time() - step_started_at
                     gc.collect()
                     log_memory(f"After {name}")
+
+            # One line, slowest first, so the bottleneck is readable without
+            # grepping fourteen separate entries out of a day's log.
+            log_status(
+                logger, "INFO", "Scraper durations",
+                **{
+                    step.lower().replace(" ", "_"): f"{seconds:.1f}"
+                    for step, seconds in sorted(
+                        step_durations.items(), key=lambda kv: kv[1], reverse=True)
+                },
+            )
 
             # STEP 2: Run Aggregator
             log_status(logger, "RUN", "Aggregator started")
