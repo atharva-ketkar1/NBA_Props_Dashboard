@@ -391,7 +391,15 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
                   <div className="min-w-[600px] flex-1 min-h-0 flex flex-col">
                      <div className="grid grid-cols-[1fr_1fr_2fr_1fr_1fr_1fr] text-[10px] text-fgSubtle font-bold uppercase mb-3 px-2">
                         <div>Date</div>
-                        <div>Opp</div>
+                        {/*
+                          The comp's OWN team, not the opponent. Every row is a
+                          game against the same opponent -- that is the hard
+                          filter in rankSimilarPlayers -- so an "Opp" column
+                          repeated one tricode down the table and told the
+                          reader nothing. Which club the comp plays for is what
+                          actually varies.
+                        */}
+                        <div>{targetOpponent ? 'Team' : 'Opp'}</div>
                         <div>Player</div>
                         <div className="text-center">Line</div>
                         <div className="text-center">Result</div>
