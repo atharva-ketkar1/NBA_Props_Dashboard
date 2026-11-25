@@ -37,7 +37,14 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install backend dependencies
-        run: pip install -r requirements.txt
+        # pytest is installed separately and deliberately not added to
+        # requirements.txt: that file is also what a dev machine installs, and
+        # requirements-vm.txt (production) must never carry a test runner.
+        # Verified in a clean venv that requirements.txt + pytest is the whole
+        # set the suite needs -- 796 passed.
+        run: |
+          pip install -r requirements.txt
+          pip install "pytest>=9,<10"
 
       - name: Run backend test suite
         working-directory: backend
