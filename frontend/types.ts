@@ -84,6 +84,20 @@ export interface PlayerStats {
   "REB+AST": number;
   "STL+BLK": number;
   USG_PCT?: number;
+  /**
+   * Upcoming opponent's league rank (1 = toughest matchup) for pace,
+   * defensive rating, and points allowed to this player's position. Carried
+   * on `stats` rather than as a top-level Player field so it reaches both
+   * delivery modes without a Supabase migration or new SELECT column -- see
+   * aggregator.py's season_stats assembly. Per-historical-game equivalents
+   * live on each game_log entry's `opp_ranks.pace` / `.def_rating` / `.pos_pts`.
+   */
+  opp_pace_rank?: number | null;
+  opp_def_rating_rank?: number | null;
+  opp_pos_pts_rank?: number | null;
+  /** Same shape as the ranks above, for the opponent's 3PA/FTA allowed. */
+  opp_fg3a_rank?: number | null;
+  opp_fta_rank?: number | null;
   [key: string]: any;
 }
 

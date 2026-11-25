@@ -475,6 +475,13 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
     const csRank = player?.shot_type_analysis?.opp_def?.catch_and_shoot?.rank;
     const pullupRank = player?.shot_type_analysis?.opp_def?.pull_up?.rank;
 
+    // Opponent team-level ranks for the upcoming matchup
+    const paceRank = player?.stats?.opp_pace_rank;
+    const defRtgRank = player?.stats?.opp_def_rating_rank;
+    const posPtsRank = player?.stats?.opp_pos_pts_rank;
+    const fg3aAllowedRank = player?.stats?.opp_fg3a_rank;
+    const ftaAllowedRank = player?.stats?.opp_fta_rank;
+
     // Stats
     const usgPct = player?.stats?.USG_PCT;
     const fga = player?.stats?.FGA;
@@ -855,8 +862,8 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                 <>
                                     {[
                                         { filterId: 'Opp Paint Pts Allowed', label: 'Opp Paint Pts Allowed', rank: paintPtsRank },
-                                        { filterId: 'Opp DefRtg', label: 'Opp DefRtg' },
-                                        { filterId: 'Opp Pace', label: 'Opp Pace', customRank: <span className="text-green500">#5</span> },
+                                        { filterId: 'Opp DefRtg', label: 'Opp DefRtg', rank: defRtgRank },
+                                        { filterId: 'Opp Pace', label: 'Opp Pace', rank: paceRank },
                                         { filterId: 'USG%', label: 'USG%' },
                                         { filterId: 'FGA', label: 'FGA' },
                                         { filterId: 'Def vs DSZ2', label: 'Def vs DSZ2', rank: dsz2Rank },
@@ -866,7 +873,6 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                                             filterId: stat.filterId,
                                             label: stat.label,
                                             rank: stat.rank,
-                                            customRank: stat.customRank,
                                         }),
                                     )}
                                     <button
@@ -1019,20 +1025,19 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                             <span className="text-[10px] font-semibold text-borderMuted uppercase tracking-wider block mb-2">Team Defense</span>
                             <div className="flex flex-wrap gap-1">
                                 {[
-                                    { filterId: 'Def vs Position (PTS)', label: 'Position' },
-                                    { filterId: 'Opp DefRtg', label: 'DefRtg' },
+                                    { filterId: 'Def vs Position (PTS)', label: 'Position', rank: posPtsRank },
+                                    { filterId: 'Opp DefRtg', label: 'DefRtg', rank: defRtgRank },
                                     { filterId: 'Def vs Pull Up', label: 'Pull Up', rank: pullupRank },
                                     { filterId: 'Catch & Shoot', label: 'C&S', rank: csRank },
                                     { filterId: 'Opp Paint Pts Allowed', label: 'Paint Pts Allowed', rank: paintPtsRank },
-                                    { filterId: 'Opp Pace', label: 'Pace', customRank: <span className="text-green500">#5</span> },
-                                    { filterId: '3PT Att Allowed', label: '3PT Att Allowed' },
-                                    { filterId: 'FT Att Allowed', label: 'FT Att Allowed' },
+                                    { filterId: 'Opp Pace', label: 'Pace', rank: paceRank },
+                                    { filterId: '3PT Att Allowed', label: '3PT Att Allowed', rank: fg3aAllowedRank },
+                                    { filterId: 'FT Att Allowed', label: 'FT Att Allowed', rank: ftaAllowedRank },
                                 ].map((stat) =>
                                     renderFilterButton({
                                         filterId: stat.filterId,
                                         label: stat.label,
                                         rank: stat.rank,
-                                        customRank: stat.customRank,
                                         className: 'px-2 py-1.5 rounded-btn text-[13px]',
                                     }),
                                 )}

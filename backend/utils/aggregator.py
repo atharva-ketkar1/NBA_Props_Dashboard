@@ -298,6 +298,23 @@ DISPLAY_STATS = [
     'PTS+REB+AST', 'PTS+REB', 'PTS+AST', 'REB+AST', 'STL+BLK', 'USG_PCT'
 ]
 
+# The "Play Types" pills in the frontend's Opp Rankings tab (FiltersPanel.tsx) --
+# everything except DPT (the player's own top play type, handled separately via
+# dpt_key_raw) and the types the UI doesn't surface (Free Throws, Cut, Misc).
+# Keys here are what ride on each game_log item's `opp_ranks`, matching the
+# `filterId` strings `filterOverlays.ts` binds to.
+PLAY_TYPE_OPP_RANK_KEYS = {
+    'transition': 'transition',
+    'pnr_ball_handler': 'pickAndRollBallHandler',
+    'isolation': 'isolation',
+    'spot_up': 'spotUp',
+    'off_screen': 'offScreen',
+    'post_up': 'postUp',
+    'handoff': 'handoff',
+    'pnr_roll_man': 'pickAndRollRollMan',
+    'putback': 'putback',
+}
+
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
@@ -368,7 +385,7 @@ def normalize_game_date(raw_value):
 # ==========================================
 # 3. MAIN AGGREGATION LOGIC
 # ==========================================
-def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path, pp_path=None):
+def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assists_path, opp_assist_path, opp_def_path, games_path, shot_type_path, opp_shot_type_path, play_type_path, boxscores_path, output_path, pp_path=None, opp_team_advanced_path=None):
     print(f"   Aggregating Data...")
     import gc
 
@@ -383,6 +400,7 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
     assists_data = load_json(assists_path)
     opp_assist_data = load_json(opp_assist_path)
     opp_def_data = load_json(opp_def_path)
+    opp_team_advanced_data = load_json(opp_team_advanced_path) if opp_team_advanced_path else {}
     games_data = load_json(games_path)
     shot_type_data = load_json(shot_type_path)
     opp_shot_type_data = load_json(opp_shot_type_path)
@@ -569,6 +587,17 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
         season_stats = {}
         for k in DISPLAY_STATS:
             season_stats[k] = safe_float(row.get(k, 0))
+        # Opponent ranks for the upcoming game ride inside `stats` (rather than
+        # as new top-level player keys) so they reach both delivery modes for
+        # free: `stats` is already a synced Supabase column and is already in
+        # PLAYER_BASE_SELECT / PLAYER_DETAIL_SELECT -- a new top-level field
+        # would need its own migration and SELECT changes. Filled in below,
+        # once the upcoming opponent is known.
+        season_stats['opp_pace_rank'] = None
+        season_stats['opp_def_rating_rank'] = None
+        season_stats['opp_pos_pts_rank'] = None
+        season_stats['opp_fg3a_rank'] = None
+        season_stats['opp_fta_rank'] = None
 
         # 2. Get opponent defense context
         team = str(row['TEAM_ABBREVIATION'])
@@ -596,7 +625,15 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
 
         if opp_info:
             opp_name = opp_info['opp_name']
-            
+
+            team_advanced = opp_team_advanced_data.get(opp_name)
+            if team_advanced:
+                season_stats['opp_pace_rank'] = _opt_number(team_advanced.get('pace_rank'))
+                season_stats['opp_def_rating_rank'] = _opt_number(team_advanced.get('def_rating_rank'))
+                season_stats['opp_pos_pts_rank'] = _opt_number(team_advanced.get('pos_pts_rank', {}).get(sim_pos))
+                season_stats['opp_fg3a_rank'] = _opt_number(team_advanced.get('fg3a_allowed_rank'))
+                season_stats['opp_fta_rank'] = _opt_number(team_advanced.get('fta_allowed_rank'))
+
             if opp_name in opp_def_data:
                 team_def_data = opp_def_data[opp_name]
                 if 'ALL' in team_def_data:
@@ -742,28 +779,47 @@ def run_aggregation(stats_path, dk_path, fd_path, logs_path, shooting_path, assi
                     'dsz': None,
                     'dsz2': None,
                     'paint_allowed': None,
-                    'pull_up': None
+                    'pull_up': None,
+                    'catch_and_shoot': None,
+                    'pace': None,
+                    'def_rating': None,
+                    'pos_pts': None,
+                    'fg3a_allowed': None,
+                    'fta_allowed': None,
+                    **{short_key: None for short_key in PLAY_TYPE_OPP_RANK_KEYS},
                 }
-                
+
                 if hist_opp_name != 'N/A':
-                    # 1. Play Type Def (DPT)
+                    # 1. Play Type Def (DPT, plus every play-type pill the UI offers)
                     hist_opp_play_type = play_type_data.get('teams', {}).get(hist_opp_name, {}).get('rankings', {})
                     if dpt_key_raw: gl_item['opp_ranks']['dpt'] = hist_opp_play_type.get(dpt_key_raw, None)
-                    
+                    for short_key, raw_key in PLAY_TYPE_OPP_RANK_KEYS.items():
+                        gl_item['opp_ranks'][short_key] = hist_opp_play_type.get(raw_key, None)
+
                     # 2. Shot Zones (DSZ, DSZ2, Paint Allowed)
                     hist_opp_def_zones = None
                     if hist_opp_name in opp_def_data:
                         team_def = opp_def_data[hist_opp_name]
                         hist_opp_def_zones = team_def.get(sim_pos) or team_def.get('ALL', {})
-                    
+
                     if hist_opp_def_zones:
                         if dsz_key: gl_item['opp_ranks']['dsz'] = hist_opp_def_zones.get(dsz_key, {}).get('rank', None)
                         if dsz2_key: gl_item['opp_ranks']['dsz2'] = hist_opp_def_zones.get(dsz2_key, {}).get('rank', None)
                         gl_item['opp_ranks']['paint_allowed'] = hist_opp_def_zones.get('paint', {}).get('rank', None)
-                        
-                    # 3. Pull Up Def
+
+                    # 4. Pace / Def Rating / Points allowed to this player's position / attempts allowed
+                    hist_team_advanced = opp_team_advanced_data.get(hist_opp_name)
+                    if hist_team_advanced:
+                        gl_item['opp_ranks']['pace'] = hist_team_advanced.get('pace_rank')
+                        gl_item['opp_ranks']['def_rating'] = hist_team_advanced.get('def_rating_rank')
+                        gl_item['opp_ranks']['pos_pts'] = hist_team_advanced.get('pos_pts_rank', {}).get(sim_pos)
+                        gl_item['opp_ranks']['fg3a_allowed'] = hist_team_advanced.get('fg3a_allowed_rank')
+                        gl_item['opp_ranks']['fta_allowed'] = hist_team_advanced.get('fta_allowed_rank')
+
+                    # 3. Pull Up / Catch & Shoot Def
                     hist_opp_shot_type = opp_shot_type_data.get(hist_opp_name, {}).get('rankings', {})
                     gl_item['opp_ranks']['pull_up'] = hist_opp_shot_type.get('pullups', None)
+                    gl_item['opp_ranks']['catch_and_shoot'] = hist_opp_shot_type.get('catchAndShoot', None)
 
         master_data[pid] = {
             "id": pid,

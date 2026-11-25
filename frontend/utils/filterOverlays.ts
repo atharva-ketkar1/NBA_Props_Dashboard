@@ -200,6 +200,35 @@ const getNumericFilter = (
   getComparisonValue: getComparisonAverage(metricKey, options?.transform),
 });
 
+/**
+ * `play_type_analysis` labels the backend emits ("PNR Ball Handler", "Off
+ * Screen", "PNR Roll Man") don't all match the UI's shorter pill labels
+ * ("PnR Ball Handler", "Off Scr", "PnR RM") by substring -- "PnR RM" isn't a
+ * substring of "PNR Roll Man" either direction -- so this maps explicitly
+ * rather than reusing FiltersPanel's fuzzy badge-matching, which already
+ * silently misses "PnR RM" for the same reason.
+ */
+const PLAY_TYPE_BACKEND_LABELS: Record<string, string> = {
+  Transition: 'Transition',
+  'PnR Ball Handler': 'PNR Ball Handler',
+  Isolation: 'Isolation',
+  'Spot Up': 'Spot Up',
+  'Off Scr': 'Off Screen',
+  'Post Up': 'Post Up',
+  Handoff: 'Handoff',
+  'PnR RM': 'PNR Roll Man',
+  Putback: 'Putback',
+};
+
+const getPlayTypeRank = (player: Player | undefined, uiLabel: string) => {
+  const backendLabel = PLAY_TYPE_BACKEND_LABELS[uiLabel];
+  const match = player?.play_type_analysis?.find((p: any) => p?.type === backendLabel);
+  return toNumber(match?.rank);
+};
+
+const getPlayTypeFilter = (uiLabel: string, rankKey: string) =>
+  getRankFilter(uiLabel, uiLabel, rankKey, (context) => getPlayTypeRank(context.player, uiLabel));
+
 const getRankFilter = (
   id: string,
   label: string,
@@ -311,6 +340,33 @@ export const OVERLAY_FILTER_DEFINITIONS: Record<string, OverlayFilterDefinition>
   'Def vs Pull Up': getRankFilter('Def vs Pull Up', 'Def vs Pull Up', 'pull_up', (context) =>
     toNumber(context.player?.shot_type_analysis?.opp_def?.pull_up?.rank),
   ),
+  'Opp Pace': getRankFilter('Opp Pace', 'Opp Pace', 'pace', (context) =>
+    toNumber(context.player?.stats?.opp_pace_rank),
+  ),
+  'Opp DefRtg': getRankFilter('Opp DefRtg', 'Opp DefRtg', 'def_rating', (context) =>
+    toNumber(context.player?.stats?.opp_def_rating_rank),
+  ),
+  'Def vs Position (PTS)': getRankFilter('Def vs Position (PTS)', 'Def vs Position (PTS)', 'pos_pts', (context) =>
+    toNumber(context.player?.stats?.opp_pos_pts_rank),
+  ),
+  'Catch & Shoot': getRankFilter('Catch & Shoot', 'Catch & Shoot', 'catch_and_shoot', (context) =>
+    toNumber(context.player?.shot_type_analysis?.opp_def?.catch_and_shoot?.rank),
+  ),
+  '3PT Att Allowed': getRankFilter('3PT Att Allowed', '3PT Att Allowed', 'fg3a_allowed', (context) =>
+    toNumber(context.player?.stats?.opp_fg3a_rank),
+  ),
+  'FT Att Allowed': getRankFilter('FT Att Allowed', 'FT Att Allowed', 'fta_allowed', (context) =>
+    toNumber(context.player?.stats?.opp_fta_rank),
+  ),
+  Transition: getPlayTypeFilter('Transition', 'transition'),
+  'PnR Ball Handler': getPlayTypeFilter('PnR Ball Handler', 'pnr_ball_handler'),
+  Isolation: getPlayTypeFilter('Isolation', 'isolation'),
+  'Spot Up': getPlayTypeFilter('Spot Up', 'spot_up'),
+  'Off Scr': getPlayTypeFilter('Off Scr', 'off_screen'),
+  'Post Up': getPlayTypeFilter('Post Up', 'post_up'),
+  Handoff: getPlayTypeFilter('Handoff', 'handoff'),
+  'PnR RM': getPlayTypeFilter('PnR RM', 'pnr_roll_man'),
+  Putback: getPlayTypeFilter('Putback', 'putback'),
 };
 
 export function getOverlayFilterDefinition(filterId?: string | null) {

@@ -28,6 +28,7 @@ from scrapers import shooting_zones as shooting_zones
 from scrapers import assist_zones as assist_zones
 from scrapers import opp_assist_zones as opp_assist_zones
 from scrapers import opp_def_zones as opp_def_zones
+from scrapers import opp_team_advanced as opp_team_advanced
 from scrapers import shot_type_analysis as shot_type_analysis
 from scrapers import opp_shot_type_analysis as opp_shot_type_analysis
 from scrapers import play_type_analysis as play_type_analysis
@@ -90,6 +91,7 @@ SHOOTING_PATH = os.path.join(DATA_DIR, "shooting_zones.json")
 ASSISTS_PATH = os.path.join(DATA_DIR, "assist_zones.json")
 OPP_ASSIST_PATH = os.path.join(DATA_DIR, "opp_assist_zones.json")
 OPP_DEF_PATH = os.path.join(DATA_DIR, "opp_def_zones.json")
+OPP_TEAM_ADV_PATH = os.path.join(DATA_DIR, "opp_team_advanced.json")
 SHOT_TYPE_PATH = os.path.join(DATA_DIR, "shot_type_analysis.json")
 OPP_SHOT_TYPE_PATH = os.path.join(DATA_DIR, "opponent_defensive_ranks.json")
 PLAY_TYPE_PATH = os.path.join(DATA_DIR, "play_type_analysis.json")
@@ -274,6 +276,13 @@ def run_opp_def_zones():
         json.dump(data, f, indent=4)
     return f"Opp Defense Zones: {len(data)} teams", len(data)
 
+def run_opp_team_advanced():
+    logger.info("Starting Opponent Team Advanced (pace/def rating/positional pts)...")
+    data = opp_team_advanced.get_opp_team_advanced_data()
+    with open(OPP_TEAM_ADV_PATH, "w") as f:
+        json.dump(data, f, indent=4)
+    return f"Opp Team Advanced: {len(data)} teams", len(data)
+
 def run_shot_type_analysis():
     logger.info("Starting Shot Type Analysis...")
     data = shot_type_analysis.get_shot_type_data()
@@ -373,6 +382,7 @@ def main():
                 ("Assist Zones", run_assist_zones, "scraper:assist_zones"),
                 ("Opp Assist Zones", run_opp_assist_zones, "scraper:opp_assist_zones"),
                 ("Opp Defense Zones", run_opp_def_zones, "scraper:opp_def_zones"),
+                ("Opp Team Advanced", run_opp_team_advanced, "scraper:opp_team_advanced"),
                 ("Shot Type Analysis", run_shot_type_analysis, "scraper:shot_type"),
                 ("Opp Shot Type Analysis", run_opp_shot_type_analysis, "scraper:opp_shot_type"),
                 ("Play Type Analysis", run_play_type_analysis, "scraper:play_type"),
@@ -457,6 +467,7 @@ def main():
                 assists_path=ASSISTS_PATH,
                 opp_assist_path=OPP_ASSIST_PATH,
                 opp_def_path=OPP_DEF_PATH,
+                opp_team_advanced_path=OPP_TEAM_ADV_PATH,
                 games_path=GAMES_PATH,
                 shot_type_path=SHOT_TYPE_PATH,
                 opp_shot_type_path=OPP_SHOT_TYPE_PATH,

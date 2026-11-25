@@ -510,7 +510,10 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
     const VIEWBOX_WIDTH = isMobile ? 650 : (isFiltersOpen ? 700 : 1000); // Internal coordinate system width dynamcially adjusts to prevent shrinking
     const VIEWBOX_HEIGHT = 400; // Internal coordinate system height
     const X_START = 80;         // Left margin to leave room for Y-axis labels
-    const X_END = VIEWBOX_WIDTH - 20; // Right margin
+    // The secondary (overlay) axis needs room for multi-character labels like
+    // "#16" or "35%" -- 20 units left almost none, which clipped them against
+    // the viewBox edge. Mirrors X_START's reservation on the left.
+    const X_END = VIEWBOX_WIDTH - (overlayDefinition ? 56 : 20); // Right margin
     const AVAILABLE_WIDTH = X_END - X_START;
 
     const baseVisibleCount = (isMobile && !isFiltersOpen) ? 14 : (historicalGameCount || (isFiltersOpen ? 19 : 29));
@@ -789,13 +792,16 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                     <line x1="60" x2={hasSecondaryOverlay ? "100%" : X_END} y1={getY(maxScore)} y2={getY(maxScore)} stroke={colors.borderMedium} strokeOpacity="0.4" />
                 </g>
 
-                {/* Secondary Y-Axis Grid Lines & Labels (Right Side) */}
+                {/* Secondary Y-Axis Grid Lines & Labels (Right Side). Anchored to a
+                  * fixed point near the viewBox's right edge and growing inward
+                  * (mirroring the left axis's anchor="end" at x=50), so a label
+                  * never overflows the viewBox regardless of its digit count. */}
                 {hasSecondaryOverlay && (
-                    <g className="text-blue500 font-semibold" fill="currentColor" textAnchor="start" fontSize="12">
+                    <g className="text-blue700 font-semibold" fill="currentColor" textAnchor="end" fontSize="12">
                         {secondaryTickValues.map((tickValue, index) => (
                             <text
                                 key={`${tickValue}-${index}`}
-                                x={X_END + 4}
+                                x={VIEWBOX_WIDTH - 8}
                                 y={getSecondaryY(tickValue)}
                                 dominantBaseline="middle"
                             >
@@ -871,9 +877,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                         strokeWidth="1.5"
                                         strokeDasharray="4 4"
                                         className="opacity-100"
-                                    >
-                                        <title>Upcoming Game</title>
-                                    </motion.rect>
+                                    />
                                 ) : (
                                     <motion.rect
                                         initial={false}
@@ -888,9 +892,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                         rx="4"
                                         ry="4"
                                         className="group-hover:brightness-110 group-hover:opacity-80"
-                                    >
-                                        <title>{`${game.dateMonth} ${game.dateDay} vs ${game.opponent} - ${game.score} ${statKey}`}</title>
-                                    </motion.rect>
+                                    />
                                 )}
 
                                 {/* Stat Value Text Inside Bar */}
@@ -972,7 +974,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                 `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`
                             )).join(' ')}
                             fill="none"
-                            stroke={colors.blue500}
+                            stroke={colors.blue700}
                             strokeWidth="2.5"
                             className="drop-shadow-sm transition-all duration-300"
                         />
@@ -988,7 +990,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                         y2={upcomingSecondaryPoint.y}
                                         fill="none"
                                         stroke="currentColor"
-                                        className="text-blue500 opacity-60"
+                                        className="text-blue700 opacity-60"
                                         strokeWidth="2.5"
                                         strokeDasharray="6 4"
                                     />
@@ -999,7 +1001,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
                                         x2={upcomingSecondaryPoint.x}
                                         y2={upcomingSecondaryPoint.y + 5}
                                         stroke="currentColor"
-                                        className="text-blue500 opacity-60"
+                                        className="text-blue700 opacity-60"
                                         strokeWidth="2.5"
                                     />
                                 </>
@@ -1146,8 +1148,8 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
 
                 {hasSecondaryOverlay && overlayDefinition ? (
                     <div className="flex items-center gap-1.5 flex-1 justify-start">
-                        <div className="w-2.5 h-2.5 bg-blue500 rounded-2xs" />
-                        <span className="text-blue500 font-bold text-[9px] tracking-widest uppercase whitespace-nowrap">
+                        <div className="w-2.5 h-2.5 bg-blue700 rounded-2xs" />
+                        <span className="text-blue700 font-bold text-[9px] tracking-widest uppercase whitespace-nowrap">
                             {overlayDefinition.label} {formatOverlayLegend(overlayDefinition, graphAvgSecondary, comparisonAvgSecondary, baseStat)}
                         </span>
                     </div>
@@ -1162,7 +1164,7 @@ export const BarChart: React.FC<BarChartProps> = ({ player, activeTab, activeSpo
             </div>
 
             {/* Hover Tooltip Overlay */}
-            <HoverTooltip data={hoverData} player={chartPlayer ?? player} />
+            <HoverTooltip data={hoverData} player={chartPlayer ?? player} overlayDefinition={overlayDefinition} />
         </div>
     );
 };

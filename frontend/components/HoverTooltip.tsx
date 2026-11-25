@@ -1,6 +1,7 @@
 import React from 'react';
 import { Player, SportsbookId } from '../types';
 import { ASSETS_BASE } from '../utils/config';
+import { formatOverlayAxisValue, OverlayFilterDefinition } from '../utils/filterOverlays';
 
 // Represents the data structure parsed by BarChart when hovering over a game
 export interface HoveredGameData {
@@ -15,7 +16,55 @@ export interface HoveredGameData {
 interface TooltipProps {
     data: HoveredGameData | null;
     player?: Player;
+    /** The active filter overlay (e.g. "Opp Pace"), if one is selected -- drawn
+     * as a highlighted row in the stats table, matching the overlay line's color. */
+    overlayDefinition?: OverlayFilterDefinition | null;
 }
+
+/** Row shown as an existing stat line, unless `highlight` marks it as the
+ * selected filter overlay -- either reusing an existing row (its label matches
+ * the overlay's label) or appended as its own row, styled to match the
+ * overlay line (#1d4ed8 / blue700). */
+interface StatRow {
+    label: string;
+    value: string;
+    highlight?: boolean;
+}
+
+/** Resolves the active overlay's value for the hovered game (or the upcoming
+ * game context), formatted the same way as the chart's secondary axis. */
+const resolveOverlayRow = (
+    overlayDefinition: OverlayFilterDefinition | null | undefined,
+    player: Player | undefined,
+    game: any,
+    isUpcoming: boolean,
+): StatRow | null => {
+    if (!overlayDefinition) return null;
+
+    const rawValue = isUpcoming
+        ? overlayDefinition.getUpcomingValue?.({ player }) ?? null
+        : overlayDefinition.getGameValue({ player, game });
+
+    const value = rawValue === null || rawValue === undefined || !Number.isFinite(rawValue)
+        ? 'N/A'
+        : formatOverlayAxisValue(overlayDefinition, rawValue);
+
+    return { label: overlayDefinition.label, value, highlight: true };
+};
+
+/** Merges the overlay row into an existing row list: highlights the row that
+ * already shows this stat (e.g. the overlay "Minutes" and the table's own
+ * "Minutes" row), or appends it as a new row when no row matches. */
+const withOverlayRow = (rows: StatRow[], overlayRow: StatRow | null): StatRow[] => {
+    if (!overlayRow) return rows;
+
+    const matchIndex = rows.findIndex((row) => row.label === overlayRow.label);
+    if (matchIndex === -1) return [...rows, overlayRow];
+
+    const merged = [...rows];
+    merged[matchIndex] = { ...merged[matchIndex], highlight: true };
+    return merged;
+};
 
 const ACTION_NETWORK_BOOK_IDS: Partial<Record<SportsbookId, string>> = {
     dk: '15',
@@ -150,7 +199,7 @@ const getUpcomingTableRows = (
     ];
 };
 
-export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
+export const HoverTooltip: React.FC<TooltipProps> = ({ data, player, overlayDefinition }) => {
     if (!data) return null;
 
     const { game, x, y, lineValue, statKey, activeSportsbook } = data;
@@ -231,18 +280,29 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
     // --- Dynamic Stat Row Configuration based on current Tab (statKey) ---
     const renderTableRows = () => {
         if (isUpcoming) {
-            return getUpcomingTableRows(game, player, activeSportsbook).map((row, index) => (
-                <div key={`${row.label}-${index}`} className="flex justify-between items-center gap-3 text-[11px] leading-tight py-[3px]">
-                    <span className="text-neutral400 font-medium">{row.label}</span>
-                    <span className="text-white font-bold text-right">{row.value}</span>
-                </div>
+            const upcomingRows = withOverlayRow(
+                getUpcomingTableRows(game, player, activeSportsbook),
+                resolveOverlayRow(overlayDefinition, player, game, true),
+            );
+            return upcomingRows.map((row, index) => (
+                row.highlight ? (
+                    <div key={`${row.label}-${index}`} className="flex justify-between items-center gap-3 text-[11px] leading-tight py-1.5 px-3 -mx-3 bg-blue700">
+                        <span className="text-white font-bold">{row.label}</span>
+                        <span className="text-white font-bold text-right">{row.value}</span>
+                    </div>
+                ) : (
+                    <div key={`${row.label}-${index}`} className="flex justify-between items-center gap-3 text-[11px] leading-tight py-[3px]">
+                        <span className="text-neutral400 font-medium">{row.label}</span>
+                        <span className="text-white font-bold text-right">{row.value}</span>
+                    </div>
+                )
             ));
         }
 
         // Format helper for minutes (handles decimals from the NBA API)
         const formatMin = (min: any) => Math.round(Number(min || 0));
 
-        const rows: { label: string; value: string }[] = [
+        const rows: StatRow[] = [
             { label: 'Minutes', value: `${formatMin(game.MIN)}'` },
         ];
 
@@ -366,11 +426,20 @@ export const HoverTooltip: React.FC<TooltipProps> = ({ data, player }) => {
                 break;
         }
 
-        return rows.map((r, i) => (
-            <div key={i} className="flex justify-between items-center text-[11px] leading-tight py-[3px]">
-                <span className="text-neutral400 font-medium">{r.label}</span>
-                <span className="text-white font-bold">{r.value}</span>
-            </div>
+        const mergedRows = withOverlayRow(rows, resolveOverlayRow(overlayDefinition, player, game, false));
+
+        return mergedRows.map((r, i) => (
+            r.highlight ? (
+                <div key={i} className="flex justify-between items-center text-[11px] leading-tight py-1.5 px-3 -mx-3 bg-blue700">
+                    <span className="text-white font-bold">{r.label}</span>
+                    <span className="text-white font-bold">{r.value}</span>
+                </div>
+            ) : (
+                <div key={i} className="flex justify-between items-center text-[11px] leading-tight py-[3px]">
+                    <span className="text-neutral400 font-medium">{r.label}</span>
+                    <span className="text-white font-bold">{r.value}</span>
+                </div>
+            )
         ));
     };
 
