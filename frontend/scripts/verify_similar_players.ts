@@ -39,8 +39,46 @@ import { readFileSync, existsSync } from 'node:fs';
 import { rankSimilarPlayers } from '../utils/similarPlayers';
 import type { Player } from '../types';
 
-const FEED_PATH = process.env.MASTER_FEED_PATH
-  ?? '../backend/data/current/master_feed.json';
+/**
+ * Where the player pool comes from, in preference order:
+ *
+ *   1. MASTER_FEED_PATH, if set. Explicit beats implicit, and a path that is
+ *      set but missing is a mistake worth failing on.
+ *   2. The live feed, when the pipeline has run on this machine. Real data is
+ *      the better check -- it moves, so it can surface things a frozen
+ *      snapshot cannot.
+ *   3. The committed fixture. `backend/data` is gitignored, so this is the only
+ *      option on a CI runner. Without it this script exited 2 on every push and
+ *      turned CI permanently red; skipping instead would have been worse, since
+ *      the ranking would then be unguarded exactly where a regression is most
+ *      likely to arrive.
+ *
+ * Rebuild the fixture with scripts/build_comps_fixture.py.
+ */
+const LIVE_FEED = '../backend/data/current/master_feed.json';
+const FIXTURE = new URL('./fixtures/comps_pool.json', import.meta.url).pathname;
+
+function resolveFeedPath(): { path: string; source: string } {
+  const explicit = process.env.MASTER_FEED_PATH;
+  if (explicit) {
+    if (!existsSync(explicit)) {
+      console.error(
+        `MASTER_FEED_PATH is set to ${explicit}, which does not exist.`,
+      );
+      process.exit(2);
+    }
+    return { path: explicit, source: 'MASTER_FEED_PATH' };
+  }
+  if (existsSync(LIVE_FEED)) return { path: LIVE_FEED, source: 'live feed' };
+  if (existsSync(FIXTURE)) return { path: FIXTURE, source: 'committed fixture' };
+
+  console.error(
+    'No player pool found. Expected the live feed at '
+    + `${LIVE_FEED} or the fixture at ${FIXTURE}.\n`
+    + 'Rebuild the fixture with: python3 scripts/build_comps_fixture.py',
+  );
+  process.exit(2);
+}
 
 /**
  * Hand-labelled expectations.
@@ -130,16 +168,10 @@ const OPPONENT_CASE = {
 };
 
 function main() {
-  if (!existsSync(FEED_PATH)) {
-    console.error(
-      `master_feed.json not found at ${FEED_PATH}.\n`
-      + 'Run the pipeline or `python3 backend/scripts/sync_all_data.py` first, '
-      + 'or set MASTER_FEED_PATH.',
-    );
-    process.exit(2);
-  }
+  const { path: feedPath, source } = resolveFeedPath();
+  console.log(`pool: ${source} (${feedPath})\n`);
 
-  const players: Player[] = JSON.parse(readFileSync(FEED_PATH, 'utf8'));
+  const players: Player[] = JSON.parse(readFileSync(feedPath, 'utf8'));
   const fold = (value: string) =>
     value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   // The ranking reads game logs only via buildSimilarPlayersDataset, but

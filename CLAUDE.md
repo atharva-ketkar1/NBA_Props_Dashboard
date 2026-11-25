@@ -54,6 +54,7 @@ npm run build
 npx tsc --noEmit   # typechecks both the app and frontend/api/; run before any push
 python3 scripts/verify_design_tokens.py   # diffs Tailwind tokens against propsmadness.com; exits non-zero on drift
 npx vite-node scripts/verify_similar_players.ts   # comp-ranking recall vs hand-labelled sets; exits non-zero on regression
+python3 scripts/build_comps_fixture.py            # rebuild the committed pool that check falls back to in CI
 ```
 
 ### Ops
@@ -386,7 +387,17 @@ removing it entirely was also wrong.
 
 Keep `scripts/verify_similar_players.ts` green -- it carries per-target floors plus the
 opponent-anchoring case, so a change that helps wings at the cost of bigs, or that
-re-breaks opponent anchoring, fails rather than passing quietly. It folds diacritics when
+re-breaks opponent anchoring, fails rather than passing quietly. It runs in CI, which is
+why `scripts/fixtures/comps_pool.json` is committed: `backend/data` is gitignored, so a
+runner has no `master_feed.json` and the check would otherwise be permanently red (or,
+worse, skipped and green while testing nothing). The verifier prefers the live feed when
+one exists locally and falls back to the fixture.
+
+Rebuild the fixture with `scripts/build_comps_fixture.py`, which **refuses** to write a
+pool where most players lack `height_inches` -- regenerating from a feed that predates the
+measurements migration would otherwise quietly replace a good fixture with a size-blind
+one, and the floors would then get re-tuned to a broken fixture rather than catching a
+real regression. It folds diacritics when
 matching names, because the feed stores `Nikola Jokić` and a plain match on `Jokic` finds
 nothing and reports a false regression.
 
