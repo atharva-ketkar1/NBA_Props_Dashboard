@@ -133,11 +133,18 @@ export const SimilarPlayers: React.FC<SimilarPlayersProps> = ({
    // Comps that have already faced tonight's opponent are ranked first, because
    // the table below only shows games against that opponent. Saying so stops
    // the list looking arbitrary when a very similar player is absent from it.
-   // With the hard filter in place, every comp shown has faced this opponent --
-   // so the note states the rule rather than reporting a ratio.
-   const opponentNote = targetOpponent
-      ? `Only comps who have already played ${teamNickname(targetOpponent)} are shown, since the table is their games against ${teamNickname(targetOpponent)}.`
-      : null;
+   // Normally every comp shown has faced this opponent, so the note states the
+   // rule. But the filter skips candidates whose history is unknown -- which is
+   // the whole DB-mode pool until the aggregator has run once after the
+   // measurements migration. Claiming the filter applied when it did not would
+   // be the panel asserting something false about its own contents.
+   const opponentFilterApplied = Boolean(targetOpponent)
+      && activeCandidates.some((candidate) => candidate.facedTargetOpponent === true);
+   const opponentNote = !targetOpponent
+      ? null
+      : opponentFilterApplied
+         ? `Only comps who have already played ${teamNickname(targetOpponent)} are shown, since the table is their games against ${teamNickname(targetOpponent)}.`
+         : `Matchup history is still loading for this slate, so comps are not yet filtered to players who have faced ${teamNickname(targetOpponent)}.`;
    const ppHistoryUnavailable = activeSportsbook === 'pp';
    const summary = dataset.summary;
    const candidatePreview = dataset.candidateNames.join(', ');

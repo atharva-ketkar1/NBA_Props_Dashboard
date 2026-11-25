@@ -647,16 +647,25 @@ function interleaveRowsByPlayer(rows: SimilarPlayerGame[], rowLimit: number) {
  * distinction between the tabs was mostly cosmetic.
  */
 /**
- * Teams this player has already faced, as tricodes.
+ * Teams this player has already faced, as tricodes. `null` means UNKNOWN.
  *
  * Reads the compact `opponents_played` list the aggregator emits, and falls
  * back to deriving it from the game log. The fallback is what makes this work
- * in JSON mode before the pipeline has re-run, and in DB mode the list is the
- * only option -- `PLAYER_SIMILAR_SELECT` deliberately does not fetch
- * `game_log`, because pulling a season of logs for ~475 players to answer a
- * yes/no question per team would be absurd.
+ * in JSON mode before the pipeline has re-run; in DB mode the list is the only
+ * option, because `PLAYER_SIMILAR_SELECT` deliberately does not fetch
+ * `game_log` -- pulling a season of logs for ~475 players to answer a yes/no
+ * question per team would be absurd.
+ *
+ * The null is the important part. "We have no record of who this player has
+ * faced" is not the same claim as "this player has faced nobody", and
+ * collapsing the two is how the opponent filter would empty the panel:
+ * `opponents_played` is NULL for every row until the aggregator has run once
+ * after the migration, and DB mode supplies no game log to fall back on, so
+ * every candidate would look like it had played no one and be filtered out.
+ * Same principle as never imputing a height -- an unknown degrades the
+ * comparison, it does not get to fabricate an answer.
  */
-function getOpponentsFaced(player: Player): Set<string> {
+function getOpponentsFaced(player: Player): Set<string> | null {
   const declared = (player as any).opponents_played;
   if (Array.isArray(declared)) {
     return new Set(
@@ -666,8 +675,13 @@ function getOpponentsFaced(player: Player): Set<string> {
     );
   }
 
+  const log = player.game_log;
+  if (!Array.isArray(log) || !log.length) {
+    return null;
+  }
+
   const faced = new Set<string>();
-  (player.game_log ?? []).forEach((game: any) => {
+  log.forEach((game: any) => {
     const opponent = getGameOpponent(game);
     if (opponent) faced.add(opponent);
   });
@@ -729,8 +743,13 @@ export function rankSimilarPlayers({
     // them is not a weaker comp, it is an empty row. Measured for Sengun vs
     // Phoenix before this: 9 of 12 slots held players who could not contribute
     // a single row, while the panel reported that it had found comps.
-    .filter((candidate) => !normalizedOpponent
-      || getOpponentsFaced(candidate).has(normalizedOpponent))
+    .filter((candidate) => {
+      if (!normalizedOpponent) return true;
+      const faced = getOpponentsFaced(candidate);
+      // Unknown passes the filter. Filtering on an absence would empty the
+      // panel rather than degrade it; see getOpponentsFaced.
+      return faced === null || faced.has(normalizedOpponent);
+    })
     .filter((candidate) => mode === 'position' || playerHasSportsbookPropForDate(
       candidate,
       context.propKey!,
@@ -803,7 +822,7 @@ export function rankSimilarPlayers({
         similarityScore,
         detailLoaded: Boolean(candidate.detail_loaded),
         facedTargetOpponent: normalizedOpponent
-          ? getOpponentsFaced(candidate).has(normalizedOpponent)
+          ? (getOpponentsFaced(candidate)?.has(normalizedOpponent) ?? null)
           : null,
       } as SimilarPlayerCandidate;
     })
